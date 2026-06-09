@@ -78,12 +78,13 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), AttachmentStoreEr
     write_result
 }
 
+#[async_trait::async_trait]
 impl AttachmentStore for FileAttachmentStore {
     fn persistence(&self) -> AttachmentStorePersistence {
         AttachmentStorePersistence::Durable
     }
 
-    fn put(
+    async fn put(
         &self,
         bytes: Vec<u8>,
         meta: AttachmentCreateMeta,
@@ -114,7 +115,7 @@ impl AttachmentStore for FileAttachmentStore {
         Ok(reference)
     }
 
-    fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+    async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
         let path = self.path_for_id(id);
         let bytes = fs::read(&path).map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
@@ -140,9 +141,11 @@ impl AttachmentStore for FileAttachmentStore {
                     }
                 }
             })?;
-            serde_json::from_slice(&meta_bytes).map_err(|source| AttachmentStoreError::Io {
-                path: meta_path,
-                source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            serde_json::from_slice(&meta_bytes).map_err(|source| {
+                AttachmentStoreError::MetadataDecode {
+                    id: id.clone(),
+                    source,
+                }
             })?
         };
         Ok(StoredAttachment { meta, bytes })
@@ -163,12 +166,12 @@ mod tests {
         )
     }
 
-    #[test]
-    fn file_store_round_trips_bytes_and_metadata() {
+    #[tokio::test]
+    async fn file_store_round_trips_bytes_and_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileAttachmentStore::new(temp.path());
-        let reference = store.put(vec![1, 2, 3], meta()).expect("put");
-        let stored = store.get(&reference.id).expect("get");
+        let reference = store.put(vec![1, 2, 3], meta()).await.expect("put");
+        let stored = store.get(&reference.id).await.expect("get");
 
         assert_eq!(stored.bytes, vec![1, 2, 3]);
         assert_eq!(stored.meta.id, reference.id);
@@ -179,11 +182,11 @@ mod tests {
     // then rename). After a successful put there must be no leftover `.tmp`
     // files in the content directory — proof that the temp file was renamed
     // into place rather than written in situ.
-    #[test]
-    fn file_store_writes_atomically_without_temp_litter() {
+    #[tokio::test]
+    async fn file_store_writes_atomically_without_temp_litter() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileAttachmentStore::new(temp.path());
-        let reference = store.put(vec![9, 8, 7, 6], meta()).expect("put");
+        let reference = store.put(vec![9, 8, 7, 6], meta()).await.expect("put");
 
         let final_path = store.path_for_id(&reference.id);
         let meta_path = store.meta_path_for_id(&reference.id);
@@ -204,14 +207,14 @@ mod tests {
         );
 
         // The bytes round-trip in full (no truncation from a partial write).
-        let stored = store.get(&reference.id).expect("get");
+        let stored = store.get(&reference.id).await.expect("get");
         assert_eq!(stored.bytes, vec![9, 8, 7, 6]);
     }
 
     // A stale `<final>.tmp` left by a crashed prior write must not block a
     // subsequent successful put — the temp file is recreated/truncated.
-    #[test]
-    fn file_store_overwrites_stale_temp_file() {
+    #[tokio::test]
+    async fn file_store_overwrites_stale_temp_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileAttachmentStore::new(temp.path());
         let content_id = lash_core::attachments::content_id(&[1, 1, 1]);
@@ -225,8 +228,9 @@ mod tests {
 
         let reference = store
             .put(vec![1, 1, 1], meta())
+            .await
             .expect("put over stale tmp");
-        let stored = store.get(&reference.id).expect("get");
+        let stored = store.get(&reference.id).await.expect("get");
         assert_eq!(stored.bytes, vec![1, 1, 1]);
     }
 }

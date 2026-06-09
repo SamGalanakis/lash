@@ -12,7 +12,7 @@ use super::harness::{
 
 #[test]
 fn lash_e2e_foreground_labeled_tool_call() -> Result<()> {
-    run_async_test_on_large_stack("lash-e2e-foreground-tool", || async {
+    run_async_test_on_stack_budget("lash-e2e-foreground-tool", || async {
         let case = LashE2eCase {
             name: "foreground labeled tool call",
             session_id: "lash-e2e-foreground-tool",
@@ -42,7 +42,7 @@ submit value
 
 #[test]
 fn lash_e2e_started_process_labeled_tool_call() -> Result<()> {
-    run_async_test_on_large_stack("lash-e2e-started-process-tool", || async {
+    run_async_test_on_stack_budget("lash-e2e-started-process-tool", || async {
         run_turn_case(LashE2eCase {
             name: "started process labeled tool call",
             session_id: "lash-e2e-process-tool",
@@ -77,7 +77,7 @@ submit result
 
 #[test]
 fn lash_e2e_started_process_labeled_subagent_spawn() -> Result<()> {
-    run_async_test_on_large_stack("lash-e2e-started-process-subagent", || async {
+    run_async_test_on_stack_budget("lash-e2e-started-process-subagent", || async {
         run_turn_case(LashE2eCase {
             name: "started process labeled subagent spawn",
             session_id: "lash-e2e-process-subagent",
@@ -119,7 +119,7 @@ submit result
 
 #[test]
 fn lash_e2e_nested_process_start_await() -> Result<()> {
-    run_async_test_on_large_stack("lash-e2e-nested-process", || async {
+    run_async_test_on_stack_budget("lash-e2e-nested-process", || async {
         run_turn_case(LashE2eCase {
             name: "nested process start await",
             session_id: "lash-e2e-nested-process",
@@ -158,14 +158,14 @@ submit result
 
 #[test]
 fn lash_e2e_session_turn_process_child() -> Result<()> {
-    run_async_test_on_large_stack("lash-e2e-session-turn-process", || async {
+    run_async_test_on_stack_budget("lash-e2e-session-turn-process", || async {
         run_session_turn_process_case().await
     })
 }
 
 #[test]
 fn lash_e2e_failed_child_preserves_failure_graph() -> Result<()> {
-    run_async_test_on_large_stack("lash-e2e-failed-child", || async {
+    run_async_test_on_stack_budget("lash-e2e-failed-child", || async {
         let run = run_turn_case_without_success_assertions(LashE2eCase {
             name: "failed child preserves failure graph",
             session_id: "lash-e2e-failed-child",
@@ -210,7 +210,7 @@ submit result
 
 #[test]
 fn lash_e2e_parallel_spawn_and_join() -> Result<()> {
-    run_async_test_on_large_stack("lash-e2e-parallel-spawn-join", || async {
+    run_async_test_on_stack_budget("lash-e2e-parallel-spawn-join", || async {
         run_turn_case(LashE2eCase {
             name: "parallel process spawn and join",
             session_id: "lash-e2e-parallel-processes",

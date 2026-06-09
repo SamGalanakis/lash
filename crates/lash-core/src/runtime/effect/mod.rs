@@ -29,8 +29,8 @@ mod tests {
     };
     use std::sync::Arc;
 
-    #[test]
-    fn runtime_effect_envelope_and_request_specs_round_trip_without_live_fields() {
+    #[tokio::test]
+    async fn runtime_effect_envelope_and_request_specs_round_trip_without_live_fields() {
         let attachment_store = crate::InMemoryAttachmentStore::new();
         let llm_request = CoreLlmRequest {
             model: "model".to_string(),
@@ -45,7 +45,9 @@ mod tests {
             generation: crate::GenerationOptions::default(),
             provider_trace: Some(LlmProviderTraceSender::new(|_| {})),
         };
-        let spec = LlmRequestSpec::from_request(&llm_request, &attachment_store).expect("llm spec");
+        let spec = LlmRequestSpec::from_request(&llm_request, &attachment_store)
+            .await
+            .expect("llm spec");
         let encoded = serde_json::to_string(&spec).expect("serialize llm spec");
         assert!(!encoded.contains("stream_events"));
         assert!(!encoded.contains("provider_trace"));
@@ -71,6 +73,7 @@ mod tests {
             RuntimeEffectCommand::Direct {
                 request: Box::new(
                     LlmRequestSpec::from_request(&llm_request, &attachment_store)
+                        .await
                         .expect("normalized spec"),
                 ),
                 usage_source: "test".to_string(),

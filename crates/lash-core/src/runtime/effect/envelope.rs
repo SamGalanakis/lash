@@ -495,14 +495,15 @@ pub struct LlmRequestSpec {
 }
 
 impl LlmRequestSpec {
-    pub fn from_request(
+    pub async fn from_request(
         request: &CoreLlmRequest,
         attachment_store: &dyn AttachmentStore,
     ) -> Result<Self, RuntimeEffectControllerError> {
         Ok(Self {
             model: request.model.clone(),
             messages: request.messages.clone(),
-            attachments: attachment_specs_from_attachments(&request.attachments, attachment_store)?,
+            attachments: attachment_specs_from_attachments(&request.attachments, attachment_store)
+                .await?,
             tools: Arc::clone(&request.tools),
             tool_choice: request.tool_choice.clone(),
             model_variant: request.model_variant.clone(),
@@ -537,17 +538,18 @@ impl LlmRequestSpec {
     }
 }
 
-fn attachment_specs_from_attachments(
+async fn attachment_specs_from_attachments(
     attachments: &[LlmAttachment],
     attachment_store: &dyn AttachmentStore,
 ) -> Result<Vec<LlmAttachmentSpec>, RuntimeEffectControllerError> {
-    attachments
-        .iter()
-        .map(|attachment| attachment_spec_from_attachment(attachment, attachment_store))
-        .collect()
+    let mut specs = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        specs.push(attachment_spec_from_attachment(attachment, attachment_store).await?);
+    }
+    Ok(specs)
 }
 
-fn attachment_spec_from_attachment(
+async fn attachment_spec_from_attachment(
     attachment: &LlmAttachment,
     attachment_store: &dyn AttachmentStore,
 ) -> Result<LlmAttachmentSpec, RuntimeEffectControllerError> {
@@ -576,6 +578,7 @@ fn attachment_spec_from_attachment(
             attachment.data.clone(),
             AttachmentCreateMeta::new(media_type, None, None, None),
         )
+        .await
         .map_err(|err| {
             RuntimeEffectControllerError::new(
                 "runtime_effect_attachment_store",

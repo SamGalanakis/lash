@@ -10,6 +10,8 @@ members = [
     "crates/lash-llm-transport",
     "crates/lash-provider-auth",
     "crates/lash-sqlite-store",
+    "crates/lash-postgres-store",
+    "crates/lash-s3-store",
     "crates/lash-restate",
     "crates/lash",
     "crates/lash-protocol-rlm",
@@ -45,6 +47,7 @@ members = [
     "crates/lashlang",
     "examples/agent-service",
     "examples/agent-workbench",
+    "e2e/restate-postgres-workers",
 ]
 # `cargo build` from the repo root compiles only the publishable SDK surface.
 # Internal bins/benches/examples build with `cargo build --workspace` or `-p <name>`.
@@ -65,6 +68,8 @@ default-members = [
     "crates/lash-provider-codex",
     "crates/lash-provider-google",
     "crates/lash-sqlite-store",
+    "crates/lash-postgres-store",
+    "crates/lash-s3-store",
     "crates/lash-tool-support",
     "crates/lash-tool-apply-patch",
     "crates/lash-tool-files",
@@ -93,7 +98,7 @@ repository = "https://github.com/SamGalanakis/lash"
 homepage = "https://samgalanakis.github.io/lash/"
 documentation = "https://samgalanakis.github.io/lash/"
 readme = "README.md"
-rust-version = "1.85"
+rust-version = "1.90"
 
 # Centralized external versions. Members opt in with
 # `dep = { workspace = true, features = [...] }`.
@@ -109,15 +114,18 @@ clap = "4"
 croner = "3"
 futures-util = "0.3"
 jsonschema = "0.18"
+object_store = { version = "0.13.2", default-features = false }
 pulldown-cmark = "0.13"
 regex = "1"
 reqwest = { version = "0.13", default-features = false }
+rmp-serde = "1"
 rmcp = { version = "1.6", default-features = false }
 restate-sdk = { version = "0.10", default-features = false, features = ["http_server"] }
 schemars = "0.8"
 serde = "1"
 serde_json = "1"
 sha2 = "0.10"
+sqlx = { version = "0.8.6", default-features = false }
 tempfile = "3"
 thiserror = "2"
 tokio = "1"
@@ -137,6 +145,8 @@ lash-file-index = { path = "crates/lash-file-index", version = "=0.1.0-alpha.39"
 lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.1.0-alpha.39" }
 lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.1.0-alpha.39" }
 lash-local-store = { path = "crates/lash-local-store", version = "=0.1.0-alpha.39" }
+lash-postgres-store = { path = "crates/lash-postgres-store", version = "=0.1.0-alpha.39" }
+lash-s3-store = { path = "crates/lash-s3-store", version = "=0.1.0-alpha.39" }
 lash-openai-schema = { path = "crates/lash-openai-schema", version = "=0.1.0-alpha.39" }
 lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.39" }
 lash-plugin-observational-memory = { path = "crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.39" }

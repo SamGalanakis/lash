@@ -78,7 +78,7 @@ pub(crate) use interactive::generate_session_name;
 pub(crate) use interactive::{injected_image_part_indices, make_injected_plugin_message};
 pub(crate) use skill_catalog::{LoadedSkill, SkillCatalog};
 
-const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_GIT_HEAD: &str = env!("LASH_BUILD_GIT_HEAD");
@@ -730,14 +730,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn injected_plugin_message_preserves_images_and_paths() {
+    #[tokio::test]
+    async fn injected_plugin_message_preserves_images_and_paths() {
         let turn = PreparedTurn::new(
             "before [Image #1] @README.md after [Image #2]".into(),
             vec![vec![1, 2, 3], vec![4, 5, 6]],
         );
 
-        let message = make_injected_plugin_message(&turn);
+        let message = make_injected_plugin_message(&turn).await;
 
         assert_eq!(message.role, MessageRole::User);
         assert!(message.images.is_empty());

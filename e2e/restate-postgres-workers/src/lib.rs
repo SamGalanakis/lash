@@ -1,0 +1,871 @@
+use anyhow::{Context, Result};
+use lash::durability::EffectHost;
+use lash::modes::{LashlangAbilities, ModeId, ModePreset, RlmProtocolPluginConfig};
+use lash::persistence::{AttachmentStore, LashlangArtifactStore, SessionStoreFactory};
+use lash::plugins::{PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin};
+use lash::process::{ProcessRegistry, ProcessWorkDriver};
+use lash::tools::{
+    StaticToolExecute, StaticToolProvider, ToolAgentSurface, ToolCall, ToolDefinition,
+    ToolProvider, ToolResult,
+};
+use lash_provider_openai::OpenAiCompatibleProvider;
+use lash_restate::RestateEffectHost;
+use lash_s3_store::{S3AttachmentStore, S3AttachmentStoreConfig};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const DEFAULT_SESSION_ID: &str = "restate-postgres-workers-e2e";
+pub const TURN_WORKFLOW_NAME: &str = "E2eTurnWorkflow";
+pub const EXPECTED_FINAL_TEXT: &str = "kitchen-sink-complete";
+pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";
+pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
+pub const ATTACHMENT_MIME: &str = "image/png";
+
+pub fn default_session_owner_scope_id() -> String {
+    format!("session:{DEFAULT_SESSION_ID}")
+}
+
+pub fn default_session_child_owner_scope_pattern() -> String {
+    format!("{}/%", default_session_owner_scope_id())
+}
+
+pub fn env(name: &str, default: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+pub fn required_env(name: &str) -> Result<String> {
+    std::env::var(name).with_context(|| format!("{name} must be set"))
+}
+
+pub fn s3_store_from_env() -> Result<S3AttachmentStore> {
+    S3AttachmentStore::from_config(S3AttachmentStoreConfig {
+        endpoint_url: Some(env("MINIO_ENDPOINT", "http://minio:9000")),
+        region: env("MINIO_REGION", "us-east-1"),
+        bucket: env("MINIO_BUCKET", "lash-attachments"),
+        prefix: Some(env("MINIO_PREFIX", "e2e/restate-postgres-workers")),
+        access_key_id: Some(env("MINIO_ACCESS_KEY", "minioadmin")),
+        secret_access_key: Some(env("MINIO_SECRET_KEY", "minioadmin")),
+        path_style: true,
+    })
+    .context("build S3 attachment store")
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnScenario {
+    #[default]
+    KitchenSink,
+    TriggerSetup,
+    DrainQueued,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnRequest {
+    pub workflow_id: String,
+    #[serde(default)]
+    pub fail_once: bool,
+    #[serde(default)]
+    pub scenario: TurnScenario,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnResponse {
+    pub workflow_id: String,
+    pub worker_id: String,
+    pub process_id: String,
+    #[serde(default)]
+    pub process_ids: Vec<String>,
+    pub attachment_id: String,
+    pub final_text: String,
+    #[serde(default)]
+    pub submitted_value: serde_json::Value,
+    #[serde(default)]
+    pub streamed_event_count: usize,
+    #[serde(default)]
+    pub replay_cursor: Option<String>,
+    #[serde(default)]
+    pub queued_turn_ran: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub worker_id: String,
+    pub ok: bool,
+}
+
+pub async fn ensure_e2e_schema(pool: &PgPool) -> Result<()> {
+    let mut tx = pool.begin().await.context("begin e2e schema transaction")?;
+    sqlx::query("SELECT pg_advisory_xact_lock(715421, 907002)")
+        .execute(&mut *tx)
+        .await
+        .context("acquire e2e schema lock")?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lash_e2e_worker_events (
+            event_id BIGSERIAL PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at_ms BIGINT NOT NULL,
+            UNIQUE (workflow_id, worker_id, event_type)
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create e2e worker events table")?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lash_e2e_terminal_results (
+            workflow_id TEXT PRIMARY KEY,
+            process_id TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            attachment_id TEXT NOT NULL,
+            final_text TEXT NOT NULL,
+            submitted_json TEXT NOT NULL DEFAULT '{}',
+            queued_turn_ran BOOLEAN NOT NULL DEFAULT FALSE,
+            streamed_event_count BIGINT NOT NULL DEFAULT 0,
+            replay_cursor TEXT,
+            created_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create e2e terminal results table")?;
+    sqlx::query(
+        "ALTER TABLE lash_e2e_terminal_results ADD COLUMN IF NOT EXISTS submitted_json TEXT NOT NULL DEFAULT '{}'",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("add e2e submitted_json column")?;
+    sqlx::query(
+        "ALTER TABLE lash_e2e_terminal_results ADD COLUMN IF NOT EXISTS queued_turn_ran BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("add e2e queued_turn_ran column")?;
+    sqlx::query(
+        "ALTER TABLE lash_e2e_terminal_results ADD COLUMN IF NOT EXISTS streamed_event_count BIGINT NOT NULL DEFAULT 0",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("add e2e streamed_event_count column")?;
+    sqlx::query(
+        "ALTER TABLE lash_e2e_terminal_results ADD COLUMN IF NOT EXISTS replay_cursor TEXT",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("add e2e replay_cursor column")?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lash_e2e_failover_markers (
+            workflow_id TEXT PRIMARY KEY,
+            worker_id TEXT NOT NULL,
+            created_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create e2e failover markers table")?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lash_e2e_provider_calls (
+            call_id BIGSERIAL PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            scenario TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            created_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create e2e provider calls table")?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lash_e2e_tool_events (
+            event_id BIGSERIAL PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            call_id TEXT,
+            args_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create e2e tool events table")?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lash_e2e_turn_events (
+            event_id BIGSERIAL PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            stream_name TEXT NOT NULL,
+            cursor TEXT,
+            activity_json TEXT NOT NULL,
+            created_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create e2e turn events table")?;
+    tx.commit().await.context("commit e2e schema transaction")?;
+    Ok(())
+}
+
+pub async fn reset_e2e_rows(pool: &PgPool) -> Result<()> {
+    for statement in [
+        "DELETE FROM lash_e2e_terminal_results",
+        "DELETE FROM lash_e2e_worker_events",
+        "DELETE FROM lash_e2e_failover_markers",
+        "DELETE FROM lash_e2e_provider_calls",
+        "DELETE FROM lash_e2e_tool_events",
+        "DELETE FROM lash_e2e_turn_events",
+        "DELETE FROM lash_host_event_deliveries",
+        "DELETE FROM lash_host_event_occurrences",
+        "DELETE FROM lash_host_event_trigger_subscriptions",
+        "DELETE FROM lash_queued_work_items",
+        "DELETE FROM lash_queued_work_batches",
+        "DELETE FROM lash_process_leases",
+        "DELETE FROM lash_process_handle_grants",
+        "DELETE FROM lash_process_wake_acks",
+        "DELETE FROM lash_process_events",
+        "DELETE FROM lash_processes",
+        "DELETE FROM lash_lashlang_artifacts",
+    ] {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .with_context(|| format!("reset e2e rows with `{statement}`"))?;
+    }
+    for statement in [
+        "DELETE FROM lash_sessions WHERE session_id = $1",
+        "DELETE FROM lash_graph_nodes WHERE session_id = $1",
+        "DELETE FROM lash_usage_deltas WHERE session_id = $1",
+        "DELETE FROM lash_session_meta WHERE session_id = $1",
+        "DELETE FROM lash_runtime_turn_commits WHERE session_id = $1",
+        "DELETE FROM lash_attachment_manifest WHERE session_id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(DEFAULT_SESSION_ID)
+            .execute(pool)
+            .await
+            .with_context(|| format!("reset e2e session rows with `{statement}`"))?;
+    }
+    Ok(())
+}
+
+pub async fn record_worker_event(
+    pool: &PgPool,
+    workflow_id: &str,
+    worker_id: &str,
+    event_type: &str,
+    detail: serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO lash_e2e_worker_events (
+            workflow_id, worker_id, event_type, detail_json, created_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (workflow_id, worker_id, event_type) DO NOTHING
+        "#,
+    )
+    .bind(workflow_id)
+    .bind(worker_id)
+    .bind(event_type)
+    .bind(detail.to_string())
+    .bind(current_epoch_ms() as i64)
+    .execute(pool)
+    .await
+    .with_context(|| format!("record e2e worker event `{event_type}` for `{workflow_id}`"))?;
+    Ok(())
+}
+
+pub async fn record_terminal_result(pool: &PgPool, response: &TurnResponse) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO lash_e2e_terminal_results (
+            workflow_id, process_id, worker_id, attachment_id, final_text, submitted_json,
+            queued_turn_ran, streamed_event_count, replay_cursor, created_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (workflow_id) DO UPDATE SET
+            process_id = EXCLUDED.process_id,
+            worker_id = EXCLUDED.worker_id,
+            attachment_id = EXCLUDED.attachment_id,
+            final_text = EXCLUDED.final_text,
+            submitted_json = EXCLUDED.submitted_json,
+            queued_turn_ran = EXCLUDED.queued_turn_ran,
+            streamed_event_count = EXCLUDED.streamed_event_count,
+            replay_cursor = EXCLUDED.replay_cursor,
+            created_at_ms = EXCLUDED.created_at_ms
+        "#,
+    )
+    .bind(&response.workflow_id)
+    .bind(&response.process_id)
+    .bind(&response.worker_id)
+    .bind(&response.attachment_id)
+    .bind(&response.final_text)
+    .bind(response.submitted_value.to_string())
+    .bind(response.queued_turn_ran)
+    .bind(response.streamed_event_count as i64)
+    .bind(response.replay_cursor.as_deref())
+    .bind(current_epoch_ms() as i64)
+    .execute(pool)
+    .await
+    .with_context(|| format!("record terminal result for `{}`", response.workflow_id))?;
+    Ok(())
+}
+
+pub async fn record_provider_call(
+    pool: &PgPool,
+    request_id: &str,
+    scenario: &str,
+    workflow_id: &str,
+    model: &str,
+    request: &serde_json::Value,
+    response: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO lash_e2e_provider_calls (
+            request_id, scenario, workflow_id, model, request_json, response_json, created_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(request_id)
+    .bind(scenario)
+    .bind(workflow_id)
+    .bind(model)
+    .bind(request.to_string())
+    .bind(response.to_string())
+    .bind(current_epoch_ms() as i64)
+    .execute(pool)
+    .await
+    .with_context(|| format!("record provider call for `{workflow_id}`"))?;
+    Ok(())
+}
+
+pub async fn record_tool_event(
+    pool: &PgPool,
+    workflow_id: &str,
+    worker_id: &str,
+    tool_name: &str,
+    call_id: Option<&str>,
+    args: serde_json::Value,
+    result: serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO lash_e2e_tool_events (
+            workflow_id, worker_id, tool_name, call_id, args_json, result_json, created_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(workflow_id)
+    .bind(worker_id)
+    .bind(tool_name)
+    .bind(call_id)
+    .bind(args.to_string())
+    .bind(result.to_string())
+    .bind(current_epoch_ms() as i64)
+    .execute(pool)
+    .await
+    .with_context(|| format!("record tool event `{tool_name}` for `{workflow_id}`"))?;
+    Ok(())
+}
+
+pub async fn record_turn_activity(
+    pool: &PgPool,
+    workflow_id: &str,
+    worker_id: &str,
+    stream_name: &str,
+    cursor: Option<&str>,
+    activity: &lash::TurnActivity,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO lash_e2e_turn_events (
+            workflow_id, worker_id, stream_name, cursor, activity_json, created_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(workflow_id)
+    .bind(worker_id)
+    .bind(stream_name)
+    .bind(cursor)
+    .bind(serde_json::to_string(activity).context("serialize turn activity")?)
+    .bind(current_epoch_ms() as i64)
+    .execute(pool)
+    .await
+    .with_context(|| format!("record turn activity for `{workflow_id}`"))?;
+    Ok(())
+}
+
+#[derive(Clone)]
+pub struct E2eCoreConfig {
+    pub worker_id: String,
+    pub storage: lash_postgres_store::PostgresStorage,
+    pub attachment_store: Arc<dyn AttachmentStore>,
+    pub process_work_driver: ProcessWorkDriver,
+    pub mock_provider_base_url: String,
+    pub trace_dir: Option<PathBuf>,
+    pub fail_once: bool,
+}
+
+pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
+    let artifact_store =
+        Arc::new(config.storage.lashlang_artifact_store()) as Arc<dyn LashlangArtifactStore>;
+    let session_store_factory =
+        Arc::new(config.storage.session_store_factory()) as Arc<dyn SessionStoreFactory>;
+    let host_event_store =
+        Arc::new(config.storage.host_event_store()) as Arc<dyn lash_core::HostEventStore>;
+    let provider = lash_core::ProviderHandle::new(
+        OpenAiCompatibleProvider::new(
+            "e2e-key",
+            format!("{}/v1", config.mock_provider_base_url.trim_end_matches('/')),
+        )
+        .into_components(),
+    );
+    let mut builder = lash::LashCore::builder()
+        .install_mode(ModePreset::rlm_with_config(
+            RlmProtocolPluginConfig::default().with_lashlang_abilities(
+                LashlangAbilities::default()
+                    .with_processes()
+                    .with_sleep()
+                    .with_process_signals()
+                    .with_triggers(),
+            ),
+        ))
+        .default_mode(ModeId::rlm())
+        .provider(provider)
+        .model(
+            lash::ModelSpec::from_token_limits("e2e-mock", None, 200_000, None)
+                .map_err(|err| anyhow::anyhow!(err))?,
+        )
+        .store_factory(session_store_factory)
+        .attachment_store(config.attachment_store)
+        .lashlang_artifact_store(artifact_store)
+        .effect_host(Arc::new(RestateEffectHost::new()) as Arc<dyn EffectHost>)
+        .host_event_store(host_event_store)
+        .process_work_driver(config.process_work_driver)
+        .plugin(Arc::new(E2ePluginFactory {
+            pool: config.storage.pool().clone(),
+            worker_id: config.worker_id.clone(),
+            fail_once: config.fail_once,
+        }));
+    if let Some(trace_dir) = config.trace_dir {
+        builder = builder
+            .trace_jsonl_path(Some(
+                trace_dir.join(format!("{}.trace.jsonl", config.worker_id)),
+            ))
+            .lashlang_execution_jsonl_path(Some(
+                trace_dir.join(format!("{}.lashlang.jsonl", config.worker_id)),
+            ));
+    }
+    builder.build().context("build e2e LashCore")
+}
+
+pub fn process_registry_from_storage(
+    storage: &lash_postgres_store::PostgresStorage,
+) -> Arc<dyn ProcessRegistry> {
+    Arc::new(storage.process_registry()) as Arc<dyn ProcessRegistry>
+}
+
+#[derive(Clone)]
+struct E2ePluginFactory {
+    pool: PgPool,
+    worker_id: String,
+    fail_once: bool,
+}
+
+impl PluginFactory for E2ePluginFactory {
+    fn id(&self) -> &'static str {
+        "restate-postgres-workers-e2e"
+    }
+
+    fn lashlang_abilities(&self) -> LashlangAbilities {
+        LashlangAbilities::default()
+            .with_processes()
+            .with_sleep()
+            .with_process_signals()
+            .with_triggers()
+    }
+
+    fn lashlang_resources(&self) -> lash::modes::ResourceCatalog {
+        let mut resources = lash::modes::ResourceCatalog::new();
+        resources
+            .add_trigger_source_constructor(
+                ["ui", "button", "pressed"],
+                lash::modes::TypeExpr::Object(vec![]),
+                button_pressed_event_type(),
+            )
+            .expect("valid e2e button trigger source");
+        resources
+    }
+
+    fn build(
+        &self,
+        _ctx: &PluginSessionContext,
+    ) -> Result<Arc<dyn SessionPlugin>, lash::plugins::PluginError> {
+        Ok(Arc::new(E2eSessionPlugin {
+            pool: self.pool.clone(),
+            worker_id: self.worker_id.clone(),
+            fail_once: self.fail_once,
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct E2eSessionPlugin {
+    pool: PgPool,
+    worker_id: String,
+    fail_once: bool,
+}
+
+impl SessionPlugin for E2eSessionPlugin {
+    fn id(&self) -> &'static str {
+        "restate-postgres-workers-e2e"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), lash::plugins::PluginError> {
+        reg.host_events().declare(lash::HostEvent::new(
+            "Button",
+            "ui.button",
+            "pressed",
+            button_pressed_event_type(),
+        ))?;
+        reg.tools()
+            .provider(e2e_tool_provider(
+                self.pool.clone(),
+                self.worker_id.clone(),
+                self.fail_once,
+            ))
+            .map_err(|err| lash::plugins::PluginError::Session(err.to_string()))?;
+        Ok(())
+    }
+}
+
+fn button_pressed_event_type() -> lash::modes::NamedDataType {
+    lash::modes::NamedDataType::object(
+        "ui.button.Pressed",
+        vec![
+            lash::modes::TypeField {
+                name: "button".into(),
+                ty: lash::modes::TypeExpr::Union(vec![
+                    lash::modes::TypeExpr::Enum(vec!["Red".into()]),
+                    lash::modes::TypeExpr::Enum(vec!["Blue".into()]),
+                ]),
+                optional: false,
+            },
+            lash::modes::TypeField {
+                name: "message".into(),
+                ty: lash::modes::TypeExpr::Str,
+                optional: false,
+            },
+            lash::modes::TypeField {
+                name: "pressed_at".into(),
+                ty: lash::modes::TypeExpr::Str,
+                optional: false,
+            },
+        ],
+    )
+    .expect("valid e2e button payload type")
+}
+
+fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dyn ToolProvider> {
+    Arc::new(StaticToolProvider::new(
+        vec![
+            e2e_tool_definition(
+                "tool:app_lookup",
+                "app_lookup",
+                "Deterministic E2E application data lookup.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" }
+                    },
+                    "required": ["key"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" },
+                        "value": { "type": "string" },
+                        "worker_id": { "type": "string" }
+                    },
+                    "required": ["key", "value", "worker_id"],
+                    "additionalProperties": false
+                }),
+                ToolAgentSurface::new(["tools"], "app_lookup"),
+            ),
+            e2e_tool_definition(
+                "tool:make_attachment",
+                "make_attachment",
+                "Write a deterministic attachment through the session attachment store.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": { "type": "string" },
+                        "name": { "type": "string" }
+                    },
+                    "required": ["workflow_id", "name"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "mime": { "type": "string" },
+                        "filename": { "type": "string" },
+                        "byte_len": { "type": "integer" }
+                    },
+                    "required": ["id", "mime", "filename", "byte_len"],
+                    "additionalProperties": false
+                }),
+                ToolAgentSurface::new(["tools"], "make_attachment"),
+            ),
+            e2e_tool_definition(
+                "tool:crash_once",
+                "crash_once",
+                "Crash one worker once for a requested workflow, after previous durable effects replay.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": { "type": "string" }
+                    },
+                    "required": ["workflow_id"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "crashed": { "type": "boolean" },
+                        "worker_id": { "type": "string" }
+                    },
+                    "required": ["crashed", "worker_id"],
+                    "additionalProperties": false
+                }),
+                ToolAgentSurface::new(["tools"], "crash_once"),
+            ),
+        ],
+        E2eTools {
+            pool,
+            worker_id,
+            fail_once,
+        },
+    )) as Arc<dyn ToolProvider>
+}
+
+fn e2e_tool_definition(
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    surface: ToolAgentSurface,
+) -> ToolDefinition {
+    ToolDefinition::raw(id, name, description, input_schema, output_schema)
+        .with_agent_surface(surface)
+}
+
+#[derive(Clone)]
+struct E2eTools {
+    pool: PgPool,
+    worker_id: String,
+    fail_once: bool,
+}
+
+#[async_trait::async_trait]
+impl StaticToolExecute for E2eTools {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "app_lookup" => self.app_lookup(call).await,
+            "make_attachment" => self.make_attachment(call).await,
+            "crash_once" => self.crash_once(call).await,
+            other => ToolResult::err_fmt(format_args!("unknown e2e tool `{other}`")),
+        }
+    }
+}
+
+impl E2eTools {
+    async fn app_lookup(&self, call: ToolCall<'_>) -> ToolResult {
+        let workflow_id = workflow_id_from_args(call.context.session_id(), &call.args);
+        let key = call
+            .args
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let result = serde_json::json!({
+            "key": key,
+            "value": format!("lookup:{key}"),
+            "worker_id": self.worker_id,
+        });
+        let _ = record_tool_event(
+            &self.pool,
+            &workflow_id,
+            &self.worker_id,
+            call.name,
+            call.context.tool_call_id(),
+            call.args.to_owned(),
+            result.clone(),
+        )
+        .await;
+        ToolResult::ok(result)
+    }
+
+    async fn make_attachment(&self, call: ToolCall<'_>) -> ToolResult {
+        let workflow_id = workflow_id_from_args(call.context.session_id(), &call.args);
+        let filename = call
+            .args
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("kitchen-sink.png");
+        let bytes = expected_attachment_bytes(&workflow_id);
+        let reference = match call
+            .context
+            .attachments()
+            .put(
+                bytes,
+                lash_core::AttachmentCreateMeta::new(
+                    lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
+                    Some(1),
+                    Some(1),
+                    Some(filename.to_string()),
+                ),
+            )
+            .await
+        {
+            Ok(reference) => reference,
+            Err(err) => return ToolResult::err_fmt(err),
+        };
+        let mut result = BTreeMap::new();
+        result.insert(
+            "id".to_string(),
+            lash_core::ToolValue::String(reference.id.to_string()),
+        );
+        result.insert(
+            "mime".to_string(),
+            lash_core::ToolValue::String(ATTACHMENT_MIME.to_string()),
+        );
+        result.insert(
+            "filename".to_string(),
+            lash_core::ToolValue::String(filename.to_string()),
+        );
+        result.insert(
+            "byte_len".to_string(),
+            lash_core::ToolValue::Number(serde_json::Number::from(reference.byte_len)),
+        );
+        result.insert(
+            "attachment".to_string(),
+            lash_core::ToolValue::Attachment(reference.clone()),
+        );
+        let result = lash_core::ToolValue::Object(result);
+        let result_json = result.to_json_value();
+        let _ = record_tool_event(
+            &self.pool,
+            &workflow_id,
+            &self.worker_id,
+            call.name,
+            call.context.tool_call_id(),
+            call.args.to_owned(),
+            result_json,
+        )
+        .await;
+        ToolResult::from_output(lash_core::ToolCallOutput::success(result))
+    }
+
+    async fn crash_once(&self, call: ToolCall<'_>) -> ToolResult {
+        let workflow_id = workflow_id_from_args(call.context.session_id(), &call.args);
+        let result = serde_json::json!({
+            "crashed": false,
+            "worker_id": self.worker_id,
+        });
+        let _ = record_tool_event(
+            &self.pool,
+            &workflow_id,
+            &self.worker_id,
+            call.name,
+            call.context.tool_call_id(),
+            call.args.to_owned(),
+            result.clone(),
+        )
+        .await;
+        if self.fail_once && claim_failover_marker(&self.pool, &workflow_id, &self.worker_id).await
+        {
+            let _ = record_worker_event(
+                &self.pool,
+                &workflow_id,
+                &self.worker_id,
+                "intentional_exit",
+                serde_json::json!({"tool": "crash_once"}),
+            )
+            .await;
+            tracing::warn!(
+                worker_id = %self.worker_id,
+                workflow_id,
+                "intentional E2E failover exit from crash_once tool"
+            );
+            std::process::exit(75);
+        }
+        ToolResult::ok(result)
+    }
+}
+
+async fn claim_failover_marker(pool: &PgPool, workflow_id: &str, worker_id: &str) -> bool {
+    match sqlx::query(
+        "INSERT INTO lash_e2e_failover_markers (workflow_id, worker_id, created_at_ms)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (workflow_id) DO NOTHING",
+    )
+    .bind(workflow_id)
+    .bind(worker_id)
+    .bind(current_epoch_ms() as i64)
+    .execute(pool)
+    .await
+    {
+        Ok(result) => result.rows_affected() == 1,
+        Err(err) => {
+            tracing::error!(workflow_id, worker_id, error = %err, "failed to claim failover marker");
+            false
+        }
+    }
+}
+
+pub fn expected_attachment_bytes(workflow_id: &str) -> Vec<u8> {
+    format!("lash-e2e-attachment:{workflow_id}:v1").into_bytes()
+}
+
+fn workflow_id_from_args(session_id: &str, args: &serde_json::Value) -> String {
+    args.get("workflow_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(session_id)
+        .to_string()
+}
+
+pub fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}

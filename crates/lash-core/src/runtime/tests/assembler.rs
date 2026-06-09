@@ -557,8 +557,8 @@ fn output_state_recovered_from_error() {
     );
 }
 
-#[test]
-fn normalize_items_merges_adjacent_text_items() {
+#[tokio::test]
+async fn normalize_items_merges_adjacent_text_items() {
     let items = vec![
         InputItem::Text {
             text: "before ".to_string(),
@@ -572,6 +572,7 @@ fn normalize_items_merges_adjacent_text_items() {
         &HashMap::new(),
         &crate::InMemoryAttachmentStore::new(),
     )
+    .await
     .expect("normalized");
     assert_eq!(out.len(), 1);
     match &out[0] {

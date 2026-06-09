@@ -198,6 +198,42 @@ fn selector_extracts_payload_pointer_const_template_and_present() {
     );
 }
 
+#[test]
+fn replayed_terminal_event_repairs_non_terminal_status_projection() {
+    let record = ProcessRecord::from_registration(registration("process-repair"));
+    let request = ProcessEventAppendRequest::new(
+        "process.completed",
+        serde_json::json!({
+            "await_output": ProcessAwaitOutput::Success {
+                value: serde_json::json!({"ok": true}),
+                control: None,
+            },
+        }),
+    )
+    .with_replay_key("process-repair-terminal");
+    let first = prepare_process_event_append(&record, request.clone(), 1, None, 42)
+        .expect("prepare first terminal event");
+
+    let replayed = prepare_process_event_append(
+        &record,
+        request,
+        99,
+        Some((first.payload_hash, first.event)),
+        100,
+    )
+    .expect("prepare replayed terminal event");
+
+    assert!(replayed.replayed);
+    assert_eq!(replayed.event.sequence, 1);
+    assert_eq!(replayed.occurred_at_ms, 42);
+    assert!(matches!(
+        replayed.status_update,
+        Some(ProcessStatus::Completed {
+            await_output: ProcessAwaitOutput::Success { .. }
+        })
+    ));
+}
+
 // Contract invariants (registration idempotency, event/wake materialization,
 // ack suppression, terminal/await, handle grants, session deletion) live in the
 // backend-agnostic conformance suite so the in-memory and Sqlite registries are

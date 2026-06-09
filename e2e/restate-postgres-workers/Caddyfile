@@ -1,0 +1,11 @@
+{
+	servers {
+		protocols h1 h2c
+	}
+}
+
+:18100 {
+	reverse_proxy h2c://worker-a:18100 h2c://worker-b:18100 {
+		lb_policy round_robin
+	}
+}

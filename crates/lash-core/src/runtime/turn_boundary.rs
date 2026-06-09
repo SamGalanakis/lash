@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::session_model::{SessionEventRecord, fresh_message_id};
@@ -69,6 +70,7 @@ struct FinalCommitInput<'a> {
     outcome: &'a TurnOutcome,
     turn_id: Option<&'a str>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
+    pending_attachment_ids: Vec<crate::AttachmentId>,
 }
 
 enum PersistedGraphMark {
@@ -209,6 +211,35 @@ impl TurnBoundary {
         .await
     }
 
+    pub(super) async fn progress_boundary_in_memory(
+        &mut self,
+        session: &mut Session,
+        policy: SessionPolicy,
+        turn_index: usize,
+        messages: MessageSequence,
+        event_delta: Vec<SessionEventRecord>,
+    ) -> ProgressBoundaryCommit {
+        if !crate::messages_are_prompt_resume_safe(messages.iter()) {
+            return ProgressBoundaryCommit {
+                protocol_events: Vec::new(),
+                persisted: false,
+            };
+        }
+
+        let execution_state_snapshot = Self::snapshot_dirty_execution_state(session).await;
+        let plugins = Arc::clone(session.plugins());
+        self.progress_boundary_with_snapshot(ProgressBoundarySnapshot {
+            policy,
+            turn_index,
+            messages,
+            event_delta,
+            execution_state_snapshot,
+            plugins: Some(plugins.as_ref()),
+            store: None,
+        })
+        .await
+    }
+
     async fn progress_boundary_with_snapshot(
         &mut self,
         snapshot: ProgressBoundarySnapshot<'_>,
@@ -292,6 +323,7 @@ impl TurnBoundary {
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        pending_attachment_ids: Vec<crate::AttachmentId>,
     ) -> Result<(), RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
             Some(session) => {
@@ -312,6 +344,7 @@ impl TurnBoundary {
             outcome: &returned_turn.outcome,
             turn_id,
             completed_queue_claims,
+            pending_attachment_ids,
         })
         .await
         .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
@@ -370,7 +403,7 @@ impl TurnBoundary {
         let draft = self.draft_mut();
         let state = draft.state();
         let graph = draft.graph_commit(state.graph_replace_required);
-        self.apply_commit(store, graph, usage_deltas, None, Vec::new())
+        self.apply_commit(store, graph, usage_deltas, None, Vec::new(), Vec::new())
             .await
     }
 
@@ -388,6 +421,7 @@ impl TurnBoundary {
             outcome,
             turn_id,
             completed_queue_claims,
+            pending_attachment_ids,
         } = input;
         let state = self.final_state_mut();
         state.apply_snapshot(returned_state);
@@ -436,8 +470,17 @@ impl TurnBoundary {
                     },
                 }
             };
-            self.apply_commit(store, graph, usage_deltas, turn_id, completed_queue_claims)
-                .await
+            let committed_attachment_ids =
+                committed_attachment_ids(state, tool_calls, pending_attachment_ids);
+            self.apply_commit(
+                store,
+                graph,
+                usage_deltas,
+                turn_id,
+                completed_queue_claims,
+                committed_attachment_ids,
+            )
+            .await
         } else {
             state.discard_runtime_snapshots();
             Ok(())
@@ -451,11 +494,13 @@ impl TurnBoundary {
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        committed_attachment_ids: Vec<crate::AttachmentId>,
     ) -> Result<(), StoreError> {
         let state = self.state_mut();
         let mark = PersistedGraphMark::from_graph_commit(&graph);
         let mut commit =
-            RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
+            RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas)
+                .with_committed_attachments(committed_attachment_ids);
         commit.completed_queue_claims = completed_queue_claims;
         if let Some(turn_id) = turn_id {
             let turn_commit_hash = commit.turn_commit_hash()?;
@@ -501,6 +546,27 @@ impl TurnBoundary {
             }
         }
     }
+}
+
+fn committed_attachment_ids(
+    state: &RuntimeSessionState,
+    tool_calls: &[ToolCallRecord],
+    pending_attachment_ids: Vec<crate::AttachmentId>,
+) -> Vec<crate::AttachmentId> {
+    let mut attachment_ids = pending_attachment_ids.into_iter().collect::<BTreeSet<_>>();
+    for call in tool_calls {
+        for attachment in call.output.attachments() {
+            attachment_ids.insert(attachment.id);
+        }
+    }
+    for message in state.read_model().messages.iter() {
+        for part in message.parts.iter() {
+            if let Some(attachment) = &part.attachment {
+                attachment_ids.insert(attachment.reference.id.clone());
+            }
+        }
+    }
+    attachment_ids.into_iter().collect()
 }
 
 fn materialize_terminal_output(state: &mut RuntimeSessionState, outcome: &TurnOutcome) {
@@ -636,6 +702,18 @@ mod tests {
                 reasoning_tokens: 0,
             },
         }
+    }
+
+    fn image_ref(id: &str) -> crate::AttachmentRef {
+        crate::AttachmentMeta::new(
+            crate::AttachmentId::new(id),
+            crate::MediaType::Image(crate::ImageMediaType::Png),
+            3,
+            Some(1),
+            Some(1),
+            Some("tiny".to_string()),
+        )
+        .as_ref()
     }
 
     fn state_with_graph(graph: SessionGraph) -> RuntimeSessionState {
@@ -941,6 +1019,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn progress_boundary_can_update_turn_draft_without_store_commit() {
+        let user = text_message("u0", MessageRole::User, "hello");
+        let assistant = text_message("a0", MessageRole::Assistant, "hi");
+        let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
+        let protocol_event =
+            crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
+                .expect("protocol event serializes");
+        let event_delta = vec![crate::SessionEventRecord::Protocol(protocol_event)];
+
+        let boundary = pipeline
+            .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
+                policy: SessionPolicy::default(),
+                turn_index: 1,
+                messages: MessageSequence::from_base(vec![user, assistant].into()),
+                event_delta,
+                execution_state_snapshot: None,
+                plugins: None,
+                store: None,
+            })
+            .await;
+
+        assert!(!boundary.persisted);
+        assert_eq!(boundary.protocol_events.len(), 1);
+        assert_eq!(pipeline.state().turn_index, 1);
+    }
+
+    #[tokio::test]
     async fn progress_boundary_logs_and_continues_on_store_failure() {
         let user = text_message("u0", MessageRole::User, "hello");
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
@@ -981,6 +1087,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn committed_attachment_ids_merge_pending_store_writes_with_tool_outputs() {
+        let tool_ref = image_ref("tool-output");
+        let state = RuntimeSessionState::default();
+        let tool_calls = vec![crate::ToolCallRecord {
+            call_id: Some("call-1".to_string()),
+            tool: "make_attachment".to_string(),
+            args: serde_json::json!({}),
+            output: crate::ToolCallOutput::success(crate::ToolValue::Attachment(tool_ref)),
+            duration_ms: 1,
+        }];
+
+        let ids = committed_attachment_ids(
+            &state,
+            &tool_calls,
+            vec![
+                crate::AttachmentId::new("tool-output"),
+                crate::AttachmentId::new("store-write"),
+            ],
+        );
+
+        assert_eq!(
+            ids,
+            vec![
+                crate::AttachmentId::new("store-write"),
+                crate::AttachmentId::new("tool-output"),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn final_commit_merges_usage_and_updates_persisted_graph_count() {
         let graph =
@@ -1004,6 +1140,7 @@ mod tests {
                 tool_calls: &[],
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
+                pending_attachment_ids: Vec::new(),
             })
             .await
             .expect("commit");
@@ -1041,6 +1178,7 @@ mod tests {
                 tool_calls: &[],
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
+                pending_attachment_ids: Vec::new(),
             })
             .await
             .expect("no-store commit");

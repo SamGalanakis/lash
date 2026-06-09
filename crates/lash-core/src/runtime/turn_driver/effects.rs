@@ -106,6 +106,7 @@ impl RuntimeTurnDriver<'_> {
                 .materialize_for_checkpoint_with_attachments(
                     self.host.core.durability.attachment_store.as_ref(),
                 )
+                .await
                 .map_err(|err| {
                     RuntimeError::new(
                         RuntimeErrorCode::DurableStoreRequired {

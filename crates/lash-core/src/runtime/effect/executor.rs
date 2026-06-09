@@ -668,6 +668,7 @@ impl LocalDirectEffectRunner {
             request,
             self.attachment_store.as_ref(),
         )
+        .await
         .map_err(|err| LlmCallError {
             message: err.to_string(),
             retryable: false,
@@ -738,9 +739,18 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match envelope.command {
             RuntimeEffectCommand::Process { command } => {
-                let result = self
-                    .execute_process_command(command, local_executor)
-                    .await?;
+                let execution = local_executor.into_process()?;
+                let registry = execution.registry;
+                let result = tokio::task::spawn(async move {
+                    Self::execute_process_command(registry, command).await
+                })
+                .await
+                .map_err(|err| {
+                    RuntimeEffectControllerError::new(
+                        "runtime_effect_process_task_join",
+                        format!("inline process effect task failed: {err}"),
+                    )
+                })??;
                 Ok(RuntimeEffectOutcome::Process { result })
             }
             _ => local_executor.execute(envelope).await,
@@ -802,7 +812,6 @@ impl InlineRuntimeEffectController {
     /// control seam pokes that runner after a successful start, so registering
     /// the row is all this path does.
     pub(crate) async fn start_process(
-        &self,
         registry: Arc<dyn crate::ProcessRegistry>,
         registration: crate::ProcessRegistration,
         grant: Option<crate::ProcessStartGrant>,
@@ -839,19 +848,16 @@ impl InlineRuntimeEffectController {
     }
 
     async fn execute_process_command(
-        &self,
+        registry: Arc<dyn crate::ProcessRegistry>,
         command: ProcessCommand,
-        local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
-        let execution = local_executor.into_process()?;
-        let registry = execution.registry;
         match command {
             ProcessCommand::Start {
                 registration,
                 grant,
                 execution_context: _,
             } => {
-                let record = self.start_process(registry, registration, grant).await?;
+                let record = Self::start_process(registry, registration, grant).await?;
                 Ok(ProcessEffectOutcome::Start { record })
             }
             ProcessCommand::List { owner_scope, mode } => {
@@ -895,7 +901,7 @@ impl InlineRuntimeEffectController {
                 Ok(ProcessEffectOutcome::Await { output })
             }
             ProcessCommand::Cancel { process_id, reason } => {
-                let record = self
+                let record = InlineRuntimeEffectController
                     .request_process_cancel(registry, &process_id, reason)
                     .await?;
                 Ok(ProcessEffectOutcome::Cancel { record })

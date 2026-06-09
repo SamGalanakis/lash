@@ -133,6 +133,30 @@ agent-workbench-restate-e2e:
   cargo test -p agent-workbench \
     live_restate_cron_runs_trigger_and_queued_turn_end_to_end -- --ignored --nocapture
 
+restate-postgres-workers-e2e:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  compose="docker compose -f {{repo}}/e2e/restate-postgres-workers/docker-compose.yml"
+
+  cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      $compose logs --no-color >&2 || true
+    fi
+    if [ "${LASH_E2E_KEEP:-0}" != "1" ]; then
+      $compose down -v --remove-orphans >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+  }
+  trap cleanup EXIT
+
+  $compose down -v --remove-orphans >/dev/null 2>&1 || true
+  $compose up -d postgres minio minio-init restate mock-provider worker-a worker-b worker-proxy
+  $compose --profile runner run --rm runner
+
+stack-budget:
+  bash "{{repo}}/scripts/ci-stack-budget.sh"
+
 # ── crates.io publishing ─────────────────────────────────────
 # Topological order of every publishable crate. Computed once via
 # `cargo metadata` then frozen here; edit by hand if a new internal

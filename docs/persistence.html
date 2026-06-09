@@ -17,7 +17,7 @@
 <script src="./docs.js?v=7" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-sqlite-store</code>, <code>examples/agent-service</code>.">
+<body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-sqlite-store</code>, <code>crates/lash-postgres-store</code>, <code>crates/lash-s3-store</code>, <code>examples/agent-service</code>.">
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">session<span class="slash">/</span>persistence</h1>
@@ -90,6 +90,36 @@ let core = LashCore::builder()
     .open()
     .await?;</code></pre>
       <p>Without <code>.store_factory(...)</code> or <code>.store(...)</code>, turns still succeed but state stays in memory. You still provide explicit in-memory effect, artifact, and attachment facets.</p>
+    </div>
+
+    <div class="section" id="distributed-backends">
+      <div class="section-header">
+        <h2>Distributed Backends</h2>
+        <p>Use <code>lash-postgres-store</code> plus <code>lash-s3-store</code> when multiple workers must share one durable runtime state and one attachment byte store.</p>
+      </div>
+      <pre><code>use std::sync::Arc;
+use lash_postgres_store::PostgresStorage;
+use lash_s3_store::S3AttachmentStore;
+
+let storage = PostgresStorage::connect(&amp;database_url).await?;
+let attachments = S3AttachmentStore::builder("lash-attachments", "us-east-1")
+    .endpoint_url("http://localhost:9000") // omit for AWS S3
+    .access_key_id("minioadmin")
+    .secret_access_key("minioadmin")
+    .path_style(true)
+    .prefix("prod/lash")
+    .build()?;
+
+let core = LashCore::builder()
+    .store_factory(Arc::new(storage.session_store_factory()))
+    .process_registry(Arc::new(storage.process_registry()))
+    .host_event_store(Arc::new(storage.host_event_store()))
+    .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
+    .attachment_store(Arc::new(attachments))
+    // provider, mode, model, effect host...
+    .build()?;</code></pre>
+      <p><code>PostgresStorage::connect</code> creates the exact supported schema on an empty database and rejects mismatched component versions. Runtime checkpoints, queued work, process rows, host events, attachment manifests, and Lashlang artifacts live in Postgres. Attachment bytes live in S3-compatible object storage under content-addressed keys; MinIO uses the same implementation with an endpoint URL and path-style mode.</p>
+      <p>The distributed integration harness is <code>just restate-postgres-workers-e2e</code>. It starts Postgres, MinIO, Restate, a mock OpenAI-compatible provider, two worker processes behind a Caddy h2c proxy, and verifies failover plus shared state.</p>
     </div>
 
     <div class="section" id="delete-sessions">

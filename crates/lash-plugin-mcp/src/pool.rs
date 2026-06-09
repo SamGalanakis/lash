@@ -199,7 +199,7 @@ impl McpConnectionPool {
         .await;
 
         match response {
-            Ok(Ok(result)) => tool_result_from_rmcp(result, context),
+            Ok(Ok(result)) => tool_result_from_rmcp(result, context).await,
             Ok(Err(err)) => ToolResult::err_fmt(err),
             Err(_) => ToolResult::err_fmt(McpError::CallTimeout {
                 server: server_name,
@@ -409,7 +409,7 @@ fn import_tools(
     imported
 }
 
-fn tool_result_from_rmcp(
+async fn tool_result_from_rmcp(
     result: rmcp::model::CallToolResult,
     context: &ToolContext<'_>,
 ) -> ToolResult {
@@ -438,10 +438,14 @@ fn tool_result_from_rmcp(
                         image.mime_type
                     ));
                 };
-                let reference = match context.attachments().put(
-                    data,
-                    AttachmentCreateMeta::new(media_type, None, None, Some("MCP image".into())),
-                ) {
+                let reference = match context
+                    .attachments()
+                    .put(
+                        data,
+                        AttachmentCreateMeta::new(media_type, None, None, Some("MCP image".into())),
+                    )
+                    .await
+                {
                     Ok(reference) => reference,
                     Err(err) => {
                         return ToolResult::err_fmt(format!(

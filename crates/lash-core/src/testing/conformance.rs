@@ -12,18 +12,22 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::{
     AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, CausalRef, DeliveryPolicy,
-    EffectHost, EffectScope, MergeKey, ModelSpec, PluginSessionSnapshot, ProtocolEvent,
-    ProtocolTurnOptions, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaimBoundary,
-    QueuedWorkPayload, RuntimeCommit, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence,
-    RuntimeScope, RuntimeSessionState, RuntimeSubject, RuntimeTurnCommitStamp,
-    ScopedEffectController, SessionMeta, SessionNodePayload, SessionNodeRecord, SessionPolicy,
-    SessionReadScope, SessionRelation, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage,
-    ToolState, TurnInput,
+    EffectHost, EffectScope, LiveReplayGapReason, LiveReplayResult, LiveReplayStore,
+    LiveReplayStoreError, LiveReplaySubscribeResult, MergeKey, ModelSpec, PluginSessionSnapshot,
+    ProtocolEvent, ProtocolTurnOptions, QueuedWorkBatch, QueuedWorkBatchDraft,
+    QueuedWorkClaimBoundary, QueuedWorkPayload, RuntimeCommit, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
+    RuntimePersistence, RuntimeScope, RuntimeSessionState, RuntimeSubject, RuntimeTurnCommitStamp,
+    ScopedEffectController, SessionMeta, SessionNodePayload, SessionNodeRecord,
+    SessionObservationEvent, SessionObservationEventPayload, SessionPolicy,
+    SessionProcessEventKind, SessionQueueEventKind, SessionReadScope, SessionRelation,
+    SessionRevision, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnActivity,
+    TurnEvent, TurnInput,
 };
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
@@ -424,6 +428,374 @@ fn assert_replay_conformance_exec_marker(outcome: RuntimeEffectOutcome, expected
         Some(serde_json::json!(expected)),
         "replayed outcome must come from the matching replay key"
     );
+}
+
+/// Run the full [`LiveReplayStore`] conformance suite against the backend
+/// produced by `make`. `make` must return a fresh, empty store on each call.
+///
+/// This suite covers the non-durable live observation contract used for host
+/// reconnects: cursors track per-session live positions, replay returns only
+/// events after the cursor, subscriptions deliver buffered events before live
+/// ones, malformed cursors fail before replay, and cursors ahead of the tail
+/// report a recoverable unavailable gap.
+pub async fn live_replay_store<F>(make: F)
+where
+    F: Fn() -> Arc<dyn LiveReplayStore>,
+{
+    live_replay_store_appends_replays_and_isolates_sessions(make()).await;
+    live_replay_store_subscribe_replays_then_yields_live_events(make()).await;
+    live_replay_store_rejects_malformed_cursors(make()).await;
+    live_replay_store_reports_unavailable_for_cursor_ahead_of_tail(make()).await;
+}
+
+/// Run the capacity-trim portion of the [`LiveReplayStore`] conformance suite.
+///
+/// `make` must return a fresh store configured to retain exactly one event per
+/// session. Stores with a fixed larger capacity should expose a test
+/// configuration rather than weakening this contract.
+pub async fn live_replay_store_capacity_trim<F>(make: F)
+where
+    F: Fn() -> Arc<dyn LiveReplayStore>,
+{
+    let store = make();
+    let revision = SessionRevision::new(1);
+    let start = store.current_cursor("capacity-session", revision);
+    let first = store
+        .append(
+            "capacity-session",
+            revision,
+            live_replay_text_payload("capacity one"),
+        )
+        .expect("append first capacity event");
+    store
+        .append(
+            "capacity-session",
+            revision,
+            live_replay_text_payload("capacity two"),
+        )
+        .expect("append second capacity event");
+
+    expect_live_replay_gap(
+        store.replay_after_cursor(&start),
+        LiveReplayGapReason::Trimmed,
+        "capacity-trim replay from dropped cursor",
+    );
+    expect_live_replay_subscribe_gap(
+        store.subscribe_after_cursor(&start),
+        LiveReplayGapReason::Trimmed,
+        "capacity-trim subscribe from dropped cursor",
+    );
+    let replay_after_first = expect_live_replay_replayed(
+        store.replay_after_cursor(&first.cursor),
+        "after first cursor",
+    );
+    assert_live_replay_labels(&replay_after_first, &["text:capacity two"]);
+}
+
+/// Run the TTL-trim portion of the [`LiveReplayStore`] conformance suite.
+///
+/// `make` must return a fresh store whose event TTL expires within
+/// `expiration_wait`. The suite explicitly calls [`LiveReplayStore::trim_session`]
+/// after waiting so implementations can keep trimming lazy and local.
+pub async fn live_replay_store_ttl_trim<F>(make: F, expiration_wait: Duration)
+where
+    F: Fn() -> Arc<dyn LiveReplayStore>,
+{
+    let store = make();
+    let revision = SessionRevision::new(1);
+    let start = store.current_cursor("ttl-session", revision);
+    store
+        .append(
+            "ttl-session",
+            revision,
+            live_replay_text_payload("ttl expired"),
+        )
+        .expect("append ttl event");
+    tokio::time::sleep(expiration_wait).await;
+    store.trim_session("ttl-session").expect("trim ttl session");
+
+    expect_live_replay_gap(
+        store.replay_after_cursor(&start),
+        LiveReplayGapReason::Trimmed,
+        "ttl-trim replay from expired cursor",
+    );
+    expect_live_replay_subscribe_gap(
+        store.subscribe_after_cursor(&start),
+        LiveReplayGapReason::Trimmed,
+        "ttl-trim subscribe from expired cursor",
+    );
+
+    let tail = store.current_cursor("ttl-session", revision);
+    let tail_replay = expect_live_replay_replayed(
+        store.replay_after_cursor(&tail),
+        "ttl-trim replay from latest cursor",
+    );
+    assert!(
+        tail_replay.is_empty(),
+        "latest cursor after ttl trim must replay no events"
+    );
+}
+
+async fn live_replay_store_appends_replays_and_isolates_sessions(store: Arc<dyn LiveReplayStore>) {
+    let revision = SessionRevision::new(7);
+    let start_a = store.current_cursor("session-a", revision);
+    let start_b = store.current_cursor("session-b", revision);
+    let empty = expect_live_replay_replayed(
+        store.replay_after_cursor(&start_a),
+        "empty replay from initial cursor",
+    );
+    assert!(empty.is_empty(), "initial cursor must replay no events");
+
+    let first_a = store
+        .append("session-a", revision, live_replay_text_payload("alpha one"))
+        .expect("append first session-a event");
+    let first_b = store
+        .append(
+            "session-b",
+            revision,
+            SessionObservationEventPayload::ProcessChanged {
+                kind: SessionProcessEventKind::Started,
+                process_ids: vec!["proc-b".to_string()],
+            },
+        )
+        .expect("append session-b event");
+    let second_a = store
+        .append(
+            "session-a",
+            SessionRevision::new(8),
+            SessionObservationEventPayload::QueueChanged {
+                kind: SessionQueueEventKind::Enqueued,
+                batch_ids: vec!["batch-a".to_string()],
+            },
+        )
+        .expect("append second session-a event");
+
+    assert_eq!(first_a.session_id, "session-a");
+    assert_eq!(first_a.revision, revision);
+    assert_eq!(second_a.revision, SessionRevision::new(8));
+    assert_ne!(
+        first_a.cursor.as_str(),
+        second_a.cursor.as_str(),
+        "each appended event must receive a distinct cursor"
+    );
+    assert_eq!(first_b.session_id, "session-b");
+
+    let replay_a =
+        expect_live_replay_replayed(store.replay_after_cursor(&start_a), "session-a replay");
+    assert_live_replay_labels(&replay_a, &["text:alpha one", "queue:Enqueued:batch-a"]);
+
+    let replay_a_after_first = expect_live_replay_replayed(
+        store.replay_after_cursor(&first_a.cursor),
+        "session-a replay after first event",
+    );
+    assert_live_replay_labels(&replay_a_after_first, &["queue:Enqueued:batch-a"]);
+
+    let replay_b =
+        expect_live_replay_replayed(store.replay_after_cursor(&start_b), "session-b replay");
+    assert_live_replay_labels(&replay_b, &["process:Started:proc-b"]);
+
+    let tail_a = store.current_cursor("session-a", SessionRevision::new(9));
+    let replay_from_tail = expect_live_replay_replayed(
+        store.replay_after_cursor(&tail_a),
+        "session-a replay from tail cursor",
+    );
+    assert!(
+        replay_from_tail.is_empty(),
+        "current tail cursor must not replay old events"
+    );
+}
+
+async fn live_replay_store_subscribe_replays_then_yields_live_events(
+    store: Arc<dyn LiveReplayStore>,
+) {
+    let revision = SessionRevision::new(3);
+    let start = store.current_cursor("subscribe-session", revision);
+    store
+        .append(
+            "subscribe-session",
+            revision,
+            live_replay_text_payload("buffered one"),
+        )
+        .expect("append first buffered event");
+    store
+        .append(
+            "subscribe-session",
+            revision,
+            live_replay_text_payload("buffered two"),
+        )
+        .expect("append second buffered event");
+
+    let mut subscription = expect_live_replay_subscribed(
+        store.subscribe_after_cursor(&start),
+        "subscribe after initial cursor",
+    );
+    let first = next_live_replay_event(&mut subscription, "first buffered event").await;
+    let second = next_live_replay_event(&mut subscription, "second buffered event").await;
+    assert_live_replay_labels(
+        &[first, second],
+        &["text:buffered one", "text:buffered two"],
+    );
+
+    store
+        .append(
+            "subscribe-session",
+            revision,
+            live_replay_text_payload("live three"),
+        )
+        .expect("append live event");
+    let live = next_live_replay_event(&mut subscription, "live event after replay").await;
+    assert_live_replay_labels(&[live], &["text:live three"]);
+}
+
+async fn live_replay_store_rejects_malformed_cursors(store: Arc<dyn LiveReplayStore>) {
+    let malformed: crate::SessionCursor =
+        serde_json::from_value(serde_json::json!("not-a-session-cursor"))
+            .expect("construct malformed cursor through public serde surface");
+    assert!(
+        matches!(
+            store.replay_after_cursor(&malformed),
+            Err(LiveReplayStoreError::Cursor(
+                crate::SessionCursorError::Malformed { .. }
+            ))
+        ),
+        "replay must reject malformed cursors before reading replay state"
+    );
+    assert!(
+        matches!(
+            store.subscribe_after_cursor(&malformed),
+            Err(LiveReplayStoreError::Cursor(
+                crate::SessionCursorError::Malformed { .. }
+            ))
+        ),
+        "subscribe must reject malformed cursors before reading replay state"
+    );
+}
+
+async fn live_replay_store_reports_unavailable_for_cursor_ahead_of_tail(
+    store: Arc<dyn LiveReplayStore>,
+) {
+    let revision = SessionRevision::new(4);
+    store
+        .append(
+            "ahead-session",
+            revision,
+            live_replay_text_payload("existing"),
+        )
+        .expect("append existing event");
+    let ahead = crate::SessionCursor::new("ahead-session", revision, 99);
+
+    expect_live_replay_gap(
+        store.replay_after_cursor(&ahead),
+        LiveReplayGapReason::Unavailable,
+        "replay from cursor ahead of tail",
+    );
+    expect_live_replay_subscribe_gap(
+        store.subscribe_after_cursor(&ahead),
+        LiveReplayGapReason::Unavailable,
+        "subscribe from cursor ahead of tail",
+    );
+}
+
+fn live_replay_text_payload(text: &str) -> SessionObservationEventPayload {
+    SessionObservationEventPayload::TurnActivity(TurnActivity::independent(
+        TurnEvent::AssistantProseDelta {
+            text: text.to_string(),
+        },
+    ))
+}
+
+fn expect_live_replay_replayed(
+    result: Result<LiveReplayResult, LiveReplayStoreError>,
+    context: &str,
+) -> Vec<SessionObservationEvent> {
+    match result.expect(context) {
+        LiveReplayResult::Replayed(events) => events,
+        LiveReplayResult::Gap(reason) => {
+            panic!("{context}: expected replayed events, got gap {reason:?}")
+        }
+    }
+}
+
+fn expect_live_replay_gap(
+    result: Result<LiveReplayResult, LiveReplayStoreError>,
+    expected: LiveReplayGapReason,
+    context: &str,
+) {
+    match result.expect(context) {
+        LiveReplayResult::Gap(reason) => assert_eq!(reason, expected, "{context}"),
+        LiveReplayResult::Replayed(events) => {
+            panic!(
+                "{context}: expected gap {expected:?}, got {} events",
+                events.len()
+            )
+        }
+    }
+}
+
+fn expect_live_replay_subscribed(
+    result: Result<LiveReplaySubscribeResult, LiveReplayStoreError>,
+    context: &str,
+) -> crate::LiveReplaySubscription {
+    match result.expect(context) {
+        LiveReplaySubscribeResult::Subscribed(subscription) => subscription,
+        LiveReplaySubscribeResult::Gap(reason) => {
+            panic!("{context}: expected subscription, got gap {reason:?}")
+        }
+    }
+}
+
+fn expect_live_replay_subscribe_gap(
+    result: Result<LiveReplaySubscribeResult, LiveReplayStoreError>,
+    expected: LiveReplayGapReason,
+    context: &str,
+) {
+    match result.expect(context) {
+        LiveReplaySubscribeResult::Gap(reason) => assert_eq!(reason, expected, "{context}"),
+        LiveReplaySubscribeResult::Subscribed(_) => {
+            panic!("{context}: expected subscribe gap {expected:?}, got subscription")
+        }
+    }
+}
+
+async fn next_live_replay_event(
+    subscription: &mut crate::LiveReplaySubscription,
+    context: &str,
+) -> SessionObservationEvent {
+    tokio::time::timeout(Duration::from_secs(1), subscription.next_event())
+        .await
+        .unwrap_or_else(|_| panic!("{context}: timed out waiting for live replay event"))
+        .unwrap_or_else(|err| panic!("{context}: live replay subscriber failed: {err}"))
+}
+
+fn assert_live_replay_labels(events: &[SessionObservationEvent], expected: &[&str]) {
+    let labels = events
+        .iter()
+        .map(live_replay_event_label)
+        .collect::<Vec<_>>();
+    let expected = expected
+        .iter()
+        .map(|label| label.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, expected, "replayed event payloads must match");
+}
+
+fn live_replay_event_label(event: &SessionObservationEvent) -> String {
+    match &event.payload {
+        SessionObservationEventPayload::TurnActivity(activity) => match &activity.event {
+            TurnEvent::AssistantProseDelta { text } => format!("text:{text}"),
+            other => format!("turn:{other:?}"),
+        },
+        SessionObservationEventPayload::Committed { .. } => "committed".to_string(),
+        SessionObservationEventPayload::AgentFrameSwitched { frame_id } => {
+            format!("frame:{frame_id}")
+        }
+        SessionObservationEventPayload::QueueChanged { kind, batch_ids } => {
+            format!("queue:{kind:?}:{}", batch_ids.join(","))
+        }
+        SessionObservationEventPayload::ProcessChanged { kind, process_ids } => {
+            format!("process:{kind:?}:{}", process_ids.join(","))
+        }
+    }
 }
 
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
@@ -3632,23 +4004,25 @@ use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
 /// produced by `make`. `make` must return a fresh, empty store on each call.
 /// `expected_persistence` is the tier this backend declares (`Ephemeral` for
 /// in-memory, `Durable` for file/Sqlite-backed).
-pub fn attachment_store<F>(make: F, expected_persistence: AttachmentStorePersistence)
+pub async fn attachment_store<F>(make: F, expected_persistence: AttachmentStorePersistence)
 where
     F: Fn() -> Arc<dyn AttachmentStore>,
 {
-    attachment_put_get_round_trips_bytes_and_meta(make());
-    attachment_is_content_addressed(make());
-    attachment_get_unknown_is_not_found(make());
+    attachment_put_get_round_trips_bytes_and_meta(make()).await;
+    attachment_is_content_addressed(make()).await;
+    attachment_get_unknown_is_not_found(make()).await;
     attachment_reports_declared_persistence(make(), expected_persistence);
 }
 
 /// Run the full [`AttachmentStore`] suite plus durable reopen checks.
-pub fn attachment_store_reopenable<F>(make: F, expected_persistence: AttachmentStorePersistence)
-where
+pub async fn attachment_store_reopenable<F>(
+    make: F,
+    expected_persistence: AttachmentStorePersistence,
+) where
     F: Fn() -> ReopenableAttachmentStore,
 {
-    attachment_store(|| make().open, expected_persistence);
-    attachment_store_survives_reopen(make());
+    attachment_store(|| make().open, expected_persistence).await;
+    attachment_store_survives_reopen(make()).await;
 }
 
 fn attachment_meta() -> AttachmentCreateMeta {
@@ -3660,12 +4034,13 @@ fn attachment_meta() -> AttachmentCreateMeta {
     )
 }
 
-fn attachment_put_get_round_trips_bytes_and_meta(store: Arc<dyn AttachmentStore>) {
+async fn attachment_put_get_round_trips_bytes_and_meta(store: Arc<dyn AttachmentStore>) {
     let bytes = vec![1u8, 2, 3, 4, 5];
     let reference = store
         .put(bytes.clone(), attachment_meta())
+        .await
         .expect("put attachment");
-    let stored = store.get(&reference.id).expect("get attachment");
+    let stored = store.get(&reference.id).await.expect("get attachment");
 
     assert_eq!(stored.bytes, bytes, "bytes must round-trip unchanged");
     assert_eq!(stored.meta.id, reference.id);
@@ -3679,15 +4054,18 @@ fn attachment_put_get_round_trips_bytes_and_meta(store: Arc<dyn AttachmentStore>
     assert_eq!(stored.meta.label.as_deref(), Some("pixel"));
 }
 
-fn attachment_is_content_addressed(store: Arc<dyn AttachmentStore>) {
+async fn attachment_is_content_addressed(store: Arc<dyn AttachmentStore>) {
     let first = store
         .put(vec![9u8, 9, 9], attachment_meta())
+        .await
         .expect("put first");
     let same = store
         .put(vec![9u8, 9, 9], attachment_meta())
+        .await
         .expect("put identical bytes");
     let different = store
         .put(vec![9u8, 9, 8], attachment_meta())
+        .await
         .expect("put different bytes");
 
     assert_eq!(
@@ -3700,9 +4078,10 @@ fn attachment_is_content_addressed(store: Arc<dyn AttachmentStore>) {
     );
 }
 
-fn attachment_get_unknown_is_not_found(store: Arc<dyn AttachmentStore>) {
+async fn attachment_get_unknown_is_not_found(store: Arc<dyn AttachmentStore>) {
     let err = store
         .get(&AttachmentId::new("sha256:does-not-exist"))
+        .await
         .expect_err("get of an unknown id must fail");
     assert!(
         matches!(err, AttachmentStoreError::NotFound(_)),
@@ -3721,14 +4100,16 @@ fn attachment_reports_declared_persistence(
     );
 }
 
-fn attachment_store_survives_reopen(factory: ReopenableAttachmentStore) {
+async fn attachment_store_survives_reopen(factory: ReopenableAttachmentStore) {
     let reference = factory
         .open
         .put(vec![4u8, 3, 2, 1], attachment_meta())
+        .await
         .expect("put attachment before reopen");
     let reopened = factory
         .reopen
         .get(&reference.id)
+        .await
         .expect("get attachment after reopen");
     assert_eq!(reopened.bytes, vec![4u8, 3, 2, 1]);
     assert_eq!(reopened.meta.id, reference.id);
@@ -3833,12 +4214,13 @@ async fn lashlang_artifact_store_survives_reopen(factory: ReopenableLashlangArti
 mod tests {
     use super::*;
 
-    #[test]
-    fn in_memory_attachment_store_satisfies_conformance() {
+    #[tokio::test]
+    async fn in_memory_attachment_store_satisfies_conformance() {
         attachment_store(
             || Arc::new(crate::InMemoryAttachmentStore::new()) as Arc<dyn AttachmentStore>,
             AttachmentStorePersistence::Ephemeral,
-        );
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -3858,6 +4240,31 @@ mod tests {
         host_event_store(
             || Arc::new(crate::InMemoryHostEventStore::default()) as Arc<dyn crate::HostEventStore>,
             DurabilityTier::Inline,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_live_replay_store_satisfies_conformance() {
+        live_replay_store(|| {
+            Arc::new(crate::InMemoryLiveReplayStore::default()) as Arc<dyn LiveReplayStore>
+        })
+        .await;
+        live_replay_store_capacity_trim(|| {
+            Arc::new(crate::InMemoryLiveReplayStore::with_bounds(
+                1,
+                Duration::from_secs(120),
+            )) as Arc<dyn LiveReplayStore>
+        })
+        .await;
+        live_replay_store_ttl_trim(
+            || {
+                Arc::new(crate::InMemoryLiveReplayStore::with_bounds(
+                    16,
+                    Duration::from_millis(1),
+                )) as Arc<dyn LiveReplayStore>
+            },
+            Duration::from_millis(20),
         )
         .await;
     }

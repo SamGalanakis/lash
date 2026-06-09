@@ -270,6 +270,12 @@ impl LashRuntime {
         self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
         self.mark_phase_begin(RuntimeTurnPhase::FinalCommit);
         let queued_work_completion_trace = queued_work_completions.clone();
+        let pending_attachment_ids = self
+            .host
+            .core
+            .durability
+            .attachment_store
+            .pending_manifest_commit_ids();
         if let Err(err) = turn_pipeline
             .final_commit(
                 &mut returned_turn,
@@ -277,6 +283,7 @@ impl LashRuntime {
                 &turn_usage_delta,
                 Some(&trace_turn_id),
                 queued_work_completions,
+                pending_attachment_ids.clone(),
             )
             .await
         {
@@ -284,6 +291,11 @@ impl LashRuntime {
             self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
             return Err(err);
         }
+        self.host
+            .core
+            .durability
+            .attachment_store
+            .mark_manifest_committed(&pending_attachment_ids);
         self.mark_phase_end(RuntimeTurnPhase::FinalCommit);
 
         emit_session_events_to_sink(events, finalized.events).await;
@@ -761,7 +773,10 @@ impl LashRuntime {
                 })?;
         }
         let previous_prompt_usage = self.state.last_prompt_usage.clone();
-        let normalized = match self.normalize_input_items(&input.items, &input.image_blobs) {
+        let normalized = match self
+            .normalize_input_items(&input.items, &input.image_blobs)
+            .await
+        {
             Ok(items) => items,
             Err(e) => {
                 self.state.last_prompt_usage = None;
@@ -975,7 +990,6 @@ impl LashRuntime {
         }
 
         self.state.last_prompt_usage = None;
-
         self.stream_prepared_turn(
             messages,
             previous_prompt_usage,
@@ -1154,9 +1168,19 @@ impl LashRuntime {
             .session
             .as_ref()
             .and_then(|session| session.history_store());
+        // Durable controllers, like Restate, own in-flight replay. Writing
+        // progress checkpoints directly to the shared store would make handler
+        // replay observe a newer partial turn and change effect replay keys.
+        let progress_store = if scoped_effect_controller.controller().durability_tier()
+            == crate::DurabilityTier::Durable
+        {
+            None
+        } else {
+            store.as_ref().map(|store| store.as_ref())
+        };
         turn_pipeline
             .prepared_checkpoint(
-                store.as_ref().map(|store| store.as_ref()),
+                progress_store,
                 turn_policy.clone(),
                 turn_index,
                 &prepared.messages,
@@ -1259,7 +1283,7 @@ impl LashRuntime {
         )
         .await
     }
-    fn normalize_input_items(
+    async fn normalize_input_items(
         &self,
         items: &[InputItem],
         image_blobs: &HashMap<String, Vec<u8>>,
@@ -1269,6 +1293,7 @@ impl LashRuntime {
             image_blobs,
             self.host.core.durability.attachment_store.as_ref(),
         )
+        .await
     }
 }
 

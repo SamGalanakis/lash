@@ -70,10 +70,13 @@ impl RuntimeTurnDriver<'_> {
             RuntimeEffectEnvelope::new(
                 invocation,
                 RuntimeEffectCommand::LlmCall {
-                    request: Box::new(LlmRequestSpec::from_request(
-                        &request,
-                        self.host.core.durability.attachment_store.as_ref(),
-                    )?),
+                    request: Box::new(
+                        LlmRequestSpec::from_request(
+                            &request,
+                            self.host.core.durability.attachment_store.as_ref(),
+                        )
+                        .await?,
+                    ),
                 },
             ),
             RuntimeEffectOutcome::into_llm_call,
@@ -175,7 +178,9 @@ impl RuntimeTurnDriver<'_> {
         let request = match crate::attachments::resolve_llm_request_attachments(
             request,
             self.host.core.durability.attachment_store.as_ref(),
-        ) {
+        )
+        .await
+        {
             Ok(request) => request,
             Err(err) => {
                 return (

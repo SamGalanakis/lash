@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
         "--stack-bytes",
         action="append",
         default=[],
-        help="Worker stack size for the stack lane, e.g. 256k or 8388608.",
+        help="Worker stack size for the stack lane, e.g. 256k, 2m, or 4m.",
     )
     parser.add_argument(
         "--skip-dhat",

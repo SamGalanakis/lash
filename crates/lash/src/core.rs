@@ -259,14 +259,18 @@ impl LashCore {
             extra_plugin_factories.into_iter().collect(),
             true,
         )?;
-        Ok(DurableProcessWorkerConfig::new(
+        let mut config = DurableProcessWorkerConfig::new(
             Arc::new(plugin_host),
             self.env.core.clone(),
             Arc::clone(store_factory),
             process_registry,
         )
         .with_session_policy(self.policy.clone())
-        .with_residency(self.env.residency))
+        .with_residency(self.env.residency);
+        if let Some(host_event_store) = self.env.host_event_store.as_ref() {
+            config = config.with_host_event_store(Arc::clone(host_event_store));
+        }
+        Ok(config)
     }
 }
 

@@ -42,6 +42,8 @@ Attach a `TraceSink` for structured turn, tool, LLM, prompt, stream, and usage r
 
 - `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output; no Lashlang dependency.
 - `lash-core` — async runtime internals, plugin host, protocol build input, providers, persistence, session graph, child-session orchestration, built-in tools, and Lashlang host-surface construction.
+- `lash-postgres-store` — shared durable Postgres runtime state for sessions, queued work, process registry rows, host events, attachment manifests, and Lashlang artifacts.
+- `lash-s3-store` — S3-compatible durable attachment bytes for AWS S3 and MinIO, using content-addressed object keys.
 - `lash-remote-protocol` — runtime-neutral canonical DTOs for wrapping Lash behind a service boundary: remote turn requests/results, LLM requests/responses, prompt patches, activity streams, and transport-neutral tool grants.
 - `lash` — app-facing facade for runtime construction, sessions, turn streaming, provider / mode / plugin wiring, host integrations.
 - `lash-protocol-standard` / `lash-protocol-rlm` — protocol plugins.

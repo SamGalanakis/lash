@@ -41,10 +41,10 @@ impl ReadFileBlockingResult {
         Self::Tool(result)
     }
 
-    fn into_tool_result(self, context: &lash_core::ToolContext<'_>) -> ToolResult {
+    async fn into_tool_result(self, context: &lash_core::ToolContext<'_>) -> ToolResult {
         match self {
             Self::Tool(result) => result,
-            Self::Image(image) => store_image_attachment(context, image),
+            Self::Image(image) => store_image_attachment(context, image).await,
         }
     }
 }
@@ -71,7 +71,7 @@ impl StaticToolExecute for ReadFile {
         };
 
         match run_blocking_value(move || execute_read_file_sync(&path_str, offset, limit)).await {
-            Ok(result) => result.into_tool_result(call.context),
+            Ok(result) => result.into_tool_result(call.context).await,
             Err(err) => ToolResult::err_fmt(format_args!("{err}")),
         }
     }
@@ -280,19 +280,23 @@ fn read_image(path: &Path, path_str: &str, mime: &str) -> ReadFileBlockingResult
     })
 }
 
-fn store_image_attachment(
+async fn store_image_attachment(
     context: &lash_core::ToolContext<'_>,
     image: ImageAttachmentData,
 ) -> ToolResult {
-    let reference = match context.attachments().put(
-        image.data,
-        lash_core::AttachmentCreateMeta::new(
-            image.media_type,
-            image.width,
-            image.height,
-            Some(image.label),
-        ),
-    ) {
+    let reference = match context
+        .attachments()
+        .put(
+            image.data,
+            lash_core::AttachmentCreateMeta::new(
+                image.media_type,
+                image.width,
+                image.height,
+                Some(image.label),
+            ),
+        )
+        .await
+    {
         Ok(reference) => reference,
         Err(err) => {
             return ToolResult::err_fmt(format_args!("Failed to store image attachment: {err}"));
@@ -778,7 +782,7 @@ mod tests {
         assert_eq!(reference.byte_len, data.len() as u64);
         assert_eq!(reference.width, Some(1));
         assert_eq!(reference.height, Some(1));
-        assert_eq!(store.get(&reference.id).unwrap().bytes, data);
+        assert_eq!(store.get(&reference.id).await.unwrap().bytes, data);
     }
 
     #[test]

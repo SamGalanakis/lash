@@ -52,6 +52,9 @@ jobs:
       - name: Test lash facade
         run: cargo test -p lash-runtime --locked
 
+      - name: Enforce stack budget
+        run: bash scripts/ci-stack-budget.sh
+
       - name: Test first-party standard plugins
         run: cargo test -p lash-standard-plugins --locked --features fff-zlob
 
@@ -64,6 +67,53 @@ jobs:
       # instead of only post-merge on the (main-only, ~15 min) Perf jobs.
       - name: Check lash CLI bench feature
         run: cargo check -p lash-cli --locked --features bench,fff-zlob
+
+  postgres-store:
+    name: Test Postgres store
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lash
+          POSTGRES_PASSWORD: lash
+          POSTGRES_DB: lash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lash -d lash"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Install system dependencies
+        run: scripts/ci-install-apt-packages.sh protobuf-compiler
+
+      # `lash-postgres-store`'s conformance tests run the backend-agnostic
+      # RuntimePersistence / ProcessRegistry / HostEventStore / LashlangArtifactStore
+      # suites against a real Postgres. They self-skip when the URL is unset, so the
+      # env var is what makes them actually execute here. `connect()` runs
+      # `ensure_schema` (CREATE TABLE IF NOT EXISTS), so no separate migrate step.
+      # `--test-threads=1`: the suites share one database and reset() truncates
+      # all lash_* tables between cases, so they must not run concurrently.
+      - name: Test Postgres store (conformance)
+        run: cargo test -p lash-postgres-store --locked -- --test-threads=1
+        env:
+          LASH_POSTGRES_DATABASE_URL: postgres://lash:lash@localhost:5432/lash
 
   build-release-assets:
     name: Build (${{ matrix.target }})

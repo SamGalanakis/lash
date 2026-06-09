@@ -1,0 +1,30 @@
+[package]
+name = "lash-postgres-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL-backed durable storage for the lash agent runtime."
+keywords = ["lash", "agent", "postgres", "persistence", "store"]
+categories = ["database", "asynchronous"]
+
+[dependencies]
+async-trait = { workspace = true }
+lash-core = { workspace = true }
+lashlang = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true, default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+lash-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["full"] }

@@ -182,138 +182,118 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
 
 #[test]
 fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -> Result<()> {
-    std::thread::Builder::new()
-        .name("tool-projection-stack-test".to_string())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("test runtime")
-                .block_on(async {
-                    let projection = Arc::new(crate::plugins::ToolOutputBudgetPluginFactory::new(
-                        crate::plugins::ToolOutputBudgetConfig {
-                            mode: crate::plugins::ToolOutputBudgetMode::Bytes,
-                            limit: 12,
-                            max_lines: 4,
-                        },
-                    ));
-                    let observed_tool_results = Arc::new(TokioMutex::new(Vec::<String>::new()));
-                    let observed_tool_results_provider = Arc::clone(&observed_tool_results);
-                    let responses = Arc::new(TokioMutex::new(VecDeque::from([
-                        LlmResponse {
-                            parts: vec![LlmOutputPart::ToolCall {
-                                call_id: "call-1".to_string(),
-                                tool_name: "app_lookup".to_string(),
-                                input_json: "{}".to_string(),
-                                replay: None,
-                            }],
-                            ..LlmResponse::default()
-                        },
-                        LlmResponse {
-                            full_text: "done".to_string(),
-                            parts: vec![LlmOutputPart::Text {
-                                text: "done".to_string(),
-                                response_meta: None,
-                            }],
-                            ..LlmResponse::default()
-                        },
-                    ])));
-                    let standard_provider = lash_core::testing::TestProvider::builder()
-                        .kind("embed-test")
-                        .complete(move |request| {
-                            let observed_tool_results = Arc::clone(&observed_tool_results_provider);
-                            let responses = Arc::clone(&responses);
-                            async move {
-                                for message in &request.messages {
-                                    for block in message.blocks.iter() {
-                                        if let LlmContentBlock::ToolResult { content, .. } = block {
-                                            observed_tool_results
-                                                .lock()
-                                                .await
-                                                .push(content.clone());
-                                        }
-                                    }
-                                }
-                                Ok(responses.lock().await.pop_front().expect("queued response"))
+    run_async_test_on_stack_budget("tool-projection-stack-test", || async {
+        let projection = Arc::new(crate::plugins::ToolOutputBudgetPluginFactory::new(
+            crate::plugins::ToolOutputBudgetConfig {
+                mode: crate::plugins::ToolOutputBudgetMode::Bytes,
+                limit: 12,
+                max_lines: 4,
+            },
+        ));
+        let observed_tool_results = Arc::new(TokioMutex::new(Vec::<String>::new()));
+        let observed_tool_results_provider = Arc::clone(&observed_tool_results);
+        let responses = Arc::new(TokioMutex::new(VecDeque::from([
+            LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "call-1".to_string(),
+                    tool_name: "app_lookup".to_string(),
+                    input_json: "{}".to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            },
+            LlmResponse {
+                full_text: "done".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "done".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            },
+        ])));
+        let standard_provider = lash_core::testing::TestProvider::builder()
+            .kind("embed-test")
+            .complete(move |request| {
+                let observed_tool_results = Arc::clone(&observed_tool_results_provider);
+                let responses = Arc::clone(&responses);
+                async move {
+                    for message in &request.messages {
+                        for block in message.blocks.iter() {
+                            if let LlmContentBlock::ToolResult { content, .. } = block {
+                                observed_tool_results.lock().await.push(content.clone());
                             }
-                        })
-                        .build()
-                        .into_handle();
-                    let standard_core = explicit_ephemeral_facets(LashCore::standard())
-                        .provider(standard_provider)
-                        .model(mock_model_spec())
-                        .tools(Arc::new(LongTextTools))
-                        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-                        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-                        .configure_plugins(|plugins| {
-                            plugins.replace(projection.clone());
-                        })
-                        .build()?;
-                    let standard_session =
-                        standard_core.session("standard-projection").open().await?;
-                    let standard_events = RecordingEvents::default();
-                    let _ = standard_session
-                        .turn(TurnInput::text("use tool"))
-                        .stream(&standard_events, turn_scope(&standard_session.session_id()))
-                        .await?;
-                    let standard_view = standard_events
-                        .snapshot()
-                        .await
-                        .into_iter()
-                        .find_map(|event| match event.event {
-                            TurnEvent::ToolCallCompleted { output, .. } => {
-                                Some(output.value_for_projection())
-                            }
-                            _ => None,
-                        })
-                        .expect("standard tool completion");
-                    assert_eq!(
-                        standard_view,
-                        serde_json::json!("abcdefghijklmnopqrstuvwxyz0123456789")
-                    );
-                    let observed = observed_tool_results.lock().await;
-                    let model_observation = observed
-                        .iter()
-                        .find(|content| content.contains("bytes truncated"))
-                        .expect("projected model observation");
-                    assert!(model_observation.contains("Full output saved to:"));
+                        }
+                    }
+                    Ok(responses.lock().await.pop_front().expect("queued response"))
+                }
+            })
+            .build()
+            .into_handle();
+        let standard_core = explicit_ephemeral_facets(LashCore::standard())
+            .provider(standard_provider)
+            .model(mock_model_spec())
+            .tools(Arc::new(LongTextTools))
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+            .configure_plugins(|plugins| {
+                plugins.replace(projection.clone());
+            })
+            .build()?;
+        let standard_session = standard_core.session("standard-projection").open().await?;
+        let standard_events = RecordingEvents::default();
+        let _ = standard_session
+            .turn(TurnInput::text("use tool"))
+            .stream(&standard_events, turn_scope(&standard_session.session_id()))
+            .await?;
+        let standard_view = standard_events
+            .snapshot()
+            .await
+            .into_iter()
+            .find_map(|event| match event.event {
+                TurnEvent::ToolCallCompleted { output, .. } => Some(output.value_for_projection()),
+                _ => None,
+            })
+            .expect("standard tool completion");
+        assert_eq!(
+            standard_view,
+            serde_json::json!("abcdefghijklmnopqrstuvwxyz0123456789")
+        );
+        let observed = observed_tool_results.lock().await;
+        let model_observation = observed
+            .iter()
+            .find(|content| content.contains("bytes truncated"))
+            .expect("projected model observation");
+        assert!(model_observation.contains("Full output saved to:"));
 
-                    let rlm_core = explicit_ephemeral_facets(LashCore::rlm())
-                        .provider(queued_text_provider(vec![
-                            "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
-                        ]))
-                        .model(mock_model_spec())
-                        .tools(Arc::new(LongTextTools))
-                        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-                        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-                        .configure_plugins(|plugins| {
-                            plugins.replace(projection);
-                        })
-                        .build()?;
-                    let rlm_session = rlm_core.session("rlm-projection").open().await?;
-                    let rlm_events = RecordingEvents::default();
-                    let _ = rlm_session
-                        .turn(TurnInput::text("use tool"))
-                        .stream(&rlm_events, turn_scope(&rlm_session.session_id()))
-                        .await?;
-                    let rlm_view = rlm_events
-                        .snapshot()
-                        .await
-                        .into_iter()
-                        .find_map(|event| match event.event {
-                            TurnEvent::ToolCallCompleted { output, .. } => {
-                                Some(output.value_for_projection())
-                            }
-                            _ => None,
-                        })
-                        .expect("rlm tool completion");
+        let rlm_core = explicit_ephemeral_facets(LashCore::rlm())
+            .provider(queued_text_provider(vec![
+                "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
+            ]))
+            .model(mock_model_spec())
+            .tools(Arc::new(LongTextTools))
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+            .configure_plugins(|plugins| {
+                plugins.replace(projection);
+            })
+            .build()?;
+        let rlm_session = rlm_core.session("rlm-projection").open().await?;
+        let rlm_events = RecordingEvents::default();
+        let _ = rlm_session
+            .turn(TurnInput::text("use tool"))
+            .stream(&rlm_events, turn_scope(&rlm_session.session_id()))
+            .await?;
+        let rlm_view = rlm_events
+            .snapshot()
+            .await
+            .into_iter()
+            .find_map(|event| match event.event {
+                TurnEvent::ToolCallCompleted { output, .. } => Some(output.value_for_projection()),
+                _ => None,
+            })
+            .expect("rlm tool completion");
 
-                    assert_eq!(rlm_view, standard_view);
-                    Ok(())
-                })
-        })
-        .expect("spawn stack-sized test thread")
-        .join()
-        .expect("stack-sized test thread panicked")
+        assert_eq!(rlm_view, standard_view);
+        Ok(())
+    })
 }

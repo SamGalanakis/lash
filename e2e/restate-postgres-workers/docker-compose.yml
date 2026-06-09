@@ -1,0 +1,175 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lash
+      POSTGRES_PASSWORD: lash
+      POSTGRES_DB: lash
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lash -d lash"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done &&
+      mc mb --ignore-existing local/lash-attachments
+      "
+
+  restate:
+    image: restatedev/restate:1.6.2
+    environment:
+      RESTATE_ADMIN__BIND_PORT: "9070"
+      RESTATE_INGRESS__BIND_PORT: "8080"
+      RESTATE_BIND_PORT: "5122"
+
+  e2e-build:
+    image: rust:1.90-bookworm
+    working_dir: /workspace
+    command: cargo build -p lash-restate-postgres-workers-e2e --bins
+    environment:
+      CARGO_TARGET_DIR: /cargo-target
+    volumes:
+      - ../..:/workspace:ro
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/cargo-target
+
+  mock-provider:
+    image: rust:1.90-bookworm
+    working_dir: /workspace
+    command: /cargo-target/debug/lash-e2e-mock-provider
+    depends_on:
+      e2e-build:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      MOCK_PROVIDER_PORT: "18001"
+      DATABASE_URL: postgres://lash:lash@postgres:5432/lash
+    volumes:
+      - cargo-target:/cargo-target
+
+  worker-a:
+    image: rust:1.90-bookworm
+    working_dir: /workspace
+    command: /cargo-target/debug/lash-e2e-worker
+    restart: "no"
+    depends_on:
+      e2e-build:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      restate:
+        condition: service_started
+    environment:
+      WORKER_INSTANCE_ID: worker-a
+      WORKER_PORT: "18100"
+      LASH_E2E_FAIL_ONCE: "1"
+      DATABASE_URL: postgres://lash:lash@postgres:5432/lash
+      RESTATE_INGRESS_URL: http://restate:8080
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_BUCKET: lash-attachments
+      MINIO_REGION: us-east-1
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_PREFIX: e2e/restate-postgres-workers
+      MOCK_PROVIDER_BASE_URL: http://mock-provider:18001
+      LASH_E2E_TRACE_DIR: /e2e-traces
+    volumes:
+      - cargo-target:/cargo-target
+      - trace-output:/e2e-traces
+
+  worker-b:
+    image: rust:1.90-bookworm
+    working_dir: /workspace
+    command: /cargo-target/debug/lash-e2e-worker
+    depends_on:
+      e2e-build:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      restate:
+        condition: service_started
+    environment:
+      WORKER_INSTANCE_ID: worker-b
+      WORKER_PORT: "18100"
+      LASH_E2E_FAIL_ONCE: "1"
+      DATABASE_URL: postgres://lash:lash@postgres:5432/lash
+      RESTATE_INGRESS_URL: http://restate:8080
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_BUCKET: lash-attachments
+      MINIO_REGION: us-east-1
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_PREFIX: e2e/restate-postgres-workers
+      MOCK_PROVIDER_BASE_URL: http://mock-provider:18001
+      LASH_E2E_TRACE_DIR: /e2e-traces
+    volumes:
+      - cargo-target:/cargo-target
+      - trace-output:/e2e-traces
+
+  worker-proxy:
+    image: caddy:2-alpine
+    depends_on:
+      - worker-a
+      - worker-b
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+  runner:
+    image: rust:1.90-bookworm
+    working_dir: /workspace
+    command: /cargo-target/debug/lash-e2e-runner
+    depends_on:
+      e2e-build:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      restate:
+        condition: service_started
+      worker-proxy:
+        condition: service_started
+      mock-provider:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://lash:lash@postgres:5432/lash
+      RESTATE_ADMIN_URL: http://restate:9070
+      RESTATE_INGRESS_URL: http://restate:8080
+      WORKER_DEPLOYMENT_URL: http://worker-proxy:18100
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_BUCKET: lash-attachments
+      MINIO_REGION: us-east-1
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_PREFIX: e2e/restate-postgres-workers
+      MOCK_PROVIDER_BASE_URL: http://mock-provider:18001
+      LASH_E2E_TRACE_DIR: /e2e-traces
+    volumes:
+      - cargo-target:/cargo-target
+      - trace-output:/e2e-traces
+    profiles:
+      - runner
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  cargo-target:
+  trace-output:

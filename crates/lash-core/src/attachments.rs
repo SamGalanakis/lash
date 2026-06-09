@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,8 +20,16 @@ pub enum AttachmentStoreError {
     },
     #[error("attachment store metadata is unavailable for `{0}`")]
     MissingMeta(AttachmentId),
+    #[error("attachment store metadata decode failed for `{id}`: {source}")]
+    MetadataDecode {
+        id: AttachmentId,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("attachment manifest write failed: {0}")]
     ManifestRecordFailed(String),
+    #[error("attachment store backend failed: {0}")]
+    Backend(String),
 }
 
 #[derive(Clone, Debug)]
@@ -49,18 +57,35 @@ impl AttachmentStorePersistence {
     }
 }
 
+#[async_trait::async_trait]
 pub trait AttachmentStore: Send + Sync {
     fn persistence(&self) -> AttachmentStorePersistence {
         AttachmentStorePersistence::Ephemeral
     }
 
-    fn put(
+    /// Attachment refs written by this store that still need their
+    /// write-ahead manifest rows stamped by the next runtime commit.
+    ///
+    /// Plain stores return an empty set. [`SessionScopedAttachmentStore`]
+    /// overrides this so attachments created through downstream tools,
+    /// Lashlang execution, and other runtime services are committed by the
+    /// same final turn transaction that makes them reachable from session
+    /// state.
+    fn pending_manifest_commit_ids(&self) -> Vec<AttachmentId> {
+        Vec::new()
+    }
+
+    /// Clear attachment refs that were stamped committed by a successful
+    /// runtime commit.
+    fn mark_manifest_committed(&self, _ids: &[AttachmentId]) {}
+
+    async fn put(
         &self,
         bytes: Vec<u8>,
         meta: AttachmentCreateMeta,
     ) -> Result<AttachmentRef, AttachmentStoreError>;
 
-    fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError>;
+    async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError>;
 }
 
 #[derive(Default)]
@@ -74,8 +99,9 @@ impl InMemoryAttachmentStore {
     }
 }
 
+#[async_trait::async_trait]
 impl AttachmentStore for InMemoryAttachmentStore {
-    fn put(
+    async fn put(
         &self,
         bytes: Vec<u8>,
         meta: AttachmentCreateMeta,
@@ -90,7 +116,7 @@ impl AttachmentStore for InMemoryAttachmentStore {
         Ok(reference)
     }
 
-    fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+    async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
         self.attachments
             .lock()
             .expect("attachment store lock")
@@ -121,6 +147,7 @@ pub struct SessionScopedAttachmentStore {
     inner: Arc<dyn AttachmentStore>,
     manifest: Arc<dyn AttachmentManifest>,
     session_id: String,
+    pending_manifest_commit_ids: Mutex<BTreeSet<AttachmentId>>,
 }
 
 impl SessionScopedAttachmentStore {
@@ -133,6 +160,7 @@ impl SessionScopedAttachmentStore {
             inner,
             manifest,
             session_id: session_id.into(),
+            pending_manifest_commit_ids: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -145,12 +173,35 @@ impl SessionScopedAttachmentStore {
     }
 }
 
+#[async_trait::async_trait]
 impl AttachmentStore for SessionScopedAttachmentStore {
     fn persistence(&self) -> AttachmentStorePersistence {
         self.inner.persistence()
     }
 
-    fn put(
+    fn pending_manifest_commit_ids(&self) -> Vec<AttachmentId> {
+        self.pending_manifest_commit_ids
+            .lock()
+            .expect("attachment manifest commit tracker lock")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn mark_manifest_committed(&self, ids: &[AttachmentId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut pending = self
+            .pending_manifest_commit_ids
+            .lock()
+            .expect("attachment manifest commit tracker lock");
+        for id in ids {
+            pending.remove(id);
+        }
+    }
+
+    async fn put(
         &self,
         bytes: Vec<u8>,
         meta: AttachmentCreateMeta,
@@ -169,11 +220,22 @@ impl AttachmentStore for SessionScopedAttachmentStore {
                 "failed to record attachment intent for `{attachment_id}`: {err}"
             ))
         })?;
-        self.inner.put(bytes, meta)
+        let reference = self.inner.put(bytes, meta).await?;
+        if reference.id != attachment_id {
+            return Err(AttachmentStoreError::Backend(format!(
+                "attachment store returned id `{}` after manifest intent for `{attachment_id}`",
+                reference.id
+            )));
+        }
+        self.pending_manifest_commit_ids
+            .lock()
+            .expect("attachment manifest commit tracker lock")
+            .insert(reference.id.clone());
+        Ok(reference)
     }
 
-    fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
-        self.inner.get(id)
+    async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+        self.inner.get(id).await
     }
 }
 
@@ -226,7 +288,7 @@ fn stored_meta(bytes: &[u8], meta: AttachmentCreateMeta) -> AttachmentMeta {
     )
 }
 
-pub fn resolve_llm_request_attachments(
+pub async fn resolve_llm_request_attachments(
     mut request: crate::llm::types::LlmRequest,
     store: &dyn AttachmentStore,
 ) -> Result<crate::llm::types::LlmRequest, AttachmentStoreError> {
@@ -237,7 +299,7 @@ pub fn resolve_llm_request_attachments(
         if !attachment.data.is_empty() {
             continue;
         }
-        let stored = store.get(&reference.id)?;
+        let stored = store.get(&reference.id).await?;
         attachment.mime = stored.meta.media_type.canonical_mime().to_string();
         attachment.data = stored.bytes;
     }
@@ -249,6 +311,37 @@ mod tests {
     use super::*;
     use lash_sansio::{ImageMediaType, MediaType};
 
+    #[derive(Default)]
+    struct RecordingManifest {
+        intents: Mutex<Vec<AttachmentIntent>>,
+    }
+
+    impl AttachmentManifest for RecordingManifest {
+        fn record_intent(&self, intent: AttachmentIntent) -> Result<(), crate::StoreError> {
+            self.intents.lock().expect("lock intents").push(intent);
+            Ok(())
+        }
+
+        fn commit_refs(
+            &self,
+            _session_id: &str,
+            _attachment_ids: &[AttachmentId],
+        ) -> Result<(), crate::StoreError> {
+            Ok(())
+        }
+
+        fn list_uncommitted(
+            &self,
+            _older_than_epoch_ms: u64,
+        ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn forget(&self, _attachment_id: &AttachmentId) -> Result<(), crate::StoreError> {
+            Ok(())
+        }
+    }
+
     fn meta() -> AttachmentCreateMeta {
         AttachmentCreateMeta::new(
             MediaType::Image(ImageMediaType::Png),
@@ -258,22 +351,53 @@ mod tests {
         )
     }
 
-    #[test]
-    fn memory_store_dedupes_by_bytes() {
+    #[tokio::test]
+    async fn memory_store_dedupes_by_bytes() {
         let store = InMemoryAttachmentStore::new();
-        let a = store.put(vec![1, 2, 3], meta()).expect("put a");
-        let b = store.put(vec![1, 2, 3], meta()).expect("put b");
+        let a = store.put(vec![1, 2, 3], meta()).await.expect("put a");
+        let b = store.put(vec![1, 2, 3], meta()).await.expect("put b");
         assert_eq!(a.id, b.id);
         assert_eq!(a.byte_len, 3);
-        assert_eq!(store.get(&a.id).expect("get").bytes, vec![1, 2, 3]);
+        assert_eq!(store.get(&a.id).await.expect("get").bytes, vec![1, 2, 3]);
     }
 
-    #[test]
-    fn memory_store_assigns_identity_and_byte_len_from_bytes() {
+    #[tokio::test]
+    async fn memory_store_assigns_identity_and_byte_len_from_bytes() {
         let store = InMemoryAttachmentStore::new();
-        let reference = store.put(vec![4, 5, 6, 7], meta()).expect("put");
+        let reference = store.put(vec![4, 5, 6, 7], meta()).await.expect("put");
 
         assert_eq!(reference.id, content_id(&[4, 5, 6, 7]));
         assert_eq!(reference.byte_len, 4);
+    }
+
+    #[tokio::test]
+    async fn session_scoped_store_tracks_successful_puts_until_commit_mark() {
+        let manifest = Arc::new(RecordingManifest::default());
+        let manifest_for_store: Arc<dyn AttachmentManifest> = manifest.clone();
+        let store = SessionScopedAttachmentStore::new(
+            Arc::new(InMemoryAttachmentStore::new()),
+            manifest_for_store,
+            "session-1",
+        );
+
+        let reference = store.put(vec![8, 9, 10], meta()).await.expect("put");
+
+        assert_eq!(
+            manifest.intents.lock().expect("lock intents")[0].attachment_id,
+            reference.id
+        );
+        assert_eq!(
+            store.pending_manifest_commit_ids(),
+            vec![reference.id.clone()]
+        );
+
+        store.mark_manifest_committed(&[AttachmentId::new("other")]);
+        assert_eq!(
+            store.pending_manifest_commit_ids(),
+            vec![reference.id.clone()]
+        );
+
+        store.mark_manifest_committed(std::slice::from_ref(&reference.id));
+        assert!(store.pending_manifest_commit_ids().is_empty());
     }
 }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use super::{InputItem, NormalizedItem};
 
-pub(super) fn normalize_input_items(
+pub(super) async fn normalize_input_items(
     items: &[InputItem],
     image_blobs: &HashMap<String, Vec<u8>>,
     attachment_store: &dyn crate::AttachmentStore,
@@ -30,6 +30,7 @@ pub(super) fn normalize_input_items(
                 );
                 let reference = attachment_store
                     .put(blob.clone(), meta)
+                    .await
                     .map_err(|err| format!("Failed to store image_ref '{id}': {err}"))?;
                 out.push(NormalizedItem::Image(reference));
             }

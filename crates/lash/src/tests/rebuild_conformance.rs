@@ -75,7 +75,7 @@ fn fresh_in_memory_backend() -> (
 
 #[test]
 fn runtime_rebuild_and_worker_recovery_with_inline_stores() {
-    run_async_test_on_large_stack("runtime-rebuild-inline-stores", || async {
+    run_async_test_on_stack_budget("runtime-rebuild-inline-stores", || async {
         runtime_rebuild_and_worker_recovery(move || {
             let (store_factory, registry) = fresh_in_memory_backend();
             RuntimeRebuildBackend {
@@ -94,7 +94,7 @@ fn runtime_rebuild_and_worker_recovery_with_inline_stores() {
 
 #[test]
 fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
-    run_async_test_on_large_stack("runtime-rebuild-durable-stores", || async {
+    run_async_test_on_stack_budget("runtime-rebuild-durable-stores", || async {
         let root = tempfile::tempdir().expect("tempdir");
         let root_path = root.path().to_path_buf();
         runtime_rebuild_and_worker_recovery(move || {

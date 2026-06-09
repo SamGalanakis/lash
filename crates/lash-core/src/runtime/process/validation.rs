@@ -8,7 +8,7 @@ use super::events::{
 };
 use super::materialization::materialize_process_event_semantics;
 use super::model::{ProcessRecord, ProcessRegistration, ProcessStatus};
-use super::time::system_time_from_epoch_ms;
+use super::time::{epoch_ms_from_system_time, system_time_from_epoch_ms};
 use super::wake::{ProcessWakeDeliveryRequest, process_wake_delivery};
 
 #[derive(Clone, Debug)]
@@ -34,6 +34,10 @@ pub fn prepare_process_event_append(
         && let Some((existing_hash, existing)) = replay_lookup
     {
         if existing_hash == payload_hash {
+            let status_update = existing.semantics.terminal.clone().and_then(|terminal| {
+                (!record.is_terminal()).then(|| ProcessStatus::from_terminal(terminal))
+            });
+            let occurred_at_ms = epoch_ms_from_system_time(existing.occurred_at);
             let wake_delivery = prepare_wake_delivery(
                 process_id,
                 record,
@@ -47,7 +51,7 @@ pub fn prepare_process_event_append(
             return Ok(PreparedProcessEventAppend {
                 event: existing,
                 payload_hash,
-                status_update: None,
+                status_update,
                 wake_delivery,
                 occurred_at_ms,
                 replayed: true,

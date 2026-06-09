@@ -1,0 +1,25 @@
+[package]
+name = "lash-s3-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "S3-compatible attachment storage adapter for the lash agent runtime."
+keywords = ["lash", "agent", "s3", "minio", "attachments"]
+categories = ["database", "asynchronous"]
+
+[dependencies]
+async-trait = { workspace = true }
+lash-core = { workspace = true }
+object_store = { workspace = true, default-features = false, features = ["aws"] }
+serde_json = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+lash-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["full"] }

@@ -1054,8 +1054,9 @@ fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message 
 mod control_admin;
 mod core_session_builder;
 mod harness;
-use harness::{mock_model_spec, model_spec, run_async_test_on_large_stack};
+use harness::{mock_model_spec, model_spec, run_async_test_on_stack_budget};
 mod lash_e2e;
 mod plugin_stack;
 mod rebuild_conformance;
+mod stack_budget;
 mod turn_streaming;

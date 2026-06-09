@@ -1576,14 +1576,18 @@ async fn default_process_work_runner_spawns_when_registry_and_store_factory_pres
 async fn durable_process_worker_config_uses_core_process_registry() -> Result<()> {
     let registry =
         Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
+    let host_event_store = Arc::new(lash_core::InMemoryHostEventStore::default())
+        as Arc<dyn lash_core::HostEventStore>;
     let core = explicit_ephemeral_facets(peer_coherence_builder())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .host_event_store(Arc::clone(&host_event_store))
         .process_registry(Arc::clone(&registry))
         .build()?;
 
     assert!(core.process_observer().is_some());
     let config = core.durable_process_worker_config()?;
     assert!(Arc::ptr_eq(&config.process_registry, &registry));
+    assert!(Arc::ptr_eq(&config.host_event_store, &host_event_store));
     Ok(())
 }
 

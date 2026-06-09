@@ -274,24 +274,25 @@ struct DurableInMemoryAttachmentStore {
     inner: crate::InMemoryAttachmentStore,
 }
 
+#[async_trait::async_trait]
 impl crate::AttachmentStore for DurableInMemoryAttachmentStore {
     fn persistence(&self) -> crate::AttachmentStorePersistence {
         crate::AttachmentStorePersistence::Durable
     }
 
-    fn put(
+    async fn put(
         &self,
         bytes: Vec<u8>,
         meta: lash_sansio::AttachmentCreateMeta,
     ) -> Result<lash_sansio::AttachmentRef, crate::AttachmentStoreError> {
-        self.inner.put(bytes, meta)
+        self.inner.put(bytes, meta).await
     }
 
-    fn get(
+    async fn get(
         &self,
         id: &lash_sansio::AttachmentId,
     ) -> Result<crate::StoredAttachment, crate::AttachmentStoreError> {
-        self.inner.get(id)
+        self.inner.get(id).await
     }
 }
 

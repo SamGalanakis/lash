@@ -299,15 +299,17 @@ mod restate_tests {
     use lash_core::llm::types::LlmResponse;
     use lash_restate::LashProcessWorkflow;
 
+    const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+
     #[test]
     #[ignore = "requires a running Restate server; set RESTATE_INGRESS_URL and run with --ignored"]
     fn live_restate_ingress_runs_agent_turn_and_process_workflow_end_to_end() {
         std::thread::Builder::new()
             .name("agent-service-restate-e2e".to_string())
-            .stack_size(16 * 1024 * 1024)
+            .stack_size(STACK_BUDGET_BYTES)
             .spawn(|| {
                 tokio::runtime::Builder::new_multi_thread()
-                    .thread_stack_size(16 * 1024 * 1024)
+                    .thread_stack_size(STACK_BUDGET_BYTES)
                     .enable_all()
                     .build()
                     .expect("build live Restate E2E runtime")

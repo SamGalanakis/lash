@@ -136,24 +136,25 @@ struct DurableMemoryAttachmentStore {
     inner: lash_core::InMemoryAttachmentStore,
 }
 
+#[async_trait::async_trait]
 impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
     fn persistence(&self) -> lash_core::AttachmentStorePersistence {
         lash_core::AttachmentStorePersistence::Durable
     }
 
-    fn put(
+    async fn put(
         &self,
         bytes: Vec<u8>,
         meta: lash_core::AttachmentCreateMeta,
     ) -> Result<lash_core::AttachmentRef, lash_core::AttachmentStoreError> {
-        self.inner.put(bytes, meta)
+        self.inner.put(bytes, meta).await
     }
 
-    fn get(
+    async fn get(
         &self,
         id: &lash_core::AttachmentId,
     ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
-        self.inner.get(id)
+        self.inner.get(id).await
     }
 }
 
