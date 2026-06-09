@@ -110,7 +110,7 @@ impl Provider for AnthropicProvider {
         }
 
         let mut state = StreamState::default();
-        let expose_thinking = self.options.thinking.expose;
+        let expose_thinking = self.options.expose_thinking;
         drive_sse_response(
             resp,
             timeouts.chunk_timeout,

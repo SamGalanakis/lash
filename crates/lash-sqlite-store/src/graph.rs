@@ -96,7 +96,7 @@ impl Store {
             return;
         };
         let commits = self.commit_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-        if interval != 0 && commits % interval == 0 {
+        if interval != 0 && commits.is_multiple_of(interval) {
             let _ = self.gc_unreachable().await;
         }
     }

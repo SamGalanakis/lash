@@ -12,48 +12,48 @@ repos:
       - id: cargo-fmt-lash-core
         name: cargo fmt (lash-core)
         language: system
-        entry: cargo fmt --manifest-path lash-core/Cargo.toml
-        files: '^lash-core/.*\.rs$'
+        entry: cargo fmt --manifest-path crates/lash-core/Cargo.toml
+        files: '^crates/lash-core/.*\.rs$'
         pass_filenames: false
 
       # Rust — lash (facade)
       - id: cargo-fmt-lash
         name: cargo fmt (lash)
         language: system
-        entry: cargo fmt --manifest-path lash/Cargo.toml
-        files: '^lash/.*\.rs$'
+        entry: cargo fmt --manifest-path crates/lash/Cargo.toml
+        files: '^crates/lash/.*\.rs$'
         pass_filenames: false
 
       # Rust — lash-cli
       - id: cargo-fmt-cli
         name: cargo fmt (lash-cli)
         language: system
-        entry: cargo fmt --manifest-path lash-cli/Cargo.toml
-        files: '^lash-cli/.*\.rs$'
+        entry: cargo fmt --manifest-path crates/lash-cli/Cargo.toml
+        files: '^crates/lash-cli/.*\.rs$'
         pass_filenames: false
 
       # Rust clippy — lash-core (runtime library)
       - id: cargo-clippy-lash-core
         name: cargo clippy (lash-core)
         language: system
-        entry: cargo clippy --manifest-path lash-core/Cargo.toml -- -D warnings
-        files: '^lash-core/.*\.rs$'
+        entry: cargo clippy --manifest-path crates/lash-core/Cargo.toml -- -D warnings
+        files: '^crates/lash-core/.*\.rs$'
         pass_filenames: false
 
       # Rust clippy — lash (facade)
       - id: cargo-clippy-lash
         name: cargo clippy (lash)
         language: system
-        entry: cargo clippy --manifest-path lash/Cargo.toml -- -D warnings
-        files: '^lash/.*\.rs$'
+        entry: cargo clippy --manifest-path crates/lash/Cargo.toml -- -D warnings
+        files: '^crates/lash/.*\.rs$'
         pass_filenames: false
 
       # Rust clippy — lash-cli
       - id: cargo-clippy-cli
         name: cargo clippy (lash-cli)
         language: system
-        entry: cargo clippy --manifest-path lash-cli/Cargo.toml -- -D warnings
-        files: '^lash-cli/.*\.rs$'
+        entry: cargo clippy --manifest-path crates/lash-cli/Cargo.toml -- -D warnings
+        files: '^crates/lash-cli/.*\.rs$'
         pass_filenames: false
 
       # Rust workspace tests

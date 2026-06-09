@@ -30,7 +30,7 @@
             <h2>Run It</h2>
             <p>The example uses OpenRouter through the OpenAI-compatible provider. Environment variables define defaults; the browser UI can override model and variant per chat.</p>
           </div>
-          <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
+          <pre data-lang="console"><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>
           <dl class="def-list">
             <dt><code>OPENROUTER_MODEL</code></dt>
@@ -62,30 +62,40 @@
             <h2>Core Wiring</h2>
             <p>Build one core for the process. The example installs RLM explicitly and wires the SQLite session factory, Lashlang artifact store, file attachment store, and effect host on the normal builder.</p>
           </div>
-          <pre><code>let provider = ProviderHandle::new(
+          <pre data-lang="rust" data-snippet="example_agent_service#service-core"><code>let provider = ProviderHandle::new(
     OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
         .with_options(ProviderOptions {
-            thinking: ProviderThinkingPolicy { expose: true },
+            expose_thinking: true,
             ..ProviderOptions::default()
         })
         .into_components(),
 );
-let artifact_store = std::sync::Arc::new(lash_sqlite_store::Store::open(
-    &amp;data_dir.join("lash-artifacts.db"),
-)?);
+let artifact_store = std::sync::Arc::new(
+    lash_sqlite_store::Store::open(&amp;data_dir.join("lash-artifacts.db")).await?,
+);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits(model.clone(), Some(model_variant.clone()), 200_000, None, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits(
+            model.clone(),
+            Some(model_variant.clone()),
+            200_000,
+            None,
+        )
+        .expect("valid model metadata"),
+    )
     .store_factory(store_factory)
-    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
+    .effect_host(std::sync::Arc::new(
+        lash::durability::InlineEffectHost::default(),
+    ))
     .lashlang_artifact_store(artifact_store)
-    .attachment_store(std::sync::Arc::new(lash::persistence::FileAttachmentStore::new(
-        data_dir.join("attachments"),
-    )))
-    .trace_sink(Some(trace_sink))
+    .attachment_store(std::sync::Arc::new(
+        lash::persistence::FileAttachmentStore::new(data_dir.join("attachments")),
+    ))
+    .trace_sink(trace_sink)
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
         </div>
@@ -95,13 +105,21 @@ let core = LashCore::builder()
             <h2>Turn Path</h2>
             <p>The route stores the user message and UI replay board snapshot first, updates the canonical <code>chat_boards</code> row, opens the Lash session, then runs a turn with the chat's model selection.</p>
           </div>
-          <pre><code>let session = state.open_session(&amp;chat_id).await?;
+          <pre data-lang="rust" data-snippet="example_agent_service#service-turn"><code>let session = state.open_session(&amp;chat_id).await?;
 
 use lash::modes::RlmTurnBuilderExt as _;
 
 let turn = session
     .turn(TurnInput::text(text))
-    .model(lash::ModelSpec::from_token_limits(model_selection.model, model_selection.model_variant, 200_000, None, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits(
+            model_selection.model,
+            model_selection.model_variant,
+            200_000,
+            None,
+        )
+        .expect("valid model metadata"),
+    )
     .require_submit()?;
 
 let output = turn.stream_to(&amp;ui_events).await?;
@@ -117,7 +135,7 @@ let assistant_text = assistant_text_for_persistence(
             <h2>Restate Mode</h2>
             <p>With the <code>restate</code> feature, browser turns submit <code>AgentServiceTurnWorkflow/{turn_id}/run/send</code> through Restate ingress. The workflow request carries stable turn, chat, text, model, and model-variant data only; board state remains app-owned SQLite state.</p>
           </div>
-          <pre><code>just agent-service-restate-e2e</code></pre>
+          <pre data-lang="console"><code>just agent-service-restate-e2e</code></pre>
           <p>The one-command E2E starts <code>restatedev/restate:1.6.2</code> with host networking, binds the in-process agent-service endpoint on <code>127.0.0.1:19080</code>, registers it through Restate Admin, submits a turn through ingress, verifies app outbox/message persistence, and removes the container on exit. In app runs, <code>AGENT_SERVICE_ADDR</code> serves the Axum UI and <code>AGENT_SERVICE_RESTATE_ADDR</code> serves the Restate endpoint from the same process.</p>
         </div>
 
@@ -126,7 +144,7 @@ let assistant_text = assistant_text_for_persistence(
             <h2>Browser Controls</h2>
             <p>The UI treats model choice as product state. New chats inherit defaults from <code>/api/settings</code>, the sidebar displays each chat's selected model, and edits are saved to <code>/api/chats/{chat_id}/model</code>.</p>
           </div>
-          <pre><code>function selectedModel() {
+          <pre data-lang="javascript"><code>function selectedModel() {
   return {
     model: modelInput.value.trim() || settings.default_model,
     model_variant: variantInput.value || null

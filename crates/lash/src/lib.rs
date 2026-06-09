@@ -4,6 +4,11 @@
 //! `lash-core` runtime crate. Host applications own providers, persistence,
 //! app state, HTTP protocols, auth, and frontend streaming; this crate
 //! owns only the ergonomic core/session/turn API.
+//!
+//! Every public name has exactly one home. The crate root carries the daily
+//! core/session/turn path; each domain module ([`tools`], [`persistence`],
+//! [`plugins`], [`observe`], [`host_events`], ...) carries its own
+//! vocabulary. [`prelude`] mirrors the crate root exactly.
 
 pub mod control;
 mod core;
@@ -31,41 +36,57 @@ pub use crate::session::{
     EnqueueTurnBuilder, LashSession, ObservableSession, SessionBuilder, SessionConfigPatch,
 };
 pub use crate::turn::{
-    AdvancedTurn, QueuedTurnBuilder, ScopedQueuedTurnBuilder, ScopedTurnBuilder,
-    TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role,
-    message_text,
+    QueuedTurnBuilder, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream,
+    message_role, message_text,
 };
 pub use lash_core::{
-    HostEvent, HostEventEmitReport, HostEventOccurrenceRequest, InputItem, ModelLimits, ModelSpec,
-    PluginStack, ProcessHandleSummary, SessionCommand, SessionCommandReceipt, SessionCursor,
-    SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
-    SessionObservationSubscription, SessionProcessEventKind, SessionQueueEventKind, SessionResume,
-    SessionRevision, SessionSpec, TriggerRegistration, TriggerSourceType,
-    TriggerSubscriptionFilter, TriggerTargetSummary, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnEvent, TurnInput, empty_host_event_source_key,
-    impl_unsupported_queued_work_methods,
+    InputItem, ModelLimits, ModelSpec, PluginStack, SessionCommand, SessionCommandReceipt,
+    SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
 };
+/// Cooperative cancellation handle accepted by
+/// [`TurnBuilder::cancel`](crate::TurnBuilder::cancel); re-exported so
+/// embedders cancel turns without depending on `tokio-util` themselves.
+pub use tokio_util::sync::CancellationToken;
 
+/// The prelude is exactly the crate root: `use lash::prelude::*;` brings in
+/// the daily core/session/turn vocabulary and nothing from the domain
+/// modules.
 pub mod prelude {
     pub use crate::{
-        AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport,
-        HostEventOccurrenceRequest, HostEventsControl, InputItem, LashCore, LashCoreBuilder,
-        LashSession, ModeId, ModePreset, ModelSpec, ObservableSession, PluginActions,
-        PluginBinding, PluginStack, ProcessHandleSummary, PromptLayerSink, QueuedTurnBuilder,
-        Result, ScopedQueuedTurnBuilder, ScopedTurnBuilder, SessionBuilder, SessionCommand,
-        SessionCommandReceipt, SessionCommandsControl, SessionCursor, SessionObservation,
-        SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
-        SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision,
-        SessionSpec, ToolsControl, TriggerRegistration, TriggerSourceType,
-        TriggerSubscriptionFilter, TriggerTargetSummary, TriggersControl, TurnActivity,
-        TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        AdvancedToolsControl, EmbedError, EnqueueTurnBuilder, HostEventsControl, InputItem,
+        LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ModelLimits, ModelSpec,
+        ObservableSession, PluginActions, PluginBinding, PluginStack, PromptLayerSink,
+        QueuedTurnBuilder, Result, SessionBuilder, SessionCommand, SessionCommandReceipt,
+        SessionCommandsControl, SessionConfigPatch, SessionDeleteReport, SessionSpec, ToolsControl,
+        TriggersControl, TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink,
+        TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream, message_role,
+        message_text,
+    };
+}
+
+/// Session observation: cursors, resumable event streams, and live replay
+/// recovery for host frontends. Entry point: [`LashSession::observe`] /
+/// [`ObservableSession`].
+pub mod observe {
+    pub use lash_core::{
+        SessionCursor, SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
+        SessionObservationSubscription, SessionProcessEventKind, SessionQueueEventKind,
+        SessionResume, SessionRevision,
+    };
+}
+
+/// Host events and triggers: declaring event sources, emitting occurrences,
+/// and inspecting trigger subscriptions. Entry points:
+/// [`LashCore::host_events`] and [`LashSession::triggers`].
+pub mod host_events {
+    pub use lash_core::{
+        HostEvent, HostEventEmitReport, HostEventOccurrenceRequest, TriggerRegistration,
+        TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary,
         empty_host_event_source_key,
     };
-    pub use lash_core::TurnActivitySink;
 }
 
 pub mod tools {
-    pub use crate::ToolState;
     pub use lash_core::{
         PreparedToolCall, ToolActivation, ToolAgentSurface, ToolArgumentProjectionPolicy,
         ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
@@ -73,6 +94,7 @@ pub mod tools {
         ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
         ToolScheduling, ToolSourceHandle,
     };
+    pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
     /// `resolve_contract`: supply the [`ToolDefinition`]s once and an
     /// [`StaticToolExecute`] for behavior.
@@ -91,13 +113,14 @@ pub mod direct {
 }
 
 pub mod persistence {
+    pub use lash_core::FileAttachmentStore;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
         QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
-        SessionCommand, SessionCommandReceipt, SessionStoreCreateRequest, SessionStoreFactory,
-        SlotPolicy,
+        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
     };
+    pub use lash_core::store::queued_work;
     pub use lash_core::store::{
         GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, RuntimeCommit,
         RuntimeCommitResult, RuntimeTurnCommitStamp, SessionCheckpoint, SessionHead,
@@ -107,11 +130,10 @@ pub mod persistence {
     pub use lash_core::{
         BlobRef, GcReport, PersistedSessionConfig, PersistedTurnState, ProtocolEvent,
         RuntimePersistence, SessionEventRecord, SessionGraph, SessionMeta, SessionNodeRecord,
-        SessionReadScope, SessionReadView, SessionRelation, SessionSnapshot, StoreError,
-        TokenLedgerEntry, VacuumReport,
+        SessionReadScope, SessionReadView, SessionRelation, StoreError, TokenLedgerEntry,
+        VacuumReport,
     };
     pub use lash_core::{InMemoryLashlangArtifactStore, LashlangArtifactStore};
-    pub use lash_local_store::FileAttachmentStore;
 }
 
 pub mod plugins {
@@ -126,10 +148,10 @@ pub mod plugins {
         ToolResultHookContext,
     };
     pub use lash_core::{
-        HostEvent, PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar,
-        PluginRuntimeEvent, PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory,
-        PromptHookContext, SessionPlugin, ToolSurfaceContribution, ToolSurfaceOverride,
-        TurnHookContext, TurnResultHookContext,
+        PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
+        PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory, PromptHookContext,
+        SessionPlugin, ToolSurfaceContribution, ToolSurfaceOverride, TurnHookContext,
+        TurnResultHookContext,
     };
     pub use lash_plugin_tool_output_budget::{
         ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
@@ -144,8 +166,6 @@ pub mod modes {
         ResourceCatalog, RlmProtocolPluginConfig, TypeExpr, TypeField, format_type_expr,
     };
     pub use lash_rlm_types::RlmFinalAnswerFormat;
-
-    pub use crate::mode::{ModeId, ModePreset};
 }
 
 pub mod messages {
@@ -153,7 +173,32 @@ pub mod messages {
 }
 
 pub mod remote {
-    pub use lash_remote_protocol::*;
+    pub use lash_remote_protocol::{
+        REMOTE_PROTOCOL_VERSION, RemoteAssistantOutput, RemoteAssistantOutputState,
+        RemoteAttachmentRef, RemoteCausalRef, RemoteDiagnostic, RemoteExecutionSummary,
+        RemoteGenerationOptions, RemoteHostEventEmitReport, RemoteHostEventOccurrenceRecord,
+        RemoteHostEventOccurrenceRequest, RemoteInputItem, RemoteLiveReplayGap,
+        RemoteLiveReplayGapReason, RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage,
+        RemoteLlmOutputPart, RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestMetadata,
+        RemoteLlmResponse, RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice,
+        RemoteLlmToolSpec, RemoteModelIntent, RemotePromptBuiltin, RemotePromptContribution,
+        RemotePromptContributionGate, RemotePromptLayer, RemotePromptSlot, RemotePromptSlotLayer,
+        RemotePromptTemplate, RemotePromptTemplateEntry, RemotePromptTemplateSection,
+        RemoteProtocolError, RemoteProtocolTurnOptions, RemoteProviderMetadata,
+        RemoteProviderReasoningReplay, RemoteProviderReplayMeta, RemoteResponseTextMeta,
+        RemoteSchemaProjectionOverride, RemoteSessionCursor, RemoteSessionObservationEvent,
+        RemoteSessionObservationEventPayload, RemoteSessionProcessEventKind,
+        RemoteSessionQueueEventKind, RemoteTokenLedgerEntry, RemoteToolActivation,
+        RemoteToolAgentSurface, RemoteToolArgumentProjectionPolicy, RemoteToolAvailability,
+        RemoteToolCallOutcome, RemoteToolCallRequest, RemoteToolCallResponse,
+        RemoteToolCallSummary, RemoteToolGrant, RemoteToolOutputContract, RemoteToolRegistry,
+        RemoteToolRetryPolicy, RemoteToolScheduling, RemoteTriggerRegistration,
+        RemoteTriggerSubscriptionFilter, RemoteTriggerTargetSummary, RemoteTurnActivity,
+        RemoteTurnEvent, RemoteTurnFinish, RemoteTurnInput, RemoteTurnIssue, RemoteTurnOutcome,
+        RemoteTurnRequest, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,
+        RemoteTurnUsageSummary, RemoteUsage, assert_remote_tool_registry_reopenable,
+        ensure_protocol_version,
+    };
 }
 
 pub mod process {
@@ -192,9 +237,7 @@ pub mod runtime {
         RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
         RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
-        RuntimeTurnPhaseProbe, ScopedEffectController, SessionCommand, SessionCommandReceipt,
-        SessionCursor, SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
-        SessionObservationSubscription, SessionResume, SessionRevision, TurnContext,
+        RuntimeTurnPhaseProbe, ScopedEffectController, TurnContext,
     };
     pub use lash_core::{
         PersistentRuntimeServices, PluginMessage, ProtocolSessionExtensionHandle,
@@ -232,14 +275,10 @@ pub mod testing;
 
 pub mod provider {
     pub use lash_core::provider::{
-        ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder,
-        ProviderRetryPolicy, ProviderTimeoutPolicy,
+        ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
     };
     pub use lash_core::{
         LlmTimeouts, Provider, ProviderComponents, ProviderFactory, ProviderHandle,
-        ProviderModelPolicy, ProviderOptions, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
-        StaticModelPolicy,
+        ProviderModelPolicy, ProviderOptions, ProviderSpec, RequestTimeout, StaticModelPolicy,
     };
 }
-
-pub type ToolState = lash_core::ToolState;

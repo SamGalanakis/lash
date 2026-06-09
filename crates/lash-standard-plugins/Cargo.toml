@@ -15,22 +15,20 @@ categories = ["asynchronous", "api-bindings"]
 
 [features]
 default = []
-fff-zlob = ["lash-tool-search/fff-zlob"]
+fff-zlob = ["lash-tools/fff-zlob"]
 semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
 
 [dependencies]
 lash-core = { workspace = true }
 lash-plugin-observational-memory = { workspace = true }
 lash-plugin-process-controls = { workspace = true }
-lash-plugin-rolling-history = { workspace = true }
 lash-plugin-tool-discovery = { workspace = true }
 lash-plugin-tool-output-budget = { workspace = true }
-lash-tool-apply-patch = { workspace = true }
-lash-tool-files = { workspace = true }
-lash-tool-search = { workspace = true }
-lash-tool-shell = { workspace = true }
-lash-tool-web = { workspace = true }
+lash-tools = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

@@ -30,7 +30,8 @@
             <h2>Enabling Tracing</h2>
             <p>Attach a sink at builder time. It propagates to every session from that core.</p>
           </div>
-          <pre><code>use std::sync::Arc;
+          <pre data-lang="rust" data-snippet="tracing#jsonl-trace-core"><code>use std::sync::Arc;
+
 use lash::{
     LashCore,
     tracing::{JsonlTraceSink, TraceLevel, TraceSink},
@@ -40,11 +41,16 @@ let trace_sink: Arc&lt;dyn TraceSink&gt; = Arc::new(JsonlTraceSink::new("./.lash
 
 let core = LashCore::standard()
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
+            .expect("valid model metadata"),
+    )
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-    .trace_sink(Some(trace_sink))
+    .trace_sink(trace_sink)
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
           <p><code>TraceLevel::Standard</code> (default): turns, tool calls, LLM start/complete, token usage. <code>TraceLevel::Extended</code> adds provider stream chunks, prompt-component hashes, and runtime stream deltas. Extended is verbose; use for provider debugging.</p>
@@ -55,30 +61,40 @@ let core = LashCore::standard()
             <h2>Lashlang Execution Graphs</h2>
             <p>Host-level Lashlang execution graphs are a separate opt-in sink. They are observability only: they are not written to <code>process_events</code>, do not create process-registry storage, and the normal <code>trace_sink</code> does not receive them unless the host explicitly tees the sink itself. Commands remain on <code>ProcessControl</code>; observation is optional trace projection.</p>
           </div>
-          <pre><code>let core = LashCore::rlm()
+          <pre data-lang="rust" data-snippet="tracing#lashlang-execution-jsonl"><code>let core = LashCore::rlm()
     .provider(provider)
     .model(model)
-    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(std::sync::Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
-    .attachment_store(std::sync::Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-    .lashlang_execution_jsonl_path(Some("./.lash-data/lashlang-execution.jsonl".into()))
+    .effect_host(std::sync::Arc::new(
+        lash::durability::InlineEffectHost::default(),
+    ))
+    .lashlang_artifact_store(std::sync::Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
+    .attachment_store(std::sync::Arc::new(
+        lash::persistence::InMemoryAttachmentStore::new(),
+    ))
+    .lashlang_execution_jsonl_path("./.lash-data/lashlang-execution.jsonl")
     .build()?;</code></pre>
-          <pre><code>use std::sync::Arc;
+          <pre data-lang="rust" data-snippet="tracing#lashlang-graph-store"><code>use std::sync::Arc;
+
 use lash::tracing::{JsonlTraceSink, TeeTraceSink, TraceLashlangGraphStore, TraceSink};
 
 let lashlang_graphs = Arc::new(TraceLashlangGraphStore::default());
 let lashlang_execution_sink = Arc::new(TeeTraceSink::new([
     Arc::clone(&amp;lashlang_graphs) as Arc&lt;dyn TraceSink&gt;,
-    Arc::new(JsonlTraceSink::new("./.lash-data/lashlang-execution.jsonl")) as Arc&lt;dyn TraceSink&gt;,
+    Arc::new(JsonlTraceSink::new("./.lash-data/lashlang-execution.jsonl"))
+        as Arc&lt;dyn TraceSink&gt;,
 ]));
 
 let core = LashCore::rlm()
     .provider(provider)
     .model(model)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-    .lashlang_execution_sink(Some(lashlang_execution_sink))
+    .lashlang_execution_sink(lashlang_execution_sink)
     .build()?;
 
 let graph = lashlang_graphs.graph("process:process-id");</code></pre>
@@ -92,11 +108,13 @@ let graph = lashlang_graphs.graph("process:process-id");</code></pre>
             <h2>The Sink Trait</h2>
             <p>One synchronous <code>append</code>. Called on the runtime thread; must not block. <code>JsonlTraceSink</code> serializes and appends under a short-held mutex.</p>
           </div>
-          <pre><code>pub trait TraceSink: Send + Sync {
+          <pre data-lang="rust"><code>pub trait TraceSink: Send + Sync {
     fn append(&amp;self, record: &amp;TraceRecord) -&gt; Result&lt;(), TraceSinkError&gt;;
 }</code></pre>
           <p>Fan out to multiple destinations by wrapping sinks:</p>
-          <pre><code>struct FanoutTraceSink { sinks: Vec&lt;Arc&lt;dyn TraceSink&gt;&gt; }
+          <pre data-lang="rust" data-snippet="tracing#fanout-trace-sink"><code>struct FanoutTraceSink {
+    sinks: Vec&lt;Arc&lt;dyn TraceSink&gt;&gt;,
+}
 
 impl TraceSink for FanoutTraceSink {
     fn append(&amp;self, record: &amp;TraceRecord) -&gt; Result&lt;(), TraceSinkError&gt; {
@@ -155,7 +173,7 @@ impl TraceSink for FanoutTraceSink {
             <h2>The JSONL Schema</h2>
             <p>One line of UTF-8 JSON per record. <code>TRACE_SCHEMA_VERSION = 2</code>. Reject or warn on higher unrecognized versions.</p>
           </div>
-          <pre><code>{
+          <pre data-lang="json"><code>{
   "schema_version": 2,
   "id": "6621dfa7-2cd0-4296-ac20-15c0f2d3cec1",
   "timestamp": "2026-05-11T11:42:01.234+00:00",
@@ -178,7 +196,7 @@ impl TraceSink for FanoutTraceSink {
             <h2>Viewing A Trace</h2>
             <p>Renders JSONL to a self-contained HTML timeline with nested LLM calls, tool calls, and streaming chunks inline. Valid-JSON records of an unrecognized schema are preserved as raw text; a line that is not valid JSON aborts the load.</p>
           </div>
-          <pre><code>$ cargo run -p lash-trace-viewer -- ./.lash-data/trace.jsonl
+          <pre data-lang="console"><code>$ cargo run -p lash-trace-viewer -- ./.lash-data/trace.jsonl
 # Writes ./.lash-data/trace.html next to the input
 
 $ cargo run -p lash-trace-viewer -- trace.jsonl \
@@ -193,22 +211,29 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
             <h2>OpenTelemetry Export</h2>
             <p>Optional <code>otel-trace</code> cargo feature converts events to OTel spans for export to Jaeger, Honeycomb, Datadog, or any OTLP backend. Off by default. The sink lives in <code>lash-trace</code> and is re-exported by <code>lash-core</code> under the feature.</p>
           </div>
-          <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace
+          <pre data-lang="console"><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace
 # feature alongside the lash-runtime facade.
 lash-runtime = "=0.1.0-alpha.42"
 lash-core    = { version = "=0.1.0-alpha.42", features = ["otel-trace"] }</code></pre>
           <p><code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every event to a span with payload attributes. Use in place of (or alongside) <code>JsonlTraceSink</code>:</p>
-          <pre><code>use std::sync::Arc;
+          <pre data-lang="rust" data-snippet="tracing#otel-trace-core"><code>use std::sync::Arc;
 
-use lash::{LashCore, tracing::{TraceLevel, TraceSink}};
+use lash::{
+    LashCore,
+    tracing::{TraceLevel, TraceSink},
+};
 use lash_core::OtelTraceSink;
 
-let sink: Arc&lt;dyn TraceSink&gt; = Arc::new(OtelTraceSink::new(tracer));
+// Exporter/provider setup stays with the host; this reads the
+// process-global OpenTelemetry tracer provider.
+let sink: Arc&lt;dyn TraceSink&gt; = Arc::new(OtelTraceSink::from_global_provider());
 let core = LashCore::standard()
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-    .trace_sink(Some(sink))
+    .trace_sink(sink)
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
         </div>

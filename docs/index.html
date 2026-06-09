@@ -348,9 +348,9 @@ anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
 
         <p>One <code>LashCore</code> per app, cloned freely; one <code>LashSession</code> per chat or task; <code>.run()</code> for a single collected turn, <code>.stream_to(&amp;sink)</code> for live events.</p>
-<pre data-lang="rust"><code>use std::sync::Arc;
+<pre data-lang="rust" data-snippet="index#hello-lash"><code>use std::sync::Arc;
 
-use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
+use lash::{LashCore, ModelSpec, TurnInput, provider::ProviderHandle};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -360,17 +360,17 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
     );
 
-    let model = ModelSpec::from_token_limits(
-        "anthropic/claude-sonnet-4.6", None, 200_000, None, None,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let model = ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
+        .map_err(anyhow::Error::msg)?;
 
     // one LashCore per app, cloned freely.
     let core = LashCore::standard()
         .provider(provider)
         .model(model)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 

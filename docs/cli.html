@@ -30,7 +30,7 @@
             <h2>First Run</h2>
             <p>If <code>~/.lash/config.json</code> does not exist, <code>lash</code> launches the setup wizard. The wizard provisions an active provider, collects credentials, and writes the config file before dropping you into the TUI.</p>
           </div>
-          <pre><code>$ lash
+          <pre data-lang="console"><code>$ lash
 # Setup wizard:
 # 1. Choose a provider (Anthropic, OpenAI, OpenAI-compatible, Codex, Google OAuth)
 # 2. Paste API key (or run OAuth / device-code flow)
@@ -179,7 +179,7 @@
             <h2>Print Mode</h2>
             <p><code>lash --print "&lt;prompt&gt;"</code> runs Lash autonomously: it boots, executes the prompt, prints the settled <code>TurnFinish::AssistantMessage</code> prose to stdout, and exits. Print mode runs without a TUI; status and tool output go to stderr. An autonomous system prompt is injected so the assistant completes the task without asking for input.</p>
           </div>
-          <pre><code>$ lash --print "Summarise this branch's changes in two bullets."
+          <pre data-lang="console"><code>$ lash --print "Summarise this branch's changes in two bullets."
 # Assistant prose to stdout, tool/lifecycle logs to stderr.
 
 $ lash --print "Investigate the latest test failure." \
@@ -192,7 +192,7 @@ $ lash --print "Investigate the latest test failure." \
             <h2>Config File</h2>
             <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is defined by <code>LashConfig</code> in <code>lash-cli</code> and uses <code>serde(deny_unknown_fields)</code> — unknown top-level fields are rejected to catch typos.</p>
           </div>
-          <pre><code>{
+          <pre data-lang="json"><code>{
   "active_provider": "openai",
   "providers": {
     "openai": { "type": "openai", "api_key": "sk-..." },

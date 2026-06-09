@@ -312,13 +312,22 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         ctx: ObjectContext<'_>,
         Json(request): Json<WorkbenchCronRequest>,
     ) -> HandlerResult<Json<WorkbenchCronInfo>> {
+        let now = journaled_now(&ctx, "workbench-cron:upsert-now").await?;
         if let Some(Json(existing)) = ctx.get::<Json<WorkbenchCronState>>(CRON_STATE_KEY).await?
             && existing.request == request
         {
-            return Ok(Json(WorkbenchCronInfo::from(&existing)));
+            // Only short-circuit while the stored chain is still alive. If the
+            // recorded next execution is in the past the chain died (e.g. a
+            // crash between fire and re-arm) and an equal-request upsert is
+            // exactly the sync pass that should revive it.
+            let chain_alive = DateTime::parse_from_rfc3339(&existing.next_execution_time)
+                .map(|next| next.with_timezone(&Utc) > now)
+                .unwrap_or(false);
+            if chain_alive {
+                return Ok(Json(WorkbenchCronInfo::from(&existing)));
+            }
         }
         cancel_stored_execution(&ctx).await?;
-        let now = journaled_now(&ctx, "workbench-cron:upsert-now").await?;
         let state = schedule_next(&ctx, request, now, None).await?;
         Ok(Json(WorkbenchCronInfo::from(&state)))
     }
@@ -327,10 +336,36 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         let Some(Json(state)) = ctx.get::<Json<WorkbenchCronState>>(CRON_STATE_KEY).await? else {
             return Ok(Json(()));
         };
+        // Zombie guard: a job whose session is no longer the live workbench
+        // session terminates itself instead of firing into a deleted session.
+        // (Jobs armed by a previous process run are invisible to the
+        // in-memory cancel bookkeeping, so reset alone cannot reach them.)
+        let current_session = self.state.session_ids.current();
+        if state.request.session_id != current_session {
+            self.state.trace(
+                "cron.restate.zombie_cancelled",
+                json!({
+                    "job_key": ctx.key(),
+                    "job_session_id": state.request.session_id,
+                    "current_session_id": current_session,
+                }),
+            );
+            ctx.clear(CRON_STATE_KEY);
+            return Ok(Json(()));
+        }
         let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
         let fired_at = journaled_now(controller.context(), "workbench-cron:fired-at").await?;
         let request = state.request.clone();
         let fired_at_text = fired_at.to_rfc3339();
+        // Re-arm before emitting: a tick whose emission fails terminally must
+        // not take the whole schedule down with it.
+        schedule_next(
+            controller.context(),
+            state.request.clone(),
+            fired_at,
+            Some(fired_at.to_rfc3339()),
+        )
+        .await?;
         let Json(emit_report) =
             emit_cron_occurrence(self.state.clone(), request, fired_at_text, &controller).await?;
         self.state.trace(
@@ -347,13 +382,6 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         self.state
             .queued_work_poke
             .poke_session(state.request.session_id.clone(), "cron_tick");
-        schedule_next(
-            controller.context(),
-            state.request,
-            fired_at,
-            Some(fired_at.to_rfc3339()),
-        )
-        .await?;
         Ok(Json(()))
     }
 
@@ -468,8 +496,34 @@ pub(crate) async fn submit_session_delete(
     submit_restate_json(state, url, &request).await
 }
 
-pub(crate) async fn cancel_known_cron_jobs(state: &AppState, reason: &str) -> Result<(), AppError> {
-    let known = {
+/// Cancel every cron job belonging to `session_id`, derived from the durable
+/// trigger registrations (the same source `sync_cron_jobs_with_context`
+/// schedules from), plus anything this process armed. The in-memory key set
+/// alone is not enough: jobs armed by a previous process run are invisible to
+/// it and would keep firing into a deleted session forever.
+pub(crate) async fn cancel_cron_jobs_for_session(
+    state: &AppState,
+    session_id: &str,
+    reason: &str,
+) -> Result<(), AppError> {
+    let session = state
+        .core
+        .session(session_id.to_string())
+        .rlm()
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    let registrations = session
+        .triggers()
+        .by_source_type(CRON_SCHEDULE_SOURCE_TYPE)
+        .await
+        .map_err(AppError::internal)?;
+    let mut job_keys: BTreeSet<String> = registrations
+        .iter()
+        .map(|registration| cron_job_key(session_id, &registration.source_key))
+        .collect();
+    session.close().await.map_err(AppError::internal)?;
+    job_keys.extend({
         let mut guard = state
             .restate_cron_job_keys
             .lock()
@@ -477,8 +531,8 @@ pub(crate) async fn cancel_known_cron_jobs(state: &AppState, reason: &str) -> Re
         let known = guard.clone();
         guard.clear();
         known
-    };
-    for job_key in known {
+    });
+    for job_key in job_keys {
         let url = format!(
             "{}/WorkbenchCronJob/{job_key}/cancel",
             state.restate_ingress_url.trim_end_matches('/')
@@ -517,6 +571,10 @@ async fn run_user_turn(
     };
     let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
+    // Registered for /api/turn/cancel (the UI's stop button / Esc); the guard
+    // drops the registry entry when the turn finishes either way, and the
+    // cancel endpoint calls `cancel_running_turns()` on this session handle.
+    let _cancel_guard = state.register_turn_cancel(&session, &request.turn_id);
     let output = session
         .turn(input)
         .turn_id(request.turn_id.clone())
@@ -725,7 +783,14 @@ fn record_turn_output(
             }),
         }),
     );
-    state.push_message("assistant", assistant_text);
+    if matches!(
+        output.outcome,
+        lash::runtime::TurnOutcome::Stopped(lash::runtime::TurnStop::Cancelled)
+    ) {
+        state.push_message("event", "turn cancelled");
+    } else {
+        state.push_message("assistant", assistant_text);
+    }
     state.publish(crate::StreamItem::Done);
 }
 
@@ -811,6 +876,15 @@ async fn sync_cron_jobs_with_context(
     Ok(())
 }
 
+/// Idempotency key for one cron tick's host-event occurrence. Must be unique
+/// per (job, tick): `fired_at` is the journaled fire time, so retries of the
+/// same tick dedupe while the next tick gets a fresh occurrence. (A key
+/// without the tick component kills the schedule: the second tick conflicts,
+/// the handler fails before re-arming, and the chain stops.)
+fn cron_occurrence_key(job_key: &str, fired_at: &str) -> String {
+    format!("workbench-cron:{job_key}:{fired_at}")
+}
+
 async fn emit_cron_occurrence(
     state: AppState,
     request: WorkbenchCronRequest,
@@ -827,18 +901,13 @@ async fn emit_cron_occurrence(
         .core
         .host_events()
         .emit(
-            lash::HostEventOccurrenceRequest::new(
+            lash::host_events::HostEventOccurrenceRequest::new(
                 CRON_SCHEDULE_SOURCE_TYPE,
                 request.source_key.clone(),
                 json!({
                     "fired_at": fired_at,
                 }),
-                format!(
-                    "workbench-cron:{}:{}:{}",
-                    request.session_id,
-                    request.source_key,
-                    controller.context().key()
-                ),
+                cron_occurrence_key(controller.context().key(), &fired_at),
             )
             .with_source(json!({
                 "expr": request.expr,
@@ -926,7 +995,7 @@ fn next_cron_time(
 
 fn cron_request_from_registration(
     session_id: &str,
-    registration: &lash::TriggerRegistration,
+    registration: &lash::host_events::TriggerRegistration,
 ) -> Result<(String, WorkbenchCronRequest), String> {
     let source_type = registration.source_type.as_str();
     if source_type != CRON_SCHEDULE_SOURCE_TYPE {
@@ -1003,4 +1072,27 @@ async fn submit_restate_empty(state: &AppState, url: String) -> Result<(), AppEr
 
 fn terminal_handler_error(err: AppError) -> HandlerError {
     TerminalError::new(err.message).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cron_occurrence_key;
+
+    #[test]
+    fn cron_occurrence_key_is_unique_per_tick() {
+        let job = "session:source:cron.Schedule:sha256:abc";
+        let first = cron_occurrence_key(job, "2026-06-09T22:30:30+00:00");
+        let second = cron_occurrence_key(job, "2026-06-09T22:31:00+00:00");
+        // Two ticks of one job must not collide: a constant key makes the
+        // second tick fail its host-event emit with an idempotency conflict
+        // before re-arming, killing the schedule after exactly one fire.
+        assert_ne!(first, second);
+        // A retried tick (same journaled fired_at) must dedupe.
+        assert_eq!(first, cron_occurrence_key(job, "2026-06-09T22:30:30+00:00"));
+        // Distinct jobs never collide on the same tick time.
+        assert_ne!(
+            first,
+            cron_occurrence_key("other-job", "2026-06-09T22:30:30+00:00")
+        );
+    }
 }

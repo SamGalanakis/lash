@@ -357,13 +357,8 @@ impl RuntimePersistence for Store {
                         }
                     }
                     let now = current_epoch_ms();
-                    let batch_id = format!(
-                        "qwb:{:x}",
-                        Sha256::digest(
-                            format!("{}:{:?}:{now}:{nonce}", batch.session_id, batch.source_key)
-                                .as_bytes()
-                        )
-                    );
+                    let batch_id =
+                        derive_batch_id(&batch.session_id, batch.source_key.as_deref(), now, Some(nonce));
                     tx.execute(
                         "INSERT INTO queued_work_batches (
                             batch_id, session_id, source_key, delivery_policy, slot_policy,
@@ -439,63 +434,39 @@ impl RuntimePersistence for Store {
                             .map_err(sqlite_error)?;
                         let rows = stmt
                             .query_map(
-                                params![
-                                    session_id,
-                                    now as i64,
-                                    (max_batches as i64).saturating_add(32)
-                                ],
+                                params![session_id, now as i64, claim_scan_limit(max_batches)],
                                 queued_batch_row_from_sql,
                             )
                             .map_err(sqlite_error)?;
                         rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
                     };
-                    let Some(first_row) = candidate_rows.first() else {
-                        return Ok(TxOutcome::Commit(None));
-                    };
-                    let first_delivery = decode_delivery_policy(first_row.delivery_policy.clone())?;
-                    if boundary == QueuedWorkClaimBoundary::ActiveTurnCheckpoint
-                        && first_delivery != DeliveryPolicy::EarliestSafeBoundary
-                    {
+                    let candidates = candidate_rows
+                        .iter()
+                        .map(|row| {
+                            Ok(ClaimCandidate {
+                                enqueue_seq: row.enqueue_seq,
+                                claim_fencing_token: row.claim_fencing_token,
+                                delivery_policy: decode_delivery_policy(
+                                    row.delivery_policy.clone(),
+                                )?,
+                                slot_policy: decode_slot_policy(row.slot_policy.clone())?,
+                                merge_key: decode_merge_key(row.merge_key_json.clone())?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    let selected_len = select_claim_prefix(&candidates, boundary, max_batches);
+                    if selected_len == 0 {
                         return Ok(TxOutcome::Commit(None));
                     }
-                    let first_slot = decode_slot_policy(first_row.slot_policy.clone())?;
-                    let first_merge_key = decode_merge_key(first_row.merge_key_json.clone())?;
-                    let mut selected = Vec::new();
-                    for row in candidate_rows {
-                        if selected.len() >= max_batches {
-                            break;
-                        }
-                        let delivery = decode_delivery_policy(row.delivery_policy.clone())?;
-                        let slot = decode_slot_policy(row.slot_policy.clone())?;
-                        let merge_key = decode_merge_key(row.merge_key_json.clone())?;
-                        if selected.is_empty() {
-                            selected.push(row);
-                            if first_slot == SlotPolicy::Exclusive {
-                                break;
-                            }
-                            continue;
-                        }
-                        if first_slot != SlotPolicy::Join
-                            || slot != SlotPolicy::Join
-                            || delivery != first_delivery
-                            || merge_key != first_merge_key
-                        {
-                            break;
-                        }
-                        selected.push(row);
-                    }
-                    let Some(first) = selected.first() else {
-                        return Ok(TxOutcome::Commit(None));
-                    };
-                    let fencing_token = first.claim_fencing_token.saturating_add(1);
-                    let claim_id = format!("qwc:{}:{fencing_token}", first.enqueue_seq);
-                    let lease_token = format!(
-                        "{:x}",
-                        Sha256::digest(
-                            format!("{session_id}:{owner_id}:{claim_id}:{now}").as_bytes()
-                        )
+                    let mut selected = candidate_rows;
+                    selected.truncate(selected_len);
+                    let lease = QueuedWorkClaimLease::derive(
+                        &candidates[0],
+                        &session_id,
+                        &owner_id,
+                        now,
+                        lease_ttl_ms,
                     );
-                    let expires_at = now.saturating_add(lease_ttl_ms);
                     for row in &selected {
                         // Under `BEGIN IMMEDIATE` this connection already holds
                         // the write lock, but the row could still have been
@@ -520,11 +491,11 @@ impl RuntimePersistence for Store {
                                 params![
                                     session_id,
                                     row.batch_id,
-                                    claim_id,
+                                    lease.claim_id,
                                     owner_id,
-                                    lease_token,
+                                    lease.lease_token,
                                     now as i64,
-                                    expires_at as i64
+                                    lease.expires_at_epoch_ms as i64
                                 ],
                             )
                             .map_err(sqlite_error)?;
@@ -541,12 +512,12 @@ impl RuntimePersistence for Store {
                     }
                     Ok(TxOutcome::Commit(Some(QueuedWorkClaim {
                         session_id: session_id.clone(),
-                        claim_id,
+                        claim_id: lease.claim_id,
                         owner_id: owner_id.clone(),
-                        lease_token,
-                        fencing_token,
-                        claimed_at_epoch_ms: now,
-                        expires_at_epoch_ms: expires_at,
+                        lease_token: lease.lease_token,
+                        fencing_token: lease.fencing_token,
+                        claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
+                        expires_at_epoch_ms: lease.expires_at_epoch_ms,
                         batches,
                     })))
                 })();
@@ -573,7 +544,6 @@ impl RuntimePersistence for Store {
         let session_id = claim.session_id.clone();
         let claim_id = claim.claim_id.clone();
         let lease_token = claim.lease_token.clone();
-        let batch_count = claim.batches.len();
         let changed = self
             .conn
             .write(move |tx| {
@@ -586,16 +556,7 @@ impl RuntimePersistence for Store {
             })
             .await
             .map_err(sqlite_error)?;
-        if changed != batch_count {
-            return Err(StoreError::QueuedWorkClaimExpired {
-                session_id: claim.session_id.clone(),
-                claim_id: claim.claim_id.clone(),
-            });
-        }
-        Ok(QueuedWorkClaim {
-            expires_at_epoch_ms: expires_at,
-            ..claim.clone()
-        })
+        renewed_claim(claim, changed, expires_at)
     }
 
     async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {

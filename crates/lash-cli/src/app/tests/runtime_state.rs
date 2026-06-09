@@ -71,7 +71,7 @@ fn plan_exit_tool_does_not_create_local_shadow_queue() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let ui_extensions =
         lash_tui_extensions::TuiExtensions::builtin().expect("builtin ui extensions");
-    crate::apply_ui_host_effects(
+    crate::ui_effects::apply_ui_host_effects(
         &mut app,
         ui_extensions.effects_for_turn_event(&TurnEvent::ToolCallCompleted {
             call_id: Some("tc-plan-exit".into()),
@@ -149,7 +149,7 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let ui_extensions =
         lash_tui_extensions::TuiExtensions::builtin().expect("builtin ui extensions");
-    crate::apply_ui_host_effects(
+    crate::ui_effects::apply_ui_host_effects(
         &mut app,
         ui_extensions.effects_for_turn_event(&TurnEvent::ToolCallCompleted {
             call_id: Some("tc-plan-exit-fresh".into()),

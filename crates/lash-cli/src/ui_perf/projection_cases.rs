@@ -8,7 +8,7 @@ use lash_core::{
 use serde_json::json;
 
 use crate::app::{App, UiProjectionState, UiTimeline, UiTimelineItem, timeline_from_read_view};
-use crate::perf_support::time::elapsed_ms;
+use lash_perf::perf_support::time::elapsed_ms;
 
 use super::measurement::UiPerfRunResult;
 use super::scenarios::UiPerfWorkload;

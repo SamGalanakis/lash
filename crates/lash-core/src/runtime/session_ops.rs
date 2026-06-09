@@ -23,11 +23,19 @@ impl LashRuntime {
             // `state`. `restore_state` adopts the snapshot's generation, so a
             // surface that reached generation >= 2 restores cleanly.
             if let Some(tool_state) = state.tool_state_snapshot.clone() {
-                session
+                let report = session
                     .plugins()
                     .tool_registry()
                     .restore_state(tool_state)
                     .map_err(|err| SessionError::Protocol(err.to_string()))?;
+                if !report.orphaned.is_empty() {
+                    tracing::warn!(
+                        session_id = %state.session_id,
+                        orphaned = ?report.orphaned,
+                        "persisted state installed with orphaned tools: no registered \
+                         source resolves them; they are Off until their source returns"
+                    );
+                }
             }
             let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
             session

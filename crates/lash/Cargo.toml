@@ -26,7 +26,6 @@ lash-remote-protocol = { workspace = true }
 lash-tool-support = { workspace = true }
 lash-protocol-rlm = { workspace = true }
 lash-protocol-standard = { workspace = true }
-lash-local-store = { workspace = true }
 lash-plugin-tool-output-budget = { workspace = true }
 lash-rlm-types = { workspace = true }
 lash-trace = { workspace = true }

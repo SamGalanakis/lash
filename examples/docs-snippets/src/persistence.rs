@@ -1,0 +1,176 @@
+//! Compiled sources for the Rust snippets on `docs/persistence.html`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::bail;
+use lash::provider::ProviderHandle;
+use lash::{LashCore, LashSession, ModeId, ModePreset, TurnInput, TurnOutput};
+use lash_sqlite_store::SqliteSessionStoreFactory;
+
+async fn sqlite_core(provider: ProviderHandle, model: String) -> anyhow::Result<()> {
+    // docs:start:sqlite-core
+    use std::sync::Arc;
+
+    use lash::{LashCore, ModeId, ModePreset};
+    use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
+
+    let data_dir = std::path::PathBuf::from("./.lash-data");
+    let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
+    let artifact_store = Arc::new(Store::open(&data_dir.join("artifacts.db")).await?);
+
+    let core = LashCore::builder()
+        .install_mode(ModePreset::rlm())
+        .default_mode(ModeId::rlm())
+        .provider(provider)
+        .model(
+            lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
+                .expect("valid model metadata"),
+        )
+        .store_factory(store_factory)
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(artifact_store)
+        .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+            data_dir.join("attachments"),
+        )))
+        .build()?;
+    // docs:end:sqlite-core
+    Ok(())
+}
+
+async fn explicit_store(
+    core: &LashCore,
+    chat_id: &str,
+    my_custom_persistence: impl lash::persistence::RuntimePersistence + 'static,
+) -> anyhow::Result<()> {
+    // docs:start:explicit-store
+    let session = core
+        .session(chat_id)
+        .store(Arc::new(my_custom_persistence))
+        .open()
+        .await?;
+    // docs:end:explicit-store
+    Ok(())
+}
+
+async fn postgres_core(database_url: String) -> anyhow::Result<()> {
+    // docs:start:postgres-core
+    use std::sync::Arc;
+
+    use lash_postgres_store::PostgresStorage;
+    use lash_s3_store::S3AttachmentStore;
+
+    let storage = PostgresStorage::connect(&database_url).await?;
+    let attachments = S3AttachmentStore::builder("lash-attachments", "us-east-1")
+        .endpoint_url("http://localhost:9000") // omit for AWS S3
+        .access_key_id("minioadmin")
+        .secret_access_key("minioadmin")
+        .path_style(true)
+        .prefix("prod/lash")
+        .build()?;
+
+    let core = LashCore::builder()
+        .store_factory(Arc::new(storage.session_store_factory()))
+        .process_registry(Arc::new(storage.process_registry()))
+        .host_event_store(Arc::new(storage.host_event_store()))
+        .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
+        .attachment_store(Arc::new(attachments))
+        // provider, mode, model, effect host...
+        .build()?;
+    // docs:end:postgres-core
+    Ok(())
+}
+
+fn audit_process_cleanup(_report: lash::process::ProcessSessionDeleteReport) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn delete_session(core: &LashCore, chat_id: &str) -> anyhow::Result<()> {
+    // docs:start:delete-session
+    let effect_host = core.effect_host();
+    let scope = effect_host.scoped(lash::runtime::EffectScope::runtime_operation(format!(
+        "delete-session:{chat_id}"
+    )))?;
+    let report = core.delete_session(chat_id, scope).await?;
+
+    if let Some(process_report) = report.process {
+        audit_process_cleanup(process_report)?;
+    }
+    // docs:end:delete-session
+    Ok(())
+}
+
+fn persist(_turn: TurnOutput) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn retry_or_surface(
+    _err: lash::runtime::RuntimeError,
+    _session: LashSession,
+) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn commit_conflict_retry(
+    core: &LashCore,
+    session: &LashSession,
+    chat_id: &str,
+    input: TurnInput,
+) -> anyhow::Result<()> {
+    // docs:start:commit-conflict-retry
+    use lash::runtime::RuntimeErrorCode;
+
+    match session.turn(input).run().await {
+        Ok(turn) => persist(turn)?,
+        Err(lash::EmbedError::Runtime(err)) if err.code == RuntimeErrorCode::StoreCommitFailed => {
+            // Another writer won the head-revision race: reload and retry.
+            let session = core.session(chat_id).open().await?;
+            retry_or_surface(err, session)?;
+        }
+        Err(other) => bail!(other),
+    }
+    // docs:end:commit-conflict-retry
+    Ok(())
+}
+
+async fn shared_factory(
+    provider: ProviderHandle,
+    model: String,
+    model_variant: String,
+    data_dir: PathBuf,
+    chat_id: &str,
+) -> anyhow::Result<()> {
+    // docs:start:shared-factory
+    // One factory at boot, shared across every chat.
+    let store_factory = Arc::new(SqliteSessionStoreFactory::new(
+        data_dir.join("lash-sessions"),
+    ));
+    let artifact_store =
+        Arc::new(lash_sqlite_store::Store::open(&data_dir.join("lash-artifacts.db")).await?);
+
+    let core = LashCore::builder()
+        .install_mode(ModePreset::rlm())
+        .default_mode(ModeId::rlm())
+        .provider(provider)
+        .model(
+            lash::ModelSpec::from_token_limits(
+                model.clone(),
+                Some(model_variant.clone()),
+                200_000,
+                None,
+            )
+            .expect("valid model metadata"),
+        )
+        .store_factory(store_factory)
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(artifact_store)
+        .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+            data_dir.join("attachments"),
+        )))
+        .build()?;
+
+    // Per request: open a session keyed by the app's chat id.
+    let session = core.session(chat_id).rlm().open().await?;
+    // docs:end:shared-factory
+    Ok(())
+}

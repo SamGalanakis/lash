@@ -284,6 +284,7 @@ impl SessionBuilder {
             mode,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
+            turn_cancels: crate::turn::TurnCancelRegistry::default(),
         })
     }
 
@@ -333,6 +334,7 @@ pub struct LashSession {
     pub(crate) mode: ModeId,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
+    pub(crate) turn_cancels: crate::turn::TurnCancelRegistry,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -372,7 +374,7 @@ impl LashSession {
         self.parent_session_id.as_deref()
     }
 
-    pub async fn effect_host(&self) -> Arc<dyn EffectHost> {
+    pub fn effect_host(&self) -> Arc<dyn EffectHost> {
         Arc::clone(&self.effect_host)
     }
 
@@ -383,6 +385,7 @@ impl LashSession {
             active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
+            cancels: self.turn_cancels.clone(),
             protocol_turn_options: None,
             provider: None,
             model: None,
@@ -395,9 +398,28 @@ impl LashSession {
             runtime: self.runtime.clone(),
             effect_host: Arc::clone(&self.effect_host),
             cancel: CancellationToken::new(),
+            cancels: self.turn_cancels.clone(),
             batch_ids: Vec::new(),
             drain_id: None,
         }
+    }
+
+    /// Cancel every turn currently executing through this opened session
+    /// (including its clones) and report how many were signalled.
+    ///
+    /// This is the affordance behind a UI "stop" control: hold a clone of the
+    /// session wherever the stop arrives and call this, instead of threading a
+    /// [`CancellationToken`](crate::CancellationToken) into every turn call
+    /// ([`TurnBuilder::cancel`](crate::TurnBuilder::cancel) remains the
+    /// per-turn hook when you need one). A cancelled turn finishes with
+    /// `TurnOutcome::Stopped(TurnStop::Cancelled)` and commits like any other
+    /// turn; the session stays usable.
+    ///
+    /// Scope: turns started from this `LashSession` instance and its clones.
+    /// A handle opened separately for the same session id has its own
+    /// registry and is not reached.
+    pub fn cancel_running_turns(&self) -> usize {
+        self.turn_cancels.cancel_all()
     }
 
     pub fn control(&self) -> SessionControl {
@@ -472,6 +494,46 @@ impl LashSession {
             .map_err(EmbedError::Runtime)
     }
 
+    /// Resolve once `batch_id` is no longer pending in the queue store —
+    /// drained by whoever runs queued work (a queued-work runner, a durable
+    /// worker, or another handle's [`queued_turn`](Self::queued_turn)) or
+    /// cancelled. This is the enqueue-and-observe side of the queue: the
+    /// caller never claims the work itself.
+    ///
+    /// Completion is read from the persistent queue store, so it observes
+    /// drains performed by other session handles and other processes alike.
+    /// There is no built-in deadline — nothing resolves if nothing drains the
+    /// queue, so bound it with `tokio::time::timeout` when the worker may be
+    /// unavailable. A batch id the store has never seen resolves immediately.
+    pub async fn await_queued_work_batch(&self, batch_id: &str) -> Result<()> {
+        let observation = self.runtime.observe();
+        let store = observation.queue_store.clone().ok_or_else(|| {
+            EmbedError::Runtime(lash_core::RuntimeError::new(
+                lash_core::RuntimeErrorCode::StoreCommitFailed,
+                "queued work inspection requires a persistent runtime store",
+            ))
+        })?;
+        let session_id = observation.session_id().to_string();
+        drop(observation);
+        let mut delay = std::time::Duration::from_millis(25);
+        loop {
+            let pending = store
+                .list_pending_queued_work(&session_id)
+                .await
+                .map_err(|err| {
+                    EmbedError::Runtime(lash_core::RuntimeError::new(
+                        lash_core::RuntimeErrorCode::StoreCommitFailed,
+                        err.to_string(),
+                    ))
+                })?;
+            if !pending.iter().any(|batch| batch.batch_id == batch_id) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_millis(400));
+        }
+    }
+
     pub fn read_view(&self) -> SessionReadView {
         self.runtime.observe().read_view.clone()
     }
@@ -540,7 +602,7 @@ impl ObservableSession {
         self.snapshot().tool_state.clone()
     }
 
-    pub fn active_tool_definitions(&self) -> Vec<ToolManifest> {
+    pub fn active_tool_manifests(&self) -> Vec<ToolManifest> {
         self.snapshot()
             .tool_state
             .as_ref()

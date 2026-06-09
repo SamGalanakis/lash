@@ -1,0 +1,237 @@
+//! Compiled sources for the Rust snippets on `docs/embedding.html`.
+
+use std::sync::Arc;
+
+use lash::plugins::{
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+    runtime_plugin_stack,
+};
+use lash::provider::ProviderHandle;
+use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
+use lash::{LashCore, LashSession, ModeId, ModePreset, SessionSpec, TurnActivity, TurnInput};
+
+struct AppTools;
+
+#[async_trait::async_trait]
+impl ToolProvider for AppTools {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        Vec::new()
+    }
+
+    fn resolve_contract(&self, _name: &str) -> Option<Arc<ToolContract>> {
+        None
+    }
+
+    async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+        ToolResult::ok(serde_json::Value::Null)
+    }
+}
+
+struct AppPlugin;
+
+impl SessionPlugin for AppPlugin {
+    fn id(&self) -> &'static str {
+        "app"
+    }
+
+    fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+struct AppPluginFactory;
+
+impl PluginFactory for AppPluginFactory {
+    fn id(&self) -> &'static str {
+        "app"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(AppPlugin))
+    }
+}
+
+struct CustomBudgetPlugin;
+
+impl PluginFactory for CustomBudgetPlugin {
+    fn id(&self) -> &'static str {
+        "tool_output_budget"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(AppPlugin))
+    }
+}
+
+async fn full_core(provider: ProviderHandle) -> anyhow::Result<()> {
+    // docs:start:full-core
+    use std::sync::Arc;
+
+    use lash::{
+        LashCore, ModeId, ModePreset, TurnEvent, TurnInput, plugins::runtime_plugin_stack, tools::*,
+    };
+
+    let data_dir = std::path::PathBuf::from(".lash-data");
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        data_dir.join("sessions"),
+    ));
+    let artifact_store =
+        Arc::new(lash_sqlite_store::Store::open(&data_dir.join("artifacts.db")).await?);
+
+    let core = LashCore::builder()
+        .install_mode(ModePreset::standard())
+        .install_mode(ModePreset::rlm())
+        .default_mode(ModeId::rlm())
+        .provider(provider)
+        .model(
+            lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
+                .expect("valid model metadata"),
+        )
+        .plugins(runtime_plugin_stack())
+        .tools(Arc::new(AppTools) as Arc<dyn ToolProvider>)
+        .store_factory(store_factory)
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(artifact_store)
+        .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+            data_dir.join("attachments"),
+        )))
+        .build()?;
+
+    let session = core.session("chat-123").rlm().open().await?;
+    let result = session
+        .turn(TurnInput::text("Use the app tools."))
+        .run()
+        .await?;
+    let assistant_text: String = result
+        .activities
+        .iter()
+        .filter_map(|activity| match &activity.event {
+            TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    println!("{assistant_text}");
+    // docs:end:full-core
+    Ok(())
+}
+
+async fn preset_core(provider: ProviderHandle) -> anyhow::Result<()> {
+    // docs:start:preset-core
+    use std::sync::Arc;
+
+    use lash::{
+        LashCore, SessionSpec,
+        plugins::{PluginFactory, runtime_plugin_stack},
+    };
+
+    let root_spec = SessionSpec::new().provider_id(provider.kind()).model(
+        lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
+            .expect("valid model metadata"),
+    );
+
+    let core = LashCore::rlm()
+        .session_spec(root_spec)
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .configure_plugins(|plugins| {
+            plugins.push(Arc::new(AppPluginFactory) as Arc<dyn PluginFactory>);
+        })
+        .build()?;
+    // docs:end:preset-core
+    let _ = core;
+    Ok(())
+}
+
+async fn custom_stack(root_spec: SessionSpec) -> anyhow::Result<()> {
+    // docs:start:custom-stack
+    use std::sync::Arc;
+
+    let plugins = runtime_plugin_stack().configure(|plugins| {
+        plugins.replace(Arc::new(CustomBudgetPlugin) as Arc<dyn PluginFactory>);
+        plugins.push(Arc::new(AppPluginFactory) as Arc<dyn PluginFactory>);
+    });
+
+    let core = LashCore::builder()
+        .install_mode(ModePreset::rlm())
+        .default_mode(ModeId::rlm())
+        .session_spec(root_spec)
+        .plugins(plugins)
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .build()?;
+    // docs:end:custom-stack
+    let _ = core;
+    Ok(())
+}
+
+async fn collected_turn(session: &LashSession) -> anyhow::Result<()> {
+    use lash::TurnEvent;
+    // docs:start:collected-turn
+    let collected = session
+        .turn(TurnInput::text("Summarize this task."))
+        .run()
+        .await?;
+
+    let live_preview: String = collected
+        .activities
+        .iter()
+        .filter_map(|activity| match &activity.event {
+            TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let settled_answer = collected.assistant_message().unwrap_or_default();
+    let total = collected.result.total_usage(); // parent + children
+    let parent_usage = collected.result.usage; // parent's own LLM tokens
+    let children = collected.result.children_usage; // per-(source, model) child entries
+    let outcome = collected.result.outcome;
+    // docs:end:collected-turn
+    Ok(())
+}
+
+struct AppEvents {
+    tx: tokio::sync::mpsc::Sender<TurnActivity>,
+}
+
+impl AppEvents {
+    fn new(tx: tokio::sync::mpsc::Sender<TurnActivity>) -> Self {
+        Self { tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl lash::TurnActivitySink for AppEvents {
+    async fn emit(&self, activity: TurnActivity) {
+        let _ = self.tx.send(activity).await;
+    }
+}
+
+fn persist(_assistant_text: &str, _usage: lash::usage::TokenUsage) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn streamed_turn(
+    session: &LashSession,
+    user_text: String,
+    tx: tokio::sync::mpsc::Sender<TurnActivity>,
+) -> anyhow::Result<()> {
+    // docs:start:streamed-turn
+    let ui_sink = Arc::new(AppEvents::new(tx));
+    let turn = session
+        .turn(TurnInput::text(user_text))
+        .stream_to(ui_sink.as_ref())
+        .await?;
+
+    persist(
+        turn.assistant_message().unwrap_or_default(),
+        turn.total_usage(),
+    )?;
+    // docs:end:streamed-turn
+    Ok(())
+}

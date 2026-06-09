@@ -728,7 +728,7 @@ impl MdRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_support::display_width;
+    use crate::text_layout::display_width;
 
     #[test]
     fn render_plain_text() {

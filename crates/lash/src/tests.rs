@@ -328,8 +328,6 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
         unreachable!("test should fail before committing to the reused child store")
     }
 
-    lash_core::impl_unsupported_queued_work_methods!();
-
     async fn save_session_meta(
         &self,
         _meta: lash_core::SessionMeta,
@@ -924,11 +922,10 @@ fn retry_once_provider() -> ProviderHandle {
         .kind("retry-test")
         .requires_streaming(true)
         .options(lash_core::ProviderOptions {
-            reliability: lash_core::provider::ProviderReliability::builder()
+            reliability: lash_core::provider::ProviderReliability::default()
                 .max_attempts(2)
                 .base_delay_ms(0)
-                .max_delay_ms(0)
-                .build(),
+                .max_delay_ms(0),
             ..lash_core::ProviderOptions::default()
         })
         .complete(move |_request| {

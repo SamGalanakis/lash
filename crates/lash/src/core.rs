@@ -328,11 +328,6 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn mode(mut self, mode: ModeId) -> Self {
-        self.default_mode = Some(mode);
-        self
-    }
-
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
         self.session_spec = self.session_spec.provider_id(provider.kind());
         self.provider = Some(provider);
@@ -423,30 +418,26 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn trace_sink(mut self, trace_sink: Option<Arc<dyn lash_trace::TraceSink>>) -> Self {
-        self.trace_sink = trace_sink;
+    pub fn trace_sink(mut self, trace_sink: Arc<dyn lash_trace::TraceSink>) -> Self {
+        self.trace_sink = Some(trace_sink);
         self
     }
 
-    pub fn trace_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.trace_sink = path.map(|path| {
-            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
-        });
+    pub fn trace_jsonl_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.trace_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(path.into())));
         self
     }
 
     pub fn lashlang_execution_sink(
         mut self,
-        lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+        lashlang_execution_sink: Arc<dyn lash_trace::TraceSink>,
     ) -> Self {
-        self.lashlang_execution_sink = lashlang_execution_sink;
+        self.lashlang_execution_sink = Some(lashlang_execution_sink);
         self
     }
 
-    pub fn lashlang_execution_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.lashlang_execution_sink = path.map(|path| {
-            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
-        });
+    pub fn lashlang_execution_jsonl_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.lashlang_execution_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(path.into())));
         self
     }
 
@@ -581,16 +572,16 @@ impl LashCoreBuilder {
             }
         }
 
-        if let Some(process_registry) = self.process_work_source.process_registry().as_ref() {
-            if process_registry.durability_tier() == DurabilityTier::Durable {
-                if session_store_tier != Some(DurabilityTier::Durable) {
-                    return Err(EmbedError::DurableProcessRegistryRequiresStoreFactory);
-                }
-                if host_event_store_tier != Some(DurabilityTier::Durable) {
-                    return Err(EmbedError::DurableStorePeerRequired {
-                        facet: "host event store",
-                    });
-                }
+        if let Some(process_registry) = self.process_work_source.process_registry().as_ref()
+            && process_registry.durability_tier() == DurabilityTier::Durable
+        {
+            if session_store_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableProcessRegistryRequiresStoreFactory);
+            }
+            if host_event_store_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "host event store",
+                });
             }
         }
 
@@ -825,7 +816,9 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn with_queued_work_runner(mut self, poke: QueuedWorkPoke) -> Self {
+    /// Wire the wake handle of an externally owned queued-work runner. The
+    /// runtime pokes it whenever new queued work lands for a session.
+    pub fn queued_work_poke(mut self, poke: QueuedWorkPoke) -> Self {
         self.queued_work_poke = Some(poke);
         self
     }

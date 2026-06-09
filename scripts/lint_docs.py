@@ -289,7 +289,139 @@ def check_bold_cross_refs(errors: list[str], pages: dict[Path, PageParser]) -> N
                 )
 
 
+SNIPPETS_SRC = ROOT / "examples" / "docs-snippets" / "src"
+REGION_START = re.compile(r"^(\s*)// docs:start:([\w-]+)\s*$")
+PRE_BLOCK = re.compile(r"<pre([^>]*)><code>(.*?)</code></pre>", re.S)
+
+
+def snippet_regions(errors: list[str]) -> dict[str, dict[str, str]]:
+    """Extract `// docs:start:<id>` .. `// docs:end:<id>` regions, dedented by
+    the indentation of their start marker, from the docs-snippets crate."""
+    regions: dict[str, dict[str, str]] = {}
+    for path in sorted(SNIPPETS_SRC.glob("*.rs")):
+        module = path.stem
+        rel = path.relative_to(ROOT).as_posix()
+        current: tuple[str, str, list[str]] | None = None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            started = REGION_START.match(line)
+            if current is None:
+                if started:
+                    current = (started.group(2), started.group(1), [])
+                continue
+            rid, indent, body = current
+            if re.match(rf"^\s*// docs:end:{re.escape(rid)}\s*$", line):
+                text = "\n".join(
+                    l[len(indent):] if l.startswith(indent) else l for l in body
+                )
+                if rid in regions.get(module, {}):
+                    errors.append(f"{rel}: duplicate snippet region {rid!r}")
+                regions.setdefault(module, {})[rid] = text.strip("\n")
+                current = None
+            elif started:
+                errors.append(f"{rel}: region {rid!r} not closed before {started.group(2)!r}")
+            else:
+                body.append(line)
+        if current is not None:
+            errors.append(f"{rel}: unterminated snippet region {current[0]!r}")
+    return regions
+
+
+def check_code_snippets(errors: list[str], fix: bool) -> None:
+    """Every `<pre>` on a published page declares what it is: `data-snippet`
+    blocks mirror a compiled region of the docs-snippets crate verbatim
+    (`cargo check -p docs-snippets` keeps them building); `data-lang` blocks
+    are display-only (shell transcripts, Lashlang, API-shape excerpts)."""
+    regions = snippet_regions(errors)
+    referenced: set[str] = set()
+    for path in sorted(DOCS.glob("*.html")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = path.read_text(encoding="utf-8")
+        changed = False
+
+        def replace(m: re.Match[str]) -> str:
+            nonlocal changed
+            attrs, body = m.group(1), m.group(2)
+            snippet = re.search(r'data-snippet="([^"]+)"', attrs)
+            if snippet is None:
+                if not re.search(r'data-lang="[^"]+"', attrs):
+                    errors.append(
+                        f"{rel}: <pre> needs data-snippet (compiled, synced) or data-lang (display-only)"
+                    )
+                return m.group(0)
+            ref = snippet.group(1)
+            module, _, rid = ref.partition("#")
+            source = regions.get(module, {}).get(rid)
+            if source is None:
+                errors.append(
+                    f"{rel}: data-snippet {ref!r} has no region in examples/docs-snippets/src/{module}.rs"
+                )
+                return m.group(0)
+            referenced.add(ref)
+            if html.unescape(body).strip("\n") != source:
+                if fix:
+                    changed = True
+                    return f"<pre{attrs}><code>{html.escape(source, quote=False)}</code></pre>"
+                errors.append(
+                    f"{rel}: <pre data-snippet={ref!r}> drifted from examples/docs-snippets/src/{module}.rs"
+                    " (run scripts/lint_docs.py --fix-snippets)"
+                )
+            return m.group(0)
+
+        new_text = PRE_BLOCK.sub(replace, text)
+        if fix and changed:
+            path.write_text(new_text, encoding="utf-8")
+
+    check_readme_snippets(errors, regions, referenced, fix)
+
+    for module, by_id in sorted(regions.items()):
+        for rid in sorted(by_id):
+            if f"{module}#{rid}" not in referenced:
+                errors.append(
+                    f"examples/docs-snippets/src/{module}.rs: region {rid!r} is not embedded by any docs page"
+                )
+
+
+# README ```rust fences, in document order, mirror these compiled regions.
+README_SNIPPETS = ["index#hello-lash"]
+
+
+def check_readme_snippets(
+    errors: list[str],
+    regions: dict[str, dict[str, str]],
+    referenced: set[str],
+    fix: bool,
+) -> None:
+    readme = ROOT / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    fences = list(re.finditer(r"```rust\n(.*?)```\n", text, re.S))
+    if len(fences) != len(README_SNIPPETS):
+        errors.append(
+            f"README.md: expected {len(README_SNIPPETS)} ```rust fences (see README_SNIPPETS in scripts/lint_docs.py), found {len(fences)}"
+        )
+        return
+    changed = False
+    for fence, ref in zip(reversed(fences), reversed(README_SNIPPETS)):
+        module, _, rid = ref.partition("#")
+        source = regions.get(module, {}).get(rid)
+        if source is None:
+            errors.append(f"README.md: snippet ref {ref!r} has no region in examples/docs-snippets/src/{module}.rs")
+            continue
+        referenced.add(ref)
+        if fence.group(1).strip("\n") != source:
+            if fix:
+                text = text[: fence.start(1)] + source + "\n" + text[fence.end(1) :]
+                changed = True
+            else:
+                errors.append(
+                    f"README.md: ```rust fence drifted from examples/docs-snippets/src/{module}.rs region {rid!r}"
+                    " (run scripts/lint_docs.py --fix-snippets)"
+                )
+    if changed:
+        readme.write_text(text, encoding="utf-8")
+
+
 def main() -> int:
+    fix = "--fix-snippets" in sys.argv[1:]
     errors: list[str] = []
     pages = parse_pages()
     canonical = check_registry(errors, pages)
@@ -297,6 +429,7 @@ def main() -> int:
     check_asset_versions(errors, pages)
     check_pagers(errors, canonical, pages)
     check_bold_cross_refs(errors, pages)
+    check_code_snippets(errors, fix)
     if errors:
         for err in errors:
             print(f"docs lint: {err}", file=sys.stderr)

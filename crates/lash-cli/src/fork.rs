@@ -7,8 +7,8 @@ use lash_core::store::SessionHead;
 use lash_sqlite_store::Store;
 
 use crate::persistence::persist_committed_runtime_state;
-use crate::session_bootstrap::SessionBootstrap;
 use crate::session_log::SessionLogger;
+use crate::startup::session::SessionBootstrap;
 
 async fn persist_parent_root_snapshot(session: &lash::LashSession, store: &Store) -> Result<()> {
     let mut state = session

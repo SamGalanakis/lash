@@ -436,7 +436,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
         tokio::fs::write(&prompt_path, &prompt)
             .await
             .map_err(lash_harness_opt::HarnessOptError::Io)?;
-        let effect_host = session.effect_host().await;
+        let effect_host = session.effect_host();
         let scoped_effect_controller = effect_host
             .scoped(lash::runtime::EffectScope::turn(
                 session.session_id(),

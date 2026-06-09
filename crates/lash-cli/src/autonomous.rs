@@ -144,7 +144,7 @@ impl AutonomousRenderer {
 
 struct AutonomousTurnOutcome {
     done: crate::turn_runner::RuntimeRunResult,
-    cancel: tokio_util::sync::CancellationToken,
+    cancel: lash::CancellationToken,
 }
 
 async fn run_autonomous_turn(

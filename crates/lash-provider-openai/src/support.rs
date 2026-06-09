@@ -15,6 +15,7 @@ pub(crate) use lash_core::llm::types::{
 // assertions (the request/response shapes that exercise the shared Responses
 // input builder), so gate the re-export to test builds to keep the non-test
 // lib free of unused-import warnings.
+pub(crate) use crate::schema::{OpenAiSchemaProfile, model_id, responses_error_is_retryable};
 #[cfg(test)]
 pub(crate) use lash_core::llm::types::ResponseTextMeta;
 pub(crate) use lash_core::provider::{
@@ -29,7 +30,6 @@ pub(crate) use lash_llm_transport::timeouts::{
 pub(crate) use lash_llm_transport::util::{
     OPENAI_IMAGE_MIMES, emit_provider_trace, extract_error_detail,
 };
-pub(crate) use lash_openai_schema::{OpenAiSchemaProfile, model_id, responses_error_is_retryable};
 
 pub(crate) use crate::chat::*;
 pub(crate) use crate::common::*;

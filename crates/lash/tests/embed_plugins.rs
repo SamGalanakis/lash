@@ -317,7 +317,7 @@ async fn sessions_without_typed_plugin_install_do_not_get_inactive_fallback_tool
 
     let definitions = session
         .tools()
-        .active_definitions()
+        .active_manifests()
         .await
         .expect("definitions");
 

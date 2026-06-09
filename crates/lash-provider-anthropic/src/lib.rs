@@ -192,7 +192,7 @@ mod tests {
 
         let exposed = AnthropicProvider::new("key")
             .with_options(ProviderOptions {
-                thinking: lash_core::provider::ProviderThinkingPolicy { expose: true },
+                expose_thinking: true,
                 ..ProviderOptions::default()
             })
             .build_request_body(&req)

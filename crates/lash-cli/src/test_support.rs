@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 use crate::app::{App, PreparedTurn, PromptState};
 use crate::overlay::PromptFocus;
 use crate::prompt_model::{PromptRequest, PromptResponse};
+use crate::render;
+use crate::ui_effects::apply_ui_host_effects;
 use crate::ui_trace::{TraceRepoStatus, render_screen_snapshot};
-use crate::{apply_ui_host_effects, render};
 
 pub(crate) fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

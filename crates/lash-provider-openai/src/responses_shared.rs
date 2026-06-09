@@ -26,6 +26,10 @@ use base64::Engine;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use crate::schema::{
+    OpenAiSchemaProfile, SchemaProjectionError, project_schema, project_structured_output,
+    project_tool_parameters, responses_error_is_retryable,
+};
 use lash_core::SchemaProjectionOverride;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
 use lash_core::llm::types::{
@@ -34,10 +38,6 @@ use lash_core::llm::types::{
     ResponseTextMeta,
 };
 use lash_llm_transport::util::parse_i64;
-use lash_openai_schema::{
-    OpenAiSchemaProfile, SchemaProjectionError, project_schema, project_structured_output,
-    project_tool_parameters, responses_error_is_retryable,
-};
 
 // ---------------------------------------------------------------------------
 // Request-building primitives

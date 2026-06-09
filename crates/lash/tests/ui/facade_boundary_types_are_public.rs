@@ -19,10 +19,7 @@ use lash::plugins::{
     PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContribution,
     ToolSurfaceOverride,
 };
-use lash::provider::{
-    ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder, ProviderRetryPolicy,
-    ProviderTimeoutPolicy,
-};
+use lash::provider::{ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy};
 use lash::runtime::AdvancedLashCoreBuilder;
 use lash::tools::{ToolActivation, ToolAgentSurface, ToolCallRecord, ToolOutputContract};
 use lash::turn::{AssistantOutput, TurnIssue};
@@ -65,8 +62,6 @@ impl RuntimePersistence for FacadeStore {
             manifest,
         })
     }
-
-    lash::impl_unsupported_queued_work_methods!();
 
     async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
         Ok(())
@@ -211,16 +206,44 @@ fn turn_result_detail_types_are_nameable(
 
 fn provider_reliability_types_are_nameable(
     reliability: ProviderReliability,
-    builder: ProviderReliabilityBuilder,
     retry: ProviderRetryPolicy,
-    timeouts: ProviderTimeoutPolicy,
     rate_limits: ProviderRateLimitPolicy,
 ) {
-    let _ = (reliability, builder, retry, timeouts, rate_limits);
+    let _ = (reliability, retry, rate_limits);
 }
 
 fn model_spec_types_are_nameable(spec: ModelSpec, limits: ModelLimits) {
     let _ = (spec, limits);
+}
+
+fn cancellation_token_is_at_root(token: lash::CancellationToken, session: &lash::LashSession) {
+    token.cancel();
+    let _: usize = session.cancel_running_turns();
+}
+
+async fn queued_work_wait_is_nameable(session: &lash::LashSession) -> lash::Result<()> {
+    session.await_queued_work_batch("qwb:batch").await
+}
+
+fn observation_types_are_homed_in_observe(
+    cursor: lash::observe::SessionCursor,
+    observation: lash::observe::SessionObservation,
+    resume: lash::observe::SessionResume,
+    revision: lash::observe::SessionRevision,
+) {
+    let _ = (cursor, observation, resume, revision);
+}
+
+fn host_event_types_are_homed_in_host_events(
+    event: lash::host_events::HostEvent,
+    report: lash::host_events::HostEventEmitReport,
+    registration: lash::host_events::TriggerRegistration,
+    source_type: lash::host_events::TriggerSourceType,
+    filter: lash::host_events::TriggerSubscriptionFilter,
+    target: lash::host_events::TriggerTargetSummary,
+) {
+    let _ = (event, report, registration, source_type, filter, target);
+    let _ = lash::host_events::empty_host_event_source_key("ui.button.pressed");
 }
 
 async fn persistence_load_helpers_are_nameable(
@@ -250,4 +273,8 @@ fn main() {
     let _ = provider_reliability_types_are_nameable;
     let _ = model_spec_types_are_nameable;
     let _ = persistence_load_helpers_are_nameable;
+    let _ = observation_types_are_homed_in_observe;
+    let _ = host_event_types_are_homed_in_host_events;
+    let _ = cancellation_token_is_at_root;
+    let _ = queued_work_wait_is_nameable;
 }

@@ -61,7 +61,7 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Providers</h2>
-            <p>Four first-party provider crates ship five provider kinds: <code>lash-provider-openai</code> (direct <code>openai</code> Responses plus <code>openai-compatible</code> Chat Completions), <code>lash-provider-codex</code> (<code>codex</code> OAuth device-code flow), <code>lash-provider-anthropic</code> (<code>anthropic</code>), and <code>lash-provider-google</code> (<code>google_oauth</code>). They share one runtime interface (<code>ProviderHandle</code>) but own their own auth, readiness, model policy, transport, and cache-marker placement.</p>
+            <p>Three first-party provider crates ship five provider kinds: <code>lash-provider-openai</code> (direct <code>openai</code> Responses, <code>openai-compatible</code> Chat Completions, and the <code>codex</code> OAuth device-code flow), <code>lash-provider-anthropic</code> (<code>anthropic</code>), and <code>lash-provider-google</code> (<code>google_oauth</code>). They share one runtime interface (<code>ProviderHandle</code>) but own their own auth, readiness, model policy, transport, and cache-marker placement.</p>
           </div>
           <p>See the <a href="./providers.html">Providers chapter</a> for the OpenAI Responses vs Chat split, Anthropic <code>cache_control</code> placement rules, RLM prompt-cache strategy, normalized <code>LlmUsage</code> shape, and the components needed to add a new provider.</p>
         </div>

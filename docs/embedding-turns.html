@@ -32,7 +32,7 @@
           </div>
           <div class="diagram">
             <div class="diagram-title">TurnOutcome shape</div>
-            <pre><code>pub enum TurnOutcome {
+            <pre data-lang="rust"><code>pub enum TurnOutcome {
     Finished(TurnFinish),
     AgentFrameSwitch { frame_id: String },
     Stopped(TurnStop),
@@ -66,16 +66,12 @@ pub enum TurnFinish {
           </div>
           <p>Host-driven stops are recoverable next request. Provider stops usually want a different model or shorter context. Runtime stops indicate a configuration or authoring problem. <code>RuntimeError</code> is the only category where identical-input retry is unlikely to help.</p>
           <p>CAS commit conflicts are <em>not</em> a <code>Stopped</code> variant — they surface as <code>Err</code> from <code>run()</code>/<code>stream()</code>, no partial commit. See <a href="./persistence.html#cas-conflicts">Persistence → Concurrent Writes And CAS</a>.</p>
-          <pre><code>use lash::runtime::{TurnOutcome, TurnStop};
-
-match result.outcome {
+          <pre data-lang="rust" data-snippet="embedding_turns#outcome-match"><code>match result.outcome {
     TurnOutcome::Finished(finish) =&gt; persist_terminal(finish)?,
-    TurnOutcome::AgentFrameSwitch { frame_id } =&gt; record_frame_boundary(frame_id)?,
+    TurnOutcome::AgentFrameSwitch { frame_id, .. } =&gt; record_frame_boundary(frame_id)?,
     TurnOutcome::Stopped(stop) =&gt; match stop {
-        TurnStop::Cancelled
-        | TurnStop::InvalidInput =&gt; report_user_visible(stop),
-        TurnStop::ProviderError
-        | TurnStop::Incomplete =&gt; offer_retry(stop),
+        TurnStop::Cancelled | TurnStop::InvalidInput =&gt; report_user_visible(stop),
+        TurnStop::ProviderError | TurnStop::Incomplete =&gt; offer_retry(stop),
         TurnStop::MaxTurns =&gt; suggest_higher_max_turns(),
         other =&gt; record_for_diagnosis(other),
     },
@@ -108,7 +104,7 @@ match result.outcome {
           </div>
           <div class="diagram">
             <div class="diagram-title">TurnActivity sink</div>
-            <pre><code>use async_trait::async_trait;
+            <pre data-lang="rust" data-snippet="embedding_turns#ui-sink"><code>use async_trait::async_trait;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent};
 
 struct AppEvents {
@@ -145,14 +141,25 @@ impl TurnActivitySink for AppEvents {
                     .insert(correlation_id, row);
             }
             TurnEvent::ToolCallCompleted { name, output, .. } =&gt; {
-                let row = self.turn_state.lock().unwrap().tools.remove(&amp;correlation_id);
+                let row = self
+                    .turn_state
+                    .lock()
+                    .unwrap()
+                    .tools
+                    .remove(&amp;correlation_id);
                 update_or_insert_tool_row(row, name, output).await;
             }
-            TurnEvent::CodeBlockStarted { language, code } =&gt; {
+            TurnEvent::CodeBlockStarted { language, code, .. } =&gt; {
                 let row = insert_code_row(language, code).await;
                 self.turn_state.lock().unwrap().code = Some(row);
             }
-            TurnEvent::CodeBlockCompleted { language, output, error, success, .. } =&gt; {
+            TurnEvent::CodeBlockCompleted {
+                language,
+                output,
+                error,
+                success,
+                ..
+            } =&gt; {
                 let row = self.turn_state.lock().unwrap().code.take();
                 update_or_insert_code_row(row, language, output, error, success).await;
             }
@@ -163,14 +170,20 @@ impl TurnActivitySink for AppEvents {
                 append_live_text(render_terminal_value(&amp;value)).await;
                 record_terminal_tool(tool_name).await;
             }
-            TurnEvent::Usage { usage, cumulative, .. } =&gt; {
+            TurnEvent::Usage {
+                usage, cumulative, ..
+            } =&gt; {
                 update_usage(usage, cumulative).await;
             }
-            TurnEvent::ChildUsage { source, usage, cumulative, .. } =&gt; {
+            TurnEvent::ChildUsage {
+                source,
+                usage,
+                cumulative,
+                ..
+            } =&gt; {
                 update_child_usage(source, usage, cumulative).await;
             }
-            TurnEvent::Error { .. }
-            | _ =&gt; {}
+            _ =&gt; {}
         }
     }
 }
@@ -195,9 +208,11 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
             <p><code>TurnActivitySink::emit()</code> is awaited by the runtime. A slow sink slows the turn. No buffering, no spawn-and-drop. Sinks own their own concurrency.</p>
           </div>
           <p>Conventional pattern: push onto an <code>mpsc</code> channel and return immediately; drain into UI state from a separate task. <code>Sender::send</code> only awaits when full — the channel bound is the backpressure dial:</p>
-          <pre><code>use tokio::sync::mpsc;
+          <pre data-lang="rust" data-snippet="embedding_turns#channel-sink"><code>use tokio::sync::mpsc;
 
-struct ChannelSink { tx: mpsc::Sender&lt;TurnActivity&gt; }
+struct ChannelSink {
+    tx: mpsc::Sender&lt;TurnActivity&gt;,
+}
 
 #[async_trait::async_trait]
 impl TurnActivitySink for ChannelSink {
@@ -208,6 +223,36 @@ impl TurnActivitySink for ChannelSink {
     }
 }</code></pre>
           <p>Sink panics or <code>Err</code>-shaped activities do not abort the turn. Persistence and <code>TurnOutput.activities</code> are independent of the sink — a dropped sink loses no activity.</p>
+        </div>
+
+        <div class="section" id="cancellation">
+          <div class="section-header">
+            <h2>Cancellation</h2>
+            <p>Cancellation is cooperative and first-class: a cancelled turn finishes with <code>TurnOutcome::Stopped(TurnStop::Cancelled)</code>, commits like any other turn, and leaves the session ready for the next turn. In-flight provider streaming is aborted, not awaited.</p>
+          </div>
+          <p>Two tiers. <code>TurnBuilder::cancel(token)</code> attaches a caller-owned <code>CancellationToken</code> (re-exported at the crate root — no <code>tokio-util</code> dependency needed) to one turn. <code>LashSession::cancel_running_turns()</code> cancels everything currently executing through that opened session and its clones — the affordance behind a UI stop button, with no token threading. It returns how many turns were signalled; a handle opened separately for the same session id is not reached.</p>
+          <pre data-lang="rust" data-snippet="embedding_turns#cancel-turn"><code>use lash::CancellationToken;
+use lash::runtime::{TurnOutcome, TurnStop};
+
+// Per-turn token: hand it to whatever can decide to stop the turn
+// (an HTTP handler, a keybinding, a timeout task).
+let cancel = CancellationToken::new();
+let stream = session
+    .turn(TurnInput::text("Summarize the incident."))
+    .cancel(cancel.clone())
+    .stream()?;
+// elsewhere: cancel.cancel();
+
+// Or skip token plumbing entirely: any clone of the opened session can
+// stop whatever it is currently running.
+let stopper = session.clone();
+let cancelled_turns = stopper.cancel_running_turns();
+
+let result = stream.finish().await?;
+if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
+    // The turn committed as cancelled; the session is ready for the
+    // next turn.
+}</code></pre>
         </div>
 
         <div class="section" id="token-usage">
@@ -236,7 +281,7 @@ impl TurnActivitySink for ChannelSink {
           <div class="two-col">
             <article class="panel">
               <h3>Per-turn RLM options</h3>
-              <pre><code>use lash::modes::RlmTurnBuilderExt as _;
+              <pre data-lang="rust" data-snippet="embedding_turns#rlm-terminal-contracts"><code>use lash::modes::RlmTurnBuilderExt as _;
 
 let submitted = session
     .turn(TurnInput::text("Move on the board."))
@@ -252,26 +297,18 @@ let prose_or_submit = session
             </article>
             <article class="panel">
               <h3>Outcome shape</h3>
-              <pre><code>use lash::runtime::{TurnFinish, TurnOutcome};
-
-match result.outcome {
-    TurnOutcome::Finished(
-        TurnFinish::SubmittedValue { value }
-    ) =&gt; {
+              <pre data-lang="rust" data-snippet="embedding_turns#terminal-value-match"><code>match result.outcome {
+    TurnOutcome::Finished(TurnFinish::SubmittedValue { value }) =&gt; {
         // Same value already arrived as TurnEvent::SubmittedValue.
         persist_typed_value(value)?;
     }
-    TurnOutcome::Finished(
-        TurnFinish::AssistantMessage { text }
-    ) =&gt; persist_text(text)?,
+    TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) =&gt; persist_text(text)?,
     other =&gt; handle_other_outcome(other)?,
 }</code></pre>
             </article>
           </div>
           <p>Use <code>require_submit_schema(...)</code> when the submitted value must match a JSON Schema. Use <code>RlmSessionBuilderExt::final_answer_format(...)</code> to set the session's normal submit presentation: root RLM sessions default to Markdown guidance, managed child sessions default to raw submit values, and schema-required turns ignore the presentation preference.</p>
-          <pre><code>use lash::modes::{
-    RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _,
-};
+          <pre data-lang="rust" data-snippet="embedding_turns#submit-schema"><code>use lash::modes::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
 let session = core
     .session("analysis")

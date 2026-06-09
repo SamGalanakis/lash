@@ -7,13 +7,17 @@ use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_tui::Terminal;
 
 use crate::app::App;
-use crate::model_catalog::CachedModelCatalog;
-use crate::setup;
-use crate::{
+use crate::execution_settings::{
     ensure_supported_execution_mode, execution_mode_label, execution_mode_usage,
-    parse_execution_mode, parse_model_selection, provider_display_label, push_system_message,
-    resolve_model_selection, resolve_model_variant, validate_model_selection, variant_lines,
+    parse_execution_mode,
 };
+use crate::model_catalog::CachedModelCatalog;
+use crate::model_selection::{
+    parse_model_selection, provider_display_label, resolve_model_selection, resolve_model_variant,
+    validate_model_selection, variant_lines,
+};
+use crate::startup::onboarding;
+use crate::ui_effects::push_system_message;
 
 fn save_model_default(
     app: &mut App,
@@ -261,7 +265,7 @@ pub(super) async fn handle_change_provider(
 
     terminal.restore();
     let existing_cfg = LashConfig::load(&crate::paths::config_file());
-    let setup_result = setup::run_setup_with_existing(existing_cfg.as_ref()).await;
+    let setup_result = onboarding::run_setup_with_existing(existing_cfg.as_ref()).await;
     *terminal = Terminal::enter()?;
     paused.store(false, Ordering::Relaxed);
 
@@ -295,7 +299,7 @@ pub(super) async fn handle_change_provider(
                     format!("Provider updated, but saving config failed: {}", e),
                 );
             }
-            crate::expose_provider_thinking(&mut new_provider);
+            crate::model_selection::expose_provider_thinking(&mut new_provider);
             *provider = new_provider;
             if let Err(err) = model_catalog
                 .refresh_if_stale(crate::model_catalog::DEFAULT_REFRESH_INTERVAL)

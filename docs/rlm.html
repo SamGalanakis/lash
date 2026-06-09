@@ -66,7 +66,7 @@
         <h2>Minimal Example</h2>
         <p>Install the RLM mode and runtime plugin stack, then open the session in RLM mode.</p>
       </div>
-<pre data-lang="rust"><code>use std::sync::Arc;
+<pre data-lang="rust" data-snippet="rlm#rlm-core"><code>use std::sync::Arc;
 
 use lash::{LashCore, ModeId, ModePreset, TurnInput};
 
@@ -75,15 +75,22 @@ let core = LashCore::builder()
     .default_mode(ModeId::rlm())
     .plugins(lash::plugins::runtime_plugin_stack())
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits(model_id, None, 200_000, None, None)?)
+    .model(
+        lash::ModelSpec::from_token_limits(model_id, None, 200_000, None)
+            .expect("valid model metadata"),
+    )
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;
 
 let session = core.session("task-42").rlm().open().await?;
 let output = session
-    .turn(TurnInput::text("Inspect the task and submit a concise result."))
+    .turn(TurnInput::text(
+        "Inspect the task and submit a concise result.",
+    ))
     .run()
     .await?;</code></pre>
       <p>For a complete core/provider setup, start from <a href="./quickstart.html#minimal-example">Quickstart</a> and switch the mode to RLM.</p>

@@ -12,6 +12,10 @@ use lash_core::runtime::{
     ProcessHandleGrantEntry, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
     QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem,
 };
+use lash_core::store::queued_work::{
+    ClaimCandidate, QueuedWorkClaimLease, claim_scan_limit, derive_batch_id, renewed_claim,
+    select_claim_prefix,
+};
 use lash_core::store::{
     GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, RuntimeCommit,
     RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
@@ -680,11 +684,9 @@ async fn load_graph(
         let json: String = row.get(0);
         nodes.push(store_decode_json(&json, "session graph node")?);
     }
-    if active_path {
-        if let Some(leaf) = leaf_node_id.clone() {
-            let wanted = active_path_node_ids(&nodes, &leaf);
-            nodes.retain(|node| wanted.contains(&node.node_id));
-        }
+    if active_path && let Some(leaf) = leaf_node_id.clone() {
+        let wanted = active_path_node_ids(&nodes, &leaf);
+        nodes.retain(|node| wanted.contains(&node.node_id));
     }
     Ok(lash_core::SessionGraph::from_nodes(nodes, leaf_node_id))
 }
@@ -1353,10 +1355,7 @@ impl RuntimePersistence for PostgresSessionStore {
             }
         }
         let now = current_epoch_ms();
-        let batch_id = format!(
-            "qwb:{:x}",
-            Sha256::digest(format!("{}:{:?}:{now}", batch.session_id, batch.source_key).as_bytes())
-        );
+        let batch_id = derive_batch_id(&batch.session_id, batch.source_key.as_deref(), now, None);
         let row = sqlx::query_scalar::<_, i64>(
             "INSERT INTO lash_queued_work_batches (
                 batch_id, session_id, source_key, delivery_policy, slot_policy,
@@ -1425,59 +1424,32 @@ impl RuntimePersistence for PostgresSessionStore {
         )
         .bind(session_id)
         .bind(now as i64)
-        .bind((max_batches as i64).saturating_add(32))
+        .bind(claim_scan_limit(max_batches))
         .fetch_all(&mut *tx)
         .await
         .map_err(store_sqlx_error)?;
-        let mut candidates = Vec::new();
-        for row in rows {
-            candidates.push(queued_batch_row(row)?);
-        }
-        let Some(first_row) = candidates.first() else {
-            tx.commit().await.map_err(store_sqlx_error)?;
-            return Ok(None);
-        };
-        if boundary == QueuedWorkClaimBoundary::ActiveTurnCheckpoint
-            && first_row.delivery_policy != DeliveryPolicy::EarliestSafeBoundary
-        {
-            tx.commit().await.map_err(store_sqlx_error)?;
-            return Ok(None);
-        }
-        let first_slot = first_row.slot_policy;
-        let first_delivery = first_row.delivery_policy;
-        let first_merge = first_row.merge_key.clone();
         let mut selected = Vec::new();
-        for row in candidates {
-            if selected.len() >= max_batches {
-                break;
-            }
-            if selected.is_empty() {
-                selected.push(row);
-                if first_slot == SlotPolicy::Exclusive {
-                    break;
-                }
-                continue;
-            }
-            if first_slot != SlotPolicy::Join
-                || row.slot_policy != SlotPolicy::Join
-                || row.delivery_policy != first_delivery
-                || row.merge_key != first_merge
-            {
-                break;
-            }
-            selected.push(row);
+        for row in rows {
+            selected.push(queued_batch_row(row)?);
         }
-        let Some(first) = selected.first() else {
+        let candidates = selected
+            .iter()
+            .map(|row| ClaimCandidate {
+                enqueue_seq: row.enqueue_seq,
+                claim_fencing_token: row.claim_fencing_token,
+                delivery_policy: row.delivery_policy,
+                slot_policy: row.slot_policy,
+                merge_key: row.merge_key.clone(),
+            })
+            .collect::<Vec<_>>();
+        let selected_len = select_claim_prefix(&candidates, boundary, max_batches);
+        if selected_len == 0 {
             tx.commit().await.map_err(store_sqlx_error)?;
             return Ok(None);
-        };
-        let fencing_token = first.claim_fencing_token.saturating_add(1);
-        let claim_id = format!("qwc:{}:{fencing_token}", first.enqueue_seq);
-        let lease_token = format!(
-            "{:x}",
-            Sha256::digest(format!("{session_id}:{owner_id}:{claim_id}:{now}").as_bytes())
-        );
-        let expires_at = now.saturating_add(lease_ttl_ms);
+        }
+        selected.truncate(selected_len);
+        let lease =
+            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner_id, now, lease_ttl_ms);
         for row in &selected {
             let changed = sqlx::query(
                 "UPDATE lash_queued_work_batches
@@ -1493,11 +1465,11 @@ impl RuntimePersistence for PostgresSessionStore {
             )
             .bind(session_id)
             .bind(&row.batch_id)
-            .bind(&claim_id)
+            .bind(&lease.claim_id)
             .bind(owner_id)
-            .bind(&lease_token)
+            .bind(&lease.lease_token)
             .bind(now as i64)
-            .bind(expires_at as i64)
+            .bind(lease.expires_at_epoch_ms as i64)
             .execute(&mut *tx)
             .await
             .map_err(store_sqlx_error)?
@@ -1514,12 +1486,12 @@ impl RuntimePersistence for PostgresSessionStore {
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(Some(QueuedWorkClaim {
             session_id: session_id.to_string(),
-            claim_id,
+            claim_id: lease.claim_id,
             owner_id: owner_id.to_string(),
-            lease_token,
-            fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: expires_at,
+            lease_token: lease.lease_token,
+            fencing_token: lease.fencing_token,
+            claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
+            expires_at_epoch_ms: lease.expires_at_epoch_ms,
             batches,
         }))
     }
@@ -1543,16 +1515,7 @@ impl RuntimePersistence for PostgresSessionStore {
         .await
         .map_err(store_sqlx_error)?
         .rows_affected();
-        if changed as usize != claim.batches.len() {
-            return Err(StoreError::QueuedWorkClaimExpired {
-                session_id: claim.session_id.clone(),
-                claim_id: claim.claim_id.clone(),
-            });
-        }
-        Ok(QueuedWorkClaim {
-            expires_at_epoch_ms: expires_at,
-            ..claim.clone()
-        })
+        renewed_claim(claim, changed as usize, expires_at)
     }
 
     async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {

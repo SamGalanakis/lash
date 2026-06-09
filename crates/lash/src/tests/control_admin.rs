@@ -114,7 +114,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     session
         .control()
         .commands()
-        .refresh_tool_surface("control admin test", None, "control-admin-refresh")
+        .refresh_tool_surface("control admin test", "control-admin-refresh")
         .await?;
     session.process_control().await_all().await?;
     assert!(session.process_control().list().await?.is_empty());
@@ -261,11 +261,11 @@ async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
 
     let first = session
         .commands()
-        .refresh_tool_surface("test refresh", None, "same-refresh")
+        .refresh_tool_surface("test refresh", "same-refresh")
         .await?;
     let second = session
         .commands()
-        .refresh_tool_surface("test refresh", None, "same-refresh")
+        .refresh_tool_surface("test refresh", "same-refresh")
         .await?;
 
     assert_eq!(first.batch_id, second.batch_id);
@@ -461,7 +461,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         let _ = session.read_view();
         let _ = session.usage_report();
         let _ = session.control().tools().state().await?;
-        let _ = session.control().tools().active_definitions().await?;
+        let _ = session.control().tools().active_manifests().await?;
         let _ = session.process_control().list().await?;
         Result::<()>::Ok(())
     })

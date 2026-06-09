@@ -32,7 +32,7 @@
             <p><code>LashRuntime.state</code> (<code>RuntimeSessionState</code>) is a <strong>rehydratable working copy</strong>, not a source of truth. It is loaded via <code>RuntimePersistence::load_session</code> and refreshed via <code>refresh_session_graph_from_store</code>; <code>Residency</code> controls whether a load rehydrates the full graph or just the active path.</p>
           </div>
           <p>The other in-memory fields on <code>LashRuntime</code> are either ephemeral per-turn accumulators (<code>shared_token_ledger</code>, drained into <code>state</code> at commit) or per-worker coordination (<code>managed_sessions</code>, <code>managed_turns</code> — what <em>this</em> instance is currently running). None of it is durable truth.</p>
-          <p>Durable truth lives behind a single trait, <code>RuntimePersistence</code> (<code>crates/lash-core/src/store.rs</code>), whose surface is exactly a durable-object store:</p>
+          <p>Durable truth lives behind a single trait, <code>RuntimePersistence</code> (<code>crates/lash-core/src/store/mod.rs</code>), whose surface is exactly a durable-object store:</p>
           <ul class="bullets">
             <li><code>load_session</code>, <code>load_node</code> — rehydrate working state.</li>
             <li><code>commit_runtime_state</code> — <strong>compare-and-swap (CAS)</strong> on the session's revision: a worker commits only if the session is unchanged since it loaded; a losing writer reloads and retries. No worker "owns" or locks the session.</li>
@@ -92,8 +92,8 @@ flowchart LR
               <thead><tr><th>Primitive</th><th>Role</th><th>Where</th></tr></thead>
               <tbody>
                 <tr><td><code>lash-sansio</code> pure <code>TurnMachine</code></td><td>compute is deterministic <code>(state, input) → (state, effects)</code></td><td><code>crates/lash-sansio</code></td></tr>
-                <tr><td><code>RuntimePersistence</code></td><td>the single durable store seam; backend-swappable</td><td><code>store.rs</code>, conformance suite</td></tr>
-                <tr><td><code>commit_runtime_state</code> CAS on <code>session_head</code></td><td>optimistic concurrency for many writers</td><td><code>store.rs</code></td></tr>
+                <tr><td><code>RuntimePersistence</code></td><td>the single durable store seam; backend-swappable</td><td><code>store/mod.rs</code>, conformance suite</td></tr>
+                <tr><td><code>commit_runtime_state</code> CAS on <code>session_head</code></td><td>optimistic concurrency for many writers</td><td><code>store/mod.rs</code></td></tr>
                 <tr><td>queue with claim + fencing tokens</td><td>exactly-once work pickup by any worker</td><td><code>queued_work_batches</code></td></tr>
                 <tr><td>effect replay keys + <code>lash-restate</code></td><td>re-run a turn on another worker, replay effects</td><td><code>crates/lash-restate</code></td></tr>
                 <tr><td><code>lash-postgres-store</code> + <code>lash-s3-store</code></td><td>networked runtime/process/host-event/artifact state plus content-addressed attachment bytes</td><td><code>crates/lash-postgres-store</code>, <code>crates/lash-s3-store</code></td></tr>

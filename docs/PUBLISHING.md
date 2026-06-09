@@ -10,11 +10,11 @@ publishes them all together, in dependency order.
 - **Published:** every workspace member without `publish = false`. The public
   entry point is `lash-runtime` (imported as `lash`); embedders also pull in
   provider crates (`lash-provider-*`), stores (`lash-sqlite-store`,
-  `lash-postgres-store`, `lash-s3-store`, `lash-local-store`,
+  `lash-postgres-store`, `lash-s3-store`,
   `lash-restate`), the remote-embedding DTOs (`lash-remote-protocol`), and
-  a-la-carte capability crates (`lash-plugin-mcp`, `lash-subagents`,
-  `lash-plugin-plan-mode`, `lash-plugin-tool-output-budget`,
-  `lash-llm-tools`).
+  a-la-carte capability crates (`lash-tools`, `lash-plugin-mcp`,
+  `lash-subagents`, `lash-plugin-plan-mode`,
+  `lash-plugin-tool-output-budget`, `lash-llm-tools`).
 - **Not published:** anything marked `publish = false` — the CLI (`lash-cli`),
   TUI crates, examples, E2E harnesses, and dev/internal tooling
   (`lash-harness-opt`, `lash-trace-viewer`, `lash-export`,
@@ -51,6 +51,19 @@ python3 scripts/test_publish_workspace.py
 
 Those tests pin the lockstep/private-crate version behavior and the publisher's
 transient retry classification.
+
+## Docs code snippets
+
+Every Rust code block on a published docs page is compiled. The sources live in
+`examples/docs-snippets/` (one module per page) inside
+`// docs:start:<id>` / `// docs:end:<id>` regions, and each page block carries
+`<pre data-snippet="<module>#<id>">`. CI runs
+`cargo check -p docs-snippets --locked` (snippets must build against the
+current API) and `python3 scripts/lint_docs.py` (the HTML must match the
+regions byte-for-byte). To change a snippet, edit the `.rs` source and run
+`python3 scripts/lint_docs.py --fix-snippets` to re-inject the HTML (and the
+README hero block). Display-only blocks (shell transcripts, Lashlang, API-shape
+excerpts) are marked `data-lang="..."` instead.
 
 ## Auth
 

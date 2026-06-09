@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::{App, PreparedTurn};
 use crate::prompt_model::{PromptRequest, PromptSelectionMode};
+use crate::render::{self, compositor};
 use crate::repo_status::RepoStatus;
-use crate::{render, scratch_tui};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct UiTraceFixture {
@@ -300,14 +300,14 @@ pub(crate) fn render_screen_snapshot_with_perf(
     height: u16,
     previous: Option<&ScreenSnapshot>,
 ) -> (ScreenSnapshot, PerfCounters) {
-    scratch_tui::sync_chrome_turn_status(app);
+    compositor::sync_chrome_turn_status(app);
     let viewport_height = render::history_viewport_height(app, width, height);
     let viewport_width = width as usize;
     app.ensure_height_cache_pub(viewport_width, viewport_height);
     app.refresh_scroll_position(viewport_width, viewport_height);
     app.history_area = render::history_area(app, width, height);
     lash_tui::render_snapshot_with_perf(width, height, previous, |frame| {
-        scratch_tui::draw(frame, app);
+        compositor::draw(frame, app);
     })
 }
 

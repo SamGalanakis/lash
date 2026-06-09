@@ -196,12 +196,13 @@ submit "registered"
         }
 
         fn register(&self, reg: &mut PluginRegistrar) -> std::result::Result<(), PluginError> {
-            reg.host_events().declare(crate::HostEvent::new(
-                "Button",
-                "ui.button",
-                "pressed",
-                button_pressed_event_type(),
-            ))?;
+            reg.host_events()
+                .declare(crate::host_events::HostEvent::new(
+                    "Button",
+                    "ui.button",
+                    "pressed",
+                    button_pressed_event_type(),
+                ))?;
             Ok(())
         }
     }
@@ -390,7 +391,7 @@ submit "registered"
         );
         core.host_events()
             .emit(
-                crate::HostEventOccurrenceRequest::new(
+                crate::host_events::HostEventOccurrenceRequest::new(
                     "clock.Alarm",
                     handle.source_key.clone(),
                     payload,
@@ -467,13 +468,13 @@ submit "registered"
         )
         .await;
 
-        let source_key =
-            crate::empty_host_event_source_key("ui.button.pressed").expect("button source key");
+        let source_key = crate::host_events::empty_host_event_source_key("ui.button.pressed")
+            .expect("button source key");
         let idempotency_key = "runtime-rebuild-host-event";
         let report = core
             .host_events()
             .emit(
-                crate::HostEventOccurrenceRequest::new(
+                crate::host_events::HostEventOccurrenceRequest::new(
                     "ui.button.pressed",
                     source_key,
                     serde_json::json!({

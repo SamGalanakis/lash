@@ -463,14 +463,15 @@ impl SessionGraphCache {
         if let Some(event) = node.event() {
             Arc::make_mut(&mut self.active_events).push(event.clone());
         }
-        if let Some(message) = node.message() {
-            if !message.is_transient() && !self.active_message_ids.contains_key(&message.id) {
-                let messages = Arc::make_mut(&mut self.active_messages);
-                self.active_message_ids
-                    .insert(message.id.clone(), messages.len());
-                messages.push(message);
-                self.prompt_render_cache = Arc::new(BaseRenderCache::new());
-            }
+        if let Some(message) = node.message()
+            && !message.is_transient()
+            && !self.active_message_ids.contains_key(&message.id)
+        {
+            let messages = Arc::make_mut(&mut self.active_messages);
+            self.active_message_ids
+                .insert(message.id.clone(), messages.len());
+            messages.push(message);
+            self.prompt_render_cache = Arc::new(BaseRenderCache::new());
         }
     }
 
@@ -1095,10 +1096,11 @@ fn push_active_read_node(
     if let Some(event) = node.event() {
         active_events.push(event.clone());
     }
-    if let Some(message) = node.message() {
-        if !message.is_transient() && active_message_ids.insert(message.id.clone()) {
-            active_messages.push(message);
-        }
+    if let Some(message) = node.message()
+        && !message.is_transient()
+        && active_message_ids.insert(message.id.clone())
+    {
+        active_messages.push(message);
     }
 }
 

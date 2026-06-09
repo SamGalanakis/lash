@@ -1,0 +1,45 @@
+[package]
+name = "lash-perf"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "Developer-only performance harness for the Lash runtime. Not shipped."
+
+[features]
+default = []
+# Use the dhat heap profiler as the global allocator so the harness can emit
+# dhat heap profiles. Without it the harness uses stats_alloc and reports
+# allocation counters instead.
+dhat-heap = ["dep:dhat"]
+fff-zlob = ["lash-standard-plugins/fff-zlob"]
+
+[lib]
+name = "lash_perf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lash-perf"
+path = "src/main.rs"
+
+[dependencies]
+lash-core = { workspace = true, features = ["testing"] }
+lash = { workspace = true }
+lash-llm-tools = { workspace = true }
+lash-plugin-observational-memory = { workspace = true }
+lash-protocol-rlm = { workspace = true }
+lash-provider-openai = { workspace = true }
+lash-rlm-types = { workspace = true }
+lash-sqlite-store = { workspace = true }
+lash-standard-plugins = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+stats_alloc = "0.1"
+dhat = { version = "0.3", optional = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }

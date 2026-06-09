@@ -8,18 +8,10 @@ use crate::lexer::Span;
 use crate::tracking::{
     LashlangAstPath, LashlangExecutionContext, LashlangExecutionSiteBuilder, ProcessBranchSelection,
 };
-use crate::{LinkedModule, ModuleArtifact, ModuleRef, ProcessRef};
+use crate::{ModuleArtifact, ModuleRef, ProcessRef};
 
 pub fn static_graph_json(program: &Program, module_ref: impl Into<String>) -> Value {
-    static_graph_for_program(program, module_ref.into(), &BTreeMap::new())
-}
-
-pub fn linked_static_graph_json(linked: &LinkedModule) -> Value {
-    static_graph_for_program(
-        linked.program(),
-        linked.module_ref.to_string(),
-        &linked.artifact.exports.processes,
-    )
+    static_graph_for_program(program, module_ref.into())
 }
 
 pub(crate) fn static_graph_json_for_module_ref(
@@ -42,11 +34,7 @@ pub(crate) fn static_graph_json_without_ir(module_ref: impl Into<String>) -> Val
     })
 }
 
-fn static_graph_for_program(
-    program: &Program,
-    module_ref: String,
-    process_refs: &BTreeMap<String, ProcessRef>,
-) -> Value {
+fn static_graph_for_program(program: &Program, module_ref: String) -> Value {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
@@ -54,19 +42,9 @@ fn static_graph_for_program(
         let span = program.declaration_spans.get(index).copied();
         match declaration {
             Declaration::Process(process) => {
-                let process_id = process_refs
-                    .get(process.name.as_str())
-                    .map(process_node_id)
-                    .unwrap_or_else(|| format!("process:{}", process.name));
+                let process_id = format!("process:{}", process.name);
                 nodes.push(node(&process_id, "process", process.name.as_str(), span));
-                collect_expr_graph(
-                    &process.body,
-                    &process_id,
-                    span,
-                    process_refs,
-                    &mut nodes,
-                    &mut edges,
-                );
+                collect_expr_graph(&process.body, &process_id, span, &mut nodes, &mut edges);
             }
             Declaration::Type(type_decl) => {
                 nodes.push(node(
@@ -84,14 +62,7 @@ fn static_graph_for_program(
         .first()
         .copied()
         .or_else(|| program.declaration_spans.last().copied());
-    collect_expr_graph(
-        &program.main,
-        "main",
-        main_span,
-        process_refs,
-        &mut nodes,
-        &mut edges,
-    );
+    collect_expr_graph(&program.main, "main", main_span, &mut nodes, &mut edges);
 
     json!({
         "module_ref": module_ref,
@@ -104,19 +75,15 @@ fn collect_expr_graph(
     expr: &Expr,
     owner: &str,
     span: Option<Span>,
-    process_refs: &BTreeMap<String, ProcessRef>,
     nodes: &mut Vec<Value>,
     edges: &mut Vec<Value>,
 ) {
     match expr {
         Expr::StartProcess(start) => {
-            let target = process_refs
-                .get(start.process.as_str())
-                .map(process_node_id)
-                .unwrap_or_else(|| format!("process:{}", start.process));
+            let target = format!("process:{}", start.process);
             edges.push(edge(owner, &target, "starts", span));
             for child in expr.children() {
-                collect_expr_graph(child, owner, span, process_refs, nodes, edges);
+                collect_expr_graph(child, owner, span, nodes, edges);
             }
         }
         Expr::SleepFor(_) => {
@@ -124,7 +91,7 @@ fn collect_expr_graph(
             nodes.push(node(&sleep_id, "sleep", "sleep for", span));
             edges.push(edge(owner, &sleep_id, "sleeps", span));
             for child in expr.children() {
-                collect_expr_graph(child, &sleep_id, span, process_refs, nodes, edges);
+                collect_expr_graph(child, &sleep_id, span, nodes, edges);
             }
         }
         Expr::SleepUntil(_) => {
@@ -132,7 +99,7 @@ fn collect_expr_graph(
             nodes.push(node(&sleep_id, "sleep", "sleep until", span));
             edges.push(edge(owner, &sleep_id, "sleeps", span));
             for child in expr.children() {
-                collect_expr_graph(child, &sleep_id, span, process_refs, nodes, edges);
+                collect_expr_graph(child, &sleep_id, span, nodes, edges);
             }
         }
         Expr::WaitSignal => {
@@ -145,7 +112,7 @@ fn collect_expr_graph(
             nodes.push(node(&signal_id, "signal", "signal run", span));
             edges.push(edge(owner, &signal_id, "signals", span));
             for child in expr.children() {
-                collect_expr_graph(child, &signal_id, span, process_refs, nodes, edges);
+                collect_expr_graph(child, &signal_id, span, nodes, edges);
             }
         }
         Expr::ReceiverCall { operation, .. } => {
@@ -153,7 +120,7 @@ fn collect_expr_graph(
             nodes.push(node(&op_id, "resource_operation", operation.as_str(), span));
             edges.push(edge(owner, &op_id, "calls", span));
             for child in expr.children() {
-                collect_expr_graph(child, owner, span, process_refs, nodes, edges);
+                collect_expr_graph(child, owner, span, nodes, edges);
             }
         }
         Expr::ResourceRef(resource) => {
@@ -169,21 +136,21 @@ fn collect_expr_graph(
             let branch_id = format!("{owner}:branch:{}", nodes.len());
             nodes.push(node(&branch_id, "branch", "if", span));
             edges.push(edge(owner, &branch_id, "branches", span));
-            collect_expr_graph(condition, &branch_id, span, process_refs, nodes, edges);
-            collect_expr_graph(then_block, &branch_id, span, process_refs, nodes, edges);
-            collect_expr_graph(else_block, &branch_id, span, process_refs, nodes, edges);
+            collect_expr_graph(condition, &branch_id, span, nodes, edges);
+            collect_expr_graph(then_block, &branch_id, span, nodes, edges);
+            collect_expr_graph(else_block, &branch_id, span, nodes, edges);
         }
         Expr::Finish(expr) | Expr::Submit(expr) => {
             let terminal_id = format!("{owner}:terminal:{}", nodes.len());
             nodes.push(node(&terminal_id, "terminal", "result", span));
             edges.push(edge(owner, terminal_id, "terminates", span));
             if let Some(expr) = expr {
-                collect_expr_graph(expr, owner, span, process_refs, nodes, edges);
+                collect_expr_graph(expr, owner, span, nodes, edges);
             }
         }
         _ => {
             for child in expr.children() {
-                collect_expr_graph(child, owner, span, process_refs, nodes, edges);
+                collect_expr_graph(child, owner, span, nodes, edges);
             }
         }
     }
@@ -229,10 +196,6 @@ fn span_value(span: Option<Span>) -> Value {
 
 fn resource_node_id(resource: &ResourceRefExpr) -> String {
     format!("resource:{}", resource.path_string())
-}
-
-fn process_node_id(process_ref: &ProcessRef) -> String {
-    format!("process:{}:{}", process_ref.component, process_ref.pos)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,0 +1,297 @@
+//! Compiled sources for the Rust snippets on `docs/embedding-turns.html`.
+
+use lash::runtime::{TurnFinish, TurnOutcome, TurnStop};
+use lash::{LashCore, LashSession, TurnInput, TurnResult};
+
+fn persist_terminal(_finish: TurnFinish) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn record_frame_boundary(_frame_id: String) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn report_user_visible(_stop: TurnStop) {}
+
+fn offer_retry(_stop: TurnStop) {}
+
+fn suggest_higher_max_turns() {}
+
+fn record_for_diagnosis(_stop: TurnStop) {}
+
+fn outcome_match(result: TurnResult) -> anyhow::Result<()> {
+    // docs:start:outcome-match
+    match result.outcome {
+        TurnOutcome::Finished(finish) => persist_terminal(finish)?,
+        TurnOutcome::AgentFrameSwitch { frame_id, .. } => record_frame_boundary(frame_id)?,
+        TurnOutcome::Stopped(stop) => match stop {
+            TurnStop::Cancelled | TurnStop::InvalidInput => report_user_visible(stop),
+            TurnStop::ProviderError | TurnStop::Incomplete => offer_retry(stop),
+            TurnStop::MaxTurns => suggest_higher_max_turns(),
+            other => record_for_diagnosis(other),
+        },
+    }
+    // docs:end:outcome-match
+    Ok(())
+}
+
+type AppUiTx = tokio::sync::mpsc::Sender<String>;
+
+/// Opaque row handle in the host UI; cheap to clone, not Copy.
+#[derive(Clone)]
+struct UiRowId;
+
+async fn append_live_text(_text: String) {}
+
+async fn upsert_reasoning_row(_row: Option<UiRowId>, _text: String) -> UiRowId {
+    UiRowId
+}
+
+async fn insert_tool_row(_name: String, _args: serde_json::Value) -> UiRowId {
+    UiRowId
+}
+
+async fn update_or_insert_tool_row(
+    _row: Option<UiRowId>,
+    _name: String,
+    _output: lash::tools::ToolCallOutput,
+) {
+}
+
+async fn insert_code_row(_language: String, _code: String) -> UiRowId {
+    UiRowId
+}
+
+async fn update_or_insert_code_row(
+    _row: Option<UiRowId>,
+    _language: String,
+    _output: String,
+    _error: Option<String>,
+    _success: bool,
+) {
+}
+
+async fn record_terminal_tool(_tool_name: String) {}
+
+async fn update_usage(_usage: lash::usage::TokenUsage, _cumulative: lash::usage::TokenUsage) {}
+
+async fn update_child_usage(
+    _source: String,
+    _usage: lash::usage::TokenUsage,
+    _cumulative: lash::usage::TokenUsage,
+) {
+}
+
+// docs:start:ui-sink
+use async_trait::async_trait;
+use lash::{TurnActivity, TurnActivitySink, TurnEvent};
+
+struct AppEvents {
+    tx: AppUiTx,
+    turn_state: std::sync::Mutex<TurnUiState>,
+}
+
+#[derive(Default)]
+struct TurnUiState {
+    reasoning: Option<UiRowId>,
+    tools: std::collections::HashMap<String, UiRowId>,
+    code: Option<UiRowId>,
+}
+
+#[async_trait]
+impl TurnActivitySink for AppEvents {
+    async fn emit(&self, activity: TurnActivity) {
+        let correlation_id = activity.correlation_id.0.clone();
+        match activity.event {
+            TurnEvent::AssistantProseDelta { text } => {
+                append_live_text(text).await;
+            }
+            TurnEvent::ReasoningDelta { text } => {
+                let row = self.turn_state.lock().unwrap().reasoning.clone();
+                let row = upsert_reasoning_row(row, text).await;
+                self.turn_state.lock().unwrap().reasoning = Some(row);
+            }
+            TurnEvent::ToolCallStarted { name, args, .. } => {
+                let row = insert_tool_row(name, args).await;
+                self.turn_state
+                    .lock()
+                    .unwrap()
+                    .tools
+                    .insert(correlation_id, row);
+            }
+            TurnEvent::ToolCallCompleted { name, output, .. } => {
+                let row = self
+                    .turn_state
+                    .lock()
+                    .unwrap()
+                    .tools
+                    .remove(&correlation_id);
+                update_or_insert_tool_row(row, name, output).await;
+            }
+            TurnEvent::CodeBlockStarted { language, code, .. } => {
+                let row = insert_code_row(language, code).await;
+                self.turn_state.lock().unwrap().code = Some(row);
+            }
+            TurnEvent::CodeBlockCompleted {
+                language,
+                output,
+                error,
+                success,
+                ..
+            } => {
+                let row = self.turn_state.lock().unwrap().code.take();
+                update_or_insert_code_row(row, language, output, error, success).await;
+            }
+            TurnEvent::SubmittedValue { value } => {
+                append_live_text(render_terminal_value(&value)).await;
+            }
+            TurnEvent::ToolValue { tool_name, value } => {
+                append_live_text(render_terminal_value(&value)).await;
+                record_terminal_tool(tool_name).await;
+            }
+            TurnEvent::Usage {
+                usage, cumulative, ..
+            } => {
+                update_usage(usage, cumulative).await;
+            }
+            TurnEvent::ChildUsage {
+                source,
+                usage,
+                cumulative,
+                ..
+            } => {
+                update_child_usage(source, usage, cumulative).await;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn render_terminal_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+// docs:end:ui-sink
+
+// docs:start:channel-sink
+use tokio::sync::mpsc;
+
+struct ChannelSink {
+    tx: mpsc::Sender<TurnActivity>,
+}
+
+#[async_trait::async_trait]
+impl TurnActivitySink for ChannelSink {
+    async fn emit(&self, activity: TurnActivity) {
+        // send().await yields when the channel is full — the turn
+        // will pause here if your UI consumer falls behind.
+        let _ = self.tx.send(activity).await;
+    }
+}
+// docs:end:channel-sink
+
+async fn rlm_terminal_contracts(
+    session: &LashSession,
+    sink: lash::runtime::NoopTurnActivitySink,
+) -> anyhow::Result<()> {
+    // docs:start:rlm-terminal-contracts
+    use lash::modes::RlmTurnBuilderExt as _;
+
+    let submitted = session
+        .turn(TurnInput::text("Move on the board."))
+        .require_submit()?
+        .stream_to(&sink)
+        .await?;
+
+    let prose_or_submit = session
+        .turn(TurnInput::text("Answer directly if no code is needed."))
+        .allow_prose_or_submit()?
+        .run()
+        .await?;
+    // docs:end:rlm-terminal-contracts
+    Ok(())
+}
+
+async fn cancel_turn(session: &LashSession) -> anyhow::Result<()> {
+    // docs:start:cancel-turn
+    use lash::CancellationToken;
+    use lash::runtime::{TurnOutcome, TurnStop};
+
+    // Per-turn token: hand it to whatever can decide to stop the turn
+    // (an HTTP handler, a keybinding, a timeout task).
+    let cancel = CancellationToken::new();
+    let stream = session
+        .turn(TurnInput::text("Summarize the incident."))
+        .cancel(cancel.clone())
+        .stream()?;
+    // elsewhere: cancel.cancel();
+
+    // Or skip token plumbing entirely: any clone of the opened session can
+    // stop whatever it is currently running.
+    let stopper = session.clone();
+    let cancelled_turns = stopper.cancel_running_turns();
+
+    let result = stream.finish().await?;
+    if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
+        // The turn committed as cancelled; the session is ready for the
+        // next turn.
+    }
+    // docs:end:cancel-turn
+    Ok(())
+}
+
+fn persist_typed_value(_value: serde_json::Value) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn persist_text(_text: String) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn handle_other_outcome(_outcome: TurnOutcome) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn terminal_value_match(result: TurnResult) -> anyhow::Result<()> {
+    // docs:start:terminal-value-match
+    match result.outcome {
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { value }) => {
+            // Same value already arrived as TurnEvent::SubmittedValue.
+            persist_typed_value(value)?;
+        }
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) => persist_text(text)?,
+        other => handle_other_outcome(other)?,
+    }
+    // docs:end:terminal-value-match
+    Ok(())
+}
+
+async fn submit_schema(core: &LashCore) -> anyhow::Result<()> {
+    // docs:start:submit-schema
+    use lash::modes::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
+
+    let session = core
+        .session("analysis")
+        .rlm()
+        .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
+        .open()
+        .await?;
+
+    let result = session
+        .turn(TurnInput::text("Return a risk rating."))
+        .require_submit_schema(serde_json::json!({
+            "type": "object",
+            "required": ["rating"],
+            "properties": {
+                "rating": { "type": "string" }
+            },
+            "additionalProperties": false
+        }))?
+        .run()
+        .await?;
+    // docs:end:submit-schema
+    Ok(())
+}

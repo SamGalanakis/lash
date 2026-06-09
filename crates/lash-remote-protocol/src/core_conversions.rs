@@ -1,3 +1,8 @@
+//! Drift guard convention: conversions exhaustively destructure their source
+//! (struct patterns without `..`, enum matches without catch-all `_` arms) so
+//! a new field on either side fails compilation here instead of silently
+//! dropping off the wire.
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Write;
@@ -14,17 +19,15 @@ use super::*;
 
 impl From<RemoteProtocolTurnOptions> for lash_core::ProtocolTurnOptions {
     fn from(value: RemoteProtocolTurnOptions) -> Self {
-        Self {
-            payload: value.payload,
-        }
+        let RemoteProtocolTurnOptions { payload } = value;
+        Self { payload }
     }
 }
 
 impl From<lash_core::ProtocolTurnOptions> for RemoteProtocolTurnOptions {
     fn from(value: lash_core::ProtocolTurnOptions) -> Self {
-        Self {
-            payload: value.payload,
-        }
+        let lash_core::ProtocolTurnOptions { payload } = value;
+        Self { payload }
     }
 }
 
@@ -33,64 +36,101 @@ impl TryFrom<RemoteHostEventOccurrenceRequest> for lash_core::HostEventOccurrenc
 
     fn try_from(value: RemoteHostEventOccurrenceRequest) -> Result<Self, Self::Error> {
         value.validate()?;
+        let RemoteHostEventOccurrenceRequest {
+            protocol_version: _,
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
+            source,
+        } = value;
         let mut request = lash_core::HostEventOccurrenceRequest::new(
-            value.source_type,
-            value.source_key,
-            value.payload,
-            value.idempotency_key,
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
         );
-        request.source = value.source;
+        request.source = source;
         Ok(request)
     }
 }
 
 impl From<lash_core::HostEventOccurrenceRequest> for RemoteHostEventOccurrenceRequest {
     fn from(value: lash_core::HostEventOccurrenceRequest) -> Self {
+        let lash_core::HostEventOccurrenceRequest {
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
+            source,
+        } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            source_type: value.source_type,
-            source_key: value.source_key,
-            payload: value.payload,
-            idempotency_key: value.idempotency_key,
-            source: value.source,
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
+            source,
         }
     }
 }
 
 impl From<lash_core::HostEventOccurrenceRecord> for RemoteHostEventOccurrenceRecord {
     fn from(value: lash_core::HostEventOccurrenceRecord) -> Self {
+        let lash_core::HostEventOccurrenceRecord {
+            occurrence_id,
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
+            source,
+            occurred_at_ms,
+        } = value;
         Self {
-            occurrence_id: value.occurrence_id,
-            source_type: value.source_type,
-            source_key: value.source_key,
-            payload: value.payload,
-            idempotency_key: value.idempotency_key,
-            source: value.source,
-            occurred_at_ms: value.occurred_at_ms,
+            occurrence_id,
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
+            source,
+            occurred_at_ms,
         }
     }
 }
 
 impl From<RemoteHostEventOccurrenceRecord> for lash_core::HostEventOccurrenceRecord {
     fn from(value: RemoteHostEventOccurrenceRecord) -> Self {
+        let RemoteHostEventOccurrenceRecord {
+            occurrence_id,
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
+            source,
+            occurred_at_ms,
+        } = value;
         Self {
-            occurrence_id: value.occurrence_id,
-            source_type: value.source_type,
-            source_key: value.source_key,
-            payload: value.payload,
-            idempotency_key: value.idempotency_key,
-            source: value.source,
-            occurred_at_ms: value.occurred_at_ms,
+            occurrence_id,
+            source_type,
+            source_key,
+            payload,
+            idempotency_key,
+            source,
+            occurred_at_ms,
         }
     }
 }
 
 impl From<lash_core::HostEventEmitReport> for RemoteHostEventEmitReport {
     fn from(value: lash_core::HostEventEmitReport) -> Self {
+        let lash_core::HostEventEmitReport {
+            occurrence_id,
+            started_process_ids,
+        } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            occurrence_id: value.occurrence_id,
-            started_process_ids: value.started_process_ids,
+            occurrence_id,
+            started_process_ids,
         }
     }
 }
@@ -100,9 +140,14 @@ impl TryFrom<RemoteHostEventEmitReport> for lash_core::HostEventEmitReport {
 
     fn try_from(value: RemoteHostEventEmitReport) -> Result<Self, Self::Error> {
         value.validate()?;
+        let RemoteHostEventEmitReport {
+            protocol_version: _,
+            occurrence_id,
+            started_process_ids,
+        } = value;
         Ok(Self {
-            occurrence_id: value.occurrence_id,
-            started_process_ids: value.started_process_ids,
+            occurrence_id,
+            started_process_ids,
         })
     }
 }
@@ -112,8 +157,17 @@ impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscription
 
     fn try_from(value: RemoteTriggerSubscriptionFilter) -> Result<Self, Self::Error> {
         value.validate()?;
-        let target = value
-            .target
+        let RemoteTriggerSubscriptionFilter {
+            protocol_version: _,
+            session_id,
+            handle,
+            name,
+            source_type,
+            source_key,
+            target,
+            enabled,
+        } = value;
+        let target = target
             .map(serde_json::from_value)
             .transpose()
             .map_err(|err| RemoteProtocolError::InvalidEnvelope {
@@ -121,48 +175,68 @@ impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscription
                 message: format!("invalid target identity: {err}"),
             })?;
         Ok(Self {
-            session_id: value.session_id,
-            handle: value.handle,
-            name: value.name,
-            source_type: value.source_type,
-            source_key: value.source_key,
+            session_id,
+            handle,
+            name,
+            source_type,
+            source_key,
             target,
-            enabled: value.enabled,
+            enabled,
         })
     }
 }
 
 impl From<lash_core::TriggerSubscriptionFilter> for RemoteTriggerSubscriptionFilter {
     fn from(value: lash_core::TriggerSubscriptionFilter) -> Self {
+        let lash_core::TriggerSubscriptionFilter {
+            session_id,
+            handle,
+            name,
+            source_type,
+            source_key,
+            target,
+            enabled,
+        } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            session_id: value.session_id,
-            handle: value.handle,
-            name: value.name,
-            source_type: value.source_type,
-            source_key: value.source_key,
-            target: value
-                .target
+            session_id,
+            handle,
+            name,
+            source_type,
+            source_key,
+            target: target
                 .map(|target| serde_json::to_value(target).expect("target identity serializes")),
-            enabled: value.enabled,
+            enabled,
         }
     }
 }
 
 impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
     fn from(value: lash_core::TriggerRegistration) -> Self {
+        let lash_core::TriggerRegistration {
+            handle,
+            source_key,
+            name,
+            source_type,
+            source,
+            target,
+            enabled,
+        } = value;
+        let lash_core::TriggerTargetSummary {
+            process_name,
+            inputs,
+        } = target;
         Self {
-            handle: value.handle,
-            source_key: value.source_key,
-            name: value.name,
-            source_type: value.source_type.to_string(),
-            source: value.source,
+            handle,
+            source_key,
+            name,
+            source_type: source_type.to_string(),
+            source,
             target: RemoteTriggerTargetSummary {
-                process_name: value.target.process_name,
-                inputs: serde_json::to_value(value.target.inputs)
-                    .expect("trigger input template serializes"),
+                process_name,
+                inputs: serde_json::to_value(inputs).expect("trigger input template serializes"),
             },
-            enabled: value.enabled,
+            enabled,
         }
     }
 }
@@ -171,23 +245,35 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
     type Error = RemoteProtocolError;
 
     fn try_from(value: RemoteTriggerRegistration) -> Result<Self, Self::Error> {
-        let inputs = serde_json::from_value(value.target.inputs).map_err(|err| {
-            RemoteProtocolError::InvalidEnvelope {
+        let RemoteTriggerRegistration {
+            handle,
+            source_key,
+            name,
+            source_type,
+            source,
+            target,
+            enabled,
+        } = value;
+        let RemoteTriggerTargetSummary {
+            process_name,
+            inputs,
+        } = target;
+        let inputs =
+            serde_json::from_value(inputs).map_err(|err| RemoteProtocolError::InvalidEnvelope {
                 type_name: "RemoteTriggerTargetSummary",
                 message: format!("invalid input template: {err}"),
-            }
-        })?;
+            })?;
         Ok(Self {
-            handle: value.handle,
-            source_key: value.source_key,
-            name: value.name,
-            source_type: lash_core::TriggerSourceType::new(value.source_type),
-            source: value.source,
+            handle,
+            source_key,
+            name,
+            source_type: lash_core::TriggerSourceType::new(source_type),
+            source,
             target: lash_core::TriggerTargetSummary {
-                process_name: value.target.process_name,
+                process_name,
                 inputs,
             },
-            enabled: value.enabled,
+            enabled,
         })
     }
 }
@@ -289,8 +375,16 @@ impl TryFrom<RemoteTurnInput> for lash_core::TurnInput {
 
     fn try_from(value: RemoteTurnInput) -> Result<Self, Self::Error> {
         value.validate()?;
+        let RemoteTurnInput {
+            protocol_version: _,
+            items,
+            image_blobs_base64,
+            protocol_turn_options,
+            trace_turn_id,
+            prompt_layer,
+        } = value;
         let mut image_blobs = HashMap::new();
-        for (id, encoded) in value.image_blobs_base64 {
+        for (id, encoded) in image_blobs_base64 {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded.as_bytes())
                 .map_err(|err| RemoteProtocolError::InvalidImageBlob {
@@ -299,11 +393,11 @@ impl TryFrom<RemoteTurnInput> for lash_core::TurnInput {
                 })?;
             image_blobs.insert(id, bytes);
         }
-        let mut input = lash_core::TurnInput::items(value.items.into_iter().map(Into::into));
+        let mut input = lash_core::TurnInput::items(items.into_iter().map(Into::into));
         input.image_blobs = image_blobs;
-        input.protocol_turn_options = value.protocol_turn_options.map(Into::into);
-        input.trace_turn_id = value.trace_turn_id;
-        if let Some(prompt_layer) = value.prompt_layer {
+        input.protocol_turn_options = protocol_turn_options.map(Into::into);
+        input.trace_turn_id = trace_turn_id;
+        if let Some(prompt_layer) = prompt_layer {
             input.turn_context.set_prompt_layer(prompt_layer.into());
         }
         Ok(input)
@@ -315,7 +409,19 @@ impl TryFrom<RemoteTurnRequest> for lash_core::TurnInput {
 
     fn try_from(value: RemoteTurnRequest) -> Result<Self, Self::Error> {
         value.validate()?;
-        value.input.try_into()
+        // Identity/routing fields are consumed by the transport layer, not the
+        // core turn input; tool grants and model intent are applied separately.
+        let RemoteTurnRequest {
+            protocol_version: _,
+            session_id: _,
+            turn_id: _,
+            idempotency_key: _,
+            input,
+            tool_grants: _,
+            model_intent: _,
+            metadata: _,
+        } = value;
+        input.try_into()
     }
 }
 
@@ -323,39 +429,48 @@ impl TryFrom<lash_core::TurnInput> for RemoteTurnInput {
     type Error = RemoteProtocolError;
 
     fn try_from(value: lash_core::TurnInput) -> Result<Self, Self::Error> {
-        if value.protocol_extension.is_some() {
+        // `turn_context` has private internals and is inspected through
+        // accessors below; new TurnContext fields are not guarded here.
+        let lash_core::TurnInput {
+            items,
+            image_blobs,
+            protocol_turn_options,
+            trace_turn_id,
+            protocol_extension,
+            turn_context,
+        } = value;
+        if protocol_extension.is_some() {
             return Err(RemoteProtocolError::NonRemoteSafeTurnInput(
                 "live protocol turn extensions cannot cross a remote boundary".to_string(),
             ));
         }
-        if value.turn_context.has_live_plugin_inputs() {
+        if turn_context.has_live_plugin_inputs() {
             return Err(RemoteProtocolError::NonRemoteSafeTurnInput(format!(
                 "live plugin turn inputs cannot cross a remote boundary: {:?}",
-                value.turn_context.live_plugin_input_ids()
+                turn_context.live_plugin_input_ids()
             )));
         }
-        if value.turn_context.provider().is_some() {
+        if turn_context.provider().is_some() {
             return Err(RemoteProtocolError::NonRemoteSafeTurnInput(
                 "per-turn provider overrides cannot cross a remote boundary".to_string(),
             ));
         }
-        if value.turn_context.model_spec().is_some() {
+        if turn_context.model_spec().is_some() {
             return Err(RemoteProtocolError::NonRemoteSafeTurnInput(
                 "per-turn model overrides cannot cross a remote boundary".to_string(),
             ));
         }
-        let prompt_layer = (!value.turn_context.prompt_layer().is_empty())
-            .then(|| RemotePromptLayer::from(value.turn_context.prompt_layer().clone()));
+        let prompt_layer = (!turn_context.prompt_layer().is_empty())
+            .then(|| RemotePromptLayer::from(turn_context.prompt_layer().clone()));
         Ok(Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            items: value.items.into_iter().map(Into::into).collect(),
-            image_blobs_base64: value
-                .image_blobs
+            items: items.into_iter().map(Into::into).collect(),
+            image_blobs_base64: image_blobs
                 .into_iter()
                 .map(|(id, bytes)| (id, base64::engine::general_purpose::STANDARD.encode(bytes)))
                 .collect(),
-            protocol_turn_options: value.protocol_turn_options.map(Into::into),
-            trace_turn_id: value.trace_turn_id,
+            protocol_turn_options: protocol_turn_options.map(Into::into),
+            trace_turn_id,
             prompt_layer,
         })
     }
@@ -381,23 +496,36 @@ impl From<lash_core::InputItem> for RemoteInputItem {
 
 impl RemoteLlmRequest {
     pub fn from_core(request_id: impl Into<String>, value: core_llm::LlmRequest) -> Self {
+        let core_llm::LlmRequest {
+            model,
+            messages,
+            attachments,
+            tools,
+            tool_choice,
+            model_variant,
+            generation,
+            session_id,
+            output_spec,
+            stream_events: _,
+            provider_trace: _,
+        } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             request_id: request_id.into(),
             model_intent: RemoteModelIntent {
-                model: value.model,
-                variant: value.model_variant,
+                model,
+                variant: model_variant,
                 provider: None,
                 metadata: HashMap::new(),
             },
-            messages: value.messages.into_iter().map(Into::into).collect(),
-            attachments: value.attachments.into_iter().map(Into::into).collect(),
-            tools: value.tools.iter().cloned().map(Into::into).collect(),
-            tool_choice: value.tool_choice.into(),
-            output_spec: value.output_spec.map(Into::into),
-            generation: value.generation.into(),
+            messages: messages.into_iter().map(Into::into).collect(),
+            attachments: attachments.into_iter().map(Into::into).collect(),
+            tools: tools.iter().cloned().map(Into::into).collect(),
+            tool_choice: tool_choice.into(),
+            output_spec: output_spec.map(Into::into),
+            generation: generation.into(),
             request_metadata: RemoteLlmRequestMetadata {
-                session_id: value.session_id,
+                session_id,
                 idempotency_key: None,
                 trace_id: None,
             },
@@ -411,20 +539,43 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
 
     fn try_from(value: RemoteLlmRequest) -> Result<Self, Self::Error> {
         value.validate()?;
+        let RemoteLlmRequest {
+            protocol_version: _,
+            request_id: _,
+            model_intent,
+            messages,
+            attachments,
+            tools,
+            tool_choice,
+            output_spec,
+            generation,
+            request_metadata,
+            metadata: _,
+        } = value;
+        let RemoteModelIntent {
+            model,
+            variant,
+            provider: _,
+            metadata: _,
+        } = model_intent;
+        let RemoteLlmRequestMetadata {
+            session_id,
+            idempotency_key: _,
+            trace_id: _,
+        } = request_metadata;
         Ok(Self {
-            model: value.model_intent.model,
-            messages: value.messages.into_iter().map(Into::into).collect(),
-            attachments: value
-                .attachments
+            model,
+            messages: messages.into_iter().map(Into::into).collect(),
+            attachments: attachments
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
-            tools: Arc::new(value.tools.into_iter().map(Into::into).collect()),
-            tool_choice: value.tool_choice.into(),
-            model_variant: value.model_intent.variant,
-            generation: value.generation.try_into()?,
-            session_id: value.request_metadata.session_id,
-            output_spec: value.output_spec.map(Into::into),
+            tools: Arc::new(tools.into_iter().map(Into::into).collect()),
+            tool_choice: tool_choice.into(),
+            model_variant: variant,
+            generation: generation.try_into()?,
+            session_id,
+            output_spec: output_spec.map(Into::into),
             stream_events: None,
             provider_trace: None,
         })
@@ -433,8 +584,18 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
 
 impl RemoteLlmResponse {
     pub fn from_core(request_id: impl Into<String>, value: core_llm::LlmResponse) -> Self {
+        let core_llm::LlmResponse {
+            full_text,
+            parts,
+            usage,
+            terminal_reason,
+            terminal_diagnostic,
+            provider_usage,
+            request_body,
+            http_summary,
+        } = value;
         let mut diagnostics = Vec::new();
-        if let Some(message) = value.terminal_diagnostic {
+        if let Some(message) = terminal_diagnostic {
             diagnostics.push(RemoteDiagnostic {
                 kind: "terminal".to_string(),
                 code: None,
@@ -445,15 +606,15 @@ impl RemoteLlmResponse {
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             request_id: request_id.into(),
-            full_text: value.full_text,
-            output_parts: value.parts.into_iter().map(Into::into).collect(),
-            usage: value.usage.into(),
-            terminal_reason: value.terminal_reason.into(),
+            full_text,
+            output_parts: parts.into_iter().map(Into::into).collect(),
+            usage: usage.into(),
+            terminal_reason: terminal_reason.into(),
             diagnostics,
             provider_metadata: RemoteProviderMetadata {
-                usage: value.provider_usage,
-                request_body: value.request_body,
-                http_summary: value.http_summary,
+                usage: provider_usage,
+                request_body,
+                http_summary,
                 data: HashMap::new(),
             },
         }
@@ -462,23 +623,40 @@ impl RemoteLlmResponse {
 
 impl From<RemoteLlmResponse> for core_llm::LlmResponse {
     fn from(value: RemoteLlmResponse) -> Self {
+        let RemoteLlmResponse {
+            protocol_version: _,
+            request_id: _,
+            full_text,
+            output_parts,
+            usage,
+            terminal_reason,
+            diagnostics,
+            provider_metadata,
+        } = value;
+        let RemoteProviderMetadata {
+            usage: provider_usage,
+            request_body,
+            http_summary,
+            data: _,
+        } = provider_metadata;
         Self {
-            full_text: value.full_text,
-            parts: value.output_parts.into_iter().map(Into::into).collect(),
-            usage: value.usage.into(),
-            terminal_reason: value.terminal_reason.into(),
-            terminal_diagnostic: value.diagnostics.first().map(|diag| diag.message.clone()),
-            provider_usage: value.provider_metadata.usage,
-            request_body: value.provider_metadata.request_body,
-            http_summary: value.provider_metadata.http_summary,
+            full_text,
+            parts: output_parts.into_iter().map(Into::into).collect(),
+            usage: usage.into(),
+            terminal_reason: terminal_reason.into(),
+            terminal_diagnostic: diagnostics.first().map(|diag| diag.message.clone()),
+            provider_usage,
+            request_body,
+            http_summary,
         }
     }
 }
 
 impl From<core_llm::GenerationOptions> for RemoteGenerationOptions {
     fn from(value: core_llm::GenerationOptions) -> Self {
+        let core_llm::GenerationOptions { output_token_cap } = value;
         Self {
-            output_token_cap: value.output_token_cap_u64(),
+            output_token_cap: output_token_cap.map(|cap| cap.get() as u64),
             temperature: None,
             top_p: None,
             stop: Vec::new(),
@@ -492,9 +670,15 @@ impl TryFrom<RemoteGenerationOptions> for core_llm::GenerationOptions {
 
     fn try_from(value: RemoteGenerationOptions) -> Result<Self, Self::Error> {
         value.validate("RemoteGenerationOptions")?;
+        let RemoteGenerationOptions {
+            output_token_cap,
+            temperature: _,
+            top_p: _,
+            stop: _,
+            provider_options: _,
+        } = value;
         Ok(Self {
-            output_token_cap: value
-                .output_token_cap
+            output_token_cap: output_token_cap
                 .and_then(|cap| usize::try_from(cap).ok())
                 .and_then(NonZeroUsize::new),
         })
@@ -503,19 +687,18 @@ impl TryFrom<RemoteGenerationOptions> for core_llm::GenerationOptions {
 
 impl From<core_llm::LlmMessage> for RemoteLlmMessage {
     fn from(value: core_llm::LlmMessage) -> Self {
+        let core_llm::LlmMessage { role, blocks } = value;
         Self {
-            role: value.role.into(),
-            content: value.blocks.iter().cloned().map(Into::into).collect(),
+            role: role.into(),
+            content: blocks.iter().cloned().map(Into::into).collect(),
         }
     }
 }
 
 impl From<RemoteLlmMessage> for core_llm::LlmMessage {
     fn from(value: RemoteLlmMessage) -> Self {
-        Self::new(
-            value.role.into(),
-            value.content.into_iter().map(Into::into).collect(),
-        )
+        let RemoteLlmMessage { role, content } = value;
+        Self::new(role.into(), content.into_iter().map(Into::into).collect())
     }
 }
 
@@ -627,77 +810,83 @@ impl From<RemoteLlmContentBlock> for core_llm::LlmContentBlock {
 
 impl From<core_llm::ResponseTextMeta> for RemoteResponseTextMeta {
     fn from(value: core_llm::ResponseTextMeta) -> Self {
-        Self {
-            id: value.id,
-            status: value.status,
-            phase: value.phase,
-        }
+        let core_llm::ResponseTextMeta { id, status, phase } = value;
+        Self { id, status, phase }
     }
 }
 
 impl From<RemoteResponseTextMeta> for core_llm::ResponseTextMeta {
     fn from(value: RemoteResponseTextMeta) -> Self {
-        Self {
-            id: value.id,
-            status: value.status,
-            phase: value.phase,
-        }
+        let RemoteResponseTextMeta { id, status, phase } = value;
+        Self { id, status, phase }
     }
 }
 
 impl From<core_llm::ProviderReplayMeta> for RemoteProviderReplayMeta {
     fn from(value: core_llm::ProviderReplayMeta) -> Self {
-        Self {
-            item_id: value.item_id,
-            opaque: value.opaque,
-        }
+        let core_llm::ProviderReplayMeta { item_id, opaque } = value;
+        Self { item_id, opaque }
     }
 }
 
 impl From<RemoteProviderReplayMeta> for core_llm::ProviderReplayMeta {
     fn from(value: RemoteProviderReplayMeta) -> Self {
-        Self {
-            item_id: value.item_id,
-            opaque: value.opaque,
-        }
+        let RemoteProviderReplayMeta { item_id, opaque } = value;
+        Self { item_id, opaque }
     }
 }
 
 impl From<core_llm::ProviderReasoningReplay> for RemoteProviderReasoningReplay {
     fn from(value: core_llm::ProviderReasoningReplay) -> Self {
+        let core_llm::ProviderReasoningReplay {
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
+        } = value;
         Self {
-            item_id: value.item_id,
-            encrypted_content: value.encrypted_content,
-            signature: value.signature,
-            redacted: value.redacted,
-            summary: value.summary,
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
         }
     }
 }
 
 impl From<RemoteProviderReasoningReplay> for core_llm::ProviderReasoningReplay {
     fn from(value: RemoteProviderReasoningReplay) -> Self {
+        let RemoteProviderReasoningReplay {
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
+        } = value;
         Self {
-            item_id: value.item_id,
-            encrypted_content: value.encrypted_content,
-            signature: value.signature,
-            redacted: value.redacted,
-            summary: value.summary,
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
         }
     }
 }
 
 impl From<core_llm::LlmAttachment> for RemoteLlmAttachment {
     fn from(value: core_llm::LlmAttachment) -> Self {
+        let core_llm::LlmAttachment {
+            mime,
+            data,
+            reference,
+        } = value;
         Self {
-            id: value
-                .reference
-                .as_ref()
-                .map(|reference| reference.id.to_string()),
-            mime: value.mime,
-            data_base64: (!value.data.is_empty())
-                .then(|| base64::engine::general_purpose::STANDARD.encode(value.data)),
-            reference: value.reference.map(Into::into),
+            id: reference.as_ref().map(|reference| reference.id.to_string()),
+            mime,
+            data_base64: (!data.is_empty())
+                .then(|| base64::engine::general_purpose::STANDARD.encode(data)),
+            reference: reference.map(Into::into),
             metadata: HashMap::new(),
         }
     }
@@ -707,32 +896,48 @@ impl TryFrom<RemoteLlmAttachment> for core_llm::LlmAttachment {
     type Error = RemoteProtocolError;
 
     fn try_from(value: RemoteLlmAttachment) -> Result<Self, Self::Error> {
-        let data = match value.data_base64 {
+        let RemoteLlmAttachment {
+            id,
+            mime,
+            data_base64,
+            reference,
+            metadata: _,
+        } = value;
+        let data = match data_base64 {
             Some(encoded) => base64::engine::general_purpose::STANDARD
                 .decode(encoded.as_bytes())
                 .map_err(|err| RemoteProtocolError::InvalidImageBlob {
-                    id: value.id.unwrap_or_else(|| "<inline>".to_string()),
+                    id: id.unwrap_or_else(|| "<inline>".to_string()),
                     message: err.to_string(),
                 })?,
             None => Vec::new(),
         };
         Ok(Self {
-            mime: value.mime,
+            mime,
             data,
-            reference: value.reference.map(TryInto::try_into).transpose()?,
+            reference: reference.map(TryInto::try_into).transpose()?,
         })
     }
 }
 
 impl From<lash_core::AttachmentRef> for RemoteAttachmentRef {
     fn from(value: lash_core::AttachmentRef) -> Self {
+        let mime = value.canonical_mime().to_string();
+        let lash_core::AttachmentRef {
+            id,
+            media_type: _,
+            byte_len,
+            width,
+            height,
+            label,
+        } = value;
         Self {
-            id: value.id.to_string(),
-            mime: value.canonical_mime().to_string(),
-            byte_len: value.byte_len,
-            width: value.width,
-            height: value.height,
-            label: value.label,
+            id: id.to_string(),
+            mime,
+            byte_len,
+            width,
+            height,
+            label,
             metadata: HashMap::new(),
         }
     }
@@ -743,37 +948,52 @@ impl TryFrom<RemoteAttachmentRef> for lash_core::AttachmentRef {
 
     fn try_from(value: RemoteAttachmentRef) -> Result<Self, Self::Error> {
         value.validate()?;
-        let media_type = lash_core::MediaType::from_mime(&value.mime).ok_or_else(|| {
+        let RemoteAttachmentRef {
+            id,
+            mime,
+            byte_len,
+            width,
+            height,
+            label,
+            metadata: _,
+        } = value;
+        let media_type = lash_core::MediaType::from_mime(&mime).ok_or_else(|| {
             RemoteProtocolError::InvalidAttachmentRef {
-                id: value.id.clone(),
-                message: format!("unsupported attachment mime `{}`", value.mime),
+                id: id.clone(),
+                message: format!("unsupported attachment mime `{mime}`"),
             }
         })?;
         Ok(Self {
-            id: lash_core::AttachmentId::new(value.id),
+            id: lash_core::AttachmentId::new(id),
             media_type,
-            byte_len: value.byte_len,
-            width: value.width,
-            height: value.height,
-            label: value.label,
+            byte_len,
+            width,
+            height,
+            label,
         })
     }
 }
 
 impl From<core_llm::LlmToolSpec> for RemoteLlmToolSpec {
     fn from(value: core_llm::LlmToolSpec) -> Self {
+        let core_llm::LlmToolSpec {
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections,
+            output_schema_projections,
+        } = value;
         Self {
-            name: value.name,
-            description: value.description,
-            input_schema: value.input_schema,
-            output_schema: value.output_schema,
-            input_schema_projections: value
-                .input_schema_projections
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections: input_schema_projections
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-            output_schema_projections: value
-                .output_schema_projections
+            output_schema_projections: output_schema_projections
                 .into_iter()
                 .map(Into::into)
                 .collect(),
@@ -783,18 +1003,24 @@ impl From<core_llm::LlmToolSpec> for RemoteLlmToolSpec {
 
 impl From<RemoteLlmToolSpec> for core_llm::LlmToolSpec {
     fn from(value: RemoteLlmToolSpec) -> Self {
+        let RemoteLlmToolSpec {
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections,
+            output_schema_projections,
+        } = value;
         Self {
-            name: value.name,
-            description: value.description,
-            input_schema: value.input_schema,
-            output_schema: value.output_schema,
-            input_schema_projections: value
-                .input_schema_projections
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections: input_schema_projections
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-            output_schema_projections: value
-                .output_schema_projections
+            output_schema_projections: output_schema_projections
                 .into_iter()
                 .map(Into::into)
                 .collect(),
@@ -826,10 +1052,14 @@ impl From<core_llm::LlmOutputSpec> for RemoteLlmOutputSpec {
     fn from(value: core_llm::LlmOutputSpec) -> Self {
         match value {
             core_llm::LlmOutputSpec::JsonObject => Self::JsonObject,
-            core_llm::LlmOutputSpec::JsonSchema(schema) => Self::JsonSchema {
-                name: schema.name,
-                schema: schema.schema,
-                strict: schema.strict,
+            core_llm::LlmOutputSpec::JsonSchema(core_llm::LlmJsonSchema {
+                name,
+                schema,
+                strict,
+            }) => Self::JsonSchema {
+                name,
+                schema,
+                strict,
             },
         }
     }
@@ -942,64 +1172,98 @@ impl From<RemoteLlmTerminalReason> for core_llm::LlmTerminalReason {
 
 impl From<core_llm::LlmUsage> for RemoteUsage {
     fn from(value: core_llm::LlmUsage) -> Self {
+        let core_llm::LlmUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
         Self {
-            input_tokens: value.input_tokens,
-            output_tokens: value.output_tokens,
-            cached_input_tokens: value.cached_input_tokens,
-            reasoning_tokens: value.reasoning_tokens,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
         }
     }
 }
 
 impl From<RemoteUsage> for core_llm::LlmUsage {
     fn from(value: RemoteUsage) -> Self {
+        let RemoteUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
         Self {
-            input_tokens: value.input_tokens,
-            output_tokens: value.output_tokens,
-            cached_input_tokens: value.cached_input_tokens,
-            reasoning_tokens: value.reasoning_tokens,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
         }
     }
 }
 
 impl From<lash_core::TokenUsage> for RemoteUsage {
     fn from(value: lash_core::TokenUsage) -> Self {
+        let lash_core::TokenUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
         Self {
-            input_tokens: value.input_tokens,
-            output_tokens: value.output_tokens,
-            cached_input_tokens: value.cached_input_tokens,
-            reasoning_tokens: value.reasoning_tokens,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
         }
     }
 }
 
 impl From<RemoteUsage> for lash_core::TokenUsage {
     fn from(value: RemoteUsage) -> Self {
+        let RemoteUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
         Self {
-            input_tokens: value.input_tokens,
-            output_tokens: value.output_tokens,
-            cached_input_tokens: value.cached_input_tokens,
-            reasoning_tokens: value.reasoning_tokens,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
         }
     }
 }
 
 impl From<lash_core::TokenLedgerEntry> for RemoteTokenLedgerEntry {
     fn from(value: lash_core::TokenLedgerEntry) -> Self {
+        let lash_core::TokenLedgerEntry {
+            source,
+            model,
+            usage,
+        } = value;
         Self {
-            source: value.source,
-            model: value.model,
-            usage: value.usage.into(),
+            source,
+            model,
+            usage: usage.into(),
         }
     }
 }
 
 impl From<RemoteTokenLedgerEntry> for lash_core::TokenLedgerEntry {
     fn from(value: RemoteTokenLedgerEntry) -> Self {
+        let RemoteTokenLedgerEntry {
+            source,
+            model,
+            usage,
+        } = value;
         Self {
-            source: value.source,
-            model: value.model,
-            usage: value.usage.into(),
+            source,
+            model,
+            usage: usage.into(),
         }
     }
 }
@@ -1011,9 +1275,19 @@ impl RemoteTurnResult {
         turn: lash_core::AssembledTurn,
         activities: impl IntoIterator<Item = RemoteTurnActivity>,
     ) -> Self {
-        let parent = RemoteUsage::from(turn.token_usage);
-        let children = turn
-            .children_usage
+        // `state` is the local session snapshot; it never crosses the wire.
+        let lash_core::AssembledTurn {
+            state: _,
+            outcome,
+            assistant_output,
+            execution,
+            token_usage,
+            children_usage,
+            tool_calls,
+            errors,
+        } = turn;
+        let parent = RemoteUsage::from(token_usage);
+        let children = children_usage
             .into_iter()
             .map(RemoteTokenLedgerEntry::from)
             .collect::<Vec<_>>();
@@ -1021,7 +1295,7 @@ impl RemoteTurnResult {
         for child in &children {
             total.add(&child.usage);
         }
-        let outcome = RemoteTurnOutcome::from(turn.outcome);
+        let outcome = RemoteTurnOutcome::from(outcome);
         let status = RemoteTurnStatus::from(&outcome);
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -1029,15 +1303,15 @@ impl RemoteTurnResult {
             turn_id: turn_id.into(),
             status,
             outcome,
-            assistant_output: turn.assistant_output.into(),
+            assistant_output: assistant_output.into(),
             usage: RemoteTurnUsageSummary {
                 parent,
                 children,
                 total,
             },
-            execution: turn.execution.into(),
-            tool_calls: turn.tool_calls.into_iter().map(Into::into).collect(),
-            issues: turn.errors.into_iter().map(Into::into).collect(),
+            execution: execution.into(),
+            tool_calls: tool_calls.into_iter().map(Into::into).collect(),
+            issues: errors.into_iter().map(Into::into).collect(),
             activities: activities.into_iter().collect(),
             metadata: HashMap::new(),
         }
@@ -1105,10 +1379,15 @@ impl From<lash_core::TurnStop> for RemoteTurnStop {
 
 impl From<lash_core::AssistantOutput> for RemoteAssistantOutput {
     fn from(value: lash_core::AssistantOutput) -> Self {
+        let lash_core::AssistantOutput {
+            safe_text,
+            raw_text,
+            state,
+        } = value;
         Self {
-            safe_text: value.safe_text,
-            raw_text: value.raw_text,
-            state: value.state.into(),
+            safe_text,
+            raw_text,
+            state: state.into(),
         }
     }
 }
@@ -1126,28 +1405,44 @@ impl From<lash_core::OutputState> for RemoteAssistantOutputState {
 
 impl From<lash_core::ExecutionSummary> for RemoteExecutionSummary {
     fn from(value: lash_core::ExecutionSummary) -> Self {
+        let lash_core::ExecutionSummary {
+            had_tool_calls,
+            had_code_execution,
+        } = value;
         Self {
-            had_tool_calls: value.had_tool_calls,
-            had_code_execution: value.had_code_execution,
+            had_tool_calls,
+            had_code_execution,
         }
     }
 }
 
 impl From<lash_core::ToolCallRecord> for RemoteToolCallSummary {
     fn from(value: lash_core::ToolCallRecord) -> Self {
+        let lash_core::ToolCallRecord {
+            call_id,
+            tool,
+            args,
+            output,
+            duration_ms,
+        } = value;
         Self {
-            call_id: value.call_id,
-            tool_name: value.tool,
-            args: value.args,
-            outcome: value.output.into(),
-            duration_ms: value.duration_ms,
+            call_id,
+            tool_name: tool,
+            args,
+            outcome: output.into(),
+            duration_ms,
         }
     }
 }
 
 impl From<lash_core::ToolCallOutput> for RemoteToolCallOutcome {
     fn from(value: lash_core::ToolCallOutput) -> Self {
-        match value.outcome {
+        // `control` is a local turn-control signal and never crosses the wire.
+        let lash_core::ToolCallOutput {
+            outcome,
+            control: _,
+        } = value;
+        match outcome {
             lash_core::ToolCallOutcome::Success(value) => Self::Success(value.to_json_value()),
             lash_core::ToolCallOutcome::Failure(value) => Self::Failure(value.to_json_value()),
             lash_core::ToolCallOutcome::Cancelled(value) => Self::Cancelled(value.to_json_value()),
@@ -1157,24 +1452,36 @@ impl From<lash_core::ToolCallOutput> for RemoteToolCallOutcome {
 
 impl From<lash_core::TurnIssue> for RemoteTurnIssue {
     fn from(value: lash_core::TurnIssue) -> Self {
+        let lash_core::TurnIssue {
+            kind,
+            code,
+            terminal_reason,
+            message,
+            raw,
+        } = value;
         Self {
-            kind: value.kind,
-            code: value.code,
-            terminal_reason: value.terminal_reason.map(Into::into),
-            message: value.message,
-            raw: value.raw,
+            kind,
+            code,
+            terminal_reason: terminal_reason.map(Into::into),
+            message,
+            raw,
         }
     }
 }
 
 impl RemoteTurnActivity {
     pub fn from_core(sequence: u64, activity: lash_core::TurnActivity) -> Self {
+        let lash_core::TurnActivity {
+            id: lash_core::TurnActivityId(id),
+            correlation_id: lash_core::TurnActivityId(correlation_id),
+            event,
+        } = activity;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             sequence,
-            id: activity.id.0,
-            correlation_id: activity.correlation_id.0,
-            event: RemoteTurnEvent::from(activity.event),
+            id,
+            correlation_id,
+            event: RemoteTurnEvent::from(event),
         }
     }
 }
@@ -1199,13 +1506,21 @@ impl From<lash_core::SessionProcessEventKind> for RemoteSessionProcessEventKind 
 
 impl RemoteSessionObservationEvent {
     pub fn from_core(sequence: u64, event: lash_core::SessionObservationEvent) -> Self {
-        let payload = match event.payload {
+        let lash_core::SessionObservationEvent {
+            session_id,
+            revision,
+            cursor,
+            payload,
+        } = event;
+        let payload = match payload {
             lash_core::SessionObservationEventPayload::TurnActivity(activity) => {
                 RemoteSessionObservationEventPayload::TurnActivity {
                     activity: RemoteTurnActivity::from_core(sequence, activity),
                 }
             }
-            lash_core::SessionObservationEventPayload::Committed { .. } => {
+            // The committed read view is a local handle; only the commit
+            // signal itself crosses the wire.
+            lash_core::SessionObservationEventPayload::Committed { read_view: _ } => {
                 RemoteSessionObservationEventPayload::Committed
             }
             lash_core::SessionObservationEventPayload::AgentFrameSwitched { frame_id } => {
@@ -1226,9 +1541,9 @@ impl RemoteSessionObservationEvent {
         };
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            session_id: event.session_id,
-            revision: event.revision.as_u64(),
-            cursor: event.cursor.to_string(),
+            session_id,
+            revision: revision.as_u64(),
+            cursor: cursor.to_string(),
             event: payload,
         }
     }
@@ -1245,13 +1560,20 @@ impl From<lash_core::LiveReplayGapReason> for RemoteLiveReplayGapReason {
 
 impl From<lash_core::LiveReplayGap> for RemoteLiveReplayGap {
     fn from(value: lash_core::LiveReplayGap) -> Self {
+        let lash_core::LiveReplayGap {
+            session_id,
+            requested_cursor,
+            latest_cursor,
+            latest_revision,
+            reason,
+        } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            session_id: value.session_id,
-            requested_cursor: value.requested_cursor.to_string(),
-            latest_cursor: value.latest_cursor.to_string(),
-            latest_revision: value.latest_revision.as_u64(),
-            reason: value.reason.into(),
+            session_id,
+            requested_cursor: requested_cursor.to_string(),
+            latest_cursor: latest_cursor.to_string(),
+            latest_revision: latest_revision.as_u64(),
+            reason: reason.into(),
         }
     }
 }
@@ -1468,10 +1790,10 @@ impl<W: Write + Send + 'static> lash_core::TurnActivitySink for RemoteTurnActivi
 
 impl From<lash_core::PromptLayer> for RemotePromptLayer {
     fn from(value: lash_core::PromptLayer) -> Self {
+        let lash_core::PromptLayer { template, slots } = value;
         Self {
-            template: value.template.map(Into::into),
-            slots: value
-                .slots
+            template: template.map(Into::into),
+            slots: slots
                 .into_iter()
                 .map(|(slot, layer)| (slot.into(), layer.into()))
                 .collect(),
@@ -1481,10 +1803,10 @@ impl From<lash_core::PromptLayer> for RemotePromptLayer {
 
 impl From<RemotePromptLayer> for lash_core::PromptLayer {
     fn from(value: RemotePromptLayer) -> Self {
+        let RemotePromptLayer { template, slots } = value;
         Self {
-            template: value.template.map(Into::into),
-            slots: value
-                .slots
+            template: template.map(Into::into),
+            slots: slots
                 .into_iter()
                 .map(|(slot, layer)| (slot.into(), layer.into()))
                 .collect(),
@@ -1494,34 +1816,38 @@ impl From<RemotePromptLayer> for lash_core::PromptLayer {
 
 impl From<lash_core::PromptTemplate> for RemotePromptTemplate {
     fn from(value: lash_core::PromptTemplate) -> Self {
+        let lash_core::PromptTemplate { sections } = value;
         Self {
-            sections: value.sections.into_iter().map(Into::into).collect(),
+            sections: sections.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 impl From<RemotePromptTemplate> for lash_core::PromptTemplate {
     fn from(value: RemotePromptTemplate) -> Self {
+        let RemotePromptTemplate { sections } = value;
         Self {
-            sections: value.sections.into_iter().map(Into::into).collect(),
+            sections: sections.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 impl From<lash_core::PromptTemplateSection> for RemotePromptTemplateSection {
     fn from(value: lash_core::PromptTemplateSection) -> Self {
+        let lash_core::PromptTemplateSection { title, entries } = value;
         Self {
-            title: value.title,
-            entries: value.entries.into_iter().map(Into::into).collect(),
+            title,
+            entries: entries.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 impl From<RemotePromptTemplateSection> for lash_core::PromptTemplateSection {
     fn from(value: RemotePromptTemplateSection) -> Self {
+        let RemotePromptTemplateSection { title, entries } = value;
         Self {
-            title: value.title,
-            entries: value.entries.into_iter().map(Into::into).collect(),
+            title,
+            entries: entries.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1598,90 +1924,121 @@ impl From<RemotePromptSlot> for lash_core::PromptSlot {
 
 impl From<lash_core::PromptSlotLayer> for RemotePromptSlotLayer {
     fn from(value: lash_core::PromptSlotLayer) -> Self {
+        let lash_core::PromptSlotLayer {
+            reset,
+            contributions,
+        } = value;
         Self {
-            reset: value.reset,
-            contributions: value.contributions.into_iter().map(Into::into).collect(),
+            reset,
+            contributions: contributions.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 impl From<RemotePromptSlotLayer> for lash_core::PromptSlotLayer {
     fn from(value: RemotePromptSlotLayer) -> Self {
+        let RemotePromptSlotLayer {
+            reset,
+            contributions,
+        } = value;
         Self {
-            reset: value.reset,
-            contributions: value.contributions.into_iter().map(Into::into).collect(),
+            reset,
+            contributions: contributions.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 impl From<lash_core::PromptContribution> for RemotePromptContribution {
     fn from(value: lash_core::PromptContribution) -> Self {
+        let lash_core::PromptContribution {
+            slot,
+            title,
+            priority,
+            gate,
+            content,
+        } = value;
         Self {
-            slot: value.slot.into(),
-            title: value.title.map(|title| title.to_string()),
-            priority: value.priority,
-            gate: value.gate.into(),
-            content: value.content.to_string(),
+            slot: slot.into(),
+            title: title.map(|title| title.to_string()),
+            priority,
+            gate: gate.into(),
+            content: content.to_string(),
         }
     }
 }
 
 impl From<RemotePromptContribution> for lash_core::PromptContribution {
     fn from(value: RemotePromptContribution) -> Self {
+        let RemotePromptContribution {
+            slot,
+            title,
+            priority,
+            gate,
+            content,
+        } = value;
         Self {
-            slot: value.slot.into(),
-            title: value.title.map(Arc::from),
-            priority: value.priority,
-            gate: value.gate.into(),
-            content: Arc::from(value.content),
+            slot: slot.into(),
+            title: title.map(Arc::from),
+            priority,
+            gate: gate.into(),
+            content: Arc::from(content),
         }
     }
 }
 
 impl From<lash_core::PromptContributionGate> for RemotePromptContributionGate {
     fn from(value: lash_core::PromptContributionGate) -> Self {
+        let lash_core::PromptContributionGate {
+            tools,
+            minimum_availability,
+        } = value;
         Self {
-            tools: value.tools,
-            minimum_availability: value.minimum_availability.into(),
+            tools,
+            minimum_availability: minimum_availability.into(),
         }
     }
 }
 
 impl From<RemotePromptContributionGate> for lash_core::PromptContributionGate {
     fn from(value: RemotePromptContributionGate) -> Self {
+        let RemotePromptContributionGate {
+            tools,
+            minimum_availability,
+        } = value;
         Self {
-            tools: value.tools,
-            minimum_availability: value.minimum_availability.into(),
+            tools,
+            minimum_availability: minimum_availability.into(),
         }
     }
 }
 
 impl From<&RemoteToolAgentSurface> for lash_core::ToolAgentSurface {
     fn from(value: &RemoteToolAgentSurface) -> Self {
-        let mut surface =
-            lash_core::ToolAgentSurface::new(value.module_path.clone(), value.operation.clone());
-        if let Some(authority_type) = value.authority_type.as_ref() {
+        let RemoteToolAgentSurface {
+            module_path,
+            operation,
+            authority_type,
+            aliases,
+        } = value;
+        let mut surface = lash_core::ToolAgentSurface::new(module_path.clone(), operation.clone());
+        if let Some(authority_type) = authority_type.as_ref() {
             surface = surface.with_authority_type(authority_type.clone());
         }
-        surface.with_aliases(value.aliases.clone())
+        surface.with_aliases(aliases.clone())
     }
 }
 
 impl From<lash_core::SchemaProjectionOverride> for RemoteSchemaProjectionOverride {
     fn from(value: lash_core::SchemaProjectionOverride) -> Self {
-        Self {
-            profile: value.profile,
-            schema: value.schema,
-        }
+        let lash_core::SchemaProjectionOverride { profile, schema } = value;
+        Self { profile, schema }
     }
 }
 
 impl From<RemoteSchemaProjectionOverride> for lash_core::SchemaProjectionOverride {
     fn from(value: RemoteSchemaProjectionOverride) -> Self {
-        Self {
-            profile: value.profile,
-            schema: value.schema,
-        }
+        let RemoteSchemaProjectionOverride { profile, schema } = value;
+        Self { profile, schema }
     }
 }
 
@@ -1784,48 +2141,63 @@ impl TryFrom<&RemoteToolGrant> for ToolDefinition {
 
     fn try_from(value: &RemoteToolGrant) -> Result<Self, Self::Error> {
         value.validate()?;
+        let RemoteToolGrant {
+            protocol_version: _,
+            id,
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections,
+            output_schema_projections,
+            output_contract,
+            examples,
+            availability,
+            activation,
+            argument_projection,
+            scheduling,
+            retry_policy,
+            agent_surface,
+        } = value;
         let mut definition = ToolDefinition::raw_with_id(
-            value
-                .id
-                .clone()
+            id.clone()
                 .unwrap_or_else(|| format!("remote-tool:{}", value.call_path().unwrap())),
-            value.name.clone(),
-            value.description.clone(),
-            value.input_schema.clone(),
-            value.output_schema.clone(),
+            name.clone(),
+            description.clone(),
+            input_schema.clone(),
+            output_schema.clone(),
         )
         .with_agent_surface(
-            value
-                .agent_surface
+            agent_surface
                 .as_ref()
                 .expect("validated agent surface")
                 .into(),
         )
-        .with_examples(value.examples.clone())
-        .with_output_contract(value.output_contract.clone().into());
-        if let Some(availability) = value.availability {
+        .with_examples(examples.clone())
+        .with_output_contract(output_contract.clone().into());
+        if let Some(availability) = *availability {
             definition = definition
                 .with_availability(lash_core::ToolAvailabilityConfig::same(availability.into()));
         }
-        if let Some(activation) = value.activation {
+        if let Some(activation) = *activation {
             definition = definition.with_activation(activation.into());
         }
-        if let Some(argument_projection) = value.argument_projection.clone() {
+        if let Some(argument_projection) = argument_projection.clone() {
             definition = definition.with_argument_projection(argument_projection.into());
         }
-        if let Some(scheduling) = value.scheduling {
+        if let Some(scheduling) = *scheduling {
             definition = definition.with_scheduling(scheduling.into());
         }
-        if let Some(retry_policy) = value.retry_policy {
+        if let Some(retry_policy) = *retry_policy {
             definition = definition.with_retry_policy(retry_policy.into());
         }
-        for projection in &value.input_schema_projections {
+        for projection in input_schema_projections {
             definition = definition.with_input_schema_projection(
                 projection.profile.clone(),
                 projection.schema.clone(),
             );
         }
-        for projection in &value.output_schema_projections {
+        for projection in output_schema_projections {
             definition = definition.with_output_schema_projection(
                 projection.profile.clone(),
                 projection.schema.clone(),
@@ -1838,13 +2210,16 @@ impl TryFrom<&RemoteToolGrant> for ToolDefinition {
 impl RemoteToolCallResponse {
     pub fn into_tool_result(self) -> ToolResult {
         match self {
-            Self::Success { value, .. } => ToolResult::ok(value),
+            Self::Success {
+                protocol_version: _,
+                value,
+            } => ToolResult::ok(value),
             Self::Failure {
+                protocol_version: _,
                 code,
                 message,
                 raw,
                 retry_after_ms,
-                ..
             } => {
                 let mut failure = if let Some(after_ms) = retry_after_ms {
                     lash_core::ToolFailure::safe_retry(
@@ -1863,7 +2238,11 @@ impl RemoteToolCallResponse {
                 failure.raw = raw.map(lash_core::ToolValue::from);
                 ToolResult::failure(failure)
             }
-            Self::Cancelled { message, raw, .. } => {
+            Self::Cancelled {
+                protocol_version: _,
+                message,
+                raw,
+            } => {
                 if let Some(raw) = raw {
                     ToolResult::cancelled_with_raw(message, raw)
                 } else {

@@ -76,7 +76,7 @@
                 <dt><code>TurnInput</code></dt>
                 <dd>The user or host payload plus per-turn prompt/plugin context. It is data, not a running turn.</dd>
                 <dt><code>TurnBuilder</code></dt>
-                <dd>An ephemeral run request created by <code>session.turn(input)</code>. It layers cancellation, provider/model overrides, protocol turn options, prompt edits, typed plugin input, and optional durable handler effects, then drives the turn through <code>run()</code>, <code>stream_to(...)</code>, or pull-style <code>stream()</code>.</dd>
+                <dd>An ephemeral run request created by <code>session.turn(input)</code>. It layers cancellation (a per-turn <code>CancellationToken</code>, or <code>LashSession::cancel_running_turns()</code> from any clone of the session — see <a href="./embedding-turns.html#cancellation">turns · cancellation</a>), provider/model overrides, protocol turn options, prompt edits, typed plugin input, and optional durable handler effects, then drives the turn through <code>run()</code>, <code>stream_to(...)</code>, or pull-style <code>stream()</code>.</dd>
                 <dt><code>TurnResult</code> / <code>TurnOutput</code></dt>
                 <dd>The committed result. <code>TurnResult</code> is the terminal outcome and usage; <code>TurnOutput</code> adds the collected semantic <code>TurnActivity</code> stream for app UIs and logs.</dd>
                 <dt><code>SessionObservation</code></dt>
@@ -121,34 +121,51 @@
           </div>
           <div class="diagram">
             <div class="diagram-title">lash vs lash-core boundary</div>
-            <pre><code>use std::sync::Arc;
+            <pre data-lang="rust" data-snippet="embedding#full-core"><code>use std::sync::Arc;
 
-use lash::{plugins::runtime_plugin_stack, tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
+use lash::{
+    LashCore, ModeId, ModePreset, TurnEvent, TurnInput, plugins::runtime_plugin_stack, tools::*,
+};
 
 let data_dir = std::path::PathBuf::from(".lash-data");
-let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("sessions")));
-let artifact_store = Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db"))?);
+let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+    data_dir.join("sessions"),
+));
+let artifact_store =
+    Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db")).await?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::standard())
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
+            .expect("valid model metadata"),
+    )
     .plugins(runtime_plugin_stack())
     .tools(Arc::new(AppTools) as Arc&lt;dyn ToolProvider&gt;)
     .store_factory(store_factory)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
     .lashlang_artifact_store(artifact_store)
-    .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
+    .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+        data_dir.join("attachments"),
+    )))
     .build()?;
 
 let session = core.session("chat-123").rlm().open().await?;
-let result = session.turn(TurnInput::text("Use the app tools.")).run().await?;
-let assistant_text: String = result.activities.iter().filter_map(|activity| match &amp;activity.event {
-    TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
-    _ =&gt; None,
-}).collect();
+let result = session
+    .turn(TurnInput::text("Use the app tools."))
+    .run()
+    .await?;
+let assistant_text: String = result
+    .activities
+    .iter()
+    .filter_map(|activity| match &amp;activity.event {
+        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
+        _ =&gt; None,
+    })
+    .collect();
 println!("{assistant_text}");</code></pre>
           </div>
           <dl class="def-list">
@@ -161,7 +178,7 @@ println!("{assistant_text}");</code></pre>
             <dt><code>PluginStack</code></dt>
             <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>plugins::runtime_plugin_stack()</code>; raw <code>::builder()</code> starts without modes or plugins. All paths still require explicit effect, artifact, and attachment facets before <code>build()</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code>, <code>queued_turn()</code>, <code>read_view()</code>, and <code>control()</code>.</dd>
+            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code>, <code>queued_turn()</code>, <code>await_queued_work_batch(batch_id)</code> (resolve when a batch you enqueued is drained or cancelled — by any handle or process — without claiming it yourself; bound it with <code>tokio::time::timeout</code>), <code>read_view()</code>, and <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn config: cancellation, mode options, typed plugin input, RLM projected bindings. <code>.stream_to(&amp;sink)</code> for live events; <code>.run()</code> for a collected activity log. Durable handlers add <code>.turn_id(...).effects(&amp;controller)</code>.</dd>
           </dl>
@@ -175,17 +192,24 @@ println!("{assistant_text}");</code></pre>
           <div class="two-col">
             <article class="panel">
               <h3>Root defaults</h3>
-              <pre><code>use std::sync::Arc;
-use lash::{plugins::{runtime_plugin_stack, PluginFactory}, LashCore, ModeId, ModePreset, SessionSpec};
+              <pre data-lang="rust" data-snippet="embedding#preset-core"><code>use std::sync::Arc;
 
-let root_spec = SessionSpec::new()
-    .provider_id(provider.kind())
-    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"));
+use lash::{
+    LashCore, SessionSpec,
+    plugins::{PluginFactory, runtime_plugin_stack},
+};
+
+let root_spec = SessionSpec::new().provider_id(provider.kind()).model(
+    lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
+        .expect("valid model metadata"),
+);
 
 let core = LashCore::rlm()
     .session_spec(root_spec)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .configure_plugins(|plugins| {
         plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
@@ -194,7 +218,7 @@ let core = LashCore::rlm()
             </article>
             <article class="panel">
               <h3>Explicit stacks</h3>
-              <pre><code>use std::sync::Arc;
+              <pre data-lang="rust" data-snippet="embedding#custom-stack"><code>use std::sync::Arc;
 
 let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.replace(Arc::new(CustomBudgetPlugin) as Arc&lt;dyn PluginFactory&gt;);
@@ -207,7 +231,9 @@ let core = LashCore::builder()
     .session_spec(root_spec)
     .plugins(plugins)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;</code></pre>
             </article>
@@ -223,30 +249,37 @@ let core = LashCore::builder()
           <div class="two-col">
             <article class="panel">
               <h3>Collected result</h3>
-              <pre><code>let collected = session
+              <pre data-lang="rust" data-snippet="embedding#collected-turn"><code>let collected = session
     .turn(TurnInput::text("Summarize this task."))
     .run()
     .await?;
 
-let live_preview: String = collected.activities.iter().filter_map(|activity| match &amp;activity.event {
-    TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
-    _ =&gt; None,
-}).collect();
+let live_preview: String = collected
+    .activities
+    .iter()
+    .filter_map(|activity| match &amp;activity.event {
+        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
+        _ =&gt; None,
+    })
+    .collect();
 let settled_answer = collected.assistant_message().unwrap_or_default();
-let parent_usage = collected.result.usage;          // parent's own LLM tokens
-let children = &amp;collected.result.children_usage;    // per-(source, model) child entries
-let total = collected.result.total_usage();         // parent + children
+let total = collected.result.total_usage(); // parent + children
+let parent_usage = collected.result.usage; // parent's own LLM tokens
+let children = collected.result.children_usage; // per-(source, model) child entries
 let outcome = collected.result.outcome;</code></pre>
             </article>
             <article class="panel">
               <h3>Live stream</h3>
-              <pre><code>let ui_sink = Arc::new(AppEvents::new(tx));
+              <pre data-lang="rust" data-snippet="embedding#streamed-turn"><code>let ui_sink = Arc::new(AppEvents::new(tx));
 let turn = session
     .turn(TurnInput::text(user_text))
     .stream_to(ui_sink.as_ref())
     .await?;
 
-persist(turn.assistant_message().unwrap_or_default(), turn.total_usage())?;</code></pre>
+persist(
+    turn.assistant_message().unwrap_or_default(),
+    turn.total_usage(),
+)?;</code></pre>
             </article>
           </div>
           <p>Fold <code>TurnActivity</code> directly for live UI state. At turn completion, replace the current-turn display from <code>TurnResult.state.read_view()</code> — do not append a separate final assistant event. Use <code>TurnActivity.correlation_id</code> as the stable identity for multi-phase rows: start events insert, completion events update.</p>

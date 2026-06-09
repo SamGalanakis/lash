@@ -1,0 +1,47 @@
+error[E0425]: cannot find type `SessionObservation` in crate `lash`
+ --> tests/ui/taxonomy_types_are_not_root.rs:5:25
+  |
+5 |     let _: Option<lash::SessionObservation> = None;
+  |                         ^^^^^^^^^^^^^^^^^^ not found in `lash`
+
+error[E0425]: cannot find type `SessionCursor` in crate `lash`
+ --> tests/ui/taxonomy_types_are_not_root.rs:6:25
+  |
+6 |     let _: Option<lash::SessionCursor> = None;
+  |                         ^^^^^^^^^^^^^ not found in `lash`
+
+error[E0425]: cannot find type `SessionResume` in crate `lash`
+ --> tests/ui/taxonomy_types_are_not_root.rs:7:25
+  |
+7 |     let _: Option<lash::SessionResume> = None;
+  |                         ^^^^^^^^^^^^^ not found in `lash`
+
+error[E0425]: cannot find type `HostEvent` in crate `lash`
+ --> tests/ui/taxonomy_types_are_not_root.rs:8:25
+  |
+8 |     let _: Option<lash::HostEvent> = None;
+  |                         ^^^^^^^^^ not found in `lash`
+
+error[E0425]: cannot find type `TriggerRegistration` in crate `lash`
+ --> tests/ui/taxonomy_types_are_not_root.rs:9:25
+  |
+9 |     let _: Option<lash::TriggerRegistration> = None;
+  |                         ^^^^^^^^^^^^^^^^^^^ not found in `lash`
+
+error[E0425]: cannot find type `ProcessHandleSummary` in crate `lash`
+  --> tests/ui/taxonomy_types_are_not_root.rs:10:25
+   |
+10 |     let _: Option<lash::ProcessHandleSummary> = None;
+   |                         ^^^^^^^^^^^^^^^^^^^^ not found in `lash`
+
+error[E0425]: cannot find type `ToolState` in crate `lash`
+  --> tests/ui/taxonomy_types_are_not_root.rs:11:25
+   |
+11 |     let _: Option<lash::ToolState> = None;
+   |                         ^^^^^^^^^ not found in `lash`
+
+error[E0425]: cannot find function `empty_host_event_source_key` in crate `lash`
+  --> tests/ui/taxonomy_types_are_not_root.rs:12:19
+   |
+12 |     let _ = lash::empty_host_event_source_key("ui.button.pressed");
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `lash`

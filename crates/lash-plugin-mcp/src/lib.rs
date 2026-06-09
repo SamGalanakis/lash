@@ -25,4 +25,4 @@ pub mod pool;
 pub use config::McpServerConfig;
 pub use error::McpError;
 pub use plugin::{McpPluginFactory, McpToolProvider};
-pub use pool::McpConnectionPool;
+pub use pool::{McpConnectionPool, McpServerStatus};

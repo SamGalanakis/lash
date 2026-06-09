@@ -21,10 +21,13 @@ pub struct McpPluginFactory {
 }
 
 impl McpPluginFactory {
-    /// Connect to every configured server eagerly and return a factory whose
-    /// pool is ready to use. The pool is `Arc`-shared across sessions; cloning
-    /// the factory and adding it to multiple `LashCore`s shares the same
-    /// connections.
+    /// Connect to every configured server and return a factory whose pool is
+    /// ready to use. Servers are tried eagerly, but one being down never
+    /// fails construction — the pool keeps reconnecting in the background and
+    /// the server's tools become available once it comes up. Only
+    /// configuration errors fail. The pool is `Arc`-shared across sessions;
+    /// cloning the factory and adding it to multiple `LashCore`s shares the
+    /// same connections.
     pub async fn new(servers: BTreeMap<String, McpServerConfig>) -> Result<Self, McpError> {
         let pool = McpConnectionPool::connect(servers).await?;
         Ok(Self { pool })
@@ -58,6 +61,12 @@ impl McpPluginFactory {
     /// Detach a server at runtime.
     pub async fn detach_server(&self, server_name: &str) -> Result<(), McpError> {
         self.pool.detach(server_name).await
+    }
+
+    /// Connection status of every configured server, including the last
+    /// connection error for servers currently reconnecting in the background.
+    pub fn server_statuses(&self) -> Vec<crate::pool::McpServerStatus> {
+        self.pool.server_statuses()
     }
 }
 
@@ -105,7 +114,7 @@ impl McpToolProvider {
 impl ToolProvider for McpToolProvider {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
         self.pool
-            .advertised_tools_blocking()
+            .advertised_tools()
             .into_iter()
             .map(|tool| tool.manifest())
             .collect()
@@ -113,7 +122,7 @@ impl ToolProvider for McpToolProvider {
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
         self.pool
-            .advertised_tools_blocking()
+            .advertised_tools()
             .into_iter()
             .find(|tool| tool.name() == name)
             .map(|tool| Arc::new(tool.contract()))
@@ -263,7 +272,7 @@ mod tests {
             .await
             .expect("factory connects to stdio mock");
 
-        let defs = factory.pool().advertised_tools().await;
+        let defs = factory.pool().advertised_tools();
         assert_eq!(defs.len(), 1, "expected one imported tool, got {defs:?}");
         assert_eq!(defs[0].name(), "mcp__docs__search_docs");
         assert_eq!(

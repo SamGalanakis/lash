@@ -31,8 +31,8 @@ pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
 // Re-exports
 pub use attachments::{
-    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, InMemoryAttachmentStore,
-    SessionScopedAttachmentStore, StoredAttachment,
+    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, FileAttachmentStore,
+    InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
 };
 // The Lashlang artifact store is a host-owned durability dependency of
 // `RuntimeHostConfig`; re-export it so the `lash` facade can name it without a
@@ -82,7 +82,7 @@ pub use lash_sansio::{
 pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
-    ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
+    ReconfigureError, ToolRegistry, ToolRestoreReport, ToolSourceHandle, ToolState, ToolStateEntry,
 };
 pub use tool_result::ToolResult;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -221,7 +221,7 @@ pub use plugin_stack::PluginStack;
 pub use provider::{
     CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, Provider,
     ProviderBinding, ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy,
-    ProviderOptions, ProviderResolutionError, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
+    ProviderOptions, ProviderResolutionError, ProviderSpec, RequestTimeout,
     RuntimeProviderResolver, SingleProviderResolver, StaticModelPolicy,
 };
 #[cfg(any(test, feature = "testing"))]

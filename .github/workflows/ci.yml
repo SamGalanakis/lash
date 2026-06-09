@@ -52,6 +52,12 @@ jobs:
       - name: Test lash facade
         run: cargo test -p lash-runtime --locked
 
+      - name: Lint docs
+        run: python3 scripts/lint_docs.py
+
+      - name: Check docs snippets compile
+        run: cargo check -p docs-snippets --locked
+
       - name: Enforce stack budget
         run: bash scripts/ci-stack-budget.sh
 
@@ -67,12 +73,15 @@ jobs:
       - name: Test lash CLI
         run: cargo test -p lash-cli --locked --features fff-zlob
 
-      # The `bench` feature gates the runtime_perf / ui_perf harness, which the
-      # Perf jobs build with `--features bench,fff-zlob` but the steps above do
-      # not. Compile it here so a break in bench-only code surfaces on every PR
-      # instead of only post-merge on the (main-only, ~15 min) Perf jobs.
-      - name: Check lash CLI bench feature
-        run: cargo check -p lash-cli --locked --features bench,fff-zlob
+      # The perf harness lives in the dev-only `lash-perf` crate (runtime
+      # benchmark) plus lash-cli's `bench` feature (UI benchmark). The Perf
+      # jobs build both but the steps above do not. Compile them here so a
+      # break in bench-only code surfaces on every PR instead of only
+      # post-merge on the (main-only, ~15 min) Perf jobs.
+      - name: Check perf harness builds
+        run: |
+          cargo check -p lash-perf --locked --all-targets --features fff-zlob
+          cargo check -p lash-cli --locked --features bench,fff-zlob
 
   postgres-store:
     name: Test Postgres store

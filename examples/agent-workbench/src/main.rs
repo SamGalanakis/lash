@@ -21,11 +21,12 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
+use lash::host_events::HostEvent;
 use lash::plugins::{
-    HostEvent, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::prompt::PromptContribution;
-use lash::provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy};
+use lash::provider::{ProviderHandle, ProviderOptions};
 use lash::{
     LashCore, ModeId, ModePreset, SessionSpec, TurnActivity, TurnActivitySink, TurnEvent,
     TurnResult,
@@ -122,7 +123,7 @@ async fn async_main() -> AnyhowResult<()> {
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
             .with_options(ProviderOptions {
-                thinking: ProviderThinkingPolicy { expose: true },
+                expose_thinking: true,
                 ..ProviderOptions::default()
             })
             .into_components(),
@@ -187,8 +188,8 @@ async fn async_main() -> AnyhowResult<()> {
         )))
         .lashlang_artifact_store(artifact_store)
         .host_event_store(host_event_store)
-        .trace_sink(Some(Arc::clone(&trace_sink)))
-        .lashlang_execution_sink(Some(Arc::clone(&lashlang_execution_sink)))
+        .trace_sink(Arc::clone(&trace_sink))
+        .lashlang_execution_sink(Arc::clone(&lashlang_execution_sink))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
             plugins.push(Arc::new(
@@ -205,7 +206,7 @@ async fn async_main() -> AnyhowResult<()> {
         })
         .effect_host(Arc::new(lash_restate::RestateEffectHost::new()))
         .process_work_driver(process_deployment.process_work_driver())
-        .with_queued_work_runner(queued_work_poke.clone())
+        .queued_work_poke(queued_work_poke.clone())
         .build()
         .context("build Lash core")?;
     let process_worker = lash::durability::DurableProcessWorker::new(
@@ -220,7 +221,6 @@ async fn async_main() -> AnyhowResult<()> {
     let state = AppState {
         core,
         process_observer,
-        session_store_factory: Arc::clone(&core_store_factory),
         session_ids,
         messages: Arc::new(Mutex::new(Vec::new())),
         timeline: Arc::new(Mutex::new(Vec::new())),
@@ -236,6 +236,7 @@ async fn async_main() -> AnyhowResult<()> {
         restate_ingress_url,
         restate_http,
         restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+        turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
         mail_world,
     };
     restate::spawn_restate_endpoint(
@@ -263,9 +264,11 @@ async fn async_main() -> AnyhowResult<()> {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/healthz", get(healthz))
         .route("/api/state", get(app_state))
         .route("/api/events", get(session_events))
         .route("/api/turn", post(send_turn))
+        .route("/api/turn/cancel", post(cancel_turn))
         .route("/api/reset", post(reset_chat))
         .route("/api/button-trigger", post(button_trigger))
         .route("/api/accounts", get(list_accounts).post(add_account))
@@ -291,7 +294,6 @@ async fn async_main() -> AnyhowResult<()> {
 struct AppState {
     core: LashCore,
     process_observer: lash::process::ProcessWorkObserver,
-    session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
     timeline: Arc<Mutex<Vec<StreamItem>>>,
@@ -305,6 +307,10 @@ struct AppState {
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
     mail_world: mail::MailWorld,
+    /// Session handles of in-flight user turns, keyed by turn id. The Restate
+    /// turn workflow runs in this same process, so /api/turn/cancel calls
+    /// [`lash::LashSession::cancel_running_turns`] on the live handle.
+    turn_cancels: Arc<Mutex<BTreeMap<String, lash::LashSession>>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -409,6 +415,20 @@ impl StreamItem {
         Self::Event {
             event: Box::new(event),
         }
+    }
+}
+
+struct TurnCancelGuard {
+    registry: Arc<Mutex<BTreeMap<String, lash::LashSession>>>,
+    turn_id: String,
+}
+
+impl Drop for TurnCancelGuard {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .expect("turn cancel lock")
+            .remove(&self.turn_id);
     }
 }
 
@@ -522,6 +542,10 @@ struct WorkEvent {
     event_type: String,
     occurred_at_ms: u64,
     payload: Value,
+}
+
+async fn healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "service": "agent-workbench", "status": "ok" }))
 }
 
 async fn index() -> Html<&'static str> {
@@ -647,7 +671,7 @@ async fn add_account(
         "api.accounts.add",
         json!({ "slug": summary.slug, "authority": summary.authority }),
     );
-    refresh_persisted_tool_surface(&state, "account_added").await?;
+    enqueue_tool_surface_refresh(&state, "account_added").await?;
     state.push_message(
         "event",
         format!("connected mock account `{}`", summary.authority),
@@ -664,7 +688,7 @@ async fn delete_account(
         .remove_account(&slug)
         .map_err(AppError::not_found)?;
     state.trace("api.accounts.remove", json!({ "slug": slug }));
-    refresh_persisted_tool_surface(&state, "account_removed").await?;
+    enqueue_tool_surface_refresh(&state, "account_removed").await?;
     state.push_message("event", format!("removed mock account `inbox.{slug}`"));
     Ok(Json(CommandAccepted { accepted: true }))
 }
@@ -692,7 +716,17 @@ async fn account_inbox(
     Ok(Json(inbox))
 }
 
-async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Result<(), AppError> {
+/// Enqueue a durable tool-surface refresh for the chat session.
+///
+/// The enqueue pokes the queued-work runner, which submits a Restate workflow
+/// for the batch; that workflow drains it with a durable handler context and
+/// the runtime commits the refreshed surface to the SQLite session store.
+/// Nothing here executes effects in the foreground — the workbench runs
+/// Restate + SQLite only.
+async fn enqueue_tool_surface_refresh(
+    state: &AppState,
+    reason: &str,
+) -> Result<lash::SessionCommandReceipt, AppError> {
     let session_id = state.current_session_id();
     let session = state
         .core
@@ -701,17 +735,10 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         .open()
         .await
         .map_err(AppError::internal)?;
-    let expected_generation = session
-        .tools()
-        .state()
-        .await
-        .map_err(AppError::internal)?
-        .generation();
     let receipt = session
         .commands()
         .refresh_tool_surface(
             reason,
-            Some(expected_generation),
             format!(
                 "workbench-refresh-tool-surface:{}:{}:{}",
                 session_id,
@@ -721,53 +748,17 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         )
         .await
         .map_err(AppError::internal)?;
-    let _ = session
-        .queued_turn()
-        .drain_id(receipt.batch_id.clone())
-        .run()
-        .await
-        .map_err(AppError::internal)?;
-    let persisted = session
-        .control()
-        .state()
-        .persist_current()
-        .await
-        .map_err(AppError::internal)?;
-    let tool_count = persisted
-        .tool_state_snapshot
-        .as_ref()
-        .map(lash::ToolState::len)
-        .unwrap_or_default();
-    let store = state
-        .session_store_factory
-        .create_store(&lash::persistence::SessionStoreCreateRequest {
-            session_id: session_id.clone(),
-            relation: lash::persistence::SessionRelation::default(),
-            policy: persisted.policy.clone(),
-        })
-        .await
-        .map_err(AppError::internal)?;
-    let result = store
-        .commit_runtime_state(lash::persistence::RuntimeCommit::persisted_state(
-            &persisted,
-            &[],
-        ))
-        .await
-        .map_err(AppError::internal)?;
     session.close().await.map_err(AppError::internal)?;
     state.trace(
-        "mail.tool_surface.refresh",
+        "mail.tool_surface.refresh_enqueued",
         json!({
             "reason": reason,
             "session_id": session_id,
             "command_batch_id": receipt.batch_id,
             "command_source_key": receipt.source_key,
-            "tool_state_generation": persisted.tool_state_generation,
-            "tool_count": tool_count,
-            "head_revision": result.head_revision,
         }),
     );
-    Ok(())
+    Ok(receipt)
 }
 
 async fn inject_message(
@@ -813,9 +804,21 @@ async fn inject_message(
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
+async fn cancel_turn(State(state): State<AppState>) -> Result<Json<CommandAccepted>, AppError> {
+    let session_id = state.current_session_id();
+    let cancelled = state.cancel_turns_for_session(&session_id);
+    state.trace(
+        "api.turn.cancel",
+        json!({ "session_id": session_id, "cancelled": cancelled }),
+    );
+    Ok(Json(CommandAccepted {
+        accepted: cancelled > 0,
+    }))
+}
+
 async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
     let old_session_id = state.current_session_id();
-    restate::cancel_known_cron_jobs(&state, "reset").await?;
+    restate::cancel_cron_jobs_for_session(&state, &old_session_id, "reset").await?;
     restate::submit_session_delete(
         &state,
         restate::WorkbenchSessionDeleteWorkflowRequest {
@@ -856,6 +859,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
     state.messages.lock().expect("messages lock").clear();
     state.timeline.lock().expect("timeline lock").clear();
     state.lashlang_execution.clear();
+    state.mail_world.clear();
     Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages: Vec::new(),
@@ -962,13 +966,13 @@ pub(crate) async fn enqueue_button_host_event_command(
     pressed_at: &str,
     operation_id: &str,
     scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::HostEventEmitReport> {
+) -> AnyhowResult<lash::host_events::HostEventEmitReport> {
     let payload = json!({
         "pressed_at": pressed_at,
         "button": button.as_str(),
         "message": format!("user pressed the {} button", button.lower()),
     });
-    let source_key = lash::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
+    let source_key = lash::host_events::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
         .context("button source key")?;
     state.trace(
         "host_event.emit",
@@ -985,7 +989,7 @@ pub(crate) async fn enqueue_button_host_event_command(
         .core
         .host_events()
         .emit(
-            lash::HostEventOccurrenceRequest::new(
+            lash::host_events::HostEventOccurrenceRequest::new(
                 BUTTON_TRIGGER_SOURCE_TYPE,
                 source_key,
                 payload,
@@ -1003,14 +1007,14 @@ pub(crate) async fn enqueue_mail_received_host_event_command(
     message: &mail::MailDelivery,
     operation_id: &str,
     scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::HostEventEmitReport> {
+) -> AnyhowResult<lash::host_events::HostEventEmitReport> {
     let payload = json!({
         "account": message.account,
         "title": message.title,
         "text": message.text,
     });
-    let source_key =
-        lash::empty_host_event_source_key(MAIL_RECEIVED_SOURCE_TYPE).context("mail source key")?;
+    let source_key = lash::host_events::empty_host_event_source_key(MAIL_RECEIVED_SOURCE_TYPE)
+        .context("mail source key")?;
     state.trace(
         "host_event.emit",
         json!({
@@ -1026,7 +1030,7 @@ pub(crate) async fn enqueue_mail_received_host_event_command(
         .core
         .host_events()
         .emit(
-            lash::HostEventOccurrenceRequest::new(
+            lash::host_events::HostEventOccurrenceRequest::new(
                 MAIL_RECEIVED_SOURCE_TYPE,
                 source_key,
                 payload,
@@ -1126,6 +1130,29 @@ impl AppState {
                 .push(item.clone());
         }
         let _ = self.event_tx.send(item);
+    }
+
+    /// Register the session handle driving an in-flight user turn. Dropping
+    /// the guard removes the entry, so abandoned workflows do not leak.
+    fn register_turn_cancel(&self, session: &lash::LashSession, turn_id: &str) -> TurnCancelGuard {
+        self.turn_cancels
+            .lock()
+            .expect("turn cancel lock")
+            .insert(turn_id.to_string(), session.clone());
+        TurnCancelGuard {
+            registry: Arc::clone(&self.turn_cancels),
+            turn_id: turn_id.to_string(),
+        }
+    }
+
+    /// Cancel every in-flight user turn for `session_id`; returns how many.
+    fn cancel_turns_for_session(&self, session_id: &str) -> usize {
+        let registry = self.turn_cancels.lock().expect("turn cancel lock");
+        registry
+            .values()
+            .filter(|session| session.session_id() == session_id)
+            .map(lash::LashSession::cancel_running_turns)
+            .sum()
     }
 
     fn push_message(&self, role: impl Into<String>, text: impl Into<String>) -> ChatMessage {
@@ -1514,11 +1541,11 @@ impl SessionPlugin for WorkbenchSessionPlugin {
             mail_received_event_type(),
         ))?;
         reg.tools()
-            .provider(Arc::new(lash_tool_web::web_search_provider(
+            .provider(Arc::new(lash_tools::web::web_search_provider(
                 self.tavily_api_key.clone(),
             )))?;
         reg.tools()
-            .provider(Arc::new(lash_tool_web::fetch_url_provider(
+            .provider(Arc::new(lash_tools::web::fetch_url_provider(
                 self.tavily_api_key.clone(),
             )))?;
         reg.tools().provider(Arc::new(mail::MockMailProvider::new(
@@ -2081,7 +2108,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2097,6 +2123,7 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
 
@@ -2168,7 +2195,7 @@ mod tests {
 
         let tool_names = session
             .tools()
-            .active_definitions()
+            .active_manifests()
             .await
             .expect("active tools")
             .into_iter()
@@ -2244,7 +2271,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2260,16 +2286,19 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail_world.clone(),
         };
 
-        refresh_persisted_tool_surface(&state, "initial_empty")
+        let receipt = enqueue_tool_surface_refresh(&state, "initial_empty")
             .await
-            .expect("persist initial empty surface");
+            .expect("enqueue initial empty refresh");
+        drain_refresh_batch(&state, &receipt).await;
         mail_world.add_account("Late Account").expect("add account");
-        refresh_persisted_tool_surface(&state, "account_added")
+        let receipt = enqueue_tool_surface_refresh(&state, "account_added")
             .await
-            .expect("refresh account surface");
+            .expect("enqueue account refresh");
+        drain_refresh_batch(&state, &receipt).await;
 
         let reopened = state
             .core
@@ -2280,7 +2309,7 @@ mod tests {
             .expect("reopen session");
         let tool_names = reopened
             .tools()
-            .active_definitions()
+            .active_manifests()
             .await
             .expect("active tools")
             .into_iter()
@@ -2291,6 +2320,61 @@ mod tests {
                 .iter()
                 .any(|name| name == "inbox__late_account__send"),
             "late account send tool should be active after persisted refresh: {tool_names:?}"
+        );
+        reopened.close().await.expect("close session");
+
+        // Removing the account must not poison the persisted session: the
+        // provider stops resolving the account's tools, so restore orphans
+        // them (kept in state, marked orphaned, surfaced as Off) instead of
+        // failing the reopen.
+        mail_world
+            .remove_account("late_account")
+            .expect("remove account");
+        let receipt = enqueue_tool_surface_refresh(&state, "account_removed")
+            .await
+            .expect("enqueue removal refresh");
+        drain_refresh_batch(&state, &receipt).await;
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session after account removal");
+        let tool_state = reopened.tools().state().await.expect("tool state");
+        let send_entry = tool_state
+            .get("inbox__late_account__send")
+            .expect("removed account tool is kept as an orphan");
+        assert!(
+            send_entry.is_orphaned(),
+            "removed account tool must be marked orphaned"
+        );
+        reopened.close().await.expect("close session");
+
+        // Re-adding the account (same slug, same tool ids) rebinds the
+        // orphans on the next refresh — the tools come back without ever
+        // having made the session unopenable.
+        mail_world
+            .add_account("Late Account")
+            .expect("re-add account");
+        let receipt = enqueue_tool_surface_refresh(&state, "account_readded")
+            .await
+            .expect("enqueue re-add refresh");
+        drain_refresh_batch(&state, &receipt).await;
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session after account re-add");
+        let tool_state = reopened.tools().state().await.expect("tool state");
+        let send_entry = tool_state
+            .get("inbox__late_account__send")
+            .expect("re-added account tool is present");
+        assert!(
+            !send_entry.is_orphaned(),
+            "re-added account tool must be rebound to the live provider"
         );
         reopened.close().await.expect("close session");
         let _ = std::fs::remove_dir_all(data_dir);
@@ -2347,7 +2431,7 @@ mod tests {
         register_test_trigger(&session).await;
         let tool_names = session
             .tools()
-            .active_definitions()
+            .active_manifests()
             .await
             .expect("active tools")
             .into_iter()
@@ -2400,7 +2484,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2416,6 +2499,7 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         let target_scope_id = lash::process::ProcessScope::new(state.current_session_id()).id();
@@ -2529,7 +2613,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2545,6 +2628,7 @@ mod tests {
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         let session = state
@@ -2689,7 +2773,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(vec![ChatMessage {
                 id: "message".to_string(),
@@ -2716,6 +2799,7 @@ mod tests {
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         let old_session_id = state.current_session_id();
@@ -2750,6 +2834,10 @@ mod tests {
             ),
         );
         assert_eq!(state.lashlang_execution.graphs().len(), 1);
+        state
+            .mail_world
+            .add_account("Reset Probe")
+            .expect("add account before reset");
         drop(session);
 
         let Json(snapshot) = reset_chat(State(state.clone())).await.expect("reset");
@@ -2759,6 +2847,10 @@ mod tests {
         assert!(snapshot.timeline.is_empty());
         assert!(state.messages_snapshot().is_empty());
         assert!(state.timeline_snapshot().is_empty());
+        assert!(
+            state.mail_world.account_summaries().is_empty(),
+            "reset must clear mail accounts along with the chat session"
+        );
         let request = tokio::time::timeout(Duration::from_secs(2), restate_requests.recv())
             .await
             .expect("Restate request")
@@ -2879,7 +2971,23 @@ mod tests {
             "trace should include cron run; trace at {}",
             harness.trace_path.display()
         );
-        let _ = restate::cancel_known_cron_jobs(&harness.state, "live_e2e_cleanup").await;
+        // Regression for the single-tick chain kill: the occurrence
+        // idempotency key must be unique per tick and run() must re-arm, so a
+        // SECOND tick has to fire. The original bug passed any single-tick
+        // assertion and died silently on tick two.
+        wait_for_trace_event_count(
+            &harness.trace_path,
+            "agent_workbench.cron.restate.run",
+            2,
+            Duration::from_secs(30),
+        )
+        .await;
+        let _ = restate::cancel_cron_jobs_for_session(
+            &harness.state,
+            &harness.state.current_session_id(),
+            "live_e2e_cleanup",
+        )
+        .await;
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -3005,13 +3113,13 @@ mod tests {
             )))
             .lashlang_artifact_store(artifact_store)
             .host_event_store(host_event_store)
-            .trace_sink(Some(Arc::clone(&trace_sink)))
-            .lashlang_execution_sink(Some(lashlang_execution_sink))
+            .trace_sink(Arc::clone(&trace_sink))
+            .lashlang_execution_sink(lashlang_execution_sink)
             .trace_level(TraceLevel::Extended)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .process_work_driver(process_deployment.process_work_driver())
-            .with_queued_work_runner(queued_work_poke.clone())
+            .queued_work_poke(queued_work_poke.clone())
             .build()
             .expect("build core");
         let process_worker = lash::durability::DurableProcessWorker::new(
@@ -3026,7 +3134,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -3042,6 +3149,7 @@ mod tests {
             restate_ingress_url,
             restate_http,
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         LiveWorkbenchRestateHarness {
@@ -3068,6 +3176,28 @@ mod tests {
                 "timed out waiting for workbench message containing `{needle}`; messages={messages:#?}"
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn wait_for_trace_event_count(
+        path: &std::path::Path,
+        needle: &str,
+        count: usize,
+        timeout: Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let seen = std::fs::read_to_string(path)
+                .map(|text| text.matches(needle).count())
+                .unwrap_or(0);
+            if seen >= count {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected {count}+ `{needle}` trace events within {timeout:?}, saw {seen}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
@@ -3238,6 +3368,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    /// Stand-in for the Restate queued-turn workflow: drains an enqueued
+    /// command batch in-process. The test cores' effect host permits
+    /// foreground drains; in production the same drain runs inside a Restate
+    /// handler context (`restate::run_queued_turn`).
+    async fn drain_refresh_batch(state: &AppState, receipt: &lash::SessionCommandReceipt) {
+        let session = state
+            .core
+            .session(receipt.session_id.clone())
+            .rlm()
+            .open()
+            .await
+            .expect("open session to drain refresh batch");
+        let _ = session
+            .queued_turn()
+            .batch_ids([receipt.batch_id.clone()])
+            .drain_id(receipt.batch_id.clone())
+            .run()
+            .await
+            .expect("drain refresh batch");
+        session.close().await.expect("close drain session");
+    }
+
+    #[test]
+    fn healthz_reports_workbench_fingerprint() {
+        // scripts/agent-workbench-dev.sh readiness-checks this exact shape to
+        // distinguish the workbench from a random process on the port.
+        let Json(body) = sync_await(healthz());
+        assert_eq!(body["service"], "agent-workbench");
+        assert_eq!(body["status"], "ok");
+    }
+
     fn test_workbench_core(
         session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
         process_registry: Arc<dyn lash::process::ProcessRegistry>,
@@ -3305,9 +3466,9 @@ mod tests {
     async fn emit_test_button_trigger(
         core: &LashCore,
         button: ButtonChoice,
-    ) -> lash::HostEventEmitReport {
-        let source_key =
-            lash::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE).expect("source key");
+    ) -> lash::host_events::HostEventEmitReport {
+        let source_key = lash::host_events::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
+            .expect("source key");
         let idempotency_key = format!(
             "workbench-test-button-host-event:{}:{}",
             button.as_str(),
@@ -3320,7 +3481,7 @@ mod tests {
         .expect("inline host event effect scope");
         core.host_events()
             .emit(
-                lash::HostEventOccurrenceRequest::new(
+                lash::host_events::HostEventOccurrenceRequest::new(
                     BUTTON_TRIGGER_SOURCE_TYPE,
                     source_key,
                     json!({

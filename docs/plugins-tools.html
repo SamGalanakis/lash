@@ -30,7 +30,7 @@
             <h2>The <code>ToolCall&lt;'_&gt;</code> Shape</h2>
             <p>Every <code>execute()</code> call receives a borrowed view of the invocation. Don't store the reference — copy what you need into owned types.</p>
           </div>
-          <pre><code>pub struct ToolCall&lt;'a&gt; {
+          <pre data-lang="rust"><code>pub struct ToolCall&lt;'a&gt; {
     pub name: &amp;'a str,                           // Advertised tool name the model called
     pub args: &amp;'a serde_json::Value,             // Deserialized JSON args
     pub context: &amp;'a ToolContext&lt;'a&gt;,            // Explicit session/tool capabilities
@@ -60,7 +60,7 @@
               </tbody>
             </table>
           </div>
-          <pre><code>use lash::direct::{DirectOutputSpec, DirectRequest};
+          <pre data-lang="rust" data-snippet="plugins_tools#direct-completion-tool"><code>use lash::direct::{DirectOutputSpec, DirectRequest};
 
 async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
     let model = match call.context.sessions().model().await {
@@ -76,12 +76,17 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         output: DirectOutputSpec::Text,
         generation: Default::default(),
         stream_events: None,
-        session_id: None,                 // filled by ToolContext
-        caused_by: None,                  // filled by ToolContext
+        session_id: None, // filled by ToolContext
+        caused_by: None,  // filled by ToolContext
         replay: None,
     };
 
-    match call.context.direct_completions().complete(request, "my_tool").await {
+    match call
+        .context
+        .direct_completions()
+        .complete(request, "my_tool")
+        .await
+    {
         Ok(completion) =&gt; ToolResult::ok(serde_json::json!({ "text": completion.text })),
         Err(err) =&gt; ToolResult::err_fmt(format_args!("{err}")),
     }
@@ -104,10 +109,15 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
               <p>The tool blocks the batch: the runtime runs serial tools one at a time in the order the model emitted them, and only after all parallel tools in the batch have finished. Right for tools that mutate shared state (write to a file, update a database, advance a state machine) where overlapping calls would corrupt outcomes.</p>
             </article>
           </div>
-          <pre><code>use lash::tools::{ToolDefinition, ToolScheduling};
+          <pre data-lang="rust" data-snippet="plugins_tools#serial-tool"><code>use lash::tools::{ToolDefinition, ToolScheduling};
 
-ToolDefinition::raw_named("write_file", "Replace a file's contents.", input_schema, output_schema)
-    .with_scheduling(ToolScheduling::Serial)</code></pre>
+ToolDefinition::raw_named(
+    "write_file",
+    "Replace a file's contents.",
+    input_schema,
+    output_schema,
+)
+.with_scheduling(ToolScheduling::Serial)</code></pre>
           <p>Mixing parallel and serial tools in one batch is supported and common: a read-heavy plan emitting five <code>read_file</code> calls plus one <code>write_file</code> gets the reads concurrently and the write afterward. There is no model-visible distinction — the model sees the same JSON tool list regardless of dispatch mode.</p>
         </div>
 
@@ -116,13 +126,13 @@ ToolDefinition::raw_named("write_file", "Replace a file's contents.", input_sche
             <h2>Tool-Output Budgeting</h2>
             <p>Large tool outputs blow up provider context, model context windows, and persistent history all at once. <code>ToolOutputBudgetPluginFactory</code> sits in the <code>runtime_plugin_stack()</code> by default and projects oversized outputs into shorter forms at three different sites — so the dispatch result, the model's next request, and the session graph each see an appropriately budgeted view.</p>
           </div>
-          <pre><code>use lash::plugins::{
-    runtime_plugin_stack, ToolOutputBudgetConfig, ToolOutputBudgetPluginFactory,
+          <pre data-lang="rust" data-snippet="plugins_tools#budget-stack"><code>use lash::plugins::{
+    ToolOutputBudgetConfig, ToolOutputBudgetPluginFactory, runtime_plugin_stack,
 };
 
 let config = ToolOutputBudgetConfig {
-    limit: 32 * 1024,  // default: 16 * 1024 bytes
-    max_lines: 800,     // default: 400
+    limit: 32 * 1024, // default: 16 * 1024 bytes
+    max_lines: 800,   // default: 400
     ..ToolOutputBudgetConfig::default()
 };
 

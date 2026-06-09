@@ -13,8 +13,8 @@ use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, ExplorationOp, ExplorationOpKind,
 };
 use crate::app::{App, FollowOutputMode, PreparedTurn, TextSelection, UiTimelineItem};
-use crate::cli_support::apply_ui_host_effects;
 use crate::render;
+use crate::ui_effects::apply_ui_host_effects;
 
 use super::scenarios::{BENCH_HEIGHT, BENCH_WIDTH, UiPerfScenario, UiPerfWorkload};
 

@@ -145,6 +145,12 @@ impl MailWorld {
     }
 
     /// Remove an account and its messages. Returns an error if unknown.
+    /// Drop every account and inbox: the workbench reset wipes the mail
+    /// world along with the chat session.
+    pub(crate) fn clear(&self) {
+        self.inner.write().expect("mail world lock").clear();
+    }
+
     pub(crate) fn remove_account(&self, slug: &str) -> Result<(), String> {
         let mut accounts = self.inner.write().expect("mail world lock");
         let before = accounts.len();
@@ -355,13 +361,18 @@ impl MockMailProvider {
         defs
     }
 
-    /// Resolve a tool name back to (slug, operation) against the live accounts.
+    /// Resolve a tool name back to (slug, operation) by parsing it. Only used
+    /// to route execution; resolution (`tool_manifests`/`resolve_contract`)
+    /// covers live accounts exclusively. A persisted session that references
+    /// a removed account's tools restores anyway — lash-core orphans them
+    /// (kept, forced Off) and rebinds when the account is re-added.
     fn route(&self, name: &str) -> Option<(String, &'static str)> {
-        for summary in self.world.account_summaries() {
-            for operation in MAIL_OPERATIONS {
-                if tool_name(&summary.slug, operation) == name {
-                    return Some((summary.slug, operation));
-                }
+        let rest = name.strip_prefix("inbox__")?;
+        for operation in MAIL_OPERATIONS {
+            if let Some(slug) = rest.strip_suffix(&format!("__{operation}"))
+                && !slug.is_empty()
+            {
+                return Some((slug.to_string(), operation));
             }
         }
         None
@@ -378,10 +389,15 @@ impl ToolProvider for MockMailProvider {
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        self.definitions()
+        let (slug, operation) = self.route(name)?;
+        let summary = self
+            .world
+            .account_summaries()
             .into_iter()
-            .find(|def| def.name() == name)
-            .map(|def| Arc::new(def.contract()))
+            .find(|summary| summary.slug == slug)?;
+        Some(Arc::new(
+            definition_for(&slug, &summary.display_name, operation).contract(),
+        ))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {

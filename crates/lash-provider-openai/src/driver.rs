@@ -223,7 +223,7 @@ fn complete_buffered_responses(
         if state.usage != LlmUsage::default() {
             tx.send(LlmStreamEvent::Usage(state.usage.clone()));
         }
-        if provider.options.thinking.expose {
+        if provider.options.expose_thinking {
             for part in &parts {
                 if let LlmOutputPart::Reasoning { text, .. } = part
                     && !text.is_empty()
@@ -294,7 +294,7 @@ fn complete_buffered_chat(
         if !state.full_text.is_empty() {
             tx.send(LlmStreamEvent::Delta(state.full_text.clone()));
         }
-        if provider.options.thinking.expose {
+        if provider.options.expose_thinking {
             for part in parts
                 .iter()
                 .filter(|part| matches!(part, LlmOutputPart::Reasoning { .. }))
@@ -371,7 +371,7 @@ async fn drive_streaming_responses(
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ResponsesStreamState::default();
     let mut emitted_parts = Vec::new();
-    let expose_thinking = provider.options.thinking.expose;
+    let expose_thinking = provider.options.expose_thinking;
     drive_sse_response(
         resp,
         chunk_timeout,
@@ -443,7 +443,7 @@ async fn drive_streaming_chat(
     chunk_timeout: std::time::Duration,
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ChatStreamState::default();
-    let expose_thinking = provider.options.thinking.expose;
+    let expose_thinking = provider.options.expose_thinking;
     drive_sse_response(
         resp,
         chunk_timeout,

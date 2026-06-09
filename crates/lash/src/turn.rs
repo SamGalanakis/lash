@@ -38,12 +38,66 @@ impl<'a> TurnSinks<'a> {
     }
 }
 
+/// Cancellation tokens of the turns currently executing through one opened
+/// [`LashSession`](crate::LashSession) (shared by its clones).
+/// [`LashSession::cancel_running_turns`](crate::LashSession::cancel_running_turns)
+/// cancels them without the caller having to thread a token around.
+#[derive(Clone, Default)]
+pub(crate) struct TurnCancelRegistry {
+    inner: Arc<StdMutex<TurnCancelRegistryInner>>,
+}
+
+#[derive(Default)]
+struct TurnCancelRegistryInner {
+    next_id: u64,
+    active: BTreeMap<u64, CancellationToken>,
+}
+
+impl TurnCancelRegistry {
+    /// Register the token of a turn that is about to execute. The guard
+    /// removes the entry when the turn finishes, however it finishes.
+    fn register(&self, token: CancellationToken) -> TurnCancelGuard {
+        let mut inner = self.inner.lock().expect("turn cancel registry");
+        let id = inner.next_id;
+        inner.next_id += 1;
+        inner.active.insert(id, token);
+        TurnCancelGuard {
+            registry: Arc::clone(&self.inner),
+            id,
+        }
+    }
+
+    pub(crate) fn cancel_all(&self) -> usize {
+        let inner = self.inner.lock().expect("turn cancel registry");
+        for token in inner.active.values() {
+            token.cancel();
+        }
+        inner.active.len()
+    }
+}
+
+pub(crate) struct TurnCancelGuard {
+    registry: Arc<StdMutex<TurnCancelRegistryInner>>,
+    id: u64,
+}
+
+impl Drop for TurnCancelGuard {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .expect("turn cancel registry")
+            .active
+            .remove(&self.id);
+    }
+}
+
 pub struct TurnBuilder {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) effect_host: Arc<dyn EffectHost>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) input: TurnInput,
     pub(crate) cancel: CancellationToken,
+    pub(crate) cancels: TurnCancelRegistry,
     pub(crate) protocol_turn_options: Option<ProtocolTurnOptions>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) model: Option<ModelSpec>,
@@ -168,7 +222,7 @@ impl TurnBuilder {
     pub(crate) fn prepare(
         mut self,
         trace_turn_id: Option<String>,
-    ) -> Result<(RuntimeHandle, TurnInput, CancellationToken)> {
+    ) -> Result<(RuntimeHandle, TurnInput, CancellationToken, TurnCancelGuard)> {
         if let Some(options) = self.protocol_turn_options {
             self.input.protocol_turn_options = Some(options);
         }
@@ -182,7 +236,8 @@ impl TurnBuilder {
             self.input.trace_turn_id = Some(trace_turn_id);
         }
         validate_required_plugin_inputs(&self.active_plugins, &self.input)?;
-        Ok((self.runtime, self.input, self.cancel))
+        let cancel_guard = self.cancels.register(self.cancel.clone());
+        Ok((self.runtime, self.input, self.cancel, cancel_guard))
     }
 
     async fn stream_to_with_effect_host(
@@ -214,7 +269,7 @@ impl TurnBuilder {
         scoped_effect_controller: ScopedEffectController<'_>,
         trace_turn_id: Option<String>,
     ) -> Result<TurnResult> {
-        let (runtime, input, cancel) = self.prepare(trace_turn_id)?;
+        let (runtime, input, cancel, _cancel_guard) = self.prepare(trace_turn_id)?;
         stream_prepared_turn(
             &runtime,
             input,
@@ -238,10 +293,11 @@ impl TurnBuilder {
         scoped_effect_controller: ScopedEffectController<'static>,
         trace_turn_id: Option<String>,
     ) -> Result<TurnStream> {
-        let (runtime, input, cancel) = self.prepare(trace_turn_id)?;
+        let (runtime, input, cancel, cancel_guard) = self.prepare(trace_turn_id)?;
         let (tx, rx) = mpsc::channel(64);
         let sink = ChannelTurnActivitySink { tx };
         let completion = tokio::spawn(async move {
+            let _cancel_guard = cancel_guard;
             stream_prepared_turn(
                 &runtime,
                 input,
@@ -337,10 +393,6 @@ impl<'run> ScopedTurnBuilder<'run> {
             .stream_to_with_effect_controller(events, self.controller)
             .await
     }
-
-    pub fn advanced(self) -> AdvancedTurn {
-        self.builder.advanced()
-    }
 }
 
 /// Lower-level turn execution that exposes the raw `SessionEvent` stream.
@@ -414,7 +466,7 @@ impl AdvancedTurn {
         scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<TurnResult> {
         let trace_turn_id = trace_turn_id_for_scope(&self.builder, &scoped_effect_controller);
-        let (runtime, input, cancel) = self.builder.prepare(trace_turn_id)?;
+        let (runtime, input, cancel, _cancel_guard) = self.builder.prepare(trace_turn_id)?;
         stream_prepared_turn(
             &runtime,
             input,
@@ -450,6 +502,7 @@ pub struct QueuedTurnBuilder {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) effect_host: Arc<dyn EffectHost>,
     pub(crate) cancel: CancellationToken,
+    pub(crate) cancels: TurnCancelRegistry,
     pub(crate) batch_ids: Vec<String>,
     pub(crate) drain_id: Option<String>,
 }
@@ -537,9 +590,11 @@ impl QueuedTurnBuilder {
             runtime,
             effect_host: _,
             cancel,
+            cancels,
             batch_ids,
             drain_id: _,
         } = self;
+        let _cancel_guard = cancels.register(cancel.clone());
         stream_next_queued_prepared_turn(
             &runtime,
             TurnSinks::turn(events),
