@@ -2491,15 +2491,14 @@ dependencies = [
  "lash-export",
  "lash-file-index",
  "lash-llm-tools",
+ "lash-perf",
  "lash-plugin-mcp",
- "lash-plugin-observational-memory",
  "lash-plugin-plan-mode",
  "lash-plugin-process-controls",
  "lash-protocol-rlm",
  "lash-protocol-standard",
  "lash-provider-anthropic",
  "lash-provider-auth",
- "lash-provider-codex",
  "lash-provider-google",
  "lash-provider-openai",
  "lash-rlm-types",
@@ -2517,7 +2516,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "stats_alloc",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2637,11 +2635,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-openai-schema"
+name = "lash-perf"
 version = "0.1.0-alpha.42"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dhat",
+ "lash-core",
+ "lash-llm-tools",
+ "lash-plugin-observational-memory",
+ "lash-protocol-rlm",
+ "lash-provider-openai",
+ "lash-rlm-types",
+ "lash-runtime",
+ "lash-sqlite-store",
+ "lash-standard-plugins",
  "serde",
  "serde_json",
+ "stats_alloc",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2810,23 +2826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-provider-codex"
-version = "0.1.0-alpha.42"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "lash-core",
- "lash-llm-transport",
- "lash-openai-schema",
- "lash-provider-auth",
- "lash-provider-openai",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "lash-provider-google"
 version = "0.1.0-alpha.42"
 dependencies = [
@@ -2851,10 +2850,11 @@ dependencies = [
  "base64 0.22.1",
  "lash-core",
  "lash-llm-transport",
- "lash-openai-schema",
+ "lash-provider-auth",
  "reqwest 0.13.3",
  "serde",
  "serde_json",
+ "tracing",
  "uuid",
 ]
 

@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/lash-sansio",
-    "crates/lash-openai-schema",
     "crates/lash-trace",
     "crates/lash-trace-viewer",
     "crates/lash-rlm-types",
@@ -33,7 +32,6 @@ members = [
     "crates/lash-local-store",
     "crates/lash-standard-plugins",
     "crates/lash-provider-anthropic",
-    "crates/lash-provider-codex",
     "crates/lash-provider-google",
     "crates/lash-provider-openai",
     "crates/lash-subagents",
@@ -42,6 +40,7 @@ members = [
     "crates/lash-autoresearch",
     "crates/lash-harness-opt",
     "crates/lash-cli",
+    "crates/lash-perf",
     "crates/lash-export",
     "crates/lash-file-index",
     "crates/lashlang",
@@ -60,13 +59,11 @@ default-members = [
     "crates/lash-rlm-types",
     "crates/lash-llm-transport",
     "crates/lash-llm-tools",
-    "crates/lash-openai-schema",
     "crates/lash-protocol-standard",
     "crates/lash-protocol-rlm",
     "crates/lash-provider-auth",
     "crates/lash-provider-openai",
     "crates/lash-provider-anthropic",
-    "crates/lash-provider-codex",
     "crates/lash-provider-google",
     "crates/lash-sqlite-store",
     "crates/lash-postgres-store",
@@ -148,7 +145,6 @@ lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.1.0-alp
 lash-local-store = { path = "crates/lash-local-store", version = "=0.1.0-alpha.42" }
 lash-postgres-store = { path = "crates/lash-postgres-store", version = "=0.1.0-alpha.42" }
 lash-s3-store = { path = "crates/lash-s3-store", version = "=0.1.0-alpha.42" }
-lash-openai-schema = { path = "crates/lash-openai-schema", version = "=0.1.0-alpha.42" }
 lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.42" }
 lash-plugin-observational-memory = { path = "crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.42" }
 lash-plugin-plan-mode = { path = "crates/lash-plugin-plan-mode", version = "=0.1.0-alpha.42" }
@@ -160,7 +156,6 @@ lash-protocol-rlm = { path = "crates/lash-protocol-rlm", version = "=0.1.0-alpha
 lash-protocol-standard = { path = "crates/lash-protocol-standard", version = "=0.1.0-alpha.42" }
 lash-provider-anthropic = { path = "crates/lash-provider-anthropic", version = "=0.1.0-alpha.42" }
 lash-provider-auth = { path = "crates/lash-provider-auth", version = "=0.1.0-alpha.42" }
-lash-provider-codex = { path = "crates/lash-provider-codex", version = "=0.1.0-alpha.42" }
 lash-provider-google = { path = "crates/lash-provider-google", version = "=0.1.0-alpha.42" }
 lash-provider-openai = { path = "crates/lash-provider-openai", version = "=0.1.0-alpha.42" }
 lash-remote-protocol = { path = "crates/lash-remote-protocol", version = "=0.1.0-alpha.42" }

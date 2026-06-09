@@ -1,5 +1,6 @@
 mod activity;
 mod artifact;
+pub(crate) mod compositor;
 mod prompt;
 mod queue;
 #[cfg(test)]

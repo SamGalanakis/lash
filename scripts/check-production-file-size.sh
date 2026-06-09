@@ -11,7 +11,7 @@ allowlist=$(cat <<'EOF'
 crates/lashlang/src/linker.rs
 crates/lash-remote-protocol/src/lib.rs
 crates/lash-remote-protocol/src/core_conversions.rs
-crates/lash-cli/src/scratch_tui.rs
+crates/lash-cli/src/render/compositor.rs
 crates/lashlang/src/runtime/compiler.rs
 crates/lash-sansio/src/tool_contract.rs
 crates/lash-core/src/runtime/session_manager/process_runners/mod.rs
@@ -29,7 +29,7 @@ crates/lash-core/src/runtime/turn_loop.rs
 crates/lash-sansio/src/session_model/message.rs
 crates/lash-plugin-rolling-history/src/lib.rs
 crates/lash-cli/src/cli_support.rs
-crates/lash-provider-codex/src/lib.rs
+crates/lash-provider-openai/src/codex.rs
 crates/lash-cli/src/setup.rs
 crates/lashlang/src/artifact.rs
 crates/lashlang/src/graph.rs
@@ -47,10 +47,10 @@ crates/lash-cli/src/app/mod.rs
 crates/lashlang/src/trigger.rs
 crates/lash-sqlite-store/src/process_registry.rs
 crates/lash-core/src/store.rs
-crates/lash-cli/src/runtime_perf/providers.rs
+crates/lash-perf/src/runtime_perf/providers.rs
 crates/lash-core/src/runtime/turn_boundary.rs
 crates/lash-cli/src/render/mod.rs
-crates/lash-cli/src/runtime_perf/measurement.rs
+crates/lash-perf/src/runtime_perf/measurement.rs
 crates/lash-cli/src/editor.rs
 crates/lash-core/src/session_graph.rs
 EOF

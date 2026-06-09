@@ -1,9 +1,11 @@
-#![allow(clippy::result_large_err)]
+//! OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::responses_shared as shared;
+use crate::schema::{OpenAiSchemaProfile, model_id};
 use lash_core::SchemaProjectionOverride;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash_core::llm::types::{LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
@@ -18,8 +20,6 @@ use lash_llm_transport::timeouts::{
     response_start_timeout, send_request,
 };
 use lash_llm_transport::util::emit_provider_trace;
-use lash_openai_schema::{OpenAiSchemaProfile, model_id};
-use lash_provider_openai::responses_shared as shared;
 
 pub mod oauth;
 
@@ -41,8 +41,8 @@ fn has_xhigh_suffix(model: &str) -> bool {
 /// OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
 ///
 /// Codex speaks the OpenAI Responses streaming protocol, so the request/stream
-/// machinery is shared verbatim from [`lash_provider_openai::responses_shared`].
-/// This crate owns only the Codex-specific surface: the
+/// machinery is shared verbatim from [`crate::responses_shared`].
+/// This module owns only the Codex-specific surface: the
 /// `chatgpt.com/backend-api/codex/responses` endpoint, the `codex_cli_rs`
 /// originator/User-Agent headers, the system→`instructions` request shape with
 /// tool-result image folding, `clamp_reasoning_effort`, and Codex error/quota

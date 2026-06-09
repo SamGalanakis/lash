@@ -6,4 +6,4 @@ mod report;
 mod scenarios;
 mod store;
 
-pub(crate) use report::run_cli;
+pub use report::run_cli;

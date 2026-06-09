@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::Serialize;
 
-pub(crate) fn resolve_named_scenarios<T>(
+pub fn resolve_named_scenarios<T>(
     filters: &[String],
     defaults: &[T],
     known: &[T],
@@ -47,7 +47,7 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
     }
 }
 
-pub(crate) fn ensure_parent_dir(path: &Path, label: &str) -> anyhow::Result<()> {
+pub fn ensure_parent_dir(path: &Path, label: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create {label} dir {}", parent.display()))?;
@@ -55,7 +55,7 @@ pub(crate) fn ensure_parent_dir(path: &Path, label: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-pub(crate) fn write_json_report(path: &Path, report: &impl Serialize) -> anyhow::Result<()> {
+pub fn write_json_report(path: &Path, report: &impl Serialize) -> anyhow::Result<()> {
     std::fs::write(path, serde_json::to_vec_pretty(report)?)
         .with_context(|| format!("write benchmark report {}", path.display()))
 }

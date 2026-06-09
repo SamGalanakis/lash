@@ -46,7 +46,7 @@ pub(crate) fn default_output_path() -> PathBuf {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_cli(
+pub async fn run_cli(
     out: Option<PathBuf>,
     enable_dhat: bool,
     dhat_out: Option<PathBuf>,

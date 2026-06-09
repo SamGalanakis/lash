@@ -134,11 +134,5 @@ pub(crate) fn ensure_queued_work_completion_conn(
             |row| row.get::<_, i64>(0),
         )
         .map_err(sqlite_error)? as usize;
-    if count != completed.batch_ids.len() {
-        return Err(StoreError::QueuedWorkClaimExpired {
-            session_id: completed.session_id.clone(),
-            claim_id: completed.claim_id.clone(),
-        });
-    }
-    Ok(())
+    ensure_completion_owns_all_batches(completed, count)
 }

@@ -288,9 +288,7 @@ fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
     .with_agent_surface(
         ToolAgentSurface::new(
             ["gmail"],
-            name.trim_start_matches("GMAIL_")
-                .to_ascii_lowercase()
-                .replace('_', "_"),
+            name.trim_start_matches("GMAIL_").to_ascii_lowercase(),
         )
         .with_aliases([name
             .trim_start_matches("GMAIL_")

@@ -1,10 +1,10 @@
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ProcessMemorySample {
-    pub(crate) rss_kb: Option<u64>,
-    pub(crate) hwm_kb: Option<u64>,
+pub struct ProcessMemorySample {
+    pub rss_kb: Option<u64>,
+    pub hwm_kb: Option<u64>,
 }
 
-pub(crate) fn process_memory_sample() -> ProcessMemorySample {
+pub fn process_memory_sample() -> ProcessMemorySample {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return ProcessMemorySample::default();
     };
@@ -28,7 +28,7 @@ pub(crate) fn process_memory_sample() -> ProcessMemorySample {
     sample
 }
 
-pub(crate) fn diff_opt_i64(before: Option<u64>, after: Option<u64>) -> Option<i64> {
+pub fn diff_opt_i64(before: Option<u64>, after: Option<u64>) -> Option<i64> {
     Some(after? as i64 - before? as i64)
 }
 

@@ -6,11 +6,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use lash_core::provider::ProviderHandle;
 use lash_provider_anthropic::AnthropicProvider;
 use lash_provider_auth as oauth;
-use lash_provider_codex::CodexProvider;
-use lash_provider_codex::oauth as codex_oauth;
 use lash_provider_google::GoogleOAuthProvider;
 use lash_provider_google::oauth as google_oauth;
-use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
+use lash_provider_openai::codex::oauth as codex_oauth;
+use lash_provider_openai::{CodexProvider, OpenAiCompatibleProvider, OpenAiProvider};
 use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, Terminal};
 use unicode_width::UnicodeWidthStr;
 

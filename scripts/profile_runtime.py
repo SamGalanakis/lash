@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--binary",
         type=Path,
-        help="Path to the lash binary. Defaults to target/release/lash or target/debug/lash.",
+        help="Path to the lash-perf binary. Defaults to target/release/lash-perf or target/debug/lash-perf.",
     )
     parser.add_argument(
         "--build",
@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--release",
         action="store_true",
-        help="Use target/release/lash instead of target/debug/lash.",
+        help="Use target/release/lash-perf instead of target/debug/lash-perf.",
     )
     parser.add_argument(
         "--profile",
@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
         "--cargo-feature",
         action="append",
         default=[],
-        help="Enable one or more Cargo features when building lash-cli.",
+        help="Enable one or more Cargo features when building lash-perf.",
     )
     return parser.parse_args()
 
@@ -118,7 +118,7 @@ def resolve_binary(args: argparse.Namespace, repo_root: Path) -> Path:
     if args.binary:
         return args.binary
     profile = "release" if args.release else "debug"
-    return repo_root / "target" / profile / "lash"
+    return repo_root / "target" / profile / "lash-perf"
 
 
 def maybe_build(
@@ -131,13 +131,14 @@ def maybe_build(
 ) -> None:
     if not force and binary.exists():
         return
-    cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
-    # `--runtime-perf-benchmark` is gated behind the `bench` cargo
-    # feature so production CLI builds don't inherit `lash/testing` fixtures.
-    feature_list = ["bench", *cargo_features]
+    # The runtime benchmark lives in the dev-only `lash-perf` crate so the
+    # production CLI build never compiles the harness or testing fixtures.
+    cmd = ["cargo", "build", "-q", "-p", "lash-perf"]
+    feature_list = list(cargo_features)
     if dhat:
         feature_list.append("dhat-heap")
-    cmd.extend(["--features", ",".join(feature_list)])
+    if feature_list:
+        cmd.extend(["--features", ",".join(feature_list)])
     if release:
         cmd.append("--release")
     env = None
@@ -145,7 +146,7 @@ def maybe_build(
         env = dict(os.environ)
         env["CARGO_PROFILE_RELEASE_STRIP"] = "none"
         env["CARGO_PROFILE_RELEASE_DEBUG"] = "1"
-    print(f"Building lash binary: {' '.join(cmd)}", file=sys.stderr)
+    print(f"Building lash-perf binary: {' '.join(cmd)}", file=sys.stderr)
     subprocess.run(cmd, cwd=repo_root, check=True, env=env)
 
 
@@ -174,7 +175,6 @@ def main() -> int:
 
     cmd = [
         str(binary),
-        "--runtime-perf-benchmark",
         f"--runtime-perf-runs={max(runs, 1)}",
         f"--runtime-perf-warmups={max(warmups, 0)}",
         f"--runtime-perf-turns={max(turns, 1)}",

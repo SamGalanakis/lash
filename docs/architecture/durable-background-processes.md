@@ -290,7 +290,7 @@ terminal are carried as request config / tool-access, not lost.
   check.
 - `crates/lash/src/core.rs` — `ensure_store_peer_coherence` (facade build).
 - `crates/lash-core/src/runtime/error.rs` — `DurableStoreRequired { facet }`.
-- `crates/lash-core/src/store.rs` — committed session state and turn commit stamps
+- `crates/lash-core/src/store/mod.rs` — committed session state and turn commit stamps
   (the model the process lease mirrors).
 - `crates/lash-subagents/src/rlm.rs` — `agents.spawn` emitting
   `ProcessInput::SessionTurn`.

@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use lash_file_index::{FileIndex, MatchResult};
 
-use crate::perf_support::tempdir::make_temp_bench_dir;
-use crate::perf_support::time::elapsed_ms;
+use lash_perf::perf_support::tempdir::make_temp_bench_dir;
+use lash_perf::perf_support::time::elapsed_ms;
 
 use super::measurement::UiPerfRunResult;
 use super::scenarios::UiPerfWorkload;

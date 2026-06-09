@@ -328,8 +328,6 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
         unreachable!("test should fail before committing to the reused child store")
     }
 
-    lash_core::impl_unsupported_queued_work_methods!();
-
     async fn save_session_meta(
         &self,
         _meta: lash_core::SessionMeta,

@@ -2,7 +2,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::perf_support::time::elapsed_ms;
+use lash_perf::perf_support::time::elapsed_ms;
 
 use super::measurement::UiPerfRunResult;
 use super::scenarios::UiPerfWorkload;

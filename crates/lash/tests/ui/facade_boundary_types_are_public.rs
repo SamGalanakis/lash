@@ -63,8 +63,6 @@ impl RuntimePersistence for FacadeStore {
         })
     }
 
-    lash::persistence::impl_unsupported_queued_work_methods!();
-
     async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
         Ok(())
     }

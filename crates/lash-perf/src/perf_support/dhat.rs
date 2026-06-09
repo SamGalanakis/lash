@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use super::paths::default_dhat_output_path;
 use super::report::ensure_parent_dir;
 
-pub(crate) fn resolve_dhat_output_path(
+pub fn resolve_dhat_output_path(
     enable_dhat: bool,
     report_out: &Path,
     dhat_out: Option<PathBuf>,
@@ -16,7 +16,7 @@ pub(crate) fn resolve_dhat_output_path(
     }
 }
 
-pub(crate) fn ensure_dhat_parent(path: Option<&PathBuf>) -> anyhow::Result<()> {
+pub fn ensure_dhat_parent(path: Option<&PathBuf>) -> anyhow::Result<()> {
     if let Some(path) = path {
         ensure_parent_dir(path, "dhat output")?;
     }
@@ -24,7 +24,7 @@ pub(crate) fn ensure_dhat_parent(path: Option<&PathBuf>) -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "dhat-heap")]
-pub(crate) fn start_dhat_profiler(
+pub fn start_dhat_profiler(
     dhat_out: Option<PathBuf>,
     dhat_frames: Option<usize>,
     _feature_error: &'static str,
@@ -40,7 +40,7 @@ pub(crate) fn start_dhat_profiler(
 }
 
 #[cfg(not(feature = "dhat-heap"))]
-pub(crate) fn start_dhat_profiler(
+pub fn start_dhat_profiler(
     dhat_out: Option<PathBuf>,
     _dhat_frames: Option<usize>,
     feature_error: &'static str,
@@ -52,9 +52,9 @@ pub(crate) fn start_dhat_profiler(
 }
 
 #[cfg(feature = "dhat-heap")]
-pub(crate) fn finish_dhat_profiler(profiler: Option<dhat::Profiler>) {
+pub fn finish_dhat_profiler(profiler: Option<dhat::Profiler>) {
     drop(profiler);
 }
 
 #[cfg(not(feature = "dhat-heap"))]
-pub(crate) fn finish_dhat_profiler(_profiler: Option<()>) {}
+pub fn finish_dhat_profiler(_profiler: Option<()>) {}

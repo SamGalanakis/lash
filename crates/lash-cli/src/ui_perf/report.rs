@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::Serialize;
 
-use crate::perf_support::dhat;
-use crate::perf_support::git::git_dirty;
-use crate::perf_support::metrics::{
+use lash_perf::perf_support::dhat;
+use lash_perf::perf_support::git::git_dirty;
+use lash_perf::perf_support::metrics::{
     PercentileMetricSummary as UiPerfMetricSummary, percentile_summary,
 };
-use crate::perf_support::paths;
-use crate::perf_support::report as report_support;
+use lash_perf::perf_support::paths;
+use lash_perf::perf_support::report as report_support;
 
 use super::measurement::{UiPerfRunResult, run_once};
 use super::scenarios::{BENCH_HEIGHT, BENCH_WIDTH, UiPerfProfile, UiPerfScenario, UiPerfWorkload};

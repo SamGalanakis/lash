@@ -3,10 +3,9 @@ use std::{fmt::Write as _, path::PathBuf, sync::Arc};
 use lash::{
     LashCore, ModeId, ModePreset,
     messages::MessageRole,
-    persistence::SessionSnapshot,
     plugins::{PluginSpec, StaticPluginFactory},
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
-    runtime::{PluginMessage, TurnOutcome},
+    runtime::{PluginMessage, SessionSnapshot, TurnOutcome},
 };
 use lash_core::SessionEventRecord;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -402,7 +401,7 @@ pub(crate) fn build_embed_core(
     let mut builder = match scenario {
         RuntimePerfScenario::EmbedStandard => explicit_ephemeral_facets(lash::LashCore::standard()),
         RuntimePerfScenario::EmbedRlm => explicit_ephemeral_facets(lash::LashCore::rlm())
-            .tools(Arc::new(BenchmarkEchoTool::default()))
+            .tools(Arc::new(BenchmarkEchoTool))
             .default_mode(lash::ModeId::rlm()),
         _ => anyhow::bail!("{} is not an embed scenario", scenario.name()),
     };
@@ -458,7 +457,7 @@ pub(crate) async fn build_runtime_with_store(
     });
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
-        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool::default())),
+        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
     )));
     if matches!(scenario, RuntimePerfScenario::RlmLlmQuery) {
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
@@ -539,7 +538,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     });
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
-        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool::default())),
+        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
     )));
 
     let sessions_root = root.join("sessions");

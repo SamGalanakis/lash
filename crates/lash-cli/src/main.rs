@@ -20,8 +20,6 @@ mod markdown;
 mod model_catalog;
 mod overlay;
 mod paths;
-#[cfg(feature = "bench")]
-mod perf_support;
 mod persistence;
 mod plugin_surface;
 mod prompt_context_plugin;
@@ -31,9 +29,6 @@ mod provider_metadata;
 mod render;
 mod repo_status;
 mod resume;
-#[cfg(feature = "bench")]
-mod runtime_perf;
-mod scratch_tui;
 mod session_bootstrap;
 mod session_log;
 mod setup;
@@ -59,10 +54,6 @@ use dhat::Alloc as DhatAlloc;
 use lash::tracing::TraceLevel;
 #[cfg(test)]
 use lash::{InputItem, TurnActivity, TurnEvent};
-#[cfg(not(feature = "dhat-heap"))]
-use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
-#[cfg(not(feature = "dhat-heap"))]
-use std::alloc::System;
 
 #[cfg(test)]
 use app::PreparedTurn;
@@ -105,13 +96,12 @@ impl From<CliTraceLevel> for TraceLevel {
     }
 }
 
+// Only the dhat-heap profiling build overrides the allocator; the default
+// build uses the system allocator. Runtime allocation accounting lives in
+// the dev-only `lash-perf` crate.
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: DhatAlloc = DhatAlloc;
-
-#[cfg(not(feature = "dhat-heap"))]
-#[global_allocator]
-static GLOBAL_ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 fn turn_has_visible_output(turn: &lash::TurnResult) -> bool {
     !turn.assistant_output.safe_text.trim().is_empty() || !turn.errors.is_empty()
@@ -332,61 +322,6 @@ struct Args {
     #[arg(long, hide = true)]
     ui_perf_enforce_budgets: bool,
 
-    /// Run the synthetic non-inference runtime performance benchmark and exit
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true)]
-    runtime_perf_benchmark: bool,
-
-    /// Write the runtime benchmark JSON report to this file
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, value_name = "OUT.json")]
-    runtime_perf_out: Option<std::path::PathBuf>,
-
-    /// Write a dhat heap profile for the measured runtime benchmark window
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true)]
-    runtime_perf_dhat: bool,
-
-    /// Write a dhat heap profile for the measured runtime benchmark window
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, value_name = "OUT.json")]
-    runtime_perf_dhat_out: Option<std::path::PathBuf>,
-
-    /// Trim dhat backtraces to this many frames
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, value_name = "FRAMES")]
-    runtime_perf_dhat_frames: Option<usize>,
-
-    /// Number of measured runs for the runtime benchmark
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, default_value_t = 5)]
-    runtime_perf_runs: usize,
-
-    /// Number of warmup runs for the runtime benchmark
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, default_value_t = 1)]
-    runtime_perf_warmups: usize,
-
-    /// Limit the runtime benchmark to one or more named scenarios
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, value_name = "SCENARIO")]
-    runtime_perf_scenario: Vec<String>,
-
-    /// Number of committed turns to run inside each measured runtime session
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, default_value_t = 12)]
-    runtime_perf_turns: usize,
-
-    /// Tokio worker stack size for runtime benchmark processes
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true, value_name = "BYTES")]
-    runtime_perf_worker_stack_bytes: Option<usize>,
-
-    /// Exit non-zero when a runtime perf budget is exceeded
-    #[cfg(feature = "bench")]
-    #[arg(long, hide = true)]
-    runtime_perf_enforce_budgets: bool,
-
     /// Export a persisted session `.db` path and exit
     #[arg(long, value_name = "DB")]
     export: Option<String>,
@@ -444,12 +379,6 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn tokio_thread_stack_bytes(_args: &Args) -> usize {
-    #[cfg(feature = "bench")]
-    if _args.runtime_perf_benchmark
-        && let Some(stack_bytes) = _args.runtime_perf_worker_stack_bytes
-    {
-        return stack_bytes;
-    }
     std::env::var("LASH_TOKIO_STACK_BYTES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -473,22 +402,6 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             APP_VERSION,
             BUILD_GIT_HEAD,
         );
-    }
-    #[cfg(feature = "bench")]
-    if args.runtime_perf_benchmark {
-        return runtime_perf::run_cli(
-            args.runtime_perf_out,
-            args.runtime_perf_dhat,
-            args.runtime_perf_dhat_out,
-            args.runtime_perf_dhat_frames,
-            args.runtime_perf_runs,
-            args.runtime_perf_warmups,
-            args.runtime_perf_scenario,
-            args.runtime_perf_turns,
-            args.runtime_perf_enforce_budgets,
-            APP_VERSION,
-        )
-        .await;
     }
     if let Some(session) = args.export.as_deref() {
         let trace = args

@@ -18,12 +18,14 @@ use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiSlashInvocation};
 use tokio_util::sync::CancellationToken;
 
+use crate::Args;
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::event::{AppEvent, AppEventPump};
 use crate::model_catalog::CachedModelCatalog;
 use crate::prompt_tool::CliPromptBridge;
 use crate::render;
+use crate::render::compositor;
 use crate::resume;
 use crate::session_bootstrap::CliSessionOpener;
 use crate::session_log::{self, SessionLogger};
@@ -32,7 +34,6 @@ use crate::ui_trace::{
     UiTraceRecorder, disable_aux_op_recording, enable_aux_op_recording, render_screen_text,
 };
 use crate::update;
-use crate::{Args, scratch_tui};
 use crate::{
     apply_ui_host_effects, hash12, push_system_message, turn_has_visible_output, version_text,
 };
@@ -560,7 +561,7 @@ pub(crate) async fn run_app(
             let render_started = std::time::Instant::now();
             // Pre-compute height cache before immutable borrow in draw
             let (width, height) = terminal.size()?;
-            scratch_tui::sync_chrome_turn_status(&app);
+            compositor::sync_chrome_turn_status(&app);
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.set_size(width, height);
             }
@@ -572,7 +573,7 @@ pub(crate) async fn run_app(
             app.history_area = render::history_area(&app, width, height);
             let capabilities = terminal.capabilities();
             terminal
-                .draw(|frame| scratch_tui::draw_with_capabilities(frame, &mut app, capabilities))?;
+                .draw(|frame| compositor::draw_with_capabilities(frame, &mut app, capabilities))?;
             if let Some(recorder) = ui_trace.as_mut() {
                 let screen = render_screen_text(&mut app, width, height);
                 recorder.maybe_record_render_checkpoint(&screen);

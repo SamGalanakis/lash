@@ -9,8 +9,8 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "OpenAI-compatible (API key) provider for lash. Works with OpenRouter, OpenAI, vLLM, etc."
-keywords = ["lash", "agent", "llm", "openai", "openrouter"]
+description = "OpenAI providers for lash: API-key (OpenRouter, OpenAI, vLLM, etc.) and Codex OAuth (ChatGPT Plus/Pro/Team)."
+keywords = ["lash", "agent", "llm", "openai", "codex"]
 categories = ["api-bindings", "asynchronous"]
 
 [features]
@@ -23,10 +23,11 @@ testing = ["lash-llm-transport/testing"]
 [dependencies]
 lash-core = { workspace = true }
 lash-llm-transport = { workspace = true }
-lash-openai-schema = { workspace = true }
+lash-provider-auth = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }

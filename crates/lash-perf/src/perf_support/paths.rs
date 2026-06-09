@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-pub(crate) fn default_report_path(kind: &str) -> PathBuf {
+pub fn default_report_path(kind: &str) -> PathBuf {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     repo_root()
         .join(".benchmarks")
@@ -10,7 +10,7 @@ pub(crate) fn default_report_path(kind: &str) -> PathBuf {
         .join(format!("{stamp}.json"))
 }
 
-pub(crate) fn default_dhat_output_path(report_out: &Path, fallback_stem: &str) -> PathBuf {
+pub fn default_dhat_output_path(report_out: &Path, fallback_stem: &str) -> PathBuf {
     let stem = report_out
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -21,6 +21,7 @@ pub(crate) fn default_dhat_output_path(report_out: &Path, fallback_stem: &str) -
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("lash-cli crate should live under repo root")
+        .and_then(Path::parent)
+        .expect("lash-perf crate should live under <repo>/crates/")
         .to_path_buf()
 }

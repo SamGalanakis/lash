@@ -4,8 +4,8 @@ use std::time::Instant;
 use lash_tui::{PerfCounters, PerfPhase};
 
 use crate::app::UiTimelineItem;
-use crate::perf_support::time::{elapsed_ms, nanos_to_ms};
 use crate::ui_trace::render_screen_snapshot_with_perf;
+use lash_perf::perf_support::time::{elapsed_ms, nanos_to_ms};
 
 use super::measurement::UiPerfRunResult;
 use super::scenarios::{BENCH_HEIGHT, BENCH_WIDTH, UiPerfWorkload};

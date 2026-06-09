@@ -3,23 +3,23 @@ use serde::Serialize;
 use super::time::round3;
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct BasicMetricSummary {
-    pub(crate) min: f64,
-    pub(crate) median: f64,
-    pub(crate) max: f64,
-    pub(crate) mean: f64,
+pub struct BasicMetricSummary {
+    pub min: f64,
+    pub median: f64,
+    pub max: f64,
+    pub mean: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct PercentileMetricSummary {
-    pub(crate) p50: f64,
-    pub(crate) p95: f64,
-    pub(crate) p99: f64,
-    pub(crate) max: f64,
-    pub(crate) mean: f64,
+pub struct PercentileMetricSummary {
+    pub p50: f64,
+    pub p95: f64,
+    pub p99: f64,
+    pub max: f64,
+    pub mean: f64,
 }
 
-pub(crate) fn basic_summary(mut values: Vec<f64>) -> BasicMetricSummary {
+pub fn basic_summary(mut values: Vec<f64>) -> BasicMetricSummary {
     values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let min = *values.first().unwrap_or(&0.0);
     let max = *values.last().unwrap_or(&0.0);
@@ -43,7 +43,7 @@ pub(crate) fn basic_summary(mut values: Vec<f64>) -> BasicMetricSummary {
     }
 }
 
-pub(crate) fn optional_basic_summary(values: Vec<f64>) -> Option<BasicMetricSummary> {
+pub fn optional_basic_summary(values: Vec<f64>) -> Option<BasicMetricSummary> {
     if values.is_empty() {
         None
     } else {
@@ -51,7 +51,7 @@ pub(crate) fn optional_basic_summary(values: Vec<f64>) -> Option<BasicMetricSumm
     }
 }
 
-pub(crate) fn percentile_summary(mut values: Vec<f64>) -> PercentileMetricSummary {
+pub fn percentile_summary(mut values: Vec<f64>) -> PercentileMetricSummary {
     values.sort_by(f64::total_cmp);
     PercentileMetricSummary {
         p50: round3(percentile_sorted(&values, 0.50)),
@@ -62,7 +62,7 @@ pub(crate) fn percentile_summary(mut values: Vec<f64>) -> PercentileMetricSummar
     }
 }
 
-pub(crate) fn percentile_sorted(values: &[f64], percentile: f64) -> f64 {
+pub fn percentile_sorted(values: &[f64], percentile: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
     }

@@ -109,13 +109,13 @@ pub mod direct {
 }
 
 pub mod persistence {
-    pub use lash_core::impl_unsupported_queued_work_methods;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
         QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
         SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
     };
+    pub use lash_core::store::queued_work;
     pub use lash_core::store::{
         GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, RuntimeCommit,
         RuntimeCommitResult, RuntimeTurnCommitStamp, SessionCheckpoint, SessionHead,

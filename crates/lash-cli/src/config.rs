@@ -9,9 +9,10 @@ use std::collections::BTreeMap;
 use lash_core::{ProviderFactory, ProviderHandle, ProviderSpec};
 use lash_plugin_mcp::McpServerConfig;
 use lash_provider_anthropic::AnthropicProviderFactory;
-use lash_provider_codex::CodexProviderFactory;
 use lash_provider_google::GoogleOAuthProviderFactory;
-use lash_provider_openai::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
+use lash_provider_openai::{
+    CodexProviderFactory, OpenAiCompatibleProviderFactory, OpenAiProviderFactory,
+};
 use serde::{Deserialize, Serialize};
 
 /// Auxiliary service secrets that are independent of LLM provider auth.

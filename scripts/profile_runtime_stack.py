@@ -2,7 +2,7 @@
 """Run runtime perf scenarios across Tokio worker stack sizes.
 
 This is a crash-boundary harness for embedded Tokio stack regressions. Each
-stack size runs in a fresh process with lash-cli's hidden runtime-perf Tokio
+stack size runs in a fresh process with the lash-perf runtime benchmark Tokio
 runtime builder knob, so stack overflows are recorded as failed samples instead
 of killing the whole matrix.
 """
@@ -75,14 +75,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--binary",
         type=Path,
-        help="Path to lash. Defaults to target/release/lash or target/debug/lash.",
+        help="Path to lash-perf. Defaults to target/release/lash-perf or target/debug/lash-perf.",
     )
     parser.add_argument(
         "--build",
         dest="build",
         action="store_true",
         default=True,
-        help="Build lash-cli before running the matrix (default: enabled).",
+        help="Build lash-perf before running the matrix (default: enabled).",
     )
     parser.add_argument(
         "--no-build",
@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--release",
         action="store_true",
-        help="Use target/release/lash instead of target/debug/lash.",
+        help="Use target/release/lash-perf instead of target/debug/lash-perf.",
     )
     parser.add_argument(
         "--scenario",
@@ -137,7 +137,7 @@ def parse_args() -> argparse.Namespace:
         "--cargo-feature",
         action="append",
         default=[],
-        help="Additional Cargo feature to enable when building lash-cli.",
+        help="Additional Cargo feature to enable when building lash-perf.",
     )
     return parser.parse_args()
 
@@ -155,18 +155,19 @@ def resolve_binary(args: argparse.Namespace, root: Path) -> Path:
     if args.binary:
         return args.binary
     profile = "release" if args.release else "debug"
-    return root / "target" / profile / "lash"
+    return root / "target" / profile / "lash-perf"
 
 
 def maybe_build(args: argparse.Namespace, root: Path) -> None:
     if not args.build:
         return
-    cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
-    features = ["bench", *args.cargo_feature]
-    cmd.extend(["--features", ",".join(features)])
+    cmd = ["cargo", "build", "-q", "-p", "lash-perf"]
+    features = list(args.cargo_feature)
+    if features:
+        cmd.extend(["--features", ",".join(features)])
     if args.release:
         cmd.append("--release")
-    print(f"Building lash binary: {' '.join(cmd)}", file=sys.stderr)
+    print(f"Building lash-perf binary: {' '.join(cmd)}", file=sys.stderr)
     subprocess.run(cmd, cwd=root, check=True)
 
 
@@ -190,7 +191,6 @@ def run_sample(
     sample_out = result_path(out, scenario, stack_bytes)
     cmd = [
         str(binary),
-        "--runtime-perf-benchmark",
         f"--runtime-perf-runs={max(runs, 1)}",
         f"--runtime-perf-warmups={max(warmups, 0)}",
         f"--runtime-perf-turns={max(turns, 1)}",

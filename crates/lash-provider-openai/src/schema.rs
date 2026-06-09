@@ -1,3 +1,6 @@
+//! OpenAI JSON Schema projection helpers shared by the OpenAI-flavored
+//! providers (direct OpenAI, OpenAI-compatible, and Codex OAuth).
+
 use serde_json::{Map, Value, json};
 
 /// Strip a leading `vendor/` prefix from a model id (e.g. `openai/gpt-4o` →

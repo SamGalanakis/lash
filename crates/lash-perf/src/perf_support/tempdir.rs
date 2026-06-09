@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use chrono::Utc;
 
-pub(crate) fn make_temp_bench_dir(prefix: &str) -> anyhow::Result<PathBuf> {
+pub fn make_temp_bench_dir(prefix: &str) -> anyhow::Result<PathBuf> {
     let root = std::env::temp_dir().join(format!(
         "{}-{}-{}",
         prefix,

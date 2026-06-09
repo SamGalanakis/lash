@@ -1,3 +1,7 @@
+//! The runtime's settled-session persistence contract and shared store types.
+
+pub mod queued_work;
+
 fn default_root_session_id() -> String {
     "root".to_string()
 }
@@ -407,160 +411,6 @@ macro_rules! impl_noop_attachment_manifest {
     };
 }
 
-#[macro_export]
-macro_rules! impl_unsupported_queued_work_methods {
-    () => {
-        fn enqueue_queued_work<'life0, 'async_trait>(
-            &'life0 self,
-            _batch: $crate::runtime::QueuedWorkBatchDraft,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = ::std::result::Result<
-                            $crate::runtime::QueuedWorkBatch,
-                            $crate::store::StoreError,
-                        >,
-                    > + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move {
-                Err($crate::store::StoreError::Backend(
-                    "queued work is not supported by this test store".to_string(),
-                ))
-            })
-        }
-
-        fn claim_ready_queued_work<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            session_id: &'life1 str,
-            _owner_id: &'life2 str,
-            _boundary: $crate::runtime::QueuedWorkClaimBoundary,
-            _lease_ttl_ms: u64,
-            _max_batches: usize,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = ::std::result::Result<
-                            Option<$crate::runtime::QueuedWorkClaim>,
-                            $crate::store::StoreError,
-                        >,
-                    > + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move {
-                Err($crate::store::StoreError::Backend(format!(
-                    "queued work is not supported for session `{session_id}` by this test store"
-                )))
-            })
-        }
-
-        fn renew_queued_work_claim<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            claim: &'life1 $crate::runtime::QueuedWorkClaim,
-            _lease_ttl_ms: u64,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = ::std::result::Result<
-                            $crate::runtime::QueuedWorkClaim,
-                            $crate::store::StoreError,
-                        >,
-                    > + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move {
-                Err($crate::store::StoreError::QueuedWorkClaimExpired {
-                    session_id: claim.session_id.clone(),
-                    claim_id: claim.claim_id.clone(),
-                })
-            })
-        }
-
-        fn abandon_queued_work_claim<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            _claim: &'life1 $crate::runtime::QueuedWorkClaim,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = ::std::result::Result<(), $crate::store::StoreError>,
-                    > + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move { Ok(()) })
-        }
-
-        fn cancel_queued_work_batch<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            _session_id: &'life1 str,
-            _batch_id: &'life2 str,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = ::std::result::Result<
-                            Option<$crate::runtime::QueuedWorkBatch>,
-                            $crate::store::StoreError,
-                        >,
-                    > + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move { Ok(None) })
-        }
-
-        fn list_queued_work<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            _session_id: &'life1 str,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = ::std::result::Result<
-                            Vec<$crate::runtime::QueuedWorkBatch>,
-                            $crate::store::StoreError,
-                        >,
-                    > + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move { Ok(Vec::new()) })
-        }
-    };
-}
-
 /// Reject a persisted record whose `schema_version` does not match the
 /// version this binary supports. Backends call this immediately after
 /// deserializing a record from durable storage.
@@ -860,19 +710,35 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
 
+    /// Persist a queued-work batch for later claiming.
+    ///
+    /// The default implementation rejects the batch: backends that do not
+    /// support queued work inherit it and stay loud rather than silently
+    /// dropping work.
     async fn enqueue_queued_work(
         &self,
-        batch: crate::QueuedWorkBatchDraft,
-    ) -> Result<crate::QueuedWorkBatch, StoreError>;
+        _batch: crate::QueuedWorkBatchDraft,
+    ) -> Result<crate::QueuedWorkBatch, StoreError> {
+        Err(StoreError::Backend(
+            "queued work is not supported by this test store".to_string(),
+        ))
+    }
 
+    /// Claim the next ready queued-work group for `owner_id`.
+    ///
+    /// The default implementation reports queued work as unsupported.
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
-        owner_id: &str,
-        boundary: crate::QueuedWorkClaimBoundary,
-        lease_ttl_ms: u64,
-        max_batches: usize,
-    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
+        _owner_id: &str,
+        _boundary: crate::QueuedWorkClaimBoundary,
+        _lease_ttl_ms: u64,
+        _max_batches: usize,
+    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError> {
+        Err(StoreError::Backend(format!(
+            "queued work is not supported for session `{session_id}` by this test store"
+        )))
+    }
 
     /// Claim a specific ready batch set selected from the durable queue.
     ///
@@ -917,16 +783,31 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         Ok(None)
     }
 
+    /// Extend the lease on a held queued-work claim.
+    ///
+    /// The default implementation reports the claim as expired, matching a
+    /// backend that never granted one.
     async fn renew_queued_work_claim(
         &self,
         claim: &crate::QueuedWorkClaim,
-        lease_ttl_ms: u64,
-    ) -> Result<crate::QueuedWorkClaim, StoreError>;
+        _lease_ttl_ms: u64,
+    ) -> Result<crate::QueuedWorkClaim, StoreError> {
+        Err(StoreError::QueuedWorkClaimExpired {
+            session_id: claim.session_id.clone(),
+            claim_id: claim.claim_id.clone(),
+        })
+    }
 
+    /// Release a held queued-work claim without completing it.
+    ///
+    /// The default implementation is a no-op: with no queued work there is
+    /// nothing to release.
     async fn abandon_queued_work_claim(
         &self,
-        claim: &crate::QueuedWorkClaim,
-    ) -> Result<(), StoreError>;
+        _claim: &crate::QueuedWorkClaim,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 
     /// Remove an unclaimed queued-work batch from durable ingress.
     ///
@@ -934,16 +815,26 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     /// when the batch is missing or currently held by a live claim; callers must
     /// treat that as "already claimed or completed" and must not restore any
     /// stale local draft state.
+    ///
+    /// The default implementation reports `None` (nothing queued, nothing to
+    /// cancel).
     async fn cancel_queued_work_batch(
         &self,
-        session_id: &str,
-        batch_id: &str,
-    ) -> Result<Option<crate::QueuedWorkBatch>, StoreError>;
+        _session_id: &str,
+        _batch_id: &str,
+    ) -> Result<Option<crate::QueuedWorkBatch>, StoreError> {
+        Ok(None)
+    }
 
+    /// List all queued-work batches for a session.
+    ///
+    /// The default implementation reports an empty queue.
     async fn list_queued_work(
         &self,
-        session_id: &str,
-    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError>;
+        _session_id: &str,
+    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError> {
+        Ok(Vec::new())
+    }
 
     /// List queued-work batches that are still pending presentation/editing.
     ///
