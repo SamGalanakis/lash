@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use lash_core::testing::conformance::{
     ReopenableHostEventStore, ReopenableLashlangArtifactStore, ReopenableProcessRegistry,
@@ -6,6 +6,12 @@ use lash_core::testing::conformance::{
 };
 use lash_core::{DurabilityTier, HostEventStore, ProcessRegistry, RuntimePersistence};
 use lash_postgres_store::PostgresStorage;
+
+/// All four suites share one database and `reset()` truncates every `lash_*`
+/// table between cases, so they must not touch it concurrently. This guard
+/// serializes them intrinsically — correctness no longer depends on the test
+/// harness being invoked with `--test-threads=1`.
+static DB_GUARD: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn database_url() -> Option<String> {
     std::env::var("LASH_POSTGRES_DATABASE_URL").ok()
@@ -73,6 +79,7 @@ async fn reset(storage: &PostgresStorage) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
     let Some(storage) = storage().await else {
         eprintln!("skipping Postgres conformance: LASH_POSTGRES_DATABASE_URL is not set");
         return;
@@ -92,6 +99,7 @@ async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_process_registry_satisfies_conformance_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
     let Some(storage) = storage().await else {
         eprintln!("skipping Postgres process conformance: LASH_POSTGRES_DATABASE_URL is not set");
         return;
@@ -111,6 +119,7 @@ async fn postgres_process_registry_satisfies_conformance_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_host_event_store_satisfies_conformance_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
     let Some(storage) = storage().await else {
         eprintln!(
             "skipping Postgres host-event conformance: LASH_POSTGRES_DATABASE_URL is not set"
@@ -135,6 +144,7 @@ async fn postgres_host_event_store_satisfies_conformance_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_lashlang_artifact_store_satisfies_conformance_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
     let Some(storage) = storage().await else {
         eprintln!("skipping Postgres artifact conformance: LASH_POSTGRES_DATABASE_URL is not set");
         return;

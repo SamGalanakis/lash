@@ -92,7 +92,7 @@ flowchart TB
             <h2>The Store Is A Backend Seam</h2>
             <p>Subscriptions, occurrences, and delivery reservations live behind a <code>HostEventStore</code> trait — parallel to <code>RuntimePersistence</code>, and separate from it.</p>
           </div>
-          <p>The default implementation is in-memory. Because matching and delivery must reach whichever worker holds the target session, a distributed deployment supplies a <strong>networked <code>HostEventStore</code></strong> (the same way it supplies a networked <code>RuntimePersistence</code>). This is the one ingress-specific seam a horizontally-scaled fleet adds; see <a href="./scaling.html">scaling</a>. The host-event store is durable intent for delivery, not conversation history — durable session state remains in <code>RuntimePersistence</code>.</p>
+          <p>The default implementation is in-memory. Because matching and delivery must reach whichever worker holds the target session, a distributed deployment supplies <code>PostgresHostEventStore</code> (the same way it supplies Postgres-backed <code>RuntimePersistence</code>). The distributed Restate/Postgres/MinIO E2E covers registration, occurrence delivery, trigger process execution, and replay-safe failover. The host-event store is durable intent for delivery, not conversation history — durable session state remains in <code>RuntimePersistence</code>.</p>
         </div>
 
         <div class="section">
@@ -107,7 +107,8 @@ flowchart TB
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__link" href="./durability.html"><span class="pager__dir">next</span><span class="pager__title">durability / workflows</span></a>
+    <a class="pager__link" href="./durability.html"><span class="pager__dir">previous</span><span class="pager__title">durability / workflows</span></a>
+    <a class="pager__link" href="./scaling.html"><span class="pager__dir">next</span><span class="pager__title">scaling / stateless</span></a>
   </div>
 </section>
 </body>
