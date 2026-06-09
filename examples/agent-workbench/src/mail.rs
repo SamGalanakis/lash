@@ -361,12 +361,11 @@ impl MockMailProvider {
         defs
     }
 
-    /// Resolve a tool name back to (slug, operation) by parsing it, without
-    /// consulting the live account set. Restoring a persisted session must be
-    /// able to rebind inbox tools whose account has since been removed; the
-    /// live surface (`tool_manifests`) lists only current accounts, so the
-    /// next tool-surface refresh drops the stale entries, and executing a
-    /// stale tool fails with the world's unknown-account error.
+    /// Resolve a tool name back to (slug, operation) by parsing it. Only used
+    /// to route execution; resolution (`tool_manifests`/`resolve_contract`)
+    /// covers live accounts exclusively. A persisted session that references
+    /// a removed account's tools restores anyway — lash-core orphans them
+    /// (kept, forced Off) and rebinds when the account is re-added.
     fn route(&self, name: &str) -> Option<(String, &'static str)> {
         let rest = name.strip_prefix("inbox__")?;
         for operation in MAIL_OPERATIONS {
@@ -377,21 +376,6 @@ impl MockMailProvider {
             }
         }
         None
-    }
-
-    /// Definition for any well-formed inbox tool name (the tool id is derived
-    /// from the name, so rebinding persisted state matches by id even when
-    /// the account is gone). Uses the live display name when available.
-    fn definition_for_name(&self, name: &str) -> Option<ToolDefinition> {
-        let (slug, operation) = self.route(name)?;
-        let display_name = self
-            .world
-            .account_summaries()
-            .into_iter()
-            .find(|summary| summary.slug == slug)
-            .map(|summary| summary.display_name)
-            .unwrap_or_else(|| slug.clone());
-        Some(definition_for(&slug, &display_name, operation))
     }
 }
 
@@ -404,15 +388,16 @@ impl ToolProvider for MockMailProvider {
             .collect()
     }
 
-    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
-        self.definition_for_name(name)
-            .as_ref()
-            .map(ToolDefinition::manifest)
-    }
-
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        self.definition_for_name(name)
-            .map(|def| Arc::new(def.contract()))
+        let (slug, operation) = self.route(name)?;
+        let summary = self
+            .world
+            .account_summaries()
+            .into_iter()
+            .find(|summary| summary.slug == slug)?;
+        Some(Arc::new(
+            definition_for(&slug, &summary.display_name, operation).contract(),
+        ))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {

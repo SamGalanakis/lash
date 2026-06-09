@@ -31,19 +31,40 @@ impl ToolSourceHandle {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolStateEntry {
     manifest: ToolManifest,
+    /// True when this tool was not resolvable from any registered source at
+    /// export time (e.g. a detached MCP server). Orphaned entries keep their
+    /// last-known manifest, surface as [`crate::ToolAvailability::Off`], and
+    /// rebind automatically when a source re-advertises the same (name, id).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    orphaned: bool,
 }
 
 impl ToolStateEntry {
+    #[cfg(test)]
     pub(crate) fn new(manifest: ToolManifest) -> Self {
-        Self { manifest }
+        Self {
+            manifest,
+            orphaned: false,
+        }
     }
 
-    pub fn manifest(&self) -> &ToolManifest {
+    /// The manifest as exposed to callers. Orphaned entries are known to the
+    /// session but unavailable until their source returns, so their public
+    /// availability is always forced to `Off`.
+    pub fn manifest(&self) -> ToolManifest {
+        let mut manifest = self.manifest.clone();
+        if self.orphaned {
+            manifest.availability_override = Some(crate::ToolAvailability::Off);
+        }
+        manifest
+    }
+
+    fn stored_manifest(&self) -> &ToolManifest {
         &self.manifest
     }
 
-    pub fn manifest_mut(&mut self) -> &mut ToolManifest {
-        &mut self.manifest
+    pub fn is_orphaned(&self) -> bool {
+        self.orphaned
     }
 }
 
@@ -71,10 +92,7 @@ impl ToolState {
     }
 
     pub fn tool_manifests(&self) -> Vec<ToolManifest> {
-        self.tools
-            .values()
-            .map(|entry| entry.manifest.clone())
-            .collect()
+        self.tools.values().map(ToolStateEntry::manifest).collect()
     }
 
     pub fn get(&self, name: &str) -> Option<&ToolStateEntry> {
@@ -370,22 +388,68 @@ impl ToolSourceExecutor for ToolProviderSource {
     }
 }
 
+/// How a registry entry is connected to its tool source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolBinding {
+    /// Resolvable through the registered source with this id.
+    Bound(String),
+    /// Persisted in a session snapshot but not resolvable from any currently
+    /// registered source. Surfaces as `Off`; execution fails loudly; rebinds
+    /// when a source re-advertises the same (name, id).
+    Orphaned,
+}
+
+impl ToolBinding {
+    fn source_id(&self) -> Option<&str> {
+        match self {
+            Self::Bound(id) => Some(id),
+            Self::Orphaned => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ToolRegistryEntry {
     manifest: ToolManifest,
-    source_id: String,
+    binding: ToolBinding,
 }
 
 impl ToolRegistryEntry {
     fn new(manifest: ToolManifest, source_id: impl Into<String>) -> Self {
         Self {
             manifest,
-            source_id: source_id.into(),
+            binding: ToolBinding::Bound(source_id.into()),
         }
     }
 
+    fn orphaned(manifest: ToolManifest) -> Self {
+        Self {
+            manifest,
+            binding: ToolBinding::Orphaned,
+        }
+    }
+
+    fn is_orphaned(&self) -> bool {
+        self.binding == ToolBinding::Orphaned
+    }
+
+    /// The manifest as exposed to surfaces, catalogs, and availability checks.
+    /// Orphaned entries are forced to `Off` in the view without mutating the
+    /// stored manifest, so the persisted override survives a later rebind and
+    /// export/restore round-trips stay byte-identical.
+    fn view_manifest(&self) -> ToolManifest {
+        let mut manifest = self.manifest.clone();
+        if self.is_orphaned() {
+            manifest.availability_override = Some(crate::ToolAvailability::Off);
+        }
+        manifest
+    }
+
     fn export(&self) -> ToolStateEntry {
-        ToolStateEntry::new(self.manifest.clone())
+        ToolStateEntry {
+            manifest: self.manifest.clone(),
+            orphaned: self.is_orphaned(),
+        }
     }
 }
 
@@ -394,6 +458,16 @@ struct ToolRegistryState {
     generation: u64,
     tools: BTreeMap<String, ToolRegistryEntry>,
     next_live_source_id: u64,
+}
+
+/// Outcome of [`ToolRegistry::restore_state`]: the adopted generation plus the
+/// names of persisted tools that no registered source currently resolves.
+/// Hosts should surface a non-empty `orphaned` list to the user — the session
+/// opened, but those tools are `Off` until their source returns.
+#[derive(Clone, Debug, Default)]
+pub struct ToolRestoreReport {
+    pub generation: u64,
+    pub orphaned: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -475,9 +549,9 @@ impl ToolRegistry {
         }
 
         validate_unique_manifest_entries(next.entries().values())?;
-        let rebound_tools = {
+        let rebound = {
             let sources = self.sources.read().expect("tool source lock poisoned");
-            rebind_tool_state_entries(next.entries(), &sources)?
+            rebind_tool_state_entries(next.entries(), &sources, RebindMode::RejectUnresolved)?
         };
 
         let mut state = self
@@ -490,7 +564,7 @@ impl ToolRegistry {
                 actual: state.generation,
             });
         }
-        state.tools = rebound_tools;
+        state.tools = rebound.tools;
         state.generation += 1;
         Ok(state.generation)
     }
@@ -508,20 +582,32 @@ impl ToolRegistry {
     /// onto a base registry at generation 1 — `apply_state` would reject that
     /// (`expected G, actual 1`); `restore_state` adopts `G`. Entries are still
     /// rebound to the live sources, so source identity is reconnected.
-    pub fn restore_state(&self, snapshot: ToolState) -> Result<u64, ReconfigureError> {
+    ///
+    /// Restore is tolerant of missing sources: a persisted tool that no current
+    /// source resolves becomes an orphaned entry (kept with its last-known
+    /// manifest, surfaced as `Off`, rebound when its source returns) instead of
+    /// failing the whole restore. Real conflicts — the name resolving with a
+    /// different id, or multiple sources claiming the same tool — still fail.
+    pub fn restore_state(
+        &self,
+        snapshot: ToolState,
+    ) -> Result<ToolRestoreReport, ReconfigureError> {
         validate_unique_manifest_entries(snapshot.entries().values())?;
-        let rebound_tools = {
+        let rebound = {
             let sources = self.sources.read().expect("tool source lock poisoned");
-            rebind_tool_state_entries(snapshot.entries(), &sources)?
+            rebind_tool_state_entries(snapshot.entries(), &sources, RebindMode::OrphanUnresolved)?
         };
 
         let mut state = self
             .state
             .write()
             .expect("tool registry state lock poisoned");
-        state.tools = rebound_tools;
+        state.tools = rebound.tools;
         state.generation = snapshot.generation();
-        Ok(state.generation)
+        Ok(ToolRestoreReport {
+            generation: state.generation,
+            orphaned: rebound.orphaned,
+        })
     }
 
     pub fn add_tool_provider(
@@ -599,11 +685,6 @@ impl ToolRegistry {
             .state
             .write()
             .expect("tool registry state lock poisoned");
-        let same_source_names = state
-            .tools
-            .iter()
-            .filter_map(|(name, entry)| (entry.source_id == source_id).then_some(name.clone()))
-            .collect::<BTreeSet<_>>();
         let previous_overrides = state
             .tools
             .iter()
@@ -611,33 +692,47 @@ impl ToolRegistry {
             .collect::<BTreeMap<_, _>>();
         match policy {
             SourceReconcilePolicy::RejectExternalConflicts => {
+                // Orphans never conflict: a live advertisement supersedes a
+                // tool that is currently unresolvable. Matching (name, id)
+                // means the source came back — the entry rebinds below, with
+                // its availability override preserved via `previous_overrides`.
                 for manifest in &advertised_tools {
                     if let Some(existing) = state.tools.get(&manifest.name)
-                        && existing.source_id != source_id
+                        && let Some(existing_source) = existing.binding.source_id()
+                        && existing_source != source_id
                     {
                         return Err(ReconfigureError::Validation(format!(
                             "duplicate tool name `{}` from source `{}` conflicts with source `{}`",
-                            manifest.name, source_id, existing.source_id
+                            manifest.name, source_id, existing_source
                         )));
                     }
-                    if let Some((existing_name, existing)) =
-                        state.tools.iter().find(|(_, entry)| {
-                            entry.source_id != source_id && entry.manifest.id == manifest.id
+                    if let Some((existing_name, existing_source)) =
+                        state.tools.iter().find_map(|(name, entry)| {
+                            let existing_source = entry.binding.source_id()?;
+                            (existing_source != source_id && entry.manifest.id == manifest.id)
+                                .then(|| (name.clone(), existing_source.to_string()))
                         })
                     {
                         return Err(ReconfigureError::Validation(format!(
                             "duplicate tool id `{}` from source `{}` conflicts with tool `{}` from source `{}`",
-                            manifest.id, source_id, existing_name, existing.source_id
+                            manifest.id, source_id, existing_name, existing_source
                         )));
                     }
                 }
-                state.tools.retain(|name, entry| {
-                    entry.source_id != source_id || !same_source_names.contains(name)
+                state.tools.retain(|name, entry| match &entry.binding {
+                    // Drop this source's previous surface; it is re-inserted
+                    // from the fresh advertisement below.
+                    ToolBinding::Bound(bound) => bound != &source_id,
+                    // Drop orphans the fresh advertisement supersedes.
+                    ToolBinding::Orphaned => {
+                        !advertised_names.contains(name)
+                            && !advertised_ids.contains(&entry.manifest.id)
+                    }
                 });
             }
             SourceReconcilePolicy::OverlayReplacingConflicts => {
                 state.tools.retain(|name, entry| {
-                    entry.source_id != source_id
+                    entry.binding.source_id() != Some(source_id.as_str())
                         && !advertised_names.contains(name)
                         && !advertised_ids.contains(&entry.manifest.id)
                 });
@@ -692,7 +787,9 @@ impl ToolRegistry {
             .state
             .write()
             .expect("tool registry state lock poisoned");
-        state.tools.retain(|_, entry| entry.source_id != source_id);
+        state
+            .tools
+            .retain(|_, entry| entry.binding.source_id() != Some(source_id));
         state.generation += 1;
         Ok(state.generation)
     }
@@ -706,15 +803,101 @@ impl ToolRegistry {
             .map(|(k, v)| (k.clone(), Arc::clone(v)))
             .collect::<BTreeMap<_, _>>();
         validate_unique_manifest_entries(snapshot.entries().values())?;
-        let tools = rebind_tool_state_entries(snapshot.entries(), &sources)?;
+        // Tolerant like `restore_state`: a fork mirrors whatever the parent
+        // registry holds, including orphans whose sources are still absent.
+        let rebound =
+            rebind_tool_state_entries(snapshot.entries(), &sources, RebindMode::OrphanUnresolved)?;
         let generation = snapshot.generation.max(1);
         Ok(Self {
             sources: Arc::new(RwLock::new(sources)),
             state: Arc::new(RwLock::new(ToolRegistryState {
                 generation,
-                tools,
+                tools: rebound.tools,
                 next_live_source_id: 0,
             })),
+        })
+    }
+}
+
+impl ToolRegistry {
+    /// Try to rebind an orphaned entry to a source that now resolves the same
+    /// (name, id). Returns the live manifest on success. A source resolving
+    /// the name with a *different* id is a replaced implementation — the
+    /// orphan keeps the name and stays unavailable rather than silently
+    /// swapping semantics under the session.
+    fn try_rebind_orphan(&self, name: &str, orphan_id: &crate::ToolId) -> Option<ToolManifest> {
+        let sources = self
+            .sources
+            .read()
+            .expect("tool source lock poisoned")
+            .iter()
+            .map(|(source_id, source)| (source_id.clone(), Arc::clone(source)))
+            .collect::<Vec<_>>();
+        for (source_id, source) in sources {
+            let Some(manifest) = source.resolve_manifest(name) else {
+                continue;
+            };
+            if manifest.id != *orphan_id {
+                continue;
+            }
+            let mut manifest = manifest_with_compact_contract(source.as_ref(), manifest);
+            let mut state = self
+                .state
+                .write()
+                .expect("tool registry state lock poisoned");
+            let existing = state.tools.get(name)?;
+            if !existing.is_orphaned() {
+                return Some(existing.view_manifest());
+            }
+            manifest.availability_override = existing
+                .manifest
+                .availability_override
+                .or(manifest.availability_override);
+            state.tools.insert(
+                name.to_string(),
+                ToolRegistryEntry::new(manifest.clone(), source_id),
+            );
+            state.generation += 1;
+            return Some(manifest);
+        }
+        None
+    }
+
+    /// Resolve the source for a registry entry, distinguishing "unknown tool"
+    /// from "known but orphaned" so callers can fail with a precise error.
+    fn resolve_execution_source(
+        &self,
+        name: &str,
+    ) -> Result<Arc<dyn ToolSourceExecutor>, ToolResult> {
+        if self.resolve_manifest(name).is_none() {
+            return Err(ToolResult::err_fmt(format_args!("Unknown tool: {name}")));
+        }
+        let binding = {
+            let state = self
+                .state
+                .read()
+                .expect("tool registry state lock poisoned");
+            state.tools.get(name).map(|entry| entry.binding.clone())
+        };
+        let source_id = match binding {
+            Some(ToolBinding::Bound(source_id)) => source_id,
+            Some(ToolBinding::Orphaned) => {
+                return Err(ToolResult::err_fmt(format_args!(
+                    "Tool `{name}` is unavailable: it was restored from a persisted session \
+                     but its source is not currently registered"
+                )));
+            }
+            None => return Err(ToolResult::err_fmt(format_args!("Unknown tool: {name}"))),
+        };
+        let source = {
+            self.sources
+                .read()
+                .expect("tool source lock poisoned")
+                .get(&source_id)
+                .cloned()
+        };
+        source.ok_or_else(|| {
+            ToolResult::err_fmt(format_args!("Tool source missing for tool `{name}`"))
         })
     }
 }
@@ -729,19 +912,39 @@ impl ToolProvider for ToolRegistry {
         state
             .tools
             .values()
-            .map(|entry| entry.manifest.clone())
+            .map(ToolRegistryEntry::view_manifest)
             .collect()
     }
 
     fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
-        if let Some(manifest) = {
+        enum Known {
+            Bound(ToolManifest),
+            Orphaned(ToolManifest, crate::ToolId),
+        }
+        let known = {
             let state = self
                 .state
                 .read()
                 .expect("tool registry state lock poisoned");
-            state.tools.get(name).map(|entry| entry.manifest.clone())
-        } {
-            return Some(manifest);
+            state.tools.get(name).map(|entry| {
+                if entry.is_orphaned() {
+                    Known::Orphaned(entry.view_manifest(), entry.manifest.id.clone())
+                } else {
+                    Known::Bound(entry.manifest.clone())
+                }
+            })
+        };
+        match known {
+            Some(Known::Bound(manifest)) => return Some(manifest),
+            Some(Known::Orphaned(off_manifest, orphan_id)) => {
+                // A source may have come back since the restore: rebind on
+                // (name, id) match, otherwise keep serving the Off view.
+                return Some(
+                    self.try_rebind_orphan(name, &orphan_id)
+                        .unwrap_or(off_manifest),
+                );
+            }
+            None => {}
         }
 
         let sources = self
@@ -772,14 +975,16 @@ impl ToolProvider for ToolRegistry {
                 .write()
                 .expect("tool registry state lock poisoned");
             if let Some(existing) = state.tools.get(&manifest.name) {
-                return (existing.source_id == source_id).then(|| existing.manifest.clone());
+                return (existing.binding.source_id() == Some(source_id.as_str()))
+                    .then(|| existing.view_manifest());
             }
             if let Some((_, existing)) = state
                 .tools
                 .iter()
                 .find(|(_, entry)| entry.manifest.id == manifest.id)
             {
-                return (existing.source_id == source_id).then(|| existing.manifest.clone());
+                return (existing.binding.source_id() == Some(source_id.as_str()))
+                    .then(|| existing.view_manifest());
             }
             state.tools.insert(
                 manifest.name.clone(),
@@ -797,7 +1002,10 @@ impl ToolProvider for ToolRegistry {
                 .state
                 .read()
                 .expect("tool registry state lock poisoned");
-            state.tools.get(name).map(|entry| entry.source_id.clone())
+            state
+                .tools
+                .get(name)
+                .and_then(|entry| entry.binding.source_id().map(str::to_string))
         })?;
         self.sources
             .read()
@@ -811,52 +1019,15 @@ impl ToolProvider for ToolRegistry {
         call: ToolPrepareCall<'_>,
     ) -> Result<PreparedToolCall, ToolResult> {
         let name = call.pending.tool_name.clone();
-        let source_id = self.resolve_manifest(&name).and_then(|_| {
-            let state = self
-                .state
-                .read()
-                .expect("tool registry state lock poisoned");
-            state.tools.get(&name).map(|entry| entry.source_id.clone())
-        });
-        let Some(source_id) = source_id else {
-            return Err(ToolResult::err_fmt(format_args!("Unknown tool: {name}")));
-        };
-        let source = {
-            self.sources
-                .read()
-                .expect("tool source lock poisoned")
-                .get(&source_id)
-                .cloned()
-        };
-        let Some(source) = source else {
-            return Err(ToolResult::err_fmt(format_args!(
-                "Tool source missing for tool `{name}`"
-            )));
-        };
+        let source = self.resolve_execution_source(&name)?;
         source.prepare_tool_call(call).await
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let name = call.name;
-        let source_id = self.resolve_manifest(name).and_then(|_| {
-            let state = self
-                .state
-                .read()
-                .expect("tool registry state lock poisoned");
-            state.tools.get(name).map(|entry| entry.source_id.clone())
-        });
-        let Some(source_id) = source_id else {
-            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
-        };
-        let source = {
-            self.sources
-                .read()
-                .expect("tool source lock poisoned")
-                .get(&source_id)
-                .cloned()
-        };
-        let Some(source) = source else {
-            return ToolResult::err_fmt(format_args!("Tool source missing for tool `{name}`"));
+        let source = match self.resolve_execution_source(name) {
+            Ok(source) => source,
+            Err(result) => return result,
         };
         source
             .execute(name, call.args, call.context, call.progress)
@@ -915,11 +1086,31 @@ fn export_tool_state_entries(
         .collect()
 }
 
+/// How [`rebind_tool_state_entries`] treats a persisted tool that no
+/// registered source resolves by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RebindMode {
+    /// Restore/fork: keep the entry as an orphan instead of failing. Sessions
+    /// must stay openable when a dynamic source (e.g. an MCP server) is down.
+    OrphanUnresolved,
+    /// Explicit `apply_state`: fail on unresolved tools, except entries the
+    /// snapshot already marks as orphaned — otherwise a host could never
+    /// round-trip `export_state` → edit → `apply_state` while an orphan exists.
+    RejectUnresolved,
+}
+
+struct ReboundTools {
+    tools: BTreeMap<String, ToolRegistryEntry>,
+    orphaned: Vec<String>,
+}
+
 fn rebind_tool_state_entries(
     entries: &BTreeMap<String, ToolStateEntry>,
     sources: &BTreeMap<String, Arc<dyn ToolSourceExecutor>>,
-) -> Result<BTreeMap<String, ToolRegistryEntry>, ReconfigureError> {
+    mode: RebindMode,
+) -> Result<ReboundTools, ReconfigureError> {
     let mut rebound = BTreeMap::new();
+    let mut orphaned = Vec::new();
     for (name, entry) in entries {
         if name != &entry.manifest.name {
             return Err(ReconfigureError::Validation(format!(
@@ -940,9 +1131,17 @@ fn rebind_tool_state_entries(
         }
 
         if name_matches.is_empty() {
-            return Err(ReconfigureError::Validation(format!(
-                "no registered tool source resolves tool `{name}`"
-            )));
+            if mode == RebindMode::RejectUnresolved && !entry.orphaned {
+                return Err(ReconfigureError::Validation(format!(
+                    "no registered tool source resolves tool `{name}`"
+                )));
+            }
+            orphaned.push(name.clone());
+            rebound.insert(
+                name.clone(),
+                ToolRegistryEntry::orphaned(entry.manifest.clone()),
+            );
+            continue;
         }
 
         let matching_id = name_matches
@@ -973,7 +1172,10 @@ fn rebind_tool_state_entries(
             )));
         }
     }
-    Ok(rebound)
+    Ok(ReboundTools {
+        tools: rebound,
+        orphaned,
+    })
 }
 
 fn validate_unique_manifest_entries<'a>(
@@ -981,7 +1183,7 @@ fn validate_unique_manifest_entries<'a>(
 ) -> Result<(), ReconfigureError> {
     let manifests = entries
         .into_iter()
-        .map(|entry| entry.manifest.clone())
+        .map(|entry| entry.stored_manifest().clone())
         .collect::<Vec<_>>();
     validate_unique_manifests(&manifests)
 }
@@ -1600,7 +1802,14 @@ mod tests {
         let restored = target
             .restore_state(snapshot.clone())
             .expect("restore adopts the snapshot generation");
-        assert_eq!(restored, 3, "restore returns the adopted generation");
+        assert_eq!(
+            restored.generation, 3,
+            "restore returns the adopted generation"
+        );
+        assert!(
+            restored.orphaned.is_empty(),
+            "all tools resolve, so nothing orphans"
+        );
         assert_eq!(
             target.generation(),
             3,
@@ -1622,6 +1831,258 @@ mod tests {
             ),
             "apply_state must reject a gen-3 snapshot on a base-1 registry"
         );
+    }
+
+    /// Build a snapshot whose `mcp__demo__search` entry only resolves while
+    /// `ExternalMockSource` is registered — restoring it elsewhere orphans it.
+    fn snapshot_with_external_tool() -> ToolState {
+        let source = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("source registry");
+        source
+            .upsert_source(Arc::new(ExternalMockSource))
+            .expect("source registered");
+        source.export_state()
+    }
+
+    #[tokio::test]
+    async fn restore_orphans_unresolved_tools_instead_of_failing() {
+        let mut snapshot = snapshot_with_external_tool();
+        snapshot
+            .set_availability(
+                "mcp__demo__search",
+                Some(crate::ToolAvailability::Showcased),
+            )
+            .expect("override set");
+
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
+        let report = target
+            .restore_state(snapshot)
+            .expect("restore tolerates the missing source");
+        assert_eq!(report.orphaned, vec!["mcp__demo__search".to_string()]);
+
+        // The orphan surfaces as Off without mutating the stored manifest.
+        let view = target
+            .tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "mcp__demo__search")
+            .expect("orphan stays in the surface listing");
+        assert_eq!(
+            view.effective_availability(),
+            crate::ToolAvailability::Off,
+            "orphans are forced Off in the view"
+        );
+        let exported = target.export_state();
+        let exported_view = exported
+            .tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "mcp__demo__search")
+            .expect("orphan is visible in exported tool state");
+        assert_eq!(
+            exported_view.effective_availability(),
+            crate::ToolAvailability::Off,
+            "exported ToolState exposes the same forced-Off orphan view"
+        );
+        let entry = exported.get("mcp__demo__search").expect("orphan exported");
+        assert!(entry.is_orphaned());
+        assert_eq!(
+            entry.manifest().effective_availability(),
+            crate::ToolAvailability::Off,
+            "entry manifest is also the public forced-Off view"
+        );
+        assert_eq!(
+            entry.stored_manifest().availability_override,
+            Some(crate::ToolAvailability::Showcased),
+            "the persisted override survives orphaning"
+        );
+
+        // Execution fails loudly with a precise error.
+        let context = test_tool_context();
+        let args = json!({ "query": "hello" });
+        let result = target
+            .execute(crate::ToolCall {
+                name: "mcp__demo__search",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
+            .await;
+        assert!(!result.is_success());
+        assert!(
+            format!("{result:?}").contains("unavailable"),
+            "orphan execution error names the condition: {result:?}"
+        );
+
+        // Bound tools are unaffected.
+        assert!(target.resolve_contract("mock_tool").is_some());
+    }
+
+    #[tokio::test]
+    async fn orphan_rebinds_when_source_is_upserted_again() {
+        let mut snapshot = snapshot_with_external_tool();
+        snapshot
+            .set_availability(
+                "mcp__demo__search",
+                Some(crate::ToolAvailability::Showcased),
+            )
+            .expect("override set");
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
+        target.restore_state(snapshot).expect("restore");
+        let orphaned_generation = target.generation();
+
+        target
+            .upsert_source(Arc::new(ExternalMockSource))
+            .expect("the returning source must not conflict with its own orphan");
+        assert!(
+            target.generation() > orphaned_generation,
+            "rebinding bumps the generation"
+        );
+
+        let exported = target.export_state();
+        let entry = exported.get("mcp__demo__search").expect("entry kept");
+        assert!(
+            !entry.is_orphaned(),
+            "the orphan rebound to the live source"
+        );
+        assert_eq!(
+            entry.manifest().availability_override,
+            Some(crate::ToolAvailability::Showcased),
+            "rebinding preserves the persisted override"
+        );
+
+        let context = test_tool_context();
+        let args = json!({ "query": "hello" });
+        let result = target
+            .execute(crate::ToolCall {
+                name: "mcp__demo__search",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
+            .await;
+        assert!(result.is_success(), "rebound tool executes: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn orphan_rebinds_lazily_via_resolve_manifest() {
+        // `NamedExactSource` advertises nothing, so reconcile-on-upsert cannot
+        // rebind; only the lazy `resolve_manifest` path can.
+        let source_registry = ToolRegistry::empty();
+        source_registry
+            .upsert_source(Arc::new(NamedExactSource { id: "exact-a" }))
+            .expect("source registered");
+        assert!(source_registry.resolve_manifest("host_only").is_some());
+        let snapshot = source_registry.export_state();
+
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
+        let report = target.restore_state(snapshot).expect("restore");
+        assert_eq!(report.orphaned, vec!["host_only".to_string()]);
+
+        target
+            .upsert_source(Arc::new(NamedExactSource { id: "exact-a" }))
+            .expect("source returns");
+        let manifest = target
+            .resolve_manifest("host_only")
+            .expect("resolves after the source returned");
+        assert_eq!(
+            manifest.effective_availability(),
+            crate::ToolAvailability::Callable,
+            "lazy rebind drops the forced-Off orphan view"
+        );
+        assert!(
+            !target
+                .export_state()
+                .get("host_only")
+                .expect("entry kept")
+                .is_orphaned()
+        );
+    }
+
+    #[test]
+    fn restore_still_fails_when_name_resolves_with_different_id() {
+        struct ReplacedSearchTool;
+        #[async_trait::async_trait]
+        impl ToolProvider for ReplacedSearchTool {
+            fn tool_manifests(&self) -> Vec<ToolManifest> {
+                manifests(vec![ToolDefinition::raw_with_id(
+                    "tool:replaced",
+                    "mcp__demo__search",
+                    "a different implementation under the same name",
+                    ToolDefinition::default_input_schema(),
+                    json!({}),
+                )])
+            }
+            fn resolve_contract(&self, _name: &str) -> Option<Arc<ToolContract>> {
+                None
+            }
+            async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+                ToolResult::ok(json!("ok"))
+            }
+        }
+
+        let snapshot = snapshot_with_external_tool();
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
+        target
+            .add_tool_provider(Arc::new(ReplacedSearchTool))
+            .expect("replacement registered");
+        let err = target
+            .restore_state(snapshot)
+            .expect_err("same name with a different id is a real conflict");
+        assert!(matches!(err, ReconfigureError::Validation(_)));
+    }
+
+    #[test]
+    fn apply_state_round_trips_while_orphans_exist() {
+        // `export_state` → edit → `apply_state` must work with an orphan in
+        // the snapshot: the exported orphan flag exempts it from strictness.
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
+        target
+            .restore_state(snapshot_with_external_tool())
+            .expect("restore");
+
+        let mut edited = target.export_state();
+        edited
+            .set_availability("mock_tool", Some(crate::ToolAvailability::Searchable))
+            .expect("edit bound tool");
+        target
+            .apply_state(edited)
+            .expect("apply accepts the snapshot it exported");
+        let exported = target.export_state();
+        assert!(exported.get("mcp__demo__search").unwrap().is_orphaned());
+        assert_eq!(
+            exported
+                .get("mock_tool")
+                .unwrap()
+                .manifest()
+                .effective_availability(),
+            crate::ToolAvailability::Searchable
+        );
+
+        // But a snapshot that does NOT mark the tool orphaned still fails —
+        // strictness is preserved for entries that were bound at export.
+        let strict = snapshot_with_external_tool().with_generation(target.generation());
+        assert!(matches!(
+            target.apply_state(strict),
+            Err(ReconfigureError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn orphan_flag_serializes_and_legacy_snapshots_deserialize_as_bound() {
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
+        target
+            .restore_state(snapshot_with_external_tool())
+            .expect("restore");
+        let value = serde_json::to_value(target.export_state()).expect("serializes");
+        assert_eq!(value["tools"]["mcp__demo__search"]["orphaned"], json!(true));
+        assert!(
+            value["tools"]["mock_tool"].get("orphaned").is_none(),
+            "bound entries omit the flag, keeping old and new snapshots byte-compatible"
+        );
+
+        let legacy: ToolStateEntry = serde_json::from_value(json!({
+            "manifest": value["tools"]["mock_tool"]["manifest"]
+        }))
+        .expect("legacy entry without the flag deserializes");
+        assert!(!legacy.is_orphaned());
     }
 
     #[test]

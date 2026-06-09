@@ -220,7 +220,7 @@ impl AppState {
         let final_text = submitted_value
             .get("final")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or_else(|| match request.scenario {
+            .unwrap_or(match request.scenario {
                 TurnScenario::KitchenSink => EXPECTED_FINAL_TEXT,
                 TurnScenario::TriggerSetup => "trigger-registered",
                 TurnScenario::DrainQueued => "wake-consumed",

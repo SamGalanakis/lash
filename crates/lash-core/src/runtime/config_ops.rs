@@ -140,22 +140,33 @@ impl LashRuntime {
     /// bumps it — this restores the exact persisted surface idempotently, so a
     /// cold resume of a session whose surface reached generation ≥ 2 succeeds
     /// (a delta-apply onto a fresh base-1 registry would be rejected).
+    ///
+    /// Persisted tools that no registered source resolves become orphans
+    /// (kept, forced `Off`, rebound when their source returns) and are listed
+    /// in the returned [`crate::ToolRestoreReport`].
     pub async fn restore_tool_state(
         &mut self,
         snapshot: crate::ToolState,
-    ) -> Result<u64, SessionError> {
+    ) -> Result<crate::ToolRestoreReport, SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        let generation = session
+        let report = session
             .plugins()
             .tool_registry()
             .restore_state(snapshot)
             .map_err(|err| SessionError::Protocol(format!("tool restore failed: {err}")))?;
+        if !report.orphaned.is_empty() {
+            tracing::warn!(
+                orphaned = ?report.orphaned,
+                "tool state restored with orphaned tools: no registered source \
+                 resolves them; they are Off until their source returns"
+            );
+        }
         session.refresh_tool_surface().await?;
         self.stamp_live_plugin_state();
-        Ok(generation)
+        Ok(report)
     }
 }

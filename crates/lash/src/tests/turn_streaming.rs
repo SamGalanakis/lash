@@ -662,6 +662,193 @@ async fn cancel_running_turns_stops_inflight_turn() -> Result<()> {
     Ok(())
 }
 
+fn hang_on_signal_provider(started_tx: Arc<StdMutex<Vec<oneshot::Sender<()>>>>) -> ProviderHandle {
+    crate::testing::TestProvider::builder()
+        .kind("embed-test")
+        .complete(move |request| {
+            let started_tx = Arc::clone(&started_tx);
+            async move {
+                let user_text = last_user_text(&request);
+                if user_text.contains("hang") {
+                    if let Some(tx) = started_tx.lock().expect("started signal").pop() {
+                        let _ = tx.send(());
+                    }
+                    // Hang until the turn is cancelled out from under us.
+                    std::future::pending::<()>().await;
+                    unreachable!("provider future should be dropped by cancellation")
+                }
+                Ok(text_response(&format!("echo: {user_text}")))
+            }
+        })
+        .build()
+        .into_handle()
+}
+
+#[tokio::test]
+async fn cancel_running_turns_sweeps_lock_queued_turns() -> Result<()> {
+    // One opened session serializes turn execution on the runtime writer
+    // lock, but a second turn is already registered while it waits for that
+    // lock. A stop sweep must reach both: the executing turn aborts, and the
+    // parked turn sees its cancelled token the moment it acquires the lock
+    // instead of starting a fresh provider call after the user pressed stop.
+    let (started_tx, started_rx) = oneshot::channel::<()>();
+    let provider = hang_on_signal_provider(Arc::new(StdMutex::new(vec![started_tx])));
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(provider)
+        .model(mock_model_spec())
+        .build()
+        .expect("core");
+    let session = core.session("cancel-lock-queue").open().await?;
+
+    let first = session.turn(TurnInput::text("hang one")).stream()?;
+    started_rx.await.expect("first turn reached the provider");
+    let second = session.turn(TurnInput::text("hang two")).stream()?;
+
+    assert_eq!(session.cancel_running_turns(), 2);
+
+    let first = first.finish().await?;
+    let second = second.finish().await?;
+    assert!(matches!(
+        first.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    assert!(matches!(
+        second.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    assert_eq!(session.cancel_running_turns(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_running_turns_does_not_cross_separately_opened_handles() -> Result<()> {
+    // Each open() builds its own runtime and cancel registry; the documented
+    // scope of cancel_running_turns is the opened handle and its clones.
+    let (started_tx, started_rx) = oneshot::channel::<()>();
+    let provider = hang_on_signal_provider(Arc::new(StdMutex::new(vec![started_tx])));
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(provider)
+        .model(mock_model_spec())
+        .build()
+        .expect("core");
+    let handle_a = core.session("cancel-scope").open().await?;
+    let handle_b = core.session("cancel-scope").open().await?;
+
+    let hanging = handle_a.turn(TurnInput::text("hang here")).stream()?;
+    started_rx.await.expect("turn reached the provider");
+
+    // The other handle has its own registry: nothing to cancel there.
+    assert_eq!(handle_b.cancel_running_turns(), 0);
+    assert_eq!(handle_a.cancel_running_turns(), 1);
+
+    let result = hanging.finish().await?;
+    assert!(matches!(
+        result.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+
+    // The untouched handle keeps working.
+    let output = handle_b.turn(TurnInput::text("plain")).run().await?;
+    assert_eq!(output.assistant_message(), Some("echo: plain"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
+    // Queued drains register in the same session registry as foreground
+    // turns, so a stop sweep reaches them too.
+    let (started_tx, started_rx) = oneshot::channel::<()>();
+    let provider = hang_on_signal_provider(Arc::new(StdMutex::new(vec![started_tx])));
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(provider)
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()
+        .expect("core");
+    let session = core.session("cancel-queued-drain").open().await?;
+    let receipt = session
+        .enqueue(TurnInput::text("hang queued"))
+        .send()
+        .await?;
+
+    let drainer = session.clone();
+    let drain = tokio::spawn(async move {
+        drainer
+            .queued_turn()
+            .batch_ids([receipt.batch_id])
+            .run()
+            .await
+    });
+    started_rx.await.expect("queued drain reached the provider");
+    assert_eq!(session.cancel_running_turns(), 1);
+
+    let output = drain
+        .await
+        .expect("drain task")?
+        .expect("queued drain should produce a turn");
+    assert!(matches!(
+        output.result.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()
+        .expect("core");
+    let session = core.session("await-queued").open().await?;
+    let receipt = session
+        .enqueue(TurnInput::text("queued work"))
+        .send()
+        .await?;
+
+    let waiter_session = session.clone();
+    let waiter_batch = receipt.batch_id.clone();
+    let waiter =
+        tokio::spawn(async move { waiter_session.await_queued_work_batch(&waiter_batch).await });
+
+    // Nothing has drained the batch yet, so the waiter must still be pending.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    assert!(!waiter.is_finished(), "waiter resolved before any drain");
+
+    let output = session
+        .queued_turn()
+        .batch_ids([receipt.batch_id.clone()])
+        .run()
+        .await?
+        .expect("queued turn should run");
+    assert_eq!(output.assistant_message(), Some("echo: queued work"));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("waiter should resolve after the drain")
+        .expect("waiter task")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn await_queued_work_batch_resolves_immediately_for_unknown_batch() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()
+        .expect("core");
+    let session = core.session("await-unknown").open().await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        session.await_queued_work_batch("qwb:never-existed"),
+    )
+    .await
+    .expect("unknown batch must resolve immediately")?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn turn_stream_receives_semantic_activities() -> Result<()> {
     let core = standard_core();

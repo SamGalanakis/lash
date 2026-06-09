@@ -76,7 +76,7 @@
                 <dt><code>TurnInput</code></dt>
                 <dd>The user or host payload plus per-turn prompt/plugin context. It is data, not a running turn.</dd>
                 <dt><code>TurnBuilder</code></dt>
-                <dd>An ephemeral run request created by <code>session.turn(input)</code>. It layers cancellation, provider/model overrides, protocol turn options, prompt edits, typed plugin input, and optional durable handler effects, then drives the turn through <code>run()</code>, <code>stream_to(...)</code>, or pull-style <code>stream()</code>.</dd>
+                <dd>An ephemeral run request created by <code>session.turn(input)</code>. It layers cancellation (a per-turn <code>CancellationToken</code>, or <code>LashSession::cancel_running_turns()</code> from any clone of the session — see <a href="./embedding-turns.html#cancellation">turns · cancellation</a>), provider/model overrides, protocol turn options, prompt edits, typed plugin input, and optional durable handler effects, then drives the turn through <code>run()</code>, <code>stream_to(...)</code>, or pull-style <code>stream()</code>.</dd>
                 <dt><code>TurnResult</code> / <code>TurnOutput</code></dt>
                 <dd>The committed result. <code>TurnResult</code> is the terminal outcome and usage; <code>TurnOutput</code> adds the collected semantic <code>TurnActivity</code> stream for app UIs and logs.</dd>
                 <dt><code>SessionObservation</code></dt>
@@ -178,7 +178,7 @@ println!("{assistant_text}");</code></pre>
             <dt><code>PluginStack</code></dt>
             <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>plugins::runtime_plugin_stack()</code>; raw <code>::builder()</code> starts without modes or plugins. All paths still require explicit effect, artifact, and attachment facets before <code>build()</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code>, <code>queued_turn()</code>, <code>read_view()</code>, and <code>control()</code>.</dd>
+            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code>, <code>queued_turn()</code>, <code>await_queued_work_batch(batch_id)</code> (resolve when a batch you enqueued is drained or cancelled — by any handle or process — without claiming it yourself; bound it with <code>tokio::time::timeout</code>), <code>read_view()</code>, and <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn config: cancellation, mode options, typed plugin input, RLM projected bindings. <code>.stream_to(&amp;sink)</code> for live events; <code>.run()</code> for a collected activity log. Durable handlers add <code>.turn_id(...).effects(&amp;controller)</code>.</dd>
           </dl>

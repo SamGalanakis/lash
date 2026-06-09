@@ -518,7 +518,7 @@ impl SessionControl {
         .await
     }
 
-    async fn restore_tool_state(&self, state: ToolState) -> Result<u64> {
+    async fn restore_tool_state(&self, state: ToolState) -> Result<ToolRestoreReport> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
                 .restore_tool_state(state)
@@ -786,7 +786,12 @@ impl AdvancedToolsControl {
     /// idempotently rather than requiring the snapshot to match the current
     /// generation. A cold resume of a session whose surface reached generation
     /// ≥ 2 needs this — [`apply_state`](Self::apply_state) would reject it.
-    pub async fn restore_state(&self, state: ToolState) -> Result<u64> {
+    ///
+    /// Persisted tools whose source is not currently registered (e.g. a
+    /// detached MCP server) do not fail the restore: they are kept as orphans,
+    /// forced `Off`, listed in the returned [`ToolRestoreReport`], and rebind
+    /// automatically when a source re-advertises the same tool.
+    pub async fn restore_state(&self, state: ToolState) -> Result<ToolRestoreReport> {
         self.control.restore_tool_state(state).await
     }
 }
@@ -797,17 +802,19 @@ pub struct SessionCommandsControl {
 }
 
 impl SessionCommandsControl {
+    /// Enqueue an unconditional tool-surface refresh. The command drains
+    /// asynchronously and recomputes the surface from live sources, so it
+    /// takes no generation guard — any generation observed at enqueue time
+    /// could legitimately have advanced by drain time.
     pub async fn refresh_tool_surface(
         &self,
         reason: impl Into<String>,
-        expected_generation: Option<u64>,
         idempotency_key: impl Into<String>,
     ) -> Result<lash_core::SessionCommandReceipt> {
         self.control
             .submit_session_command(
                 lash_core::SessionCommand::RefreshToolSurface {
                     reason: reason.into(),
-                    expected_generation,
                 },
                 idempotency_key,
             )

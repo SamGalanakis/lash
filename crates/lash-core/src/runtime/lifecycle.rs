@@ -80,11 +80,19 @@ impl LashRuntime {
             // registry — the worker-rebuild / restart divergence. `restore_state`
             // adopts the snapshot's generation wholesale, so any generation
             // rebuilds.
-            session
+            let report = session
                 .plugins()
                 .tool_registry()
                 .restore_state(tool_state)
                 .map_err(|err| SessionError::Protocol(err.to_string()))?;
+            if !report.orphaned.is_empty() {
+                tracing::warn!(
+                    session_id = %state.session_id,
+                    orphaned = ?report.orphaned,
+                    "session restored with orphaned tools: no registered source \
+                     resolves them; they are Off until their source returns"
+                );
+            }
         }
         session.refresh_tool_surface().await?;
         if let Some(snapshot) = state.plugin_snapshot.clone() {

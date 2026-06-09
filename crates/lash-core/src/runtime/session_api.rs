@@ -497,26 +497,7 @@ impl LashRuntime {
             .await
             .map_err(|err| RuntimeError::new("session_command_refresh", err.to_string()))?;
         let graph = match command {
-            crate::SessionCommand::RefreshToolSurface {
-                expected_generation,
-                ..
-            } => {
-                if let Some(expected) = expected_generation {
-                    let actual = self
-                        .tool_state()
-                        .map_err(|err| {
-                            RuntimeError::new("session_command_tool_state", err.to_string())
-                        })?
-                        .generation();
-                    if actual != expected {
-                        return Err(RuntimeError::new(
-                            "session_command_generation_mismatch",
-                            format!(
-                                "expected tool generation {expected}, but live generation is {actual}"
-                            ),
-                        ));
-                    }
-                }
+            crate::SessionCommand::RefreshToolSurface { .. } => {
                 self.refresh_session_tool_surface().await.map_err(|err| {
                     RuntimeError::new("session_command_refresh_tools", err.to_string())
                 })?;

@@ -710,7 +710,7 @@ impl StaticToolExecute for E2eTools {
 
 impl E2eTools {
     async fn app_lookup(&self, call: ToolCall<'_>) -> ToolResult {
-        let workflow_id = workflow_id_from_args(call.context.session_id(), &call.args);
+        let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
         let key = call
             .args
             .get("key")
@@ -735,7 +735,7 @@ impl E2eTools {
     }
 
     async fn make_attachment(&self, call: ToolCall<'_>) -> ToolResult {
-        let workflow_id = workflow_id_from_args(call.context.session_id(), &call.args);
+        let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
         let filename = call
             .args
             .get("name")
@@ -796,7 +796,7 @@ impl E2eTools {
     }
 
     async fn crash_once(&self, call: ToolCall<'_>) -> ToolResult {
-        let workflow_id = workflow_id_from_args(call.context.session_id(), &call.args);
+        let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
         let result = serde_json::json!({
             "crashed": false,
             "worker_id": self.worker_id,

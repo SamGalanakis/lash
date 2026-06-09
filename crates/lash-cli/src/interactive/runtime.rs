@@ -99,7 +99,7 @@ pub(super) async fn sync_runtime_tool_surface(
     if let Some(rt) = runtime.as_mut() {
         rt.control()
             .commands()
-            .refresh_tool_surface("interactive sync", None, "interactive-sync-runtime-tools")
+            .refresh_tool_surface("interactive sync", "interactive-sync-runtime-tools")
             .await
             .map_err(|err| err.to_string())?;
     }

@@ -114,7 +114,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     session
         .control()
         .commands()
-        .refresh_tool_surface("control admin test", None, "control-admin-refresh")
+        .refresh_tool_surface("control admin test", "control-admin-refresh")
         .await?;
     session.process_control().await_all().await?;
     assert!(session.process_control().list().await?.is_empty());
@@ -261,11 +261,11 @@ async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
 
     let first = session
         .commands()
-        .refresh_tool_surface("test refresh", None, "same-refresh")
+        .refresh_tool_surface("test refresh", "same-refresh")
         .await?;
     let second = session
         .commands()
-        .refresh_tool_surface("test refresh", None, "same-refresh")
+        .refresh_tool_surface("test refresh", "same-refresh")
         .await?;
 
     assert_eq!(first.batch_id, second.batch_id);

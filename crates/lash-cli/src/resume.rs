@@ -228,7 +228,7 @@ async fn apply_graph_resume_state(
         let _ = rt
             .control()
             .commands()
-            .refresh_tool_surface("resume provider update", None, "resume-provider-update")
+            .refresh_tool_surface("resume provider update", "resume-provider-update")
             .await;
     }
 

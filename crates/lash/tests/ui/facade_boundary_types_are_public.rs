@@ -221,6 +221,10 @@ fn cancellation_token_is_at_root(token: lash::CancellationToken, session: &lash:
     let _: usize = session.cancel_running_turns();
 }
 
+async fn queued_work_wait_is_nameable(session: &lash::LashSession) -> lash::Result<()> {
+    session.await_queued_work_batch("qwb:batch").await
+}
+
 fn observation_types_are_homed_in_observe(
     cursor: lash::observe::SessionCursor,
     observation: lash::observe::SessionObservation,
@@ -272,4 +276,5 @@ fn main() {
     let _ = observation_types_are_homed_in_observe;
     let _ = host_event_types_are_homed_in_host_events;
     let _ = cancellation_token_is_at_root;
+    let _ = queued_work_wait_is_nameable;
 }

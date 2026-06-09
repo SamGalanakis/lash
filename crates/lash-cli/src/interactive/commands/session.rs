@@ -54,7 +54,7 @@ async fn activate_opened_session(
     session
         .control()
         .commands()
-        .refresh_tool_surface("interactive session open", None, "interactive-session-open")
+        .refresh_tool_surface("interactive session open", "interactive-session-open")
         .await
         .map_err(|err| err.to_string())?;
     *active_tool_state = session
@@ -136,11 +136,7 @@ pub(super) async fn handle_clear(
     if let Some(rt) = runtime.as_ref() {
         rt.control()
             .commands()
-            .refresh_tool_surface(
-                "interactive session switch",
-                None,
-                "interactive-session-switch",
-            )
+            .refresh_tool_surface("interactive session switch", "interactive-session-switch")
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let session_id = rt.session_id();

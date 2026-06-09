@@ -399,10 +399,12 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
             prompt_bridge: prompt_bridge.clone(),
         });
+    // Only configuration errors fail here; an unreachable server keeps
+    // reconnecting in the background and its tools appear once it comes up.
     let mcp_factory = Arc::new(
         McpPluginFactory::new(lash_config.mcp_servers().clone())
             .await
-            .map_err(|err| anyhow::anyhow!("failed to connect MCP servers: {err}"))?,
+            .map_err(|err| anyhow::anyhow!("invalid MCP server configuration: {err}"))?,
     );
     plugin_stack.push(mcp_factory);
     if args.info {
@@ -465,7 +467,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     session
         .control()
         .commands()
-        .refresh_tool_surface("bootstrap", None, "bootstrap-refresh-tool-surface")
+        .refresh_tool_surface("bootstrap", "bootstrap-refresh-tool-surface")
         .await?;
     if rlm_projected_bindings.is_some() && args.print_prompt.is_none() {
         return Err(anyhow::anyhow!(

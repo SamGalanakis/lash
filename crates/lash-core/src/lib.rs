@@ -82,7 +82,7 @@ pub use lash_sansio::{
 pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
-    ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
+    ReconfigureError, ToolRegistry, ToolRestoreReport, ToolSourceHandle, ToolState, ToolStateEntry,
 };
 pub use tool_result::ToolResult;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

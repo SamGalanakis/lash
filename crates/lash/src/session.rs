@@ -494,6 +494,46 @@ impl LashSession {
             .map_err(EmbedError::Runtime)
     }
 
+    /// Resolve once `batch_id` is no longer pending in the queue store —
+    /// drained by whoever runs queued work (a queued-work runner, a durable
+    /// worker, or another handle's [`queued_turn`](Self::queued_turn)) or
+    /// cancelled. This is the enqueue-and-observe side of the queue: the
+    /// caller never claims the work itself.
+    ///
+    /// Completion is read from the persistent queue store, so it observes
+    /// drains performed by other session handles and other processes alike.
+    /// There is no built-in deadline — nothing resolves if nothing drains the
+    /// queue, so bound it with `tokio::time::timeout` when the worker may be
+    /// unavailable. A batch id the store has never seen resolves immediately.
+    pub async fn await_queued_work_batch(&self, batch_id: &str) -> Result<()> {
+        let observation = self.runtime.observe();
+        let store = observation.queue_store.clone().ok_or_else(|| {
+            EmbedError::Runtime(lash_core::RuntimeError::new(
+                lash_core::RuntimeErrorCode::StoreCommitFailed,
+                "queued work inspection requires a persistent runtime store",
+            ))
+        })?;
+        let session_id = observation.session_id().to_string();
+        drop(observation);
+        let mut delay = std::time::Duration::from_millis(25);
+        loop {
+            let pending = store
+                .list_pending_queued_work(&session_id)
+                .await
+                .map_err(|err| {
+                    EmbedError::Runtime(lash_core::RuntimeError::new(
+                        lash_core::RuntimeErrorCode::StoreCommitFailed,
+                        err.to_string(),
+                    ))
+                })?;
+            if !pending.iter().any(|batch| batch.batch_id == batch_id) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_millis(400));
+        }
+    }
+
     pub fn read_view(&self) -> SessionReadView {
         self.runtime.observe().read_view.clone()
     }

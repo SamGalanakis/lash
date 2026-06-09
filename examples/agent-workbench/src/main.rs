@@ -735,14 +735,10 @@ async fn enqueue_tool_surface_refresh(
         .open()
         .await
         .map_err(AppError::internal)?;
-    // Unconditional refresh (no expected_generation): the command recomputes
-    // the surface from plugin state when it drains, and a generation guard
-    // taken here would only race the asynchronous drain.
     let receipt = session
         .commands()
         .refresh_tool_surface(
             reason,
-            None,
             format!(
                 "workbench-refresh-tool-surface:{}:{}:{}",
                 session_id,
@@ -2328,8 +2324,9 @@ mod tests {
         reopened.close().await.expect("close session");
 
         // Removing the account must not poison the persisted session: the
-        // surface still references the account's tools until the refresh
-        // drains, and reopening (rebinding) has to succeed in that window.
+        // provider stops resolving the account's tools, so restore orphans
+        // them (kept in state, marked orphaned, surfaced as Off) instead of
+        // failing the reopen.
         mail_world
             .remove_account("late_account")
             .expect("remove account");
@@ -2344,19 +2341,40 @@ mod tests {
             .open()
             .await
             .expect("reopen session after account removal");
-        let tool_names = reopened
-            .tools()
-            .active_manifests()
-            .await
-            .expect("active tools")
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
+        let tool_state = reopened.tools().state().await.expect("tool state");
+        let send_entry = tool_state
+            .get("inbox__late_account__send")
+            .expect("removed account tool is kept as an orphan");
         assert!(
-            !tool_names
-                .iter()
-                .any(|name| name.starts_with("inbox__late_account__")),
-            "removed account tools should be gone after refresh: {tool_names:?}"
+            send_entry.is_orphaned(),
+            "removed account tool must be marked orphaned"
+        );
+        reopened.close().await.expect("close session");
+
+        // Re-adding the account (same slug, same tool ids) rebinds the
+        // orphans on the next refresh — the tools come back without ever
+        // having made the session unopenable.
+        mail_world
+            .add_account("Late Account")
+            .expect("re-add account");
+        let receipt = enqueue_tool_surface_refresh(&state, "account_readded")
+            .await
+            .expect("enqueue re-add refresh");
+        drain_refresh_batch(&state, &receipt).await;
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session after account re-add");
+        let tool_state = reopened.tools().state().await.expect("tool state");
+        let send_entry = tool_state
+            .get("inbox__late_account__send")
+            .expect("re-added account tool is present");
+        assert!(
+            !send_entry.is_orphaned(),
+            "re-added account tool must be rebound to the live provider"
         );
         reopened.close().await.expect("close session");
         let _ = std::fs::remove_dir_all(data_dir);
@@ -2816,6 +2834,10 @@ mod tests {
             ),
         );
         assert_eq!(state.lashlang_execution.graphs().len(), 1);
+        state
+            .mail_world
+            .add_account("Reset Probe")
+            .expect("add account before reset");
         drop(session);
 
         let Json(snapshot) = reset_chat(State(state.clone())).await.expect("reset");
@@ -2825,6 +2847,10 @@ mod tests {
         assert!(snapshot.timeline.is_empty());
         assert!(state.messages_snapshot().is_empty());
         assert!(state.timeline_snapshot().is_empty());
+        assert!(
+            state.mail_world.account_summaries().is_empty(),
+            "reset must clear mail accounts along with the chat session"
+        );
         let request = tokio::time::timeout(Duration::from_secs(2), restate_requests.recv())
             .await
             .expect("Restate request")
@@ -2945,6 +2971,17 @@ mod tests {
             "trace should include cron run; trace at {}",
             harness.trace_path.display()
         );
+        // Regression for the single-tick chain kill: the occurrence
+        // idempotency key must be unique per tick and run() must re-arm, so a
+        // SECOND tick has to fire. The original bug passed any single-tick
+        // assertion and died silently on tick two.
+        wait_for_trace_event_count(
+            &harness.trace_path,
+            "agent_workbench.cron.restate.run",
+            2,
+            Duration::from_secs(30),
+        )
+        .await;
         let _ = restate::cancel_cron_jobs_for_session(
             &harness.state,
             &harness.state.current_session_id(),
@@ -3142,6 +3179,28 @@ mod tests {
         }
     }
 
+    async fn wait_for_trace_event_count(
+        path: &std::path::Path,
+        needle: &str,
+        count: usize,
+        timeout: Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let seen = std::fs::read_to_string(path)
+                .map(|text| text.matches(needle).count())
+                .unwrap_or(0);
+            if seen >= count {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected {count}+ `{needle}` trace events within {timeout:?}, saw {seen}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     async fn wait_for_restate_cron_sync(
         state: &AppState,
         trace_path: &std::path::Path,
@@ -3329,6 +3388,15 @@ mod tests {
             .await
             .expect("drain refresh batch");
         session.close().await.expect("close drain session");
+    }
+
+    #[test]
+    fn healthz_reports_workbench_fingerprint() {
+        // scripts/agent-workbench-dev.sh readiness-checks this exact shape to
+        // distinguish the workbench from a random process on the port.
+        let Json(body) = sync_await(healthz());
+        assert_eq!(body["service"], "agent-workbench");
+        assert_eq!(body["status"], "ok");
     }
 
     fn test_workbench_core(

@@ -87,7 +87,6 @@ pub mod host_events {
 }
 
 pub mod tools {
-    pub use lash_core::ToolState;
     pub use lash_core::{
         PreparedToolCall, ToolActivation, ToolAgentSurface, ToolArgumentProjectionPolicy,
         ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
@@ -95,6 +94,7 @@ pub mod tools {
         ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
         ToolScheduling, ToolSourceHandle,
     };
+    pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
     /// `resolve_contract`: supply the [`ToolDefinition`]s once and an
     /// [`StaticToolExecute`] for behavior.

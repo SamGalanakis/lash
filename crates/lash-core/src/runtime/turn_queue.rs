@@ -6,14 +6,12 @@ pub const QUEUED_WORK_CLAIM_TTL_MS: u64 = 15 * 60 * 1000;
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionCommand {
-    RefreshToolSurface {
-        reason: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected_generation: Option<u64>,
-    },
-    ResetSession {
-        reason: String,
-    },
+    // No generation guard: the command drains asynchronously, so any
+    // generation observed at enqueue time may legitimately have advanced by
+    // drain time, and the refresh recomputes the surface from live sources
+    // regardless — a guard could only fail spuriously.
+    RefreshToolSurface { reason: String },
+    ResetSession { reason: String },
 }
 
 impl SessionCommand {

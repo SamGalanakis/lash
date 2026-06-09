@@ -87,6 +87,11 @@ center pane opens a dedicated mock-email view (see below). The buttons emit
 backed by Restate: ask the agent to schedule something and it can construct a
 typed `cron.Schedule` source whose registrations sync to Restate virtual
 objects. Started Lashlang background processes appear in the right rail.
+The **stop turn** button (or **Esc**) cancels the running turn for real:
+`POST /api/turn/cancel` calls `LashSession::cancel_running_turns()` on the
+live session handle inside the Restate turn workflow, the runtime aborts the
+in-flight provider call, and the turn commits as
+`TurnOutcome::Stopped(Cancelled)` — the transcript shows `turn cancelled`.
 The Lashlang graph panel is backed by `TraceLashlangGraphStore`, a public
 trace-derived observation store for foreground blocks, durable process runs,
 and child execution links; command operations still go through the session's
@@ -122,9 +127,13 @@ personal = start triage(box: inbox.personal)
 results = await { work: work, personal: personal }
 ```
 
-Adding an account changes the authority surface; the next opened turn picks up
-the new `inbox.<slug>` authority automatically (the runtime re-reads the tool
-provider when it rebuilds the surface), so no restart or refresh is needed.
+Adding or removing an account enqueues a durable tool-surface refresh that a
+Restate workflow drains and commits — nothing executes in the HTTP handler.
+The next opened turn picks up the new `inbox.<slug>` authority automatically.
+Inbox tools resolve by parsing the tool name rather than scanning live
+accounts, so a session persisted with a since-removed account's tools still
+reopens cleanly; the refresh then drops the stale entries, and executing one
+fails with the world's unknown-account error.
 
 Delivering a message is the third trigger
 source in the demo: the host appends it to the inbox and emits `mail.received`
@@ -208,10 +217,18 @@ Restate invocation id in Restate K/V state. Its `run` handler emits a validated
 { "fired_at": "2026-06-02T12:00:00Z" }
 ```
 
-Then it schedules its next `run` call with a delayed Restate send. Resetting the
-workbench cancels known cron objects for the old session. The trace JSONL files
-include `agent_workbench.cron.restate.sync_upserted` and
-`agent_workbench.cron.restate.run` events.
+The occurrence idempotency key includes the journaled fire time, so it is
+unique per tick and stable across retries of the same tick. The `run` handler
+re-arms the next delayed `run` *before* emitting, so a tick that fails cannot
+kill the schedule, and a job whose session is no longer the live workbench
+session terminates itself on its next fire. Resetting the workbench cancels
+the old session's cron jobs derived from its durable trigger registrations
+(plus anything armed in-process), clears the mocked mail world, and rotates
+the session; an equal-request re-sync revives a chain whose stored next
+execution is already in the past. The trace JSONL files include
+`agent_workbench.cron.restate.sync_upserted`,
+`agent_workbench.cron.restate.run`, and
+`agent_workbench.cron.restate.zombie_cancelled` events.
 
 The host side declares those source constructors through the plugin's
 `lashlang_resources()` hook. The button is a zero-config source whose event

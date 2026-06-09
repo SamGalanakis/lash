@@ -1073,3 +1073,26 @@ async fn submit_restate_empty(state: &AppState, url: String) -> Result<(), AppEr
 fn terminal_handler_error(err: AppError) -> HandlerError {
     TerminalError::new(err.message).into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::cron_occurrence_key;
+
+    #[test]
+    fn cron_occurrence_key_is_unique_per_tick() {
+        let job = "session:source:cron.Schedule:sha256:abc";
+        let first = cron_occurrence_key(job, "2026-06-09T22:30:30+00:00");
+        let second = cron_occurrence_key(job, "2026-06-09T22:31:00+00:00");
+        // Two ticks of one job must not collide: a constant key makes the
+        // second tick fail its host-event emit with an idempotency conflict
+        // before re-arming, killing the schedule after exactly one fire.
+        assert_ne!(first, second);
+        // A retried tick (same journaled fired_at) must dedupe.
+        assert_eq!(first, cron_occurrence_key(job, "2026-06-09T22:30:30+00:00"));
+        // Distinct jobs never collide on the same tick time.
+        assert_ne!(
+            first,
+            cron_occurrence_key("other-job", "2026-06-09T22:30:30+00:00")
+        );
+    }
+}
