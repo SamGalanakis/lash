@@ -65,7 +65,7 @@
           <pre data-lang="rust" data-snippet="example_agent_service#service-core"><code>let provider = ProviderHandle::new(
     OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
         .with_options(ProviderOptions {
-            thinking: ProviderThinkingPolicy { expose: true },
+            expose_thinking: true,
             ..ProviderOptions::default()
         })
         .into_components(),

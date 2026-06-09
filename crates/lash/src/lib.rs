@@ -271,12 +271,10 @@ pub mod testing;
 
 pub mod provider {
     pub use lash_core::provider::{
-        ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder,
-        ProviderRetryPolicy, ProviderTimeoutPolicy,
+        ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
     };
     pub use lash_core::{
         LlmTimeouts, Provider, ProviderComponents, ProviderFactory, ProviderHandle,
-        ProviderModelPolicy, ProviderOptions, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
-        StaticModelPolicy,
+        ProviderModelPolicy, ProviderOptions, ProviderSpec, RequestTimeout, StaticModelPolicy,
     };
 }

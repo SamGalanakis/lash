@@ -559,7 +559,7 @@ impl Provider for CodexProvider {
                                 tx.send(LlmStreamEvent::Part(part.clone()));
                             }
                             lash_core::llm::types::LlmOutputPart::Reasoning { text, .. }
-                                if !text.is_empty() && self.options.thinking.expose =>
+                                if !text.is_empty() && self.options.expose_thinking =>
                             {
                                 tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
                             }
@@ -613,7 +613,7 @@ impl Provider for CodexProvider {
         }
 
         let mut state = shared::ResponsesStreamState::default();
-        let expose_thinking = self.options.thinking.expose;
+        let expose_thinking = self.options.expose_thinking;
         drive_sse_response(
             resp,
             timeouts.chunk_timeout,
@@ -812,7 +812,7 @@ mod tests {
 
         let exposed = CodexProvider::new("access", "refresh", 0)
             .with_options(ProviderOptions {
-                thinking: lash_core::ProviderThinkingPolicy { expose: true },
+                expose_thinking: true,
                 ..ProviderOptions::default()
             })
             .build_request_body(&req, true)

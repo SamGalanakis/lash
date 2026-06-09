@@ -26,7 +26,7 @@ use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::prompt::PromptContribution;
-use lash::provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy};
+use lash::provider::{ProviderHandle, ProviderOptions};
 use lash::{
     LashCore, ModeId, ModePreset, SessionSpec, TurnActivity, TurnActivitySink, TurnEvent,
     TurnResult,
@@ -123,7 +123,7 @@ async fn async_main() -> AnyhowResult<()> {
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
             .with_options(ProviderOptions {
-                thinking: ProviderThinkingPolicy { expose: true },
+                expose_thinking: true,
                 ..ProviderOptions::default()
             })
             .into_components(),

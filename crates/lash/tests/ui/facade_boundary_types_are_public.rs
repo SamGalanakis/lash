@@ -19,10 +19,7 @@ use lash::plugins::{
     PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContribution,
     ToolSurfaceOverride,
 };
-use lash::provider::{
-    ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder, ProviderRetryPolicy,
-    ProviderTimeoutPolicy,
-};
+use lash::provider::{ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy};
 use lash::runtime::AdvancedLashCoreBuilder;
 use lash::tools::{ToolActivation, ToolAgentSurface, ToolCallRecord, ToolOutputContract};
 use lash::turn::{AssistantOutput, TurnIssue};
@@ -211,12 +208,10 @@ fn turn_result_detail_types_are_nameable(
 
 fn provider_reliability_types_are_nameable(
     reliability: ProviderReliability,
-    builder: ProviderReliabilityBuilder,
     retry: ProviderRetryPolicy,
-    timeouts: ProviderTimeoutPolicy,
     rate_limits: ProviderRateLimitPolicy,
 ) {
-    let _ = (reliability, builder, retry, timeouts, rate_limits);
+    let _ = (reliability, retry, rate_limits);
 }
 
 fn model_spec_types_are_nameable(spec: ModelSpec, limits: ModelLimits) {

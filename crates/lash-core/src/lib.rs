@@ -221,7 +221,7 @@ pub use plugin_stack::PluginStack;
 pub use provider::{
     CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, Provider,
     ProviderBinding, ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy,
-    ProviderOptions, ProviderResolutionError, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
+    ProviderOptions, ProviderResolutionError, ProviderSpec, RequestTimeout,
     RuntimeProviderResolver, SingleProviderResolver, StaticModelPolicy,
 };
 #[cfg(any(test, feature = "testing"))]

@@ -180,7 +180,7 @@ mod tests {
 
         let exposed_provider =
             GoogleOAuthProvider::new("access", "refresh", 0).with_options(ProviderOptions {
-                thinking: lash_core::ProviderThinkingPolicy { expose: true },
+                expose_thinking: true,
                 ..ProviderOptions::default()
             });
         let exposed = GoogleOAuthProvider::build_request(

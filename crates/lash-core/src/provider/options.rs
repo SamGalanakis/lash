@@ -114,8 +114,9 @@ impl CacheRetention {
 pub struct ProviderOptions {
     #[serde(default)]
     pub reliability: ProviderReliability,
-    #[serde(default, skip_serializing_if = "ProviderThinkingPolicy::is_default")]
-    pub thinking: ProviderThinkingPolicy,
+    /// Surface provider reasoning/thinking output in responses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expose_thinking: bool,
     /// Per-request output-token cap. `None` lets each provider apply its
     /// own default. Providers translate to their wire-specific field
     /// (`max_tokens`, `max_output_tokens`, `maxOutputTokens`, …).
@@ -128,27 +129,14 @@ pub struct ProviderOptions {
 
 impl ProviderOptions {
     pub fn is_default(&self) -> bool {
-        self.reliability == ProviderReliability::default_llm()
-            && self.thinking == ProviderThinkingPolicy::default()
+        self.reliability == ProviderReliability::default()
+            && !self.expose_thinking
             && self.max_output_tokens.is_none()
             && self.cache_retention.is_default()
     }
 
     pub fn llm_timeouts(&self) -> LlmTimeouts {
-        self.reliability.timeouts.llm_timeouts()
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderThinkingPolicy {
-    #[serde(default)]
-    pub expose: bool,
-}
-
-impl ProviderThinkingPolicy {
-    pub fn is_default(&self) -> bool {
-        !self.expose
+        self.reliability.llm_timeouts()
     }
 }
 
@@ -173,15 +161,21 @@ pub fn resolve_generation_policy<TThinking>(
     ResolvedGenerationPolicy {
         max_output_tokens,
         cache_retention: options.cache_retention,
-        expose_thinking: options.thinking.expose,
+        expose_thinking: options.expose_thinking,
         thinking,
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ProviderReliability {
-    #[serde(default)]
-    pub timeouts: ProviderTimeoutPolicy,
+    /// Whole-request timeout. `None` applies [`DEFAULT_REQUEST_TIMEOUT_MS`];
+    /// use [`RequestTimeout::Disabled`] to wait indefinitely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout: Option<RequestTimeout>,
+    /// Inter-chunk stream timeout in milliseconds. `None` (or `0`) applies
+    /// [`DEFAULT_CHUNK_TIMEOUT_MS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_timeout: Option<u64>,
     #[serde(default)]
     pub retry: ProviderRetryPolicy,
     #[serde(default)]
@@ -189,14 +183,6 @@ pub struct ProviderReliability {
 }
 
 impl ProviderReliability {
-    pub fn default_llm() -> Self {
-        Self {
-            timeouts: ProviderTimeoutPolicy::default(),
-            retry: ProviderRetryPolicy::default(),
-            rate_limits: ProviderRateLimitPolicy::default(),
-        }
-    }
-
     pub fn codex() -> Self {
         Self {
             retry: ProviderRetryPolicy {
@@ -207,40 +193,17 @@ impl ProviderReliability {
                 retry_after_cap_ms: Some(60_000),
                 enabled: true,
             },
-            ..Self::default_llm()
+            ..Self::default()
         }
     }
 
     pub fn disabled() -> Self {
         Self {
             retry: ProviderRetryPolicy::disabled(),
-            rate_limits: ProviderRateLimitPolicy::default(),
-            timeouts: ProviderTimeoutPolicy::default(),
+            ..Self::default()
         }
     }
 
-    pub fn builder() -> ProviderReliabilityBuilder {
-        ProviderReliabilityBuilder {
-            reliability: Self::default_llm(),
-        }
-    }
-}
-
-impl Default for ProviderReliability {
-    fn default() -> Self {
-        Self::default_llm()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ProviderTimeoutPolicy {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_timeout: Option<RequestTimeout>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chunk_timeout: Option<u64>,
-}
-
-impl ProviderTimeoutPolicy {
     pub fn llm_timeouts(&self) -> LlmTimeouts {
         let request_timeout = match self.request_timeout {
             Some(RequestTimeout::Disabled) => None,
@@ -255,6 +218,53 @@ impl ProviderTimeoutPolicy {
             request_timeout,
             chunk_timeout: Duration::from_millis(chunk_timeout_ms),
         }
+    }
+
+    pub fn request_timeout(mut self, timeout: Option<RequestTimeout>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    pub fn stream_chunk_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
+        self.chunk_timeout = timeout_ms;
+        self
+    }
+
+    pub fn max_attempts(mut self, attempts: u32) -> Self {
+        self.retry.max_attempts = attempts.max(1);
+        self
+    }
+
+    pub fn base_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.retry.base_delay_ms = delay_ms;
+        self
+    }
+
+    pub fn max_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.retry.max_delay_ms = delay_ms;
+        self
+    }
+
+    pub fn retry_after_cap_ms(mut self, cap_ms: Option<u64>) -> Self {
+        self.retry.retry_after_cap_ms = cap_ms;
+        self
+    }
+
+    pub fn max_concurrency(mut self, value: Option<usize>) -> Self {
+        self.rate_limits.max_concurrency = value;
+        self
+    }
+
+    pub fn requests_per_window(mut self, requests: Option<u32>, window_ms: Option<u64>) -> Self {
+        self.rate_limits.requests_per_window = requests;
+        self.rate_limits.request_window_ms = window_ms;
+        self
+    }
+
+    pub fn tokens_per_window(mut self, tokens: Option<u32>, window_ms: Option<u64>) -> Self {
+        self.rate_limits.tokens_per_window = tokens;
+        self.rate_limits.token_window_ms = window_ms;
+        self
     }
 }
 
@@ -335,61 +345,4 @@ pub struct ProviderRateLimitPolicy {
     pub tokens_per_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_window_ms: Option<u64>,
-}
-
-pub struct ProviderReliabilityBuilder {
-    reliability: ProviderReliability,
-}
-
-impl ProviderReliabilityBuilder {
-    pub fn request_timeout(mut self, timeout: Option<RequestTimeout>) -> Self {
-        self.reliability.timeouts.request_timeout = timeout;
-        self
-    }
-
-    pub fn stream_chunk_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
-        self.reliability.timeouts.chunk_timeout = timeout_ms;
-        self
-    }
-
-    pub fn max_attempts(mut self, attempts: u32) -> Self {
-        self.reliability.retry.max_attempts = attempts.max(1);
-        self
-    }
-
-    pub fn base_delay_ms(mut self, delay_ms: u64) -> Self {
-        self.reliability.retry.base_delay_ms = delay_ms;
-        self
-    }
-
-    pub fn max_delay_ms(mut self, delay_ms: u64) -> Self {
-        self.reliability.retry.max_delay_ms = delay_ms;
-        self
-    }
-
-    pub fn retry_after_cap_ms(mut self, cap_ms: Option<u64>) -> Self {
-        self.reliability.retry.retry_after_cap_ms = cap_ms;
-        self
-    }
-
-    pub fn max_concurrency(mut self, value: Option<usize>) -> Self {
-        self.reliability.rate_limits.max_concurrency = value;
-        self
-    }
-
-    pub fn requests_per_window(mut self, requests: Option<u32>, window_ms: Option<u64>) -> Self {
-        self.reliability.rate_limits.requests_per_window = requests;
-        self.reliability.rate_limits.request_window_ms = window_ms;
-        self
-    }
-
-    pub fn tokens_per_window(mut self, tokens: Option<u32>, window_ms: Option<u64>) -> Self {
-        self.reliability.rate_limits.tokens_per_window = tokens;
-        self.reliability.rate_limits.token_window_ms = window_ms;
-        self
-    }
-
-    pub fn build(self) -> ProviderReliability {
-        self.reliability
-    }
 }

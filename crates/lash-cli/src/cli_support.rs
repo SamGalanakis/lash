@@ -543,7 +543,7 @@ pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str 
 
 pub(crate) fn expose_provider_thinking(provider: &mut ProviderHandle) {
     let mut options = provider.options();
-    options.thinking.expose = true;
+    options.expose_thinking = true;
     provider.set_options(options);
 }
 

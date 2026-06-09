@@ -11,7 +11,7 @@ use lash::PluginBinding;
 use lash::{
     LashCore, ModeId, ModePreset,
     durability::InlineEffectHost,
-    provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
+    provider::{ProviderHandle, ProviderOptions},
     tracing::{JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceLevel, TraceSink},
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
@@ -79,7 +79,7 @@ async fn main() -> anyhow_like::Result<()> {
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
             .with_options(ProviderOptions {
-                thinking: ProviderThinkingPolicy { expose: true },
+                expose_thinking: true,
                 ..ProviderOptions::default()
             })
             .into_components(),

@@ -238,7 +238,7 @@ fn responses_body_does_not_request_reasoning_summaries_by_default() {
 #[test]
 fn responses_body_requests_reasoning_summaries_when_provider_exposes_thinking() {
     let provider = OpenAiProvider::new("key").with_options(ProviderOptions {
-        thinking: lash_core::provider::ProviderThinkingPolicy { expose: true },
+        expose_thinking: true,
         ..ProviderOptions::default()
     });
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);

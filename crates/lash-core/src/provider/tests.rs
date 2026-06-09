@@ -198,11 +198,10 @@ fn provider_spec_roundtrips_as_flat_object() {
 #[test]
 fn provider_options_serialize_only_reliability_shape() {
     let options = ProviderOptions {
-        reliability: ProviderReliability::builder()
+        reliability: ProviderReliability::default()
             .request_timeout(Some(RequestTimeout::Millis(1_234)))
             .stream_chunk_timeout_ms(Some(567))
-            .max_attempts(2)
-            .build(),
+            .max_attempts(2),
         ..ProviderOptions::default()
     };
 
@@ -210,11 +209,11 @@ fn provider_options_serialize_only_reliability_shape() {
     assert!(value.get("timeout").is_none());
     assert!(value.get("chunk_timeout").is_none());
     assert_eq!(
-        value["reliability"]["timeouts"]["request_timeout"],
+        value["reliability"]["request_timeout"],
         serde_json::json!(1234)
     );
     assert_eq!(
-        value["reliability"]["timeouts"]["chunk_timeout"],
+        value["reliability"]["chunk_timeout"],
         serde_json::json!(567)
     );
 }
@@ -252,7 +251,7 @@ fn generation_policy_prefers_request_then_provider_then_default() {
     let provider_options = ProviderOptions {
         max_output_tokens: Some(8_192),
         cache_retention: CacheRetention::Long,
-        thinking: ProviderThinkingPolicy { expose: true },
+        expose_thinking: true,
         ..ProviderOptions::default()
     };
     let defaulted = resolve_generation_policy(
@@ -328,11 +327,10 @@ async fn provider_handle_retries_retryable_failures_in_shared_executor() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let provider = FailingProvider {
         options: ProviderOptions {
-            reliability: ProviderReliability::builder()
+            reliability: ProviderReliability::default()
                 .max_attempts(3)
                 .base_delay_ms(0)
-                .max_delay_ms(0)
-                .build(),
+                .max_delay_ms(0),
             ..ProviderOptions::default()
         },
         attempts: Arc::clone(&attempts),
@@ -354,11 +352,10 @@ async fn provider_handle_stops_on_non_retryable_failure() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let provider = FailingProvider {
         options: ProviderOptions {
-            reliability: ProviderReliability::builder()
+            reliability: ProviderReliability::default()
                 .max_attempts(3)
                 .base_delay_ms(0)
-                .max_delay_ms(0)
-                .build(),
+                .max_delay_ms(0),
             ..ProviderOptions::default()
         },
         attempts: Arc::clone(&attempts),
@@ -390,11 +387,10 @@ async fn provider_handle_set_options_affects_retry_behavior() {
     };
     let mut handle = ProviderHandle::new(provider.into_components());
     handle.set_options(ProviderOptions {
-        reliability: ProviderReliability::builder()
+        reliability: ProviderReliability::default()
             .max_attempts(2)
             .base_delay_ms(0)
-            .max_delay_ms(0)
-            .build(),
+            .max_delay_ms(0),
         ..ProviderOptions::default()
     });
 

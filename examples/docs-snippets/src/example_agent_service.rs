@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use lash::persistence::SessionStoreFactory;
-use lash::provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy};
+use lash::provider::{ProviderHandle, ProviderOptions};
 use lash::tracing::{TraceLevel, TraceSink};
 use lash::{LashCore, LashSession, ModeId, ModePreset, TurnInput, TurnResult};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
@@ -21,7 +21,7 @@ async fn service_core(
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
             .with_options(ProviderOptions {
-                thinking: ProviderThinkingPolicy { expose: true },
+                expose_thinking: true,
                 ..ProviderOptions::default()
             })
             .into_components(),
