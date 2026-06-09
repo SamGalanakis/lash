@@ -145,6 +145,12 @@ impl MailWorld {
     }
 
     /// Remove an account and its messages. Returns an error if unknown.
+    /// Drop every account and inbox: the workbench reset wipes the mail
+    /// world along with the chat session.
+    pub(crate) fn clear(&self) {
+        self.inner.write().expect("mail world lock").clear();
+    }
+
     pub(crate) fn remove_account(&self, slug: &str) -> Result<(), String> {
         let mut accounts = self.inner.write().expect("mail world lock");
         let before = accounts.len();

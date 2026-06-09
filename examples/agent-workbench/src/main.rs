@@ -790,7 +790,7 @@ async fn inject_message(
 
 async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
     let old_session_id = state.current_session_id();
-    restate::cancel_known_cron_jobs(&state, "reset").await?;
+    restate::cancel_cron_jobs_for_session(&state, &old_session_id, "reset").await?;
     restate::submit_session_delete(
         &state,
         restate::WorkbenchSessionDeleteWorkflowRequest {
@@ -831,6 +831,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
     state.messages.lock().expect("messages lock").clear();
     state.timeline.lock().expect("timeline lock").clear();
     state.lashlang_execution.clear();
+    state.mail_world.clear();
     Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages: Vec::new(),
@@ -2884,7 +2885,12 @@ mod tests {
             "trace should include cron run; trace at {}",
             harness.trace_path.display()
         );
-        let _ = restate::cancel_known_cron_jobs(&harness.state, "live_e2e_cleanup").await;
+        let _ = restate::cancel_cron_jobs_for_session(
+            &harness.state,
+            &harness.state.current_session_id(),
+            "live_e2e_cleanup",
+        )
+        .await;
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
