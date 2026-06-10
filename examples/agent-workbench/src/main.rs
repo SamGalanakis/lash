@@ -214,9 +214,9 @@ async fn async_main() -> AnyhowResult<()> {
             .context("build Restate process worker config")?,
     );
     let process_observer = core
-        .process_observer()
-        .expect("process observer configured")
-        .clone();
+        .processes()
+        .observer()
+        .expect("process observer configured");
 
     let state = AppState {
         core,
@@ -2102,9 +2102,9 @@ mod tests {
             .build()
             .expect("build core");
         let process_observer = core
-            .process_observer()
-            .expect("process observer configured")
-            .clone();
+            .processes()
+            .observer()
+            .expect("process observer configured");
         let state = AppState {
             core,
             process_observer,
@@ -2265,9 +2265,9 @@ mod tests {
             .build()
             .expect("build core");
         let process_observer = core
-            .process_observer()
-            .expect("process observer configured")
-            .clone();
+            .processes()
+            .observer()
+            .expect("process observer configured");
         let state = AppState {
             core,
             process_observer,
@@ -2478,9 +2478,9 @@ mod tests {
         drop(reopened);
 
         let process_observer = core
-            .process_observer()
-            .expect("process observer configured")
-            .clone();
+            .processes()
+            .observer()
+            .expect("process observer configured");
         let state = AppState {
             core,
             process_observer,
@@ -2502,7 +2502,7 @@ mod tests {
             turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
-        let target_scope_id = lash::process::ProcessScope::new(state.current_session_id()).id();
+        let target_scope_id = lash::process::SessionScope::new(state.current_session_id()).id();
         let session_store =
             lash_sqlite_store::Store::open(&session_store_factory.path_for_session(&session_id))
                 .await
@@ -2607,9 +2607,9 @@ mod tests {
             .build()
             .expect("build core");
         let process_observer = core
-            .process_observer()
-            .expect("process observer configured")
-            .clone();
+            .processes()
+            .observer()
+            .expect("process observer configured");
         let state = AppState {
             core,
             process_observer,
@@ -2767,9 +2767,9 @@ mod tests {
             .build()
             .expect("build core");
         let process_observer = core
-            .process_observer()
-            .expect("process observer configured")
-            .clone();
+            .processes()
+            .observer()
+            .expect("process observer configured");
         let state = AppState {
             core,
             process_observer,
@@ -3127,9 +3127,9 @@ mod tests {
                 .expect("build process worker config"),
         );
         let process_observer = core
-            .process_observer()
-            .expect("process observer configured")
-            .clone();
+            .processes()
+            .observer()
+            .expect("process observer configured");
         let (event_tx, _) = broadcast::channel(1024);
         let state = AppState {
             core,

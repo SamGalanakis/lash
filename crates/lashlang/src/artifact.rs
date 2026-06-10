@@ -268,11 +268,24 @@ pub trait LashlangArtifactStore: Send + Sync {
         &self,
         module_ref: &ModuleRef,
     ) -> Result<Option<Arc<ModuleArtifact>>, ArtifactStoreError>;
+
+    async fn put_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+        descriptor: &str,
+        bytes: &[u8],
+    ) -> Result<(), ArtifactStoreError>;
+
+    async fn get_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, ArtifactStoreError>;
 }
 
 #[derive(Clone, Default)]
 pub struct InMemoryLashlangArtifactStore {
     modules: Arc<Mutex<BTreeMap<ModuleRef, Arc<ModuleArtifact>>>>,
+    artifacts: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
 }
 
 impl InMemoryLashlangArtifactStore {
@@ -311,6 +324,31 @@ impl LashlangArtifactStore for InMemoryLashlangArtifactStore {
             .lock()
             .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?;
         Ok(modules.get(module_ref).cloned())
+    }
+
+    async fn put_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+        _descriptor: &str,
+        bytes: &[u8],
+    ) -> Result<(), ArtifactStoreError> {
+        self.artifacts
+            .lock()
+            .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?
+            .insert(artifact_ref.to_string(), bytes.to_vec());
+        Ok(())
+    }
+
+    async fn get_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, ArtifactStoreError> {
+        Ok(self
+            .artifacts
+            .lock()
+            .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?
+            .get(artifact_ref)
+            .cloned())
     }
 }
 

@@ -105,11 +105,11 @@ impl RuntimeObservation {
         }
     }
 
-    pub fn process_scope(&self) -> crate::ProcessScope {
-        crate::ProcessScope::new(self.session_id.as_ref())
+    pub fn process_scope(&self) -> crate::SessionScope {
+        crate::SessionScope::new(self.session_id.as_ref())
     }
 
-    pub fn process_scope_id(&self) -> crate::ProcessScopeId {
+    pub fn process_scope_id(&self) -> crate::SessionScopeId {
         self.process_scope().id()
     }
 
@@ -139,7 +139,7 @@ impl RuntimeObservation {
         let agent_frame_id = self.persisted_state.current_agent_frame_id.as_str();
         if !agent_frame_id.is_empty() {
             let frame_scope =
-                crate::ProcessScope::for_agent_frame(self.session_id.as_ref(), agent_frame_id);
+                crate::SessionScope::for_agent_frame(self.session_id.as_ref(), agent_frame_id);
             if frame_scope.id() != root_scope.id() {
                 entries.extend(list_scope_process_handles(executor, &frame_scope, mode).await);
                 entries.sort_by(|(left, _), (right, _)| left.process_id.cmp(&right.process_id));
@@ -155,7 +155,7 @@ impl RuntimeObservation {
 
 async fn list_scope_process_handles(
     executor: &Arc<dyn crate::ProcessRegistry>,
-    scope: &crate::ProcessScope,
+    scope: &crate::SessionScope,
     mode: crate::ProcessListMode,
 ) -> Vec<ProcessHandleGrantEntry> {
     match mode {

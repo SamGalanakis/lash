@@ -39,7 +39,7 @@ flowchart TB
   Reg["triggers.register(source, target process, inputs)<br/>durable subscription, keyed by source_type"]
   Emit["source owner emits occurrence<br/>HostEventStore.record_occurrence (session-agnostic)"]
   Match["reserve_matching_deliveries<br/>match by source_type"]
-  Start["start target process (idempotent effect)<br/>in the subscription's session scope"]
+  Start["start target process (idempotent effect)<br/>with stored registrant + env_ref"]
   Wake["process wake → session input queue<br/>EarliestSafeBoundary"]
   Turn["turn runs → commit to session graph"]
   Decl --> Reg
@@ -57,7 +57,7 @@ flowchart TB
           <ul class="bullets">
             <li><strong>Catalog.</strong> <code>HostEventCatalog</code> holds typed <code>HostEvent</code> declarations (<code>resource_type</code>, <code>alias</code>, <code>event</code>, and a named payload type). Identity is the <code>source_type</code> = <code>alias.event</code>; duplicate source types are rejected. Emitted payloads are validated against the declared type.</li>
             <li><strong>Sources.</strong> A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata that the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Declarative <code>trigger</code> syntax does not exist; programs pass a source value plus a process definition and explicit <code>inputs</code> to <code>triggers.register</code> / <code>triggers.list</code> / <code>triggers.cancel</code>.</li>
-            <li><strong>Subscriptions.</strong> <code>triggers.register</code> writes a durable subscription into the runtime host-event store, keyed by <code>source_type</code>. Each subscription carries its <strong>target scope</strong> (the <code>session_id</code> whose process the match will start) plus the target process ref and input template — <code>trigger.event</code> is the whole-event placeholder. The subscription is the only place session identity attaches to the host-event machinery.</li>
+            <li><strong>Subscriptions.</strong> <code>triggers.register</code> writes a durable subscription into the runtime host-event store, keyed by <code>source_type</code>. Each subscription carries a registrant (<code>Host</code> or <code>Session</code>), a captured execution environment reference, optional wake target, optional handle grant, the target process ref, and input template — <code>trigger.event</code> is the whole-event placeholder. Session identity is optional metadata on those edges, not the substrate of host-event matching.</li>
           </ul>
         </div>
 
@@ -71,8 +71,8 @@ flowchart TB
               <thead><tr><th>Step</th><th>What happens</th></tr></thead>
               <tbody>
                 <tr><td><strong>record</strong></td><td><code>HostEventStore::record_occurrence</code> stores the occurrence with a deterministic id derived from <code>source_type</code> + source key + idempotency key. The occurrence is session-agnostic.</td></tr>
-                <tr><td><strong>match</strong></td><td><code>reserve_matching_deliveries</code> looks up subscriptions by <code>source_type</code> and reserves one delivery per match. A single occurrence may fan out to 0..N subscribers across any sessions.</td></tr>
-                <tr><td><strong>deliver</strong></td><td>Each reservation starts the subscription's target process in its session scope, through the effect controller, with a deterministic delivery process id (<code>occurrence_id</code> + <code>subscription_id</code>). Delivery is therefore <strong>idempotent / exactly-once</strong> and replay-safe; the started process carries <code>CausalRef::HostEvent</code> so causality is referenced, not copied.</td></tr>
+                <tr><td><strong>match</strong></td><td><code>reserve_matching_deliveries</code> looks up subscriptions by <code>source_type</code> and reserves one delivery per match. A single occurrence may fan out to 0..N subscribers, including host-registered subscriptions with no session edges.</td></tr>
+                <tr><td><strong>deliver</strong></td><td>Each reservation starts the subscription's target process with the subscription's registrant, captured <code>env_ref</code>, wake target, and optional grant, through the effect controller, with a deterministic delivery process id (<code>occurrence_id</code> + <code>subscription_id</code>). Delivery is therefore <strong>idempotent / exactly-once</strong> and replay-safe; the started process carries <code>CausalRef::HostEvent</code> so causality is referenced, not copied.</td></tr>
               </tbody>
             </table>
           </div>
@@ -82,9 +82,9 @@ flowchart TB
         <div class="section">
           <div class="section-header">
             <h2>Only The Wake Is Session-Ordered</h2>
-            <p>Starting a process is safe at any time — it is independent background work. The one place a host event touches a session's turn state is the <strong>wake</strong> the matched process emits.</p>
+            <p>Starting a process is safe at any time — it is independent background work. The one place a host event touches a session's turn state is an optional <strong>wake</strong> the matched process emits.</p>
           </div>
-          <p>A trigger-started process is durable background work (lease-protected, crash-recovered through <code>DurableProcessWorker</code>); see <a href="./durability.html">durability</a>. When it wakes an agent, the wake is written to <em>that session's</em> input queue and delivered at <code>EarliestSafeBoundary</code> — immediately when the session is idle, at the next safe boundary while a turn runs. Host events are therefore a separate runtime-level ingress and never appear as queued session work themselves; only the resulting wake enters the queue. The full queued-work model is in <a href="./queued-work-ingress.md">queued-work ingress</a>.</p>
+          <p>A trigger-started process is durable background work (lease-protected, crash-recovered through <code>DurableProcessWorker</code>); see <a href="./durability.html">durability</a>. When it has a wake target and wakes an agent, the wake is written to <em>that session's</em> input queue and delivered at <code>EarliestSafeBoundary</code> — immediately when the session is idle, at the next safe boundary while a turn runs. With no live wake target, the wake remains a process event and no delivery is materialized. Host events are therefore a separate runtime-level ingress and never appear as queued session work themselves; only the resulting wake enters the queue. The full queued-work model is in <a href="./queued-work-ingress.md">queued-work ingress</a>.</p>
         </div>
 
         <div class="section">

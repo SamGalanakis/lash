@@ -349,6 +349,10 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
             "direct completions are unavailable in this test context",
         ),
         parent_invocation: None,
+        execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+            crate::PluginOptions::default(),
+            crate::SessionPolicy::default(),
+        ),
         session_id: session_id.clone(),
         agent_frame_id: String::new(),
         event_tx,
@@ -554,9 +558,9 @@ impl crate::ProcessService for MockSessionManager {
         let id = registration.id.clone();
         self.process_registry.register_process(registration).await?;
         if let Some(descriptor) = options.descriptor {
-            let owner_scope = crate::ProcessScope::new(session_id);
+            let session_scope = crate::SessionScope::new(session_id);
             self.process_registry
-                .grant_handle(&owner_scope, &id, descriptor)
+                .grant_handle(&session_scope, &id, descriptor)
                 .await?;
         }
         self.process_registry
@@ -585,19 +589,21 @@ impl crate::ProcessService for MockSessionManager {
         mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, PluginError> {
-        let owner_scope = scope
+        let session_scope = scope
             .agent_frame_id
             .as_deref()
-            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
-            .unwrap_or_else(|| crate::ProcessScope::new(session_id));
+            .map(|frame_id| crate::SessionScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::SessionScope::new(session_id));
         match mode {
             crate::ProcessListMode::Live => {
                 self.process_registry
-                    .list_live_handle_grants(&owner_scope)
+                    .list_live_handle_grants(&session_scope)
                     .await
             }
             crate::ProcessListMode::All => {
-                self.process_registry.list_handle_grants(&owner_scope).await
+                self.process_registry
+                    .list_handle_grants(&session_scope)
+                    .await
             }
         }
     }
@@ -608,15 +614,15 @@ impl crate::ProcessService for MockSessionManager {
         handle_ids: &[String],
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), PluginError> {
-        let owner_scope = scope
+        let session_scope = scope
             .agent_frame_id
             .as_deref()
-            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
-            .unwrap_or_else(|| crate::ProcessScope::new(session_id));
+            .map(|frame_id| crate::SessionScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::SessionScope::new(session_id));
         for handle_id in handle_ids {
             if !self
                 .process_registry
-                .has_handle_grant(&owner_scope, handle_id)
+                .has_handle_grant(&session_scope, handle_id)
                 .await?
             {
                 return Err(PluginError::Session(format!(
@@ -670,13 +676,13 @@ impl crate::ProcessService for MockSessionManager {
         let from_scope = scope
             .agent_frame_id
             .as_deref()
-            .map(|frame_id| crate::ProcessScope::for_agent_frame(from_session_id, frame_id))
-            .unwrap_or_else(|| crate::ProcessScope::new(from_session_id));
+            .map(|frame_id| crate::SessionScope::for_agent_frame(from_session_id, frame_id))
+            .unwrap_or_else(|| crate::SessionScope::new(from_session_id));
         let to_scope = scope
             .target_agent_frame_id
             .as_deref()
-            .map(|frame_id| crate::ProcessScope::for_agent_frame(to_session_id, frame_id))
-            .unwrap_or_else(|| crate::ProcessScope::new(to_session_id));
+            .map(|frame_id| crate::SessionScope::for_agent_frame(to_session_id, frame_id))
+            .unwrap_or_else(|| crate::SessionScope::new(to_session_id));
         self.process_registry
             .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
             .await
@@ -692,14 +698,14 @@ impl crate::ProcessService for MockSessionManager {
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        let owner_scope = scope
+        let session_scope = scope
             .agent_frame_id
             .as_deref()
-            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
-            .unwrap_or_else(|| crate::ProcessScope::new(session_id));
+            .map(|frame_id| crate::SessionScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::SessionScope::new(session_id));
         let grants = self
             .process_registry
-            .list_handle_grants(&owner_scope)
+            .list_handle_grants(&session_scope)
             .await?;
         let mut cancelled = Vec::new();
 
@@ -708,7 +714,7 @@ impl crate::ProcessService for MockSessionManager {
                 continue;
             }
             self.process_registry
-                .revoke_handle(&owner_scope, &grant.process_id)
+                .revoke_handle(&session_scope, &grant.process_id)
                 .await?;
             if record.is_terminal()
                 || !self

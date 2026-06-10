@@ -259,7 +259,10 @@ pub struct TriggerTargetSummary {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSubscriptionDraft {
-    pub session_id: String,
+    pub registrant: crate::ProcessOriginator,
+    pub env_ref: crate::ProcessExecutionEnvRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target: Option<crate::SessionScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub source_type: String,
@@ -276,7 +279,10 @@ pub struct TriggerSubscriptionDraft {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSubscriptionRecord {
     pub subscription_id: String,
-    pub session_id: String,
+    pub registrant: crate::ProcessOriginator,
+    pub env_ref: crate::ProcessExecutionEnvRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target: Option<crate::SessionScope>,
     pub handle: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -293,6 +299,19 @@ pub struct TriggerSubscriptionRecord {
     pub enabled: bool,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+impl TriggerSubscriptionRecord {
+    pub fn registrant_scope_id(&self) -> String {
+        self.registrant.scope_id()
+    }
+
+    pub fn registrant_session_id(&self) -> Option<&str> {
+        match &self.registrant {
+            crate::ProcessOriginator::Session { scope } => Some(scope.session_id.as_str()),
+            crate::ProcessOriginator::Host => None,
+        }
+    }
 }
 
 impl From<&TriggerSubscriptionRecord> for TriggerRegistration {
@@ -348,7 +367,7 @@ impl TriggerSubscriptionFilter {
     pub fn matches(&self, record: &TriggerSubscriptionRecord) -> bool {
         self.session_id
             .as_deref()
-            .is_none_or(|session_id| record.session_id == session_id)
+            .is_none_or(|session_id| record.registrant_session_id() == Some(session_id))
             && self
                 .handle
                 .as_deref()
@@ -414,6 +433,8 @@ pub trait HostEventStore: Send + Sync {
         handle: &str,
     ) -> Result<bool, PluginError>;
 
+    async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError>;
+
     async fn record_occurrence(
         &self,
         request: HostEventOccurrenceRequest,
@@ -456,7 +477,9 @@ impl HostEventStore for InMemoryHostEventStore {
         let now = crate::runtime::current_epoch_ms();
         let record = TriggerSubscriptionRecord {
             subscription_id: subscription_id.clone(),
-            session_id: draft.session_id,
+            registrant: draft.registrant,
+            env_ref: draft.env_ref,
+            wake_target: draft.wake_target,
             handle,
             name: draft.name,
             source_type: draft.source_type,
@@ -491,8 +514,8 @@ impl HostEventStore for InMemoryHostEventStore {
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by(|left, right| {
-            left.session_id
-                .cmp(&right.session_id)
+            left.registrant_scope_id()
+                .cmp(&right.registrant_scope_id())
                 .then_with(|| left.handle.cmp(&right.handle))
         });
         Ok(records)
@@ -508,17 +531,27 @@ impl HostEventStore for InMemoryHostEventStore {
             .lock()
             .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
         let now = crate::runtime::current_epoch_ms();
-        let Some(record) = state
-            .subscriptions
-            .values_mut()
-            .find(|record| record.session_id == session_id && record.handle == handle)
-        else {
+        let Some(record) = state.subscriptions.values_mut().find(|record| {
+            record.registrant_session_id() == Some(session_id) && record.handle == handle
+        }) else {
             return Ok(false);
         };
         let changed = record.enabled;
         record.enabled = false;
         record.updated_at_ms = now;
         Ok(changed)
+    }
+
+    async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
+        let before = state.subscriptions.len();
+        state
+            .subscriptions
+            .retain(|_, record| record.registrant_session_id() != Some(session_id));
+        Ok(before.saturating_sub(state.subscriptions.len()))
     }
 
     async fn record_occurrence(
@@ -749,9 +782,9 @@ impl HostEventRouter {
         })?;
         let args =
             materialize_trigger_process_args(&subscription.input_template, &occurrence.payload)?;
-        let owner_scope = crate::ProcessScope::new(subscription.session_id.clone());
+        let originator_scope_id = subscription.registrant_scope_id();
         let host_event_invocation = crate::runtime::causal::host_event_invocation(
-            &subscription.session_id,
+            &originator_scope_id,
             &occurrence.occurrence_id,
         );
         let registration = crate::ProcessRegistration::new(
@@ -763,30 +796,36 @@ impl HostEventRouter {
                 process_name: subscription.process_name.clone(),
                 args,
             },
+            crate::ProcessProvenance::new(
+                subscription.registrant.clone(),
+                self.host_profile_id.clone(),
+            )
+            .with_caused_by(host_event_invocation.causal_ref()),
         )
         .with_extra_event_types(crate::lashlang_process_event_types())
-        .with_process_provenance(
-            crate::ProcessProvenance::new(owner_scope.clone(), self.host_profile_id.clone())
-                .with_caused_by(host_event_invocation.causal_ref()),
-        );
-        let grant = crate::ProcessStartGrant {
-            owner_scope: owner_scope.clone(),
-            descriptor: crate::ProcessHandleDescriptor::new(
-                Some("lashlang"),
-                Some(subscription.process_name.as_str()),
-            ),
-        };
+        .with_execution_env_ref(Some(subscription.env_ref.clone()))
+        .with_wake_target(subscription.wake_target.clone());
+        let grant =
+            subscription
+                .wake_target
+                .clone()
+                .map(|session_scope| crate::ProcessStartGrant {
+                    session_scope,
+                    descriptor: crate::ProcessHandleDescriptor::new(
+                        Some("lashlang"),
+                        Some(subscription.process_name.as_str()),
+                    ),
+                });
         let execution_context = crate::ProcessExecutionContext::default()
-            .with_causal_invocation(Some(host_event_invocation))
-            .with_wake_target_scope(owner_scope);
+            .with_causal_invocation(Some(host_event_invocation));
         let command = crate::ProcessCommand::Start {
             registration,
-            grant: Some(grant),
+            grant,
             execution_context: Box::new(execution_context),
         };
         let effect_id = command.effect_id();
         let invocation = crate::RuntimeInvocation::effect(
-            crate::RuntimeScope::new(subscription.session_id.clone()),
+            crate::RuntimeScope::new(originator_scope_id),
             effect_id.clone(),
             crate::RuntimeEffectKind::Process,
             format!(
@@ -801,7 +840,7 @@ impl HostEventRouter {
             .execute_effect(
                 crate::RuntimeEffectEnvelope::new(
                     invocation,
-                    crate::RuntimeEffectCommand::Process { command },
+                    crate::RuntimeEffectCommand::process(command),
                 ),
                 crate::RuntimeEffectLocalExecutor::process_control(process_registry),
             )

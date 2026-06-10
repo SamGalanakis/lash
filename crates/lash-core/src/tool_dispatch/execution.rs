@@ -31,13 +31,13 @@ pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
     };
 
     let tool_start = Instant::now();
-    let result = execute_tool_call(
+    let result = Box::pin(execute_tool_call(
         context,
         &manifest,
         &prepared,
         progress,
         tool_context.with_prepared_payload(prepared.prepared_payload.clone()),
-    )
+    ))
     .await;
     let duration_ms = tool_start.elapsed().as_millis() as u64;
 

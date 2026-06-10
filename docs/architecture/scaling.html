@@ -160,15 +160,15 @@ flowchart LR
   Sig["external signal<br/>button &middot; mail &middot; cron &middot; webhook"] --> Emit["router.emit<br/>record occurrence"]
   Emit --> Match["reserve_matching_deliveries<br/>match by source_type"]
   Match --> Deliver["idempotent effect delivery<br/>deterministic occurrence / delivery id"]
-  Deliver --> Proc["start trigger process<br/>in subscription's session scope"]
+  Deliver --> Proc["start trigger process<br/>with stored registrant + env_ref"]
   Proc --> Wake["wake → target session input queue<br/>EarliestSafeBoundary"]
             </div>
           </div>
           <ul class="bullets">
             <li><strong>A second store seam.</strong> Subscriptions, occurrences, and delivery reservations live behind a <code>HostEventStore</code> trait — parallel to <code>RuntimePersistence</code>. A distributed fleet uses <code>PostgresHostEventStore</code> for the same reason it uses Postgres-backed session persistence.</li>
-            <li><strong>The event carries no session; the subscription carries the target.</strong> An emitted event is matched by <code>source_type</code> against registered subscriptions, each of which names its own target scope (<code>session_id</code>). A single event fans out to 0..N subscribers across any sessions on any workers. Session identity enters only as a property of the matched subscription — never of the event.</li>
+            <li><strong>The event carries no session; the subscription carries process edges.</strong> An emitted event is matched by <code>source_type</code> against registered subscriptions. Each subscription stores the registrant, captured execution environment, optional wake target, and optional handle grant for the process it will start. A single event fans out to 0..N subscribers, including subscriptions with no session edges. Session identity enters only through those optional edges — never through the event.</li>
             <li><strong>Delivery is an idempotent effect.</strong> Each matched delivery runs through the effect controller with a deterministic id (<code>occurrence_id</code> from <code>source_type</code> + source key + idempotency key; delivery process id from <code>occurrence_id</code> + <code>subscription_id</code>). Delivery is <strong>exactly-once</strong> and replay-safe: any worker can run it, and a crash-and-replay under Restate cannot double-start a trigger process.</li>
-            <li><strong>Only the wake is session-coupled.</strong> When a delivered process wakes an agent, that wake lands on the target session's input queue at <code>EarliestSafeBoundary</code> — the sole point where session identity and turn-ordering apply.</li>
+            <li><strong>Only a wake target is session-coupled.</strong> When a delivered process wakes an agent and has a live wake target, that wake lands on the target session's input queue at <code>EarliestSafeBoundary</code> — the sole point where session identity and turn-ordering apply.</li>
           </ul>
           <p>Net for the fleet: route external signals to a runtime-level emit → match → idempotent effect-delivery → wake. Host events reuse the existing CAS, claim, and replay machinery, and the Postgres-backed implementation is exercised by the distributed Restate/Postgres/MinIO E2E.</p>
         </div>

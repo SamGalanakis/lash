@@ -321,6 +321,24 @@ impl lashlang::LashlangArtifactStore for DurableInMemoryArtifactStore {
     ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
         self.inner.get_module_artifact(module_ref).await
     }
+
+    async fn put_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+        descriptor: &str,
+        bytes: &[u8],
+    ) -> Result<(), lashlang::ArtifactStoreError> {
+        self.inner
+            .put_artifact_bytes(artifact_ref, descriptor, bytes)
+            .await
+    }
+
+    async fn get_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
+        self.inner.get_artifact_bytes(artifact_ref).await
+    }
 }
 
 /// Build the single-turn mock transport shared by the store-facet scope

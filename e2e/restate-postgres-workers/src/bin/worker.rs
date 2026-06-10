@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use lash_restate_postgres_workers_e2e::{
     DEFAULT_SESSION_ID, EXPECTED_FINAL_TEXT, HealthResponse, TurnRequest, TurnResponse,
-    TurnScenario, build_e2e_core, default_session_child_owner_scope_pattern,
-    default_session_owner_scope_id, ensure_e2e_schema, env, process_registry_from_storage,
+    TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
+    default_session_originator_scope_id, ensure_e2e_schema, env, process_registry_from_storage,
     record_terminal_result, record_turn_activity, record_worker_event, required_env,
     s3_store_from_env,
 };
@@ -262,8 +262,8 @@ impl AppState {
              WHERE owner_scope_id = $1 OR owner_scope_id LIKE $2
              ORDER BY created_at_ms, process_id",
         )
-        .bind(default_session_owner_scope_id())
-        .bind(default_session_child_owner_scope_pattern())
+        .bind(default_session_originator_scope_id())
+        .bind(default_session_child_originator_scope_pattern())
         .fetch_all(self.storage.pool())
         .await
         .map_err(terminal_error)?)

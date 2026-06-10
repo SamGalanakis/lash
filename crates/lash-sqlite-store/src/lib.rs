@@ -59,8 +59,8 @@ use lash_core::{
     DeliveryPolicy, DurabilityTier, GcReport, MergeKey, PROCESS_LEASE_SCHEMA_VERSION,
     ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
-    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-    RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope,
+    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope, SessionScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -148,6 +148,7 @@ pub enum PersistedArtifactKind {
     PluginSessionSnapshot,
     ExecutionStateSnapshot,
     LashlangModule,
+    ProcessExecutionEnv,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -210,6 +211,13 @@ impl BlobArtifactDescriptor {
         Self::new(
             PersistedArtifactKind::LashlangModule,
             vec![BlobStorageHint::Compressible, BlobStorageHint::LargePayload],
+        )
+    }
+
+    pub fn process_execution_env() -> Self {
+        Self::new(
+            PersistedArtifactKind::ProcessExecutionEnv,
+            vec![BlobStorageHint::Compressible],
         )
     }
 }
@@ -317,6 +325,17 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
                 .await;
         }
         Ok(store as Arc<dyn RuntimePersistence>)
+    }
+
+    async fn open_existing_store(
+        &self,
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Option<Arc<dyn RuntimePersistence>>, String> {
+        let path = self.path_for_session(&request.session_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        self.create_store(request).await.map(Some)
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), String> {
@@ -572,11 +591,11 @@ mod tests {
             ProcessInput::External {
                 metadata: serde_json::Value::Null,
             },
+            lash_core::ProcessProvenance::session(
+                lash_core::SessionScope::new("session"),
+                "test-host",
+            ),
         )
-        .with_process_provenance(lash_core::ProcessProvenance::new(
-            lash_core::ProcessScope::new("session"),
-            "test-host",
-        ))
     }
 
     #[tokio::test]
@@ -618,14 +637,14 @@ mod tests {
             let registry = SqliteProcessRegistry::open(&path)
                 .await
                 .expect("open registry");
-            let owner_scope = lash_core::ProcessScope::new("session");
+            let session_scope = lash_core::SessionScope::new("session");
             registry
                 .register_process(registration("proc-persist"))
                 .await
                 .expect("register");
             registry
                 .grant_handle(
-                    &owner_scope,
+                    &session_scope,
                     "proc-persist",
                     ProcessHandleDescriptor::new(Some("tool"), Some("demo")),
                 )
@@ -646,14 +665,17 @@ mod tests {
         let registry = SqliteProcessRegistry::open(&path)
             .await
             .expect("reopen registry");
-        let owner_scope = lash_core::ProcessScope::new("session");
+        let session_scope = lash_core::SessionScope::new("session");
         let record = registry
             .get_process("proc-persist")
             .await
             .expect("persisted process");
 
-        assert_eq!(record.owner_scope_id(), owner_scope.id());
-        assert_eq!(record.provenance.owner_scope.session_id.as_str(), "session");
+        assert_eq!(record.originator_scope_id(), session_scope.id().as_str());
+        assert_eq!(
+            record.provenance.originator,
+            lash_core::ProcessOriginator::session(session_scope.clone())
+        );
         assert_eq!(
             registry
                 .await_process("proc-persist")
@@ -666,7 +688,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .list_handle_grants(&owner_scope)
+                .list_handle_grants(&session_scope)
                 .await
                 .expect("grants")
                 .len(),

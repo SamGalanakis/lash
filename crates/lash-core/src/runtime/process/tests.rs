@@ -10,6 +10,7 @@ fn registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
+        ProcessProvenance::host("test-host"),
     )
 }
 
@@ -124,7 +125,7 @@ fn wake_delivery(
     ProcessWakeDelivery {
         wake_id: "wake:abc".to_string(),
         target_session_id: "target".to_string(),
-        target_scope_id: ProcessScope::new("target").id(),
+        target_scope_id: SessionScope::new("target").id(),
         process_id: "process-1".to_string(),
         sequence: 7,
         event_type: event_type.clone(),
@@ -247,11 +248,11 @@ async fn test_local_process_registry_satisfies_conformance() {
 }
 
 #[tokio::test]
-async fn delete_session_process_command_requests_cancel_only_for_unshared_active_processes() {
+async fn delete_session_process_command_revokes_edges_and_reports_orphans() {
     let registry = Arc::new(TestLocalProcessRegistry::default());
     let registry_dyn = Arc::clone(&registry) as Arc<dyn ProcessRegistry>;
-    let deleted_scope = ProcessScope::new("deleted");
-    let remaining_scope = ProcessScope::new("remaining");
+    let deleted_scope = SessionScope::new("deleted");
+    let remaining_scope = SessionScope::new("remaining");
     for process_id in ["sole", "shared"] {
         registry
             .register_process(registration(process_id))
@@ -286,28 +287,37 @@ async fn delete_session_process_command_requests_cancel_only_for_unshared_active
         &controller,
         crate::RuntimeEffectEnvelope::new(
             invocation,
-            crate::RuntimeEffectCommand::Process {
-                command: crate::ProcessCommand::DeleteSession {
-                    session_id: "deleted".to_string(),
-                },
-            },
+            crate::RuntimeEffectCommand::process(crate::ProcessCommand::DeleteSession {
+                session_id: "deleted".to_string(),
+            }),
         ),
         crate::RuntimeEffectLocalExecutor::process_control(registry_dyn),
     )
     .await
     .expect("delete session process command");
 
-    assert!(matches!(
-        outcome,
-        crate::RuntimeEffectOutcome::Process {
-            result: crate::ProcessEffectOutcome::DeleteSession { .. }
-        }
-    ));
-    let sole_events = registry.events_after("sole", 0).await.expect("sole events");
+    let crate::RuntimeEffectOutcome::Process {
+        result:
+            crate::ProcessEffectOutcome::DeleteSession {
+                report:
+                    crate::ProcessSessionDeleteReport {
+                        orphaned_process_ids,
+                        preserved_process_ids,
+                        ..
+                    },
+            },
+    } = outcome
+    else {
+        panic!("unexpected delete session outcome: {outcome:?}");
+    };
+    assert_eq!(orphaned_process_ids, vec!["sole".to_string()]);
+    assert_eq!(preserved_process_ids, vec!["shared".to_string()]);
     assert!(
-        sole_events
-            .iter()
-            .any(|event| event.event_type == "process.cancel_requested")
+        registry
+            .events_after("sole", 0)
+            .await
+            .expect("sole events")
+            .is_empty()
     );
     assert!(
         registry

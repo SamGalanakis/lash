@@ -21,12 +21,14 @@ pub use events::{
 pub use materialization::materialize_process_event_semantics;
 pub use model::{
     PROCESS_LEASE_SCHEMA_VERSION, ProcessCancelSummary, ProcessDefinitionSelector,
-    ProcessDefinitionSummary, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput,
-    ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
-    ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord, ProcessRegistration,
-    ProcessScope, ProcessScopeId, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+    ProcessDefinitionSummary, ProcessExecutionContext, ProcessExecutionEnvRef,
+    ProcessExecutionEnvSpec, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease,
+    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+    ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
+    ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
+    ProcessStatus, ProcessStatusFilter, SessionScope, SessionScopeId, load_process_execution_env,
+    persist_process_execution_env,
 };
 pub use observation::{
     ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessWorkObserver,

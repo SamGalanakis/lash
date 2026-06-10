@@ -28,7 +28,6 @@ impl RuntimeSessionServices {
             registry,
             call,
             parent_invocation,
-            wake_target_scope,
             scoped_effect_controller,
             cancellation,
         } = run;
@@ -49,8 +48,8 @@ impl RuntimeSessionServices {
             .process_events(
                 registration.id.clone(),
                 registry,
-                wake_target_scope,
                 self.current.store.clone(),
+                self.current.host.session_store_factory.clone(),
                 self.current.host.queued_work_poke.clone(),
             )
             .build();

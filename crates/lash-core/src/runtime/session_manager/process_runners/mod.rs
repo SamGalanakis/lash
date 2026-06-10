@@ -49,7 +49,6 @@ pub(in crate::runtime::session_manager::process_runners) struct ProcessToolCallR
     registry: Arc<dyn crate::ProcessRegistry>,
     call: crate::PreparedToolCall,
     parent_invocation: Option<crate::RuntimeInvocation>,
-    wake_target_scope: Option<crate::ProcessScope>,
     scoped_effect_controller: crate::ScopedEffectController<'run>,
     cancellation: tokio_util::sync::CancellationToken,
 }
@@ -109,6 +108,8 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
                 .as_ref()
                 .and_then(|invocation| invocation.scope.turn_id.clone()),
         );
+        let state = self.services.current.snapshot.to_runtime_state();
+        let execution_env_spec = state.process_execution_env_spec(&self.services.current.policy);
         let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
             plugins: Arc::clone(&self.services.current.plugins),
             tools: self.services.current.plugins.tools(),
@@ -122,6 +123,7 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
             effect_controller,
             direct_completions,
             parent_invocation: self.dispatch_parent_invocation,
+            execution_env_spec,
             session_id: self.services.current.session_id.clone(),
             agent_frame_id: String::new(),
             event_tx,
@@ -210,6 +212,7 @@ mod tests {
             crate::ProcessInput::External {
                 metadata: serde_json::json!({ "process_id": process_id }),
             },
+            crate::ProcessProvenance::host("test-host"),
         )
         .with_extra_event_types([probe_event_type()])
     }
@@ -282,7 +285,7 @@ mod tests {
             .process_ref("main")
             .expect("main process ref")
             .clone();
-        Ok(crate::ProcessRegistration::new(
+        Ok(crate::ProcessRegistration::session_start_draft(
             process_id,
             crate::ProcessInput::LashlangProcess {
                 module_ref: linked_module.module_ref,
@@ -346,12 +349,12 @@ mod tests {
 
     async fn grant_handle(
         registry: &Arc<dyn crate::ProcessRegistry>,
-        owner_scope: &crate::ProcessScope,
+        session_scope: &crate::SessionScope,
         process_id: &str,
     ) {
         registry
             .grant_handle(
-                owner_scope,
+                session_scope,
                 process_id,
                 crate::ProcessHandleDescriptor::new(Some("test"), Some(process_id)),
             )
@@ -360,10 +363,41 @@ mod tests {
     }
 
     fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
-        registration.with_process_provenance(crate::ProcessProvenance::new(
-            crate::ProcessScope::new("root"),
+        registration.with_process_provenance(crate::ProcessProvenance::session(
+            crate::SessionScope::new("root"),
             "worker-profile",
         ))
+    }
+
+    async fn with_worker_execution_env_in_store(
+        registration: crate::ProcessRegistration,
+        store: &dyn ::lashlang::LashlangArtifactStore,
+    ) -> crate::ProcessRegistration {
+        match registration.input.as_ref() {
+            crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::LashlangProcess { .. } => {
+                let spec = crate::ProcessExecutionEnvSpec::new(
+                    crate::PluginOptions::default(),
+                    standard_test_policy(),
+                );
+                let env_ref = crate::persist_process_execution_env(store, &spec)
+                    .await
+                    .expect("persist worker process execution env");
+                registration.with_execution_env_ref(Some(env_ref))
+            }
+            crate::ProcessInput::SessionTurn { .. } | crate::ProcessInput::External { .. } => {
+                registration
+            }
+        }
+    }
+
+    async fn worker_registration_with_env(
+        registration: crate::ProcessRegistration,
+    ) -> crate::ProcessRegistration {
+        with_worker_execution_env_in_store(
+            worker_registration(registration),
+            ::lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
+        )
+        .await
     }
 
     fn process_worker(
@@ -466,6 +500,15 @@ mod tests {
             Ok(Arc::clone(&self.store) as Arc<dyn crate::RuntimePersistence>)
         }
 
+        async fn open_existing_store(
+            &self,
+            _request: &crate::SessionStoreCreateRequest,
+        ) -> Result<Option<Arc<dyn crate::RuntimePersistence>>, String> {
+            Ok(Some(
+                Arc::clone(&self.store) as Arc<dyn crate::RuntimePersistence>
+            ))
+        }
+
         async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
             Ok(())
         }
@@ -520,18 +563,22 @@ mod tests {
             {
                 let mut config = crate::RuntimeHostConfig::in_memory();
                 config.profile.host_profile_id = "worker-profile".to_string();
-                config.durability.lashlang_artifact_store = empty_artifact_store;
+                config.durability.lashlang_artifact_store = Arc::clone(&empty_artifact_store);
                 config
             },
         );
-        let registration = worker_registration(
-            lashlang_process_registration(
-                "missing-artifact",
-                ::lashlang::parse("process main() { finish 1 }").expect("parse module"),
-                serde_json::Map::new(),
-            )
-            .await,
-        );
+        let registration = with_worker_execution_env_in_store(
+            worker_registration(
+                lashlang_process_registration(
+                    "missing-artifact",
+                    ::lashlang::parse("process main() { finish 1 }").expect("parse module"),
+                    serde_json::Map::new(),
+                )
+                .await,
+            ),
+            empty_artifact_store.as_ref(),
+        )
+        .await;
 
         let output = worker
             .run_process(
@@ -550,7 +597,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_process_worker_requires_structured_creator_scope() {
+    async fn durable_process_worker_runs_host_originated_tool_process() {
         let registry = Arc::new(crate::TestLocalProcessRegistry::default());
         let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
         let factory =
@@ -559,34 +606,38 @@ mod tests {
             Arc::clone(&registry_dyn),
             factory as Arc<dyn crate::SessionStoreFactory>,
         );
-        let mut registration = crate::ProcessRegistration::new(
-            "worker-unstructured-scope",
-            crate::ProcessInput::ToolCall {
-                call: crate::PreparedToolCall::from_parts(
-                    "tool-call-unstructured",
-                    "process_echo",
-                    serde_json::json!({ "value": "tool" }),
-                    None,
-                    serde_json::Value::Null,
-                ),
-            },
-        );
-        registration.provenance =
-            crate::ProcessProvenance::new(crate::ProcessScope::new(""), "worker-profile");
+        let registration = with_worker_execution_env_in_store(
+            crate::ProcessRegistration::new(
+                "worker-unstructured-scope",
+                crate::ProcessInput::ToolCall {
+                    call: crate::PreparedToolCall::from_parts(
+                        "tool-call-unstructured",
+                        "process_echo",
+                        serde_json::json!({ "value": "tool" }),
+                        None,
+                        serde_json::Value::Null,
+                    ),
+                },
+                crate::ProcessProvenance::host("worker-profile"),
+            ),
+            ::lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
+        )
+        .await;
 
-        let err = worker
+        let output = worker
             .run_process(
                 registration,
                 crate::ProcessExecutionContext::default(),
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
-            .expect_err("worker should require creator session provenance");
+            .expect("worker should run host-originated tool process");
 
-        assert!(
-            err.to_string().contains("missing a structured owner scope"),
-            "{err}"
-        );
+        assert!(matches!(
+            output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value == serde_json::json!({ "payload": "raw:tool" })
+        ));
     }
 
     #[tokio::test]
@@ -603,18 +654,20 @@ mod tests {
             Arc::clone(&registry_dyn),
             factory as Arc<dyn crate::SessionStoreFactory>,
         );
-        let registration = worker_registration(crate::ProcessRegistration::new(
-            "",
-            crate::ProcessInput::ToolCall {
-                call: crate::PreparedToolCall::from_parts(
-                    "tool-call-empty-id",
-                    "process_echo",
-                    serde_json::json!({ "value": "tool" }),
-                    None,
-                    serde_json::Value::Null,
-                ),
-            },
-        ));
+        let registration =
+            worker_registration_with_env(crate::ProcessRegistration::session_start_draft(
+                "",
+                crate::ProcessInput::ToolCall {
+                    call: crate::PreparedToolCall::from_parts(
+                        "tool-call-empty-id",
+                        "process_echo",
+                        serde_json::json!({ "value": "tool" }),
+                        None,
+                        serde_json::Value::Null,
+                    ),
+                },
+            ))
+            .await;
 
         let err = worker
             .run_process(
@@ -692,8 +745,8 @@ mod tests {
 
     /// A trigger/host-event-shaped registry row: a tool process written straight to
     /// the registry with no turn lease and no manager-driven start.
-    fn counting_registration(process_id: &str) -> crate::ProcessRegistration {
-        worker_registration(crate::ProcessRegistration::new(
+    async fn counting_registration(process_id: &str) -> crate::ProcessRegistration {
+        worker_registration_with_env(crate::ProcessRegistration::session_start_draft(
             process_id,
             crate::ProcessInput::ToolCall {
                 call: crate::PreparedToolCall::from_parts(
@@ -705,6 +758,7 @@ mod tests {
                 ),
             },
         ))
+        .await
     }
 
     #[tokio::test]
@@ -724,7 +778,7 @@ mod tests {
         let poke = crate::ProcessWorkRunner::inline(worker).spawn();
 
         registry
-            .register_process(counting_registration("proc-poke"))
+            .register_process(counting_registration("proc-poke").await)
             .await
             .expect("register out-of-turn process");
         poke.poke();
@@ -768,7 +822,7 @@ mod tests {
         );
 
         registry
-            .register_process(counting_registration("proc-race"))
+            .register_process(counting_registration("proc-race").await)
             .await
             .expect("register out-of-turn process");
 
@@ -901,7 +955,7 @@ mod tests {
         child_session_id: &str,
     ) -> crate::ProcessRegistration {
         let child_policy = standard_test_policy();
-        worker_registration(crate::ProcessRegistration::new(
+        worker_registration(crate::ProcessRegistration::session_start_draft(
             process_id,
             crate::ProcessInput::SessionTurn {
                 create_request: Box::new(
@@ -1011,18 +1065,20 @@ mod tests {
         let factory_dyn = Arc::clone(&factory) as Arc<dyn crate::SessionStoreFactory>;
         let worker = process_worker(Arc::clone(&registry_dyn), factory_dyn);
 
-        let tool_registration = worker_registration(crate::ProcessRegistration::new(
-            "worker-tool",
-            crate::ProcessInput::ToolCall {
-                call: crate::PreparedToolCall::from_parts(
-                    "tool-call-1",
-                    "process_echo",
-                    serde_json::json!({ "value": "tool" }),
-                    None,
-                    serde_json::Value::Null,
-                ),
-            },
-        ));
+        let tool_registration =
+            worker_registration_with_env(crate::ProcessRegistration::session_start_draft(
+                "worker-tool",
+                crate::ProcessInput::ToolCall {
+                    call: crate::PreparedToolCall::from_parts(
+                        "tool-call-1",
+                        "process_echo",
+                        serde_json::json!({ "value": "tool" }),
+                        None,
+                        serde_json::Value::Null,
+                    ),
+                },
+            ))
+            .await;
         registry_dyn
             .register_process(tool_registration.clone())
             .await
@@ -1043,7 +1099,7 @@ mod tests {
 
         let mut args = serde_json::Map::new();
         args.insert("value".to_string(), serde_json::json!("linked"));
-        let lashlang_registration = worker_registration(
+        let lashlang_registration = worker_registration_with_env(
             lashlang_process_registration(
                 "worker-lashlang",
                 ::lashlang::parse(
@@ -1057,7 +1113,8 @@ mod tests {
                 args,
             )
             .await,
-        );
+        )
+        .await;
         let crate::ProcessInput::LashlangProcess { module_ref, .. } =
             lashlang_registration.input.as_ref()
         else {
@@ -1102,20 +1159,21 @@ mod tests {
         ));
 
         let child_policy = standard_test_policy();
-        let session_registration = worker_registration(crate::ProcessRegistration::new(
-            "worker-session",
-            crate::ProcessInput::SessionTurn {
-                create_request: Box::new(crate::SessionCreateRequest::child(
-                    "root",
-                    crate::SessionStartPoint::Empty,
-                    child_policy,
-                    crate::PluginOptions::default(),
-                    "worker-test",
-                )),
-                turn_input: Box::new(crate::TurnInput::text("run child")),
-                output_contract: crate::ToolOutputContract::Static,
-            },
-        ));
+        let session_registration =
+            worker_registration(crate::ProcessRegistration::session_start_draft(
+                "worker-session",
+                crate::ProcessInput::SessionTurn {
+                    create_request: Box::new(crate::SessionCreateRequest::child(
+                        "root",
+                        crate::SessionStartPoint::Empty,
+                        child_policy,
+                        crate::PluginOptions::default(),
+                        "worker-test",
+                    )),
+                    turn_input: Box::new(crate::TurnInput::text("run child")),
+                    output_contract: crate::ToolOutputContract::Static,
+                },
+            ));
         registry_dyn
             .register_process(session_registration.clone())
             .await
@@ -1394,7 +1452,7 @@ mod tests {
 
         let mut args = serde_json::Map::new();
         args.insert("flag".to_string(), serde_json::json!(true));
-        let registration = worker_registration(
+        let registration = worker_registration_with_env(
             lashlang_process_registration(
                 "tracking-parent",
                 ::lashlang::parse(
@@ -1417,7 +1475,8 @@ mod tests {
                 args,
             )
             .await,
-        );
+        )
+        .await;
         registry_dyn
             .register_process(registration.clone())
             .await
@@ -1774,8 +1833,8 @@ mod tests {
             .as_ref()
             .expect("process registry")
             .clone();
-        let current_scope = crate::ProcessScope::new("root");
-        let other_scope = crate::ProcessScope::new("other");
+        let current_scope = crate::SessionScope::new("root");
+        let other_scope = crate::SessionScope::new("other");
         let process_ids = ["keep", "sole", "shared"];
 
         for process_id in process_ids {
@@ -1868,8 +1927,8 @@ mod tests {
             )
             .with_parent_invocation(Some(metadata.clone()))
         };
-        let root_scope = crate::ProcessScope::new("root");
-        let target_scope = crate::ProcessScope::new("target");
+        let root_scope = crate::SessionScope::new("root");
+        let target_scope = crate::SessionScope::new("target");
 
         register_open_process(&registry, "transfer-me").await;
         grant_handle(&registry, &root_scope, "transfer-me").await;

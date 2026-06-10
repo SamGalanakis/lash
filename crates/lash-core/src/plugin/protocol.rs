@@ -204,7 +204,7 @@ pub trait ProtocolDriverPlugin: Send + Sync {
 }
 
 /// Plugin-owned options carried on a `SessionCreateRequest`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PluginOptions {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugins: BTreeMap<String, serde_json::Value>,

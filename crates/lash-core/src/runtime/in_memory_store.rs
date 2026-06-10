@@ -599,6 +599,19 @@ impl SessionStoreFactory for InMemorySessionStoreFactory {
         Ok(store as Arc<dyn RuntimePersistence>)
     }
 
+    async fn open_existing_store(
+        &self,
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Option<Arc<dyn RuntimePersistence>>, String> {
+        Ok(self
+            .stores
+            .lock()
+            .expect("in-memory store factory")
+            .get(&request.session_id)
+            .cloned()
+            .map(|store| store as Arc<dyn RuntimePersistence>))
+    }
+
     async fn delete_session(&self, session_id: &str) -> Result<(), String> {
         self.stores
             .lock()

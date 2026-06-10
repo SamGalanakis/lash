@@ -5,8 +5,8 @@ use super::events::{
 };
 use super::model::{
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessScope,
-    ProcessSessionDeleteReport,
+    ProcessLease, ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
+    ProcessSessionDeleteReport, SessionScope,
 };
 
 /// Durability-neutral process registry.
@@ -31,35 +31,35 @@ pub trait ProcessRegistry: Send + Sync {
 
     async fn grant_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
         descriptor: ProcessHandleDescriptor,
     ) -> Result<ProcessHandleGrant, PluginError>;
 
     async fn revoke_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<(), PluginError>;
 
     async fn transfer_handle_grants(
         &self,
-        from_scope: &ProcessScope,
-        to_scope: &ProcessScope,
+        from_scope: &SessionScope,
+        to_scope: &SessionScope,
         process_ids: &[String],
     ) -> Result<(), PluginError>;
 
     async fn list_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError>;
 
     async fn list_live_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
         Ok(self
-            .list_handle_grants(owner_scope)
+            .list_handle_grants(session_scope)
             .await?
             .into_iter()
             .filter(|(_, record)| !record.is_terminal())
@@ -68,11 +68,11 @@ pub trait ProcessRegistry: Send + Sync {
 
     async fn has_handle_grant(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<bool, PluginError> {
         Ok(self
-            .list_handle_grants(owner_scope)
+            .list_handle_grants(session_scope)
             .await?
             .into_iter()
             .any(|(grant, _)| grant.process_id == process_id))
@@ -122,6 +122,11 @@ pub trait ProcessRegistry: Send + Sync {
     ) -> Result<ProcessRecord, PluginError>;
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord>;
+
+    async fn list_processes(
+        &self,
+        filter: &ProcessListFilter,
+    ) -> Result<Vec<ProcessRecord>, PluginError>;
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError>;
 

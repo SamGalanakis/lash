@@ -145,7 +145,7 @@ let report = core.delete_session(chat_id, scope).await?;
 if let Some(process_report) = report.process {
     audit_process_cleanup(process_report)?;
 }</code></pre>
-      <p>Deletion requires a core-level <code>SessionStoreFactory</code>; per-session stores cannot be rediscovered from a bare id. If a <code>ProcessRegistry</code> is installed, Lash first asks the process service to cancel and revoke session-owned process state through the supplied scoped controller, then deletes the session store state.</p>
+      <p>Deletion requires a core-level <code>SessionStoreFactory</code>; per-session stores cannot be rediscovered from a bare id. If a <code>ProcessRegistry</code> is installed, Lash revokes that session's process handle grants, deletes wake bookkeeping addressed to it, deletes its trigger subscriptions, and reports any still-running zero-grant processes as orphans for host policy. It does not cancel processes automatically.</p>
       <aside class="gotcha">
         <strong>Gotcha</strong>
         <p>Deleting runtime state is separate from deleting app rows such as chats, accounts, permissions, or UI attachments. Keep the app transaction and the Lash runtime deletion coordinated at the host layer.</p>
@@ -162,6 +162,7 @@ if let Some(process_report) = report.process {
         <div class="listing__row"><div class="listing__label">head</div><div class="listing__body"><p>Current revision, current AgentFrame id, session policy, model/provider identity, and metadata for resume UIs.</p></div></div>
         <div class="listing__row"><div class="listing__label">snapshots</div><div class="listing__body"><p>Plugin state, tool state, current RLM execution state, prompt state, and Lashlang artifacts needed for resume.</p></div></div>
         <div class="listing__row"><div class="listing__label">queued work</div><div class="listing__body"><p>Queued turn input, process wakes, leases, and completed claim ids cleared with the consuming commit. Host events are runtime-level occurrences, and timers are host-owned scheduling.</p></div></div>
+        <div class="listing__row"><div class="listing__label">process envs</div><div class="listing__body"><p>Process execution environments are captured at start as content-addressed Lashlang artifacts. Persisted process and trigger rows reference those immutable environment blobs; this alpha cutover is not backward-compatible with pre-env-ref process rows.</p></div></div>
         <div class="listing__row"><div class="listing__label">usage</div><div class="listing__body"><p>Per-turn token deltas that aggregate into <code>session.usage_report()</code>.</p></div></div>
       </div>
     </div>

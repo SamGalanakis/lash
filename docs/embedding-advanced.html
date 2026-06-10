@@ -121,7 +121,7 @@ let core = LashCore::rlm()
           <div class="listing">
             <div class="listing__row">
               <div class="listing__label">inline runner</div>
-              <div class="listing__body"><p>Call <code>.process_registry(...)</code> and wire a <code>SessionStoreFactory</code>. The facade builds the default inline <code>DurableProcessWorkerConfig</code> at <code>build()</code> and lazily starts the process runner on first <code>session(...).open().await?</code>. Without a store factory the build fails, because the worker must rebuild a session runtime for each process.</p></div>
+              <div class="listing__body"><p>Call <code>.process_registry(...)</code>. The facade builds the default inline <code>DurableProcessWorkerConfig</code> at <code>build()</code> and starts process work from captured execution environments; no origin session has to be reopened for tool or Lashlang process execution.</p></div>
             </div>
             <div class="listing__row">
               <div class="listing__label">external runner</div>
@@ -129,7 +129,7 @@ let core = LashCore::rlm()
             </div>
             <div class="listing__row">
               <div class="listing__label">observability</div>
-              <div class="listing__body"><p>Use <code>core.process_registry()</code> for registry-level integrations, <code>core.process_observer()</code> for non-terminal work snapshots, and <code>session.process_control()</code> for app-facing await/cancel/list operations.</p></div>
+              <div class="listing__body"><p>Use <code>core.processes()</code> for host-level start/list/get/events/await/cancel/signal operations, <code>core.process_registry()</code> for registry-level integrations, and <code>session.process_control()</code> for grant-scoped in-session await/cancel/list operations.</p></div>
             </div>
           </div>
           <pre data-lang="rust" data-snippet="embedding_advanced#process-registry-core"><code>let core = LashCore::rlm()

@@ -311,6 +311,27 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
         Ok(store as Arc<dyn crate::store::RuntimePersistence>)
     }
 
+    async fn open_existing_store(
+        &self,
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Option<Arc<dyn crate::store::RuntimePersistence>>, String> {
+        Ok(self
+            .stores
+            .lock()
+            .expect("store factory")
+            .iter()
+            .find(|store| {
+                store
+                    .session_meta
+                    .lock()
+                    .expect("lock session meta")
+                    .as_ref()
+                    .is_some_and(|meta| meta.session_id == request.session_id)
+            })
+            .cloned()
+            .map(|store| store as Arc<dyn crate::store::RuntimePersistence>))
+    }
+
     async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
         Ok(())
     }

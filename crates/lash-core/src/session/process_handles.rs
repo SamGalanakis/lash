@@ -65,12 +65,19 @@ impl RuntimeExecutionContext<'_> {
                 return ToolInvocationReply::from_output(record.output.clone()).with_record(record);
             }
         };
-        let registration = ProcessRegistration::new(
+        let registration = ProcessRegistration::session_start_draft(
             handle_id.clone(),
             ProcessInput::ToolCall {
                 call: prepared_call.clone(),
             },
         );
+        let registration = match self
+            .attach_captured_process_execution_env(registration)
+            .await
+        {
+            Ok(registration) => registration,
+            Err(err) => return ToolInvocationReply::error(json!(err.to_string())),
+        };
         if let Err(err) =
             self.dispatch
                 .processes
@@ -368,6 +375,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,
@@ -386,7 +397,11 @@ mod tests {
             Arc::new(crate::ChronologicalProjection::default()),
             None,
             crate::TurnContext::default(),
-        );
+        )
+        .with_execution_env_spec(crate::ProcessExecutionEnvSpec::new(
+            crate::PluginOptions::default(),
+            crate::runtime::tests::helpers::standard_test_policy(),
+        ));
 
         let started = context
             .start_tool_process(
@@ -451,6 +466,7 @@ mod tests {
                     ProcessInput::External {
                         metadata: serde_json::Value::Null,
                     },
+                    crate::ProcessProvenance::host("process-handle-test-host"),
                 )
                 .with_extra_event_types(crate::lashlang_process_event_types()),
             )
@@ -474,6 +490,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,
@@ -540,6 +560,7 @@ mod tests {
                 ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
+                crate::ProcessProvenance::host("process-handle-test-host"),
             ))
             .await
             .expect("register hidden process");
@@ -561,6 +582,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,
@@ -642,6 +667,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,

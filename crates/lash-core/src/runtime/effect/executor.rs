@@ -742,7 +742,7 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
                 let execution = local_executor.into_process()?;
                 let registry = execution.registry;
                 let result = tokio::task::spawn(async move {
-                    Self::execute_process_command(registry, command).await
+                    Self::execute_process_command(registry, *command).await
                 })
                 .await
                 .map_err(|err| {
@@ -820,7 +820,7 @@ impl InlineRuntimeEffectController {
         let record = registry.register_process(registration_for_record).await?;
         if let Some(grant) = grant {
             registry
-                .grant_handle(&grant.owner_scope, &registration.id, grant.descriptor)
+                .grant_handle(&grant.session_scope, &registration.id, grant.descriptor)
                 .await?;
         }
         Ok(record)
@@ -860,13 +860,16 @@ impl InlineRuntimeEffectController {
                 let record = Self::start_process(registry, registration, grant).await?;
                 Ok(ProcessEffectOutcome::Start { record })
             }
-            ProcessCommand::List { owner_scope, mode } => {
+            ProcessCommand::List {
+                session_scope,
+                mode,
+            } => {
                 let entries = match mode {
                     crate::ProcessListMode::Live => {
-                        registry.list_live_handle_grants(&owner_scope).await?
+                        registry.list_live_handle_grants(&session_scope).await?
                     }
                     crate::ProcessListMode::All => {
-                        registry.list_handle_grants(&owner_scope).await?
+                        registry.list_handle_grants(&session_scope).await?
                     }
                 };
                 Ok(ProcessEffectOutcome::List { entries })
@@ -883,17 +886,6 @@ impl InlineRuntimeEffectController {
             }
             ProcessCommand::DeleteSession { session_id } => {
                 let report = registry.delete_session_process_state(&session_id).await?;
-                for process_id in &report.cancel_process_ids {
-                    registry
-                        .append_event(
-                            process_id,
-                            crate::ProcessEventAppendRequest::cancel_requested(
-                                process_id,
-                                Some("session deleted".to_string()),
-                            ),
-                        )
-                        .await?;
-                }
                 Ok(ProcessEffectOutcome::DeleteSession { report })
             }
             ProcessCommand::Await { process_id } => {

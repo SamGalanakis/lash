@@ -172,6 +172,8 @@ impl RuntimeSessionServices {
             None,
             crate::TurnContext::default(),
         )
+        .with_execution_env_spec(current_execution_env_spec(&self.current))
+        .with_process_registration_context(&registration)
         .with_cancellation_token(cancellation.clone());
         if let Some(invocation) = execution_context.causal_invocation.clone() {
             ctx = ctx.with_parent_invocation(invocation);
@@ -187,8 +189,8 @@ impl RuntimeSessionServices {
             process_name: process_name.clone(),
             lashlang_execution_sink: lashlang_execution_sink.clone(),
             lashlang_execution_context: lashlang_execution_context.clone(),
-            wake_target_scope: execution_context.wake_target_scope,
             store: self.current.store.clone(),
+            session_store_factory: self.current.host.session_store_factory.clone(),
             queued_work_poke: self.current.host.queued_work_poke.clone(),
             cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
@@ -220,6 +222,13 @@ impl RuntimeSessionServices {
     }
 }
 
+fn current_execution_env_spec(
+    current: &CurrentSessionCapability,
+) -> crate::ProcessExecutionEnvSpec {
+    let state = current.snapshot.to_runtime_state();
+    state.process_execution_env_spec(&current.policy)
+}
+
 struct LashlangProcessHost<'run> {
     ctx: crate::RuntimeExecutionContext<'run>,
     registry: Arc<dyn crate::ProcessRegistry>,
@@ -230,8 +239,8 @@ struct LashlangProcessHost<'run> {
     process_name: String,
     lashlang_execution_sink: Option<Arc<dyn TraceSink>>,
     lashlang_execution_context: TraceContext,
-    wake_target_scope: Option<crate::ProcessScope>,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
+    session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
     queued_work_poke: Option<crate::QueuedWorkPoke>,
     cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
@@ -405,13 +414,13 @@ impl LashlangProcessHost<'_> {
                     event_type,
                     crate::lashlang_bridge::process_event_payload(&event.value)?,
                 )
-                .with_replay_key(format!("process:{}:event:{ordinal}", self.process_id))
-                .with_optional_wake_target_scope(self.wake_target_scope.clone()),
+                .with_replay_key(format!("process:{}:event:{ordinal}", self.process_id)),
             )
             .await
             .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
         crate::tool_provider::process_events::enqueue_wake_delivery(
-            self.store.as_deref(),
+            self.store.clone(),
+            self.session_store_factory.as_ref(),
             result.wake_delivery,
             Some(self.ctx.session_graph_service()),
             self.queued_work_poke.as_ref(),

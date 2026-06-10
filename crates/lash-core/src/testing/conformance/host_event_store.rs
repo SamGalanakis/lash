@@ -37,8 +37,11 @@ fn sample_trigger_subscription_draft(
 ) -> crate::TriggerSubscriptionDraft {
     let mut inputs = BTreeMap::new();
     inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+    let registrant_scope = crate::SessionScope::new(session_id);
     crate::TriggerSubscriptionDraft {
-        session_id: session_id.to_string(),
+        registrant: crate::ProcessOriginator::session(registrant_scope.clone()),
+        env_ref: crate::ProcessExecutionEnvRef::new(format!("process-env:{session_id}")),
+        wake_target: Some(registrant_scope),
         name: Some(process_name.to_string()),
         source_type: "ui.button.pressed".to_string(),
         source_key: source_key.to_string(),

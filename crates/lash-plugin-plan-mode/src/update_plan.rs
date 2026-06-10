@@ -394,6 +394,7 @@ mod tests {
             subagent: None,
             lashlang_abilities: Default::default(),
             lashlang_language_features: Default::default(),
+            plugin_options: Default::default(),
             parent_session_id: None,
         };
         let child_ctx = PluginSessionContext {
@@ -402,6 +403,7 @@ mod tests {
             subagent: None,
             lashlang_abilities: Default::default(),
             lashlang_language_features: Default::default(),
+            plugin_options: Default::default(),
             parent_session_id: Some("root".into()),
         };
         assert!(root_ctx.is_root_session());

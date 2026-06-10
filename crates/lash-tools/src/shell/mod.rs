@@ -22,8 +22,8 @@ use lash_core::plugin::{
 use lash_core::runtime::ProcessEventSemanticsSpec;
 use lash_core::{
     PreparedToolCall, ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessStartRequest,
-    ProgressSender, PromptContribution, SessionToolAccess, ToolCall, ToolDefinition, ToolProvider,
-    ToolResult, ToolScheduling,
+    ProgressSender, PromptContribution, SessionScope, SessionToolAccess, ToolCall, ToolDefinition,
+    ToolProvider, ToolResult, ToolScheduling,
 };
 
 use lash_tool_support::{
@@ -248,8 +248,12 @@ impl StandardShell {
         let request = ProcessStartRequest::new(
             process_id.clone(),
             ProcessInput::ToolCall { call },
-            descriptor,
+            lash_core::ProcessOriginator::host(),
         )
+        .with_grant(Some(lash_core::ProcessStartGrant {
+            session_scope: SessionScope::new("request-descriptor"),
+            descriptor,
+        }))
         .with_extra_event_types([shell_signal_event_type()]);
         match context.processes().start(request).await {
             Ok(summary) => {
@@ -773,20 +777,57 @@ mod tests {
             Arc::clone(&self.registry)
         }
 
-        fn owner_scope(
+        fn session_scope(
             session_id: &str,
             scope: &lash_core::ProcessOpScope<'_>,
-        ) -> lash_core::ProcessScope {
+        ) -> lash_core::SessionScope {
             scope
                 .agent_frame_id()
                 .filter(|frame_id| !frame_id.is_empty())
-                .map(|frame_id| lash_core::ProcessScope::for_agent_frame(session_id, frame_id))
-                .unwrap_or_else(|| lash_core::ProcessScope::new(session_id))
+                .map(|frame_id| lash_core::SessionScope::for_agent_frame(session_id, frame_id))
+                .unwrap_or_else(|| lash_core::SessionScope::new(session_id))
         }
     }
 
     #[async_trait::async_trait]
     impl lash_core::ProcessService for TestProcessService {
+        async fn start_from_request(
+            &self,
+            session_id: &str,
+            request: lash_core::ProcessStartRequest,
+            scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessHandleSummary, PluginError> {
+            let env_ref = request
+                .env_spec
+                .as_ref()
+                .map(lash_core::ProcessExecutionEnvSpec::stable_ref)
+                .transpose()
+                .map_err(|err| {
+                    PluginError::Session(format!("failed to hash test process env: {err}"))
+                })?;
+            let descriptor = request
+                .grant
+                .as_ref()
+                .map(|grant| grant.descriptor.clone())
+                .unwrap_or_default();
+            let registration = request.into_registration("shell-test-host", env_ref);
+            let record = self
+                .start(
+                    session_id,
+                    registration,
+                    lash_core::ProcessStartOptions::new().with_descriptor(descriptor.clone()),
+                    scope,
+                )
+                .await?;
+            let definition = lash_core::ProcessDefinitionSummary::from_input(record.input.as_ref());
+            Ok(lash_core::ProcessHandleSummary::new(
+                record.id,
+                descriptor,
+                lash_core::ProcessLifecycleStatus::from(record.status),
+            )
+            .with_definition(definition))
+        }
+
         async fn start(
             &self,
             session_id: &str,
@@ -799,7 +840,7 @@ mod tests {
             if let Some(descriptor) = options.descriptor {
                 self.registry
                     .grant_handle(
-                        &Self::owner_scope(session_id, &scope),
+                        &Self::session_scope(session_id, &scope),
                         &process_id,
                         descriptor,
                     )
@@ -822,13 +863,13 @@ mod tests {
             mode: lash_core::ProcessListMode,
             scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<Vec<lash_core::runtime::ProcessHandleGrantEntry>, PluginError> {
-            let owner_scope = Self::owner_scope(session_id, &scope);
+            let session_scope = Self::session_scope(session_id, &scope);
             match mode {
                 lash_core::ProcessListMode::Live => {
-                    self.registry.list_live_handle_grants(&owner_scope).await
+                    self.registry.list_live_handle_grants(&session_scope).await
                 }
                 lash_core::ProcessListMode::All => {
-                    self.registry.list_handle_grants(&owner_scope).await
+                    self.registry.list_handle_grants(&session_scope).await
                 }
             }
         }
@@ -839,11 +880,11 @@ mod tests {
             process_ids: &[String],
             scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<(), PluginError> {
-            let owner_scope = Self::owner_scope(session_id, &scope);
+            let session_scope = Self::session_scope(session_id, &scope);
             for process_id in process_ids {
                 if !self
                     .registry
-                    .has_handle_grant(&owner_scope, process_id)
+                    .has_handle_grant(&session_scope, process_id)
                     .await?
                 {
                     return Err(PluginError::Session(format!(
@@ -946,6 +987,7 @@ mod tests {
                     lash_core::ProcessInput::External {
                         metadata: serde_json::json!({}),
                     },
+                    lash_core::ProcessProvenance::host("shell-test-host"),
                 )
                 .with_extra_event_types([shell_signal_event_type()]),
             )
@@ -953,7 +995,7 @@ mod tests {
             .expect("register process");
         registry
             .grant_handle(
-                &lash_core::ProcessScope::new("test-session"),
+                &lash_core::SessionScope::new("test-session"),
                 process_id,
                 lash_core::ProcessHandleDescriptor::new(Some("shell"), Some("test")),
             )
@@ -1160,7 +1202,7 @@ mod tests {
 
         let entries = service
             .registry()
-            .list_live_handle_grants(&lash_core::ProcessScope::new("test-session"))
+            .list_live_handle_grants(&lash_core::SessionScope::new("test-session"))
             .await
             .expect("list live handles");
         assert_eq!(entries.len(), 1);

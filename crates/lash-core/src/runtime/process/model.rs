@@ -16,9 +16,9 @@ pub type ProcessId = String;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ProcessScopeId(String);
+pub struct SessionScopeId(String);
 
-impl ProcessScopeId {
+impl SessionScopeId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -28,19 +28,19 @@ impl ProcessScopeId {
     }
 }
 
-impl fmt::Display for ProcessScopeId {
+impl fmt::Display for SessionScopeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl From<String> for ProcessScopeId {
+impl From<String> for SessionScopeId {
     fn from(value: String) -> Self {
         Self::new(value)
     }
 }
 
-impl From<&str> for ProcessScopeId {
+impl From<&str> for SessionScopeId {
     fn from(value: &str) -> Self {
         Self::new(value)
     }
@@ -105,14 +105,105 @@ impl Clone for ProcessInput {
     }
 }
 
-/// Execution-local context for a process start effect. This is not part of the
-/// durable process row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessExecutionEnvRef(String);
+
+impl ProcessExecutionEnvRef {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProcessExecutionEnvRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessExecutionEnvSpec {
+    #[serde(default)]
+    pub plugin_options: crate::PluginOptions,
+    #[serde(default)]
+    pub policy: crate::SessionPolicy,
+}
+
+impl ProcessExecutionEnvSpec {
+    pub fn new(plugin_options: crate::PluginOptions, policy: crate::SessionPolicy) -> Self {
+        Self {
+            plugin_options,
+            policy,
+        }
+    }
+
+    pub fn stable_ref(&self) -> Result<ProcessExecutionEnvRef, serde_json::Error> {
+        crate::stable_hash::stable_json_sha256_hex(self)
+            .map(|hash| ProcessExecutionEnvRef::new(format!("process-env:sha256:{hash}")))
+    }
+
+    pub fn to_store_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn from_store_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+pub async fn persist_process_execution_env(
+    artifact_store: &dyn lashlang::LashlangArtifactStore,
+    spec: &ProcessExecutionEnvSpec,
+) -> Result<ProcessExecutionEnvRef, crate::PluginError> {
+    let env_ref = spec.stable_ref().map_err(|err| {
+        crate::PluginError::Session(format!("failed to hash process execution env: {err}"))
+    })?;
+    let bytes = spec.to_store_bytes().map_err(|err| {
+        crate::PluginError::Session(format!("failed to encode process execution env: {err}"))
+    })?;
+    artifact_store
+        .put_artifact_bytes(env_ref.as_str(), "process_execution_env", &bytes)
+        .await
+        .map_err(|err| {
+            crate::PluginError::Session(format!(
+                "failed to persist process execution env `{env_ref}`: {err}"
+            ))
+        })?;
+    Ok(env_ref)
+}
+
+pub async fn load_process_execution_env(
+    artifact_store: &dyn lashlang::LashlangArtifactStore,
+    env_ref: &ProcessExecutionEnvRef,
+) -> Result<ProcessExecutionEnvSpec, crate::PluginError> {
+    let bytes = artifact_store
+        .get_artifact_bytes(env_ref.as_str())
+        .await
+        .map_err(|err| {
+            crate::PluginError::Session(format!(
+                "failed to load process execution env `{env_ref}`: {err}"
+            ))
+        })?
+        .ok_or_else(|| {
+            crate::PluginError::Session(format!("missing process execution env `{env_ref}`"))
+        })?;
+    ProcessExecutionEnvSpec::from_store_bytes(&bytes).map_err(|err| {
+        crate::PluginError::Session(format!(
+            "failed to decode process execution env `{env_ref}`: {err}"
+        ))
+    })
+}
+
+/// Execution-local context for process runners. Durable edges live on the
+/// process record.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProcessExecutionContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub causal_invocation: Option<crate::RuntimeInvocation>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_target_scope: Option<ProcessScope>,
 }
 
 impl ProcessExecutionContext {
@@ -121,13 +212,8 @@ impl ProcessExecutionContext {
         self
     }
 
-    pub fn with_wake_target_scope(mut self, scope: ProcessScope) -> Self {
-        self.wake_target_scope = Some(scope);
-        self
-    }
-
     pub fn is_empty(&self) -> bool {
-        self.causal_invocation.is_none() && self.wake_target_scope.is_none()
+        self.causal_invocation.is_none()
     }
 }
 
@@ -208,7 +294,6 @@ impl ProcessStartOptions {
     pub fn execution_context(&self, scope: &ProcessOpScope<'_>) -> ProcessExecutionContext {
         ProcessExecutionContext {
             causal_invocation: scope.parent_invocation.clone(),
-            wake_target_scope: None,
         }
     }
 }
@@ -218,7 +303,13 @@ impl ProcessStartOptions {
 pub struct ProcessStartRequest {
     pub id: ProcessId,
     pub input: ProcessInput,
-    pub descriptor: ProcessHandleDescriptor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_spec: Option<ProcessExecutionEnvSpec>,
+    pub originator: ProcessOriginator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target: Option<SessionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<ProcessStartGrant>,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
 }
@@ -227,22 +318,40 @@ impl ProcessStartRequest {
     pub fn new(
         id: impl Into<ProcessId>,
         input: ProcessInput,
-        descriptor: ProcessHandleDescriptor,
+        originator: ProcessOriginator,
     ) -> Self {
         Self {
             id: id.into(),
             input,
-            descriptor,
+            env_spec: None,
+            originator,
+            wake_target: None,
+            grant: None,
             event_types: default_process_event_types(),
         }
     }
 
     pub fn external(
         id: impl Into<ProcessId>,
-        descriptor: ProcessHandleDescriptor,
+        originator: ProcessOriginator,
         metadata: serde_json::Value,
     ) -> Self {
-        Self::new(id, ProcessInput::External { metadata }, descriptor)
+        Self::new(id, ProcessInput::External { metadata }, originator)
+    }
+
+    pub fn with_env_spec(mut self, env_spec: ProcessExecutionEnvSpec) -> Self {
+        self.env_spec = Some(env_spec);
+        self
+    }
+
+    pub fn with_wake_target(mut self, wake_target: Option<SessionScope>) -> Self {
+        self.wake_target = wake_target;
+        self
+    }
+
+    pub fn with_grant(mut self, grant: Option<ProcessStartGrant>) -> Self {
+        self.grant = grant;
+        self
     }
 
     pub fn with_event_types(
@@ -261,23 +370,24 @@ impl ProcessStartRequest {
         self
     }
 
-    pub(crate) fn into_registration_and_options(
+    pub fn into_registration(
         self,
-    ) -> (
-        ProcessRegistration,
-        ProcessStartOptions,
-        ProcessHandleDescriptor,
-    ) {
-        let descriptor = self.descriptor;
-        let registration =
-            ProcessRegistration::new(self.id, self.input).with_event_types(self.event_types);
-        let options = ProcessStartOptions::new().with_descriptor(descriptor.clone());
-        (registration, options, descriptor)
+        host_profile_id: impl Into<String>,
+        env_ref: Option<ProcessExecutionEnvRef>,
+    ) -> ProcessRegistration {
+        ProcessRegistration::new(
+            self.id,
+            self.input,
+            ProcessProvenance::new(self.originator, host_profile_id),
+        )
+        .with_event_types(self.event_types)
+        .with_execution_env_ref(env_ref)
+        .with_wake_target(self.wake_target)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessScope {
+pub struct SessionScope {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_frame_id: Option<crate::AgentFrameId>,
@@ -285,19 +395,27 @@ pub struct ProcessScope {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessProvenance {
-    pub owner_scope: ProcessScope,
+    pub originator: ProcessOriginator,
     pub host_profile_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<crate::CausalRef>,
 }
 
 impl ProcessProvenance {
-    pub fn new(owner_scope: ProcessScope, host_profile_id: impl Into<String>) -> Self {
+    pub fn new(originator: ProcessOriginator, host_profile_id: impl Into<String>) -> Self {
         Self {
-            owner_scope,
+            originator,
             host_profile_id: host_profile_id.into(),
             caused_by: None,
         }
+    }
+
+    pub fn host(host_profile_id: impl Into<String>) -> Self {
+        Self::new(ProcessOriginator::host(), host_profile_id)
+    }
+
+    pub fn session(scope: SessionScope, host_profile_id: impl Into<String>) -> Self {
+        Self::new(ProcessOriginator::session(scope), host_profile_id)
     }
 
     pub fn with_caused_by(mut self, caused_by: Option<crate::CausalRef>) -> Self {
@@ -306,7 +424,31 @@ impl ProcessProvenance {
     }
 }
 
-impl ProcessScope {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProcessOriginator {
+    Host,
+    Session { scope: SessionScope },
+}
+
+impl ProcessOriginator {
+    pub fn host() -> Self {
+        Self::Host
+    }
+
+    pub fn session(scope: SessionScope) -> Self {
+        Self::Session { scope }
+    }
+
+    pub fn scope_id(&self) -> String {
+        match self {
+            Self::Host => "host".to_string(),
+            Self::Session { scope } => scope.id().to_string(),
+        }
+    }
+}
+
+impl SessionScope {
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -324,12 +466,12 @@ impl ProcessScope {
         }
     }
 
-    pub fn id(&self) -> ProcessScopeId {
+    pub fn id(&self) -> SessionScopeId {
         match self.agent_frame_id.as_deref() {
             Some(frame_id) if !frame_id.is_empty() => {
-                ProcessScopeId::new(format!("session:{}/frame:{frame_id}", self.session_id))
+                SessionScopeId::new(format!("session:{}/frame:{frame_id}", self.session_id))
             }
-            _ => ProcessScopeId::new(format!("session:{}", self.session_id)),
+            _ => SessionScopeId::new(format!("session:{}", self.session_id)),
         }
     }
 
@@ -346,6 +488,10 @@ pub struct ProcessRegistration {
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
     pub provenance: ProcessProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_ref: Option<ProcessExecutionEnvRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target: Option<SessionScope>,
 }
 
 impl Clone for ProcessRegistration {
@@ -355,22 +501,44 @@ impl Clone for ProcessRegistration {
             input: Arc::clone(&self.input),
             event_types: self.event_types.clone(),
             provenance: self.provenance.clone(),
+            env_ref: self.env_ref.clone(),
+            wake_target: self.wake_target.clone(),
         }
     }
 }
 
 impl ProcessRegistration {
-    pub fn new(id: impl Into<ProcessId>, input: ProcessInput) -> Self {
+    pub fn new(
+        id: impl Into<ProcessId>,
+        input: ProcessInput,
+        provenance: ProcessProvenance,
+    ) -> Self {
         Self {
             id: id.into(),
             input: Arc::new(input),
             event_types: default_process_event_types(),
-            provenance: ProcessProvenance::new(ProcessScope::new("root"), "default"),
+            provenance,
+            env_ref: None,
+            wake_target: None,
         }
+    }
+
+    pub(crate) fn session_start_draft(id: impl Into<ProcessId>, input: ProcessInput) -> Self {
+        Self::new(id, input, ProcessProvenance::host("session-start-draft"))
     }
 
     pub fn with_process_provenance(mut self, provenance: ProcessProvenance) -> Self {
         self.provenance = provenance;
+        self
+    }
+
+    pub fn with_execution_env_ref(mut self, env_ref: Option<ProcessExecutionEnvRef>) -> Self {
+        self.env_ref = env_ref;
+        self
+    }
+
+    pub fn with_wake_target(mut self, wake_target: Option<SessionScope>) -> Self {
+        self.wake_target = wake_target;
         self
     }
 
@@ -471,6 +639,10 @@ pub struct ProcessRecord {
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
     pub provenance: ProcessProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_ref: Option<ProcessExecutionEnvRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target: Option<SessionScope>,
     #[serde(default)]
     pub created_at_ms: u64,
     #[serde(default)]
@@ -502,6 +674,8 @@ impl ProcessRecord {
             input: registration.input,
             event_types: registration.event_types,
             provenance: registration.provenance,
+            env_ref: registration.env_ref,
+            wake_target: registration.wake_target,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             external_ref: None,
@@ -513,8 +687,8 @@ impl ProcessRecord {
         self.status.is_terminal()
     }
 
-    pub fn owner_scope_id(&self) -> ProcessScopeId {
-        self.provenance.owner_scope.id()
+    pub fn originator_scope_id(&self) -> String {
+        self.provenance.originator.scope_id()
     }
 
     pub fn host_profile_id(&self) -> &str {
@@ -887,6 +1061,10 @@ impl ProcessListFilter {
 
     pub fn matches_entry(&self, entry: &ProcessHandleGrantEntry) -> bool {
         let (_grant, record) = entry;
+        self.matches_record(record)
+    }
+
+    pub fn matches_record(&self, record: &ProcessRecord) -> bool {
         let status = ProcessLifecycleStatus::from(&record.status);
         self.status.matches(status)
             && self
@@ -915,7 +1093,7 @@ impl ProcessListMode {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessStartGrant {
-    pub owner_scope: ProcessScope,
+    pub session_scope: SessionScope,
     pub descriptor: ProcessHandleDescriptor,
 }
 
@@ -924,7 +1102,7 @@ pub struct ProcessSessionDeleteReport {
     pub session_id: String,
     pub revoked_handle_count: usize,
     pub deleted_wake_count: usize,
-    pub cancel_process_ids: Vec<String>,
+    pub orphaned_process_ids: Vec<String>,
     pub preserved_process_ids: Vec<String>,
 }
 
@@ -970,16 +1148,22 @@ mod tests {
         process_name: &str,
         status: ProcessStatus,
     ) -> ProcessHandleGrantEntry {
-        let mut record = ProcessRecord::from_registration(ProcessRegistration::new(
-            process_id,
-            ProcessInput::LashlangProcess {
-                module_ref,
-                process_ref,
-                required_surface_ref: surface_ref,
-                process_name: process_name.to_string(),
-                args: serde_json::Map::new(),
-            },
-        ));
+        let mut record = ProcessRecord::from_registration(
+            ProcessRegistration::new(
+                process_id,
+                ProcessInput::LashlangProcess {
+                    module_ref,
+                    process_ref,
+                    required_surface_ref: surface_ref,
+                    process_name: process_name.to_string(),
+                    args: serde_json::Map::new(),
+                },
+                ProcessProvenance::host("model-test-host"),
+            )
+            .with_execution_env_ref(Some(ProcessExecutionEnvRef::new(format!(
+                "process-env:test:{process_id}"
+            )))),
+        );
         record.status = status;
         (
             ProcessHandleGrant {

@@ -74,6 +74,7 @@ The controller submits workflow `run` with workflow key
 `cancel` handler. The workflow runner should be built from the host's
 deployment config: plugin factories, runtime host config, session-store
 factory, process registry, attachment store, provider policy, and host profile.
-Process rows carry the process input plus `ProcessProvenance`: owner scope,
-host profile id, and optional causal parent. Workers do not parse grant keys to
-recover the owner session.
+Process rows carry the process input plus `ProcessProvenance`: originator,
+host profile id, and optional causal parent. Tool and Lashlang rows also carry a
+captured execution-environment reference, so workers do not parse grant keys or
+rebuild origin sessions to recover execution context.

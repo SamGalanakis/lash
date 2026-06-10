@@ -37,7 +37,7 @@ pub async fn process_registry_with_expected_durability<F>(
     event_streams_filter_order_and_wait_without_leaking_old_events(make()).await;
     wake_semantics_matrix_materializes_declared_wakes(make()).await;
     keyed_events_materialize_idempotent_wakes(make()).await;
-    wake_semantic_events_without_target_fail_without_persisting(make()).await;
+    wake_semantic_events_without_target_record_without_delivery(make()).await;
     terminal_and_cancel_events_require_keys(make()).await;
     await_reads_terminal_materialized_output(make()).await;
     transfer_handle_grants_moves_addressability(make()).await;
@@ -59,6 +59,7 @@ fn registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
+        ProcessProvenance::host("conformance-host"),
     )
 }
 
@@ -172,7 +173,7 @@ async fn external_refs_and_handle_grant_membership_round_trip(registry: Arc<dyn 
         "external ref must persist on the process record"
     );
 
-    let owner = ProcessScope::new("grant-owner");
+    let owner = SessionScope::new("grant-owner");
     assert!(
         !registry
             .has_handle_grant(&owner, "proc-external-ref")
@@ -217,7 +218,7 @@ async fn external_refs_and_handle_grant_membership_round_trip(registry: Arc<dyn 
 }
 
 async fn validates_custom_events_and_materializes_wakes(registry: Arc<dyn ProcessRegistry>) {
-    let target_scope = ProcessScope::new("s1");
+    let target_scope = SessionScope::new("s1");
     let mut properties = serde_json::Map::new();
     properties.insert("line".to_string(), serde_json::json!({ "type": "string" }));
     properties.insert(
@@ -305,7 +306,7 @@ async fn validates_custom_events_and_materializes_wakes(registry: Arc<dyn Proces
 async fn custom_wake_events_preserve_typed_provenance_and_replay(
     registry: Arc<dyn ProcessRegistry>,
 ) {
-    let target_scope = ProcessScope::for_agent_frame("target-session", "target-frame");
+    let target_scope = SessionScope::for_agent_frame("target-session", "target-frame");
     let target_scope_id = target_scope.id();
     let process_caused_by = CausalRef::SessionNode {
         session_id: "target-session".to_string(),
@@ -324,7 +325,7 @@ async fn custom_wake_events_preserve_typed_provenance_and_replay(
             registration("proc-provenance")
                 .with_extra_event_types([event_type])
                 .with_process_provenance(
-                    ProcessProvenance::new(ProcessScope::new("owner-session"), "host-profile")
+                    ProcessProvenance::session(SessionScope::new("owner-session"), "host-profile")
                         .with_caused_by(Some(process_caused_by.clone())),
                 ),
         )
@@ -360,10 +361,7 @@ async fn custom_wake_events_preserve_typed_provenance_and_replay(
         1,
         "a replayed custom wake event must not append a second event row"
     );
-    assert_eq!(
-        first.event.invocation.scope,
-        RuntimeScope::new("owner-session")
-    );
+    assert_eq!(first.event.invocation.scope, RuntimeScope::new("runtime"));
     assert!(matches!(
         &first.event.invocation.subject,
         RuntimeSubject::ProcessEvent {
@@ -433,7 +431,7 @@ async fn event_streams_filter_order_and_wait_without_leaking_old_events(
                 "producer.wake",
                 serde_json::json!({"wake_input": "wake two"}),
             )
-            .with_wake_target_scope(ProcessScope::new("root")),
+            .with_wake_target_scope(SessionScope::new("root")),
         )
         .await
         .expect("append wake");
@@ -590,7 +588,7 @@ async fn wake_semantics_matrix_materializes_declared_wakes(registry: Arc<dyn Pro
         )
         .await
         .expect("register");
-    let target = ProcessScope::new("root");
+    let target = SessionScope::new("root");
 
     let no_wake = registry
         .append_event(
@@ -718,7 +716,7 @@ async fn wake_semantics_matrix_materializes_declared_wakes(registry: Arc<dyn Pro
 }
 
 async fn process_registry_survives_reopen(factory: ReopenableProcessRegistry) {
-    let scope = ProcessScope::new("reopen-session");
+    let scope = SessionScope::new("reopen-session");
     factory
         .open
         .register_process(
@@ -789,7 +787,7 @@ async fn process_registry_survives_reopen(factory: ReopenableProcessRegistry) {
 }
 
 async fn keyed_events_materialize_idempotent_wakes(registry: Arc<dyn ProcessRegistry>) {
-    let target_scope = ProcessScope::new("session");
+    let target_scope = SessionScope::new("session");
     let target_scope_id = target_scope.id();
     registry
         .register_process(
@@ -845,7 +843,7 @@ async fn keyed_events_materialize_idempotent_wakes(registry: Arc<dyn ProcessRegi
     );
 }
 
-async fn wake_semantic_events_without_target_fail_without_persisting(
+async fn wake_semantic_events_without_target_record_without_delivery(
     registry: Arc<dyn ProcessRegistry>,
 ) {
     registry
@@ -856,7 +854,7 @@ async fn wake_semantic_events_without_target_fail_without_persisting(
         .await
         .expect("register");
 
-    let err = registry
+    let appended = registry
         .append_event(
             "proc-missing-wake-target",
             ProcessEventAppendRequest::new(
@@ -869,18 +867,20 @@ async fn wake_semantic_events_without_target_fail_without_persisting(
             .with_replay_key("wake:missing-target"),
         )
         .await
-        .expect_err("wake-semantic event without target scope must fail");
+        .expect("wake-semantic event without target scope records");
+    assert_eq!(appended.event.sequence, 1);
     assert!(
-        err.to_string().contains("without a wake target scope"),
-        "unexpected missing-target error: {err}"
+        appended.wake_delivery.is_none(),
+        "dangling wake target should not materialize a delivery"
     );
-    assert!(
+    assert_eq!(
         registry
             .events_after("proc-missing-wake-target", 0)
             .await
-            .expect("events after failed append")
-            .is_empty(),
-        "failed wake append must not persist a partial process event"
+            .expect("events after append")
+            .len(),
+        1,
+        "dangling wake append should persist the process event"
     );
 }
 
@@ -963,8 +963,8 @@ async fn await_reads_terminal_materialized_output(registry: Arc<dyn ProcessRegis
 }
 
 async fn transfer_handle_grants_moves_addressability(registry: Arc<dyn ProcessRegistry>) {
-    let s1 = ProcessScope::new("s1");
-    let s2 = ProcessScope::new("s2");
+    let s1 = SessionScope::new("s1");
+    let s2 = SessionScope::new("s2");
     registry
         .register_process(registration("proc-3"))
         .await
@@ -1009,9 +1009,9 @@ async fn transfer_handle_grants_moves_addressability(registry: Arc<dyn ProcessRe
 }
 
 async fn multiple_sessions_can_hold_grants(registry: Arc<dyn ProcessRegistry>) {
-    let s1 = ProcessScope::new("s1");
-    let s2 = ProcessScope::new("s2");
-    let s3 = ProcessScope::new("s3");
+    let s1 = SessionScope::new("s1");
+    let s2 = SessionScope::new("s2");
+    let s3 = SessionScope::new("s3");
     registry
         .register_process(registration("proc-5"))
         .await
@@ -1064,7 +1064,7 @@ async fn multiple_sessions_can_hold_grants(registry: Arc<dyn ProcessRegistry>) {
 }
 
 async fn processes_can_exist_with_zero_grants(registry: Arc<dyn ProcessRegistry>) {
-    let s1 = ProcessScope::new("s1");
+    let s1 = SessionScope::new("s1");
     registry
         .register_process(registration("proc-4"))
         .await
@@ -1079,8 +1079,8 @@ async fn processes_can_exist_with_zero_grants(registry: Arc<dyn ProcessRegistry>
 }
 
 async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegistry>) {
-    let deleted_scope = ProcessScope::new("deleted");
-    let remaining_scope = ProcessScope::new("remaining");
+    let deleted_scope = SessionScope::new("deleted");
+    let remaining_scope = SessionScope::new("remaining");
     for process_id in ["sole", "shared", "terminal"] {
         registry
             .register_process(
@@ -1134,7 +1134,7 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
 
     assert_eq!(report.revoked_handle_count, 3);
     assert_eq!(report.deleted_wake_count, 0);
-    assert_eq!(report.cancel_process_ids, vec!["sole".to_string()]);
+    assert_eq!(report.orphaned_process_ids, vec!["sole".to_string()]);
     assert_eq!(report.preserved_process_ids, vec!["shared".to_string()]);
     assert!(
         registry
@@ -1188,7 +1188,7 @@ async fn list_non_terminal_excludes_terminal_processes(registry: Arc<dyn Process
 }
 
 async fn list_live_handle_grants_excludes_terminal_history(registry: Arc<dyn ProcessRegistry>) {
-    let scope = ProcessScope::new("history-owner");
+    let scope = SessionScope::new("history-owner");
     for process_id in ["proc-live-grant", "proc-done-grant"] {
         registry
             .register_process(registration(process_id))

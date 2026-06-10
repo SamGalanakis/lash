@@ -324,6 +324,7 @@ impl Session {
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
+        execution_env_spec: crate::ProcessExecutionEnvSpec,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer,
     ) -> Result<RuntimeExecutionContext<'run>, crate::PluginError> {
         let dispatch = Arc::new(ToolDispatchContext {
@@ -339,6 +340,7 @@ impl Session {
             effect_controller,
             direct_completions: direct_completions.clone(),
             parent_invocation: None,
+            execution_env_spec: execution_env_spec.clone(),
             session_id: session_id.to_string(),
             agent_frame_id: agent_frame_id.to_string(),
             event_tx,
@@ -358,6 +360,7 @@ impl Session {
             protocol_extension,
             turn_context,
         ))
+        .map(|context| context.with_execution_env_spec(execution_env_spec))
     }
 
     /// Set the message sender for streaming messages during execution.

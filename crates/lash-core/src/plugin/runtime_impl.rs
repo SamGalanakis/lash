@@ -26,6 +26,7 @@ struct BuildPluginSessionRequest<'a> {
 pub struct SessionAuthorityContext {
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionContext>,
+    pub plugin_options: PluginOptions,
 }
 
 impl PluginHost {
@@ -196,6 +197,7 @@ impl PluginHost {
             session_id,
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
+            plugin_options: authority.plugin_options.clone(),
             lashlang_abilities: self.lashlang_abilities,
             lashlang_language_features: self.lashlang_language_features,
             parent_session_id,

@@ -13,8 +13,8 @@ use crate::tool_dispatch::ToolHostEventEffectOutcome;
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
     ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
-    ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration, ProcessScope,
-    ProcessStartGrant,
+    ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration,
+    ProcessStartGrant, SessionScope,
 };
 
 use super::executor::RuntimeEffectControllerError;
@@ -282,7 +282,7 @@ pub enum RuntimeEffectCommand {
         call: crate::PreparedToolCall,
     },
     Process {
-        command: ProcessCommand,
+        command: Box<ProcessCommand>,
     },
     ExecCode {
         code: String,
@@ -299,6 +299,12 @@ pub enum RuntimeEffectCommand {
 }
 
 impl RuntimeEffectCommand {
+    pub fn process(command: ProcessCommand) -> Self {
+        Self::Process {
+            command: Box::new(command),
+        }
+    }
+
     pub fn kind(&self) -> RuntimeEffectKind {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
@@ -328,13 +334,13 @@ pub enum ProcessCommand {
         execution_context: Box<ProcessExecutionContext>,
     },
     List {
-        owner_scope: ProcessScope,
+        session_scope: SessionScope,
         #[serde(default)]
         mode: ProcessListMode,
     },
     Transfer {
-        from_scope: ProcessScope,
-        to_scope: ProcessScope,
+        from_scope: SessionScope,
+        to_scope: SessionScope,
         process_ids: Vec<String>,
     },
     DeleteSession {
@@ -364,8 +370,11 @@ impl ProcessCommand {
     pub fn effect_id(&self) -> String {
         match self {
             Self::Start { registration, .. } => format!("process:start:{}", registration.id),
-            Self::List { owner_scope, mode } => {
-                format!("process:list:{}:{}", owner_scope.id(), mode.as_str())
+            Self::List {
+                session_scope,
+                mode,
+            } => {
+                format!("process:list:{}:{}", session_scope.id(), mode.as_str())
             }
             Self::Transfer {
                 from_scope,

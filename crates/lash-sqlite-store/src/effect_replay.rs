@@ -463,7 +463,7 @@ impl SqliteRuntimeEffectController {
         match envelope.command {
             RuntimeEffectCommand::Process { command } => {
                 let result = self
-                    .execute_process_command(command, local_executor)
+                    .execute_process_command(*command, local_executor)
                     .await?;
                 Ok(RuntimeEffectOutcome::Process { result })
             }
@@ -488,18 +488,21 @@ impl SqliteRuntimeEffectController {
                 let record = registry.register_process(registration).await?;
                 if let Some(grant) = grant {
                     registry
-                        .grant_handle(&grant.owner_scope, &registration_id, grant.descriptor)
+                        .grant_handle(&grant.session_scope, &registration_id, grant.descriptor)
                         .await?;
                 }
                 Ok(ProcessEffectOutcome::Start { record })
             }
-            ProcessCommand::List { owner_scope, mode } => {
+            ProcessCommand::List {
+                session_scope,
+                mode,
+            } => {
                 let entries = match mode {
                     lash_core::ProcessListMode::Live => {
-                        registry.list_live_handle_grants(&owner_scope).await?
+                        registry.list_live_handle_grants(&session_scope).await?
                     }
                     lash_core::ProcessListMode::All => {
-                        registry.list_handle_grants(&owner_scope).await?
+                        registry.list_handle_grants(&session_scope).await?
                     }
                 };
                 Ok(ProcessEffectOutcome::List { entries })
@@ -516,17 +519,6 @@ impl SqliteRuntimeEffectController {
             }
             ProcessCommand::DeleteSession { session_id } => {
                 let report = registry.delete_session_process_state(&session_id).await?;
-                for process_id in &report.cancel_process_ids {
-                    registry
-                        .append_event(
-                            process_id,
-                            lash_core::ProcessEventAppendRequest::cancel_requested(
-                                process_id,
-                                Some("session deleted".to_string()),
-                            ),
-                        )
-                        .await?;
-                }
                 Ok(ProcessEffectOutcome::DeleteSession { report })
             }
             ProcessCommand::Await { process_id } => {

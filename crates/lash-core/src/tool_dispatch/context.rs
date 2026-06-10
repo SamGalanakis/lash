@@ -85,6 +85,7 @@ pub struct ToolDispatchContext<'run> {
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
+    pub(crate) execution_env_spec: crate::ProcessExecutionEnvSpec,
     pub session_id: String,
     pub agent_frame_id: crate::AgentFrameId,
     pub event_tx: mpsc::Sender<SessionEvent>,

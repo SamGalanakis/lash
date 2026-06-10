@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use super::model::{ProcessId, ProcessScope, ProcessScopeId};
+use super::model::{ProcessId, SessionScope, SessionScopeId};
 use super::validation::process_event_payload_hash;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -232,7 +232,7 @@ pub struct ProcessEventAppendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<crate::RuntimeReplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_target_scope: Option<ProcessScope>,
+    pub wake_target_scope: Option<SessionScope>,
 }
 
 impl ProcessEventAppendRequest {
@@ -257,12 +257,12 @@ impl ProcessEventAppendRequest {
         self
     }
 
-    pub fn with_wake_target_scope(mut self, scope: ProcessScope) -> Self {
+    pub fn with_wake_target_scope(mut self, scope: SessionScope) -> Self {
         self.wake_target_scope = Some(scope);
         self
     }
 
-    pub fn with_optional_wake_target_scope(mut self, scope: Option<ProcessScope>) -> Self {
+    pub fn with_optional_wake_target_scope(mut self, scope: Option<SessionScope>) -> Self {
         self.wake_target_scope = scope;
         self
     }
@@ -283,7 +283,7 @@ impl ProcessEventAppendRequest {
 pub struct ProcessWakeDelivery {
     pub wake_id: String,
     pub target_session_id: String,
-    pub target_scope_id: ProcessScopeId,
+    pub target_scope_id: SessionScopeId,
     pub process_id: ProcessId,
     pub sequence: u64,
     #[serde(default = "default_process_wake_event_type")]

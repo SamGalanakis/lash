@@ -334,11 +334,10 @@ impl RestateProcessIngressRunner {
             input: record.input,
             event_types: record.event_types,
             provenance: record.provenance.clone(),
+            env_ref: record.env_ref,
+            wake_target: record.wake_target,
         };
-        // Wakes route to the creator scope; the owner scope persisted in
-        // provenance is that creator scope, mirroring the inline worker sweep.
-        let execution_context = ProcessExecutionContext::default()
-            .with_wake_target_scope(record.provenance.owner_scope);
+        let execution_context = ProcessExecutionContext::default();
         let url = format!(
             "{}/LashProcessWorkflow/{}/run/send",
             self.ingress_url.trim_end_matches('/'),
@@ -851,7 +850,7 @@ where
                 let RuntimeEffectCommand::Process { command } = envelope.command else {
                     unreachable!("direct process execution is only selected for process effects");
                 };
-                execute_restate_process_command(&self.context, command, local_executor)
+                execute_restate_process_command(&self.context, *command, local_executor)
                     .await
                     .map(|result| RuntimeEffectOutcome::Process { result })
             }
@@ -920,13 +919,16 @@ where
             .await?;
             Ok(ProcessEffectOutcome::Start { record })
         }
-        ProcessCommand::List { owner_scope, mode } => {
+        ProcessCommand::List {
+            session_scope,
+            mode,
+        } => {
             let entries = match mode {
                 lash_core::ProcessListMode::Live => {
-                    registry.list_live_handle_grants(&owner_scope).await?
+                    registry.list_live_handle_grants(&session_scope).await?
                 }
                 lash_core::ProcessListMode::All => {
-                    registry.list_handle_grants(&owner_scope).await?
+                    registry.list_handle_grants(&session_scope).await?
                 }
             };
             Ok(ProcessEffectOutcome::List { entries })
@@ -943,26 +945,6 @@ where
         }
         ProcessCommand::DeleteSession { session_id } => {
             let report = registry.delete_session_process_state(&session_id).await?;
-            for process_id in &report.cancel_process_ids {
-                registry
-                    .append_event(
-                        process_id,
-                        lash_core::ProcessEventAppendRequest::cancel_requested(
-                            process_id,
-                            Some("session deleted".to_string()),
-                        ),
-                    )
-                    .await?;
-                context
-                    .request_process_workflow_cancel(RestateProcessCancelRequest {
-                        process_id: process_id.clone(),
-                        reason: Some("session deleted".to_string()),
-                    })
-                    .await
-                    .map_err(|err| {
-                        RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
-                    })?;
-            }
             Ok(ProcessEffectOutcome::DeleteSession { report })
         }
         ProcessCommand::Await { process_id } => {
@@ -1018,7 +1000,7 @@ where
     let record = registry.register_process(registration.clone()).await?;
     if let Some(grant) = grant {
         registry
-            .grant_handle(&grant.owner_scope, &process_id, grant.descriptor)
+            .grant_handle(&grant.session_scope, &process_id, grant.descriptor)
             .await?;
     }
     if record.external_ref.is_some() {

@@ -2,9 +2,8 @@ use crate::plugin::PluginError;
 
 use super::events::{ProcessAwaitOutput, ProcessEvent};
 use super::model::{
-    ProcessCancelSummary, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessLifecycleStatus,
-    ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessStartOptions,
-    ProcessStartRequest,
+    ProcessCancelSummary, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessListMode,
+    ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessStartOptions, ProcessStartRequest,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,15 +157,10 @@ pub trait ProcessService: Send + Sync {
         request: ProcessStartRequest,
         scope: ProcessOpScope<'_>,
     ) -> Result<ProcessHandleSummary, PluginError> {
-        let (registration, options, descriptor) = request.into_registration_and_options();
-        let record = self.start(session_id, registration, options, scope).await?;
-        let definition = super::model::ProcessDefinitionSummary::from_input(record.input.as_ref());
-        Ok(ProcessHandleSummary::new(
-            record.id,
-            descriptor,
-            ProcessLifecycleStatus::from(record.status),
+        let _ = (session_id, request, scope);
+        Err(PluginError::Session(
+            "process start request composition is unavailable in this service".to_string(),
         ))
-        .map(|summary| summary.with_definition(definition))
     }
 
     async fn start(
@@ -338,7 +332,7 @@ mod tests {
     use super::*;
     use crate::{
         ProcessAwaitOutput, ProcessEvent, ProcessHandleDescriptor, ProcessHandleGrant,
-        ProcessInput, ProcessRegistration, ProcessStatus,
+        ProcessInput, ProcessProvenance, ProcessRegistration, ProcessStatus,
     };
 
     struct RecordingProcessService {
@@ -378,6 +372,7 @@ mod tests {
                             ProcessInput::External {
                                 metadata: json!(null),
                             },
+                            ProcessProvenance::host("service-test-host"),
                         )),
                     )
                 })
@@ -525,6 +520,7 @@ mod tests {
             ProcessInput::External {
                 metadata: json!(null),
             },
+            ProcessProvenance::host("service-test-host"),
         ));
         record.status = ProcessStatus::Cancelled {
             await_output: ProcessAwaitOutput::Cancelled {

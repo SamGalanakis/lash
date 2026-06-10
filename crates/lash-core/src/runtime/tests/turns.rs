@@ -694,7 +694,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
         .as_ref()
         .expect("process registry")
         .clone();
-    let target_scope = crate::ProcessScope::new("root");
+    let target_scope = crate::SessionScope::new("root");
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "root".to_string(),
         node_id: "host-event:button".to_string(),
@@ -706,12 +706,10 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
                 crate::ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
-            )
-            .with_extra_event_types(crate::lashlang_process_event_types())
-            .with_process_provenance(
-                crate::ProcessProvenance::new(target_scope.clone(), "test-host")
+                crate::ProcessProvenance::session(target_scope.clone(), "test-host")
                     .with_caused_by(Some(process_caused_by.clone())),
-            ),
+            )
+            .with_extra_event_types(crate::lashlang_process_event_types()),
         )
         .await
         .expect("register wake process");
@@ -868,7 +866,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
         .as_ref()
         .expect("process registry")
         .clone();
-    let target_scope = crate::ProcessScope::new("root");
+    let target_scope = crate::SessionScope::new("root");
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "root".to_string(),
         node_id: "host-event:button".to_string(),
@@ -880,12 +878,10 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
                 crate::ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
-            )
-            .with_extra_event_types(crate::lashlang_process_event_types())
-            .with_process_provenance(
-                crate::ProcessProvenance::new(target_scope.clone(), "test-host")
+                crate::ProcessProvenance::session(target_scope.clone(), "test-host")
                     .with_caused_by(Some(process_caused_by.clone())),
-            ),
+            )
+            .with_extra_event_types(crate::lashlang_process_event_types()),
         )
         .await
         .expect("register wake process");

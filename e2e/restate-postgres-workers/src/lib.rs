@@ -26,12 +26,12 @@ pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
 
-pub fn default_session_owner_scope_id() -> String {
+pub fn default_session_originator_scope_id() -> String {
     format!("session:{DEFAULT_SESSION_ID}")
 }
 
-pub fn default_session_child_owner_scope_pattern() -> String {
-    format!("{}/%", default_session_owner_scope_id())
+pub fn default_session_child_originator_scope_pattern() -> String {
+    format!("{}/%", default_session_originator_scope_id())
 }
 
 pub fn env(name: &str, default: &str) -> String {

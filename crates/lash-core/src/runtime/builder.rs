@@ -29,6 +29,7 @@ pub(super) fn lashlang_abilities_for_process_registry(
 pub struct EmbeddedRuntimeBuilder {
     session_id: Option<String>,
     policy: Option<SessionPolicy>,
+    plugin_options: crate::PluginOptions,
     initial_state: Option<RuntimeSessionState>,
     plugin_source: PluginSource,
     core: RuntimeHostConfig,
@@ -44,6 +45,7 @@ impl Default for EmbeddedRuntimeBuilder {
         Self {
             session_id: None,
             policy: None,
+            plugin_options: crate::PluginOptions::default(),
             initial_state: None,
             plugin_source: PluginSource::Host(PluginHost::empty()),
             // `RuntimeHostConfig` has no `Default`; start from an explicitly
@@ -79,6 +81,11 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_policy(mut self, policy: SessionPolicy) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    pub fn with_plugin_options(mut self, plugin_options: crate::PluginOptions) -> Self {
+        self.plugin_options = plugin_options;
         self
     }
 
@@ -310,7 +317,15 @@ impl EmbeddedRuntimeBuilder {
                     self.process_registry.is_some(),
                 ))
                 .isolated_registry()
-                .build_session(state.session_id.clone(), None)
+                .build_session_with_parent(
+                    state.session_id.clone(),
+                    None,
+                    None,
+                    crate::plugin::SessionAuthorityContext {
+                        plugin_options: self.plugin_options.clone(),
+                        ..crate::plugin::SessionAuthorityContext::default()
+                    },
+                )
                 .map_err(|err| SessionError::Protocol(err.to_string())),
         }
     }

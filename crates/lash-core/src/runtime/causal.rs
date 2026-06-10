@@ -156,14 +156,13 @@ pub(crate) fn process_effect_invocation(
 }
 
 pub fn process_event_invocation(
-    owner_session_id: &str,
     process_id: &str,
     sequence: u64,
     event_type: &str,
     replay: Option<RuntimeReplay>,
 ) -> RuntimeInvocation {
     RuntimeInvocation {
-        scope: RuntimeScope::new(owner_session_id),
+        scope: RuntimeScope::new("runtime"),
         subject: RuntimeSubject::ProcessEvent {
             process_id: process_id.to_string(),
             sequence,

@@ -68,11 +68,14 @@ impl<'scope> ProcessCommandRunner<'scope> {
 
     async fn list(
         &self,
-        owner_scope: crate::ProcessScope,
+        session_scope: crate::SessionScope,
         mode: crate::ProcessListMode,
     ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, crate::PluginError> {
         match self
-            .run(crate::ProcessCommand::List { owner_scope, mode })
+            .run(crate::ProcessCommand::List {
+                session_scope,
+                mode,
+            })
             .await?
         {
             crate::ProcessEffectOutcome::List { entries } => Ok(entries),
@@ -114,8 +117,8 @@ impl<'scope> ProcessCommandRunner<'scope> {
 
     async fn transfer(
         &self,
-        from_scope: crate::ProcessScope,
-        to_scope: crate::ProcessScope,
+        from_scope: crate::SessionScope,
+        to_scope: crate::SessionScope,
         process_ids: Vec<String>,
     ) -> Result<(), crate::PluginError> {
         match self
@@ -144,7 +147,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
         );
         let envelope = crate::RuntimeEffectEnvelope::new(
             invocation,
-            crate::RuntimeEffectCommand::Process { command },
+            crate::RuntimeEffectCommand::process(command),
         );
         // Route through the controller explicitly selected by the process
         // operation scope: host-configured for host/API paths, scoped for
@@ -184,11 +187,48 @@ impl ProcessCapability {
         &self,
         session_id: &str,
         agent_frame_id: Option<&str>,
-    ) -> crate::ProcessScope {
+    ) -> crate::SessionScope {
         agent_frame_id
             .filter(|frame_id| !frame_id.is_empty())
-            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
-            .unwrap_or_else(|| crate::ProcessScope::new(session_id))
+            .map(|frame_id| crate::SessionScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::SessionScope::new(session_id))
+    }
+
+    fn current_execution_env_spec(
+        &self,
+        current: &CurrentSessionCapability,
+    ) -> crate::ProcessExecutionEnvSpec {
+        let state = current.snapshot.to_runtime_state();
+        state.process_execution_env_spec(&current.policy)
+    }
+
+    async fn capture_execution_env_ref(
+        &self,
+        current: &CurrentSessionCapability,
+        registration: &crate::ProcessRegistration,
+    ) -> Result<Option<crate::ProcessExecutionEnvRef>, crate::PluginError> {
+        if let Some(env_ref) = registration.env_ref.clone() {
+            return Ok(Some(env_ref));
+        }
+        match registration.input.as_ref() {
+            crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::LashlangProcess { .. } => {
+                let spec = self.current_execution_env_spec(current);
+                crate::persist_process_execution_env(
+                    current
+                        .host
+                        .core
+                        .durability
+                        .lashlang_artifact_store
+                        .as_ref(),
+                    &spec,
+                )
+                .await
+                .map(Some)
+            }
+            crate::ProcessInput::External { .. } | crate::ProcessInput::SessionTurn { .. } => {
+                Ok(None)
+            }
+        }
     }
 
     pub(in crate::runtime::session_manager) async fn start_process(
@@ -208,16 +248,20 @@ impl ProcessCapability {
             .parent_invocation
             .as_ref()
             .and_then(crate::RuntimeInvocation::causal_ref);
-        let registration = registration.with_process_provenance(
-            crate::ProcessProvenance::new(
-                creator_scope.clone(),
-                current.host.core.profile.host_profile_id.clone(),
+        let env_ref = self
+            .capture_execution_env_ref(current, &registration)
+            .await?;
+        let registration = registration
+            .with_process_provenance(
+                crate::ProcessProvenance::new(
+                    crate::ProcessOriginator::session(creator_scope.clone()),
+                    current.host.core.profile.host_profile_id.clone(),
+                )
+                .with_caused_by(caused_by),
             )
-            .with_caused_by(caused_by),
-        );
-        let execution_context = options
-            .execution_context(&scope)
-            .with_wake_target_scope(creator_scope.clone());
+            .with_execution_env_ref(env_ref)
+            .with_wake_target(Some(creator_scope.clone()));
+        let execution_context = options.execution_context(&scope);
         let runner = ProcessCommandRunner::new(
             current,
             &scope,
@@ -229,7 +273,7 @@ impl ProcessCapability {
                 options
                     .descriptor
                     .map(|descriptor| crate::ProcessStartGrant {
-                        owner_scope: creator_scope,
+                        session_scope: creator_scope,
                         descriptor,
                     }),
                 execution_context,
@@ -291,10 +335,10 @@ impl ProcessCapability {
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessEvent, crate::PluginError> {
         let runner = self.command_runner(current, &scope)?;
-        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
+        let session_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
         let visible = runner
             .registry()
-            .list_live_handle_grants(&owner_scope)
+            .list_live_handle_grants(&session_scope)
             .await?
             .into_iter()
             .any(|(grant, _record)| grant.process_id == process_id);
@@ -320,11 +364,11 @@ impl ProcessCapability {
             return Ok(());
         }
         let runner = self.command_runner(current, &scope)?;
-        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
+        let session_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
         for process_id in handle_ids {
             if !runner
                 .registry()
-                .has_handle_grant(&owner_scope, process_id)
+                .has_handle_grant(&session_scope, process_id)
                 .await?
             {
                 return Err(crate::PluginError::Session(format!(
@@ -366,8 +410,8 @@ impl ProcessCapability {
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
         let keep = keep_process_ids.iter().cloned().collect::<HashSet<_>>();
         let runner = self.command_runner(current, &scope)?;
-        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
-        let tasks = runner.registry().list_handle_grants(&owner_scope).await?;
+        let session_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
+        let tasks = runner.registry().list_handle_grants(&session_scope).await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
             if keep.contains(&grant.process_id) {
@@ -375,7 +419,7 @@ impl ProcessCapability {
             }
             runner
                 .registry()
-                .revoke_handle(&owner_scope, &grant.process_id)
+                .revoke_handle(&session_scope, &grant.process_id)
                 .await?;
             if record.is_terminal() {
                 continue;

@@ -35,6 +35,24 @@ impl lashlang::LashlangArtifactStore for CountingArtifactStore {
         self.gets.fetch_add(1, AtomicOrdering::SeqCst);
         self.inner.get_module_artifact(module_ref).await
     }
+
+    async fn put_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+        descriptor: &str,
+        bytes: &[u8],
+    ) -> Result<(), lashlang::ArtifactStoreError> {
+        self.inner
+            .put_artifact_bytes(artifact_ref, descriptor, bytes)
+            .await
+    }
+
+    async fn get_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
+        self.inner.get_artifact_bytes(artifact_ref).await
+    }
 }
 
 struct TriggerRouteTestFactory;
@@ -423,10 +441,23 @@ impl TriggerRegistrationHost {
             .source_key_for_subscription(&source_type, &source_value)
             .await
             .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        let env_ref = crate::persist_process_execution_env(
+            self.artifact_store.as_ref(),
+            &crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::runtime::tests::helpers::standard_test_policy(),
+            ),
+        )
+        .await
+        .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
         let record = self
             .store
             .register_subscription(crate::TriggerSubscriptionDraft {
-                session_id: self.session_id.clone(),
+                registrant: crate::ProcessOriginator::session(crate::SessionScope::new(
+                    self.session_id.clone(),
+                )),
+                env_ref,
+                wake_target: Some(crate::SessionScope::new(self.session_id.clone())),
                 name: request.name,
                 source_type,
                 source_key,
@@ -769,6 +800,14 @@ async fn host_event_occurrence_activates_matching_button_subscription_without_gr
 
     let session_store_factory =
         Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+    let root_store = session_store_factory
+        .create_store(&crate::SessionStoreCreateRequest {
+            session_id: "root".to_string(),
+            relation: crate::SessionRelation::default(),
+            policy: crate::runtime::tests::helpers::standard_test_policy(),
+        })
+        .await
+        .expect("create root target session store");
     let worker = crate::DurableProcessWorker::new(
         crate::DurableProcessWorkerConfig::new(
             Arc::new(crate::PluginHost::new(vec![Arc::new(ButtonTriggerFactory)])),
@@ -794,9 +833,7 @@ async fn host_event_occurrence_activates_matching_button_subscription_without_gr
         .await_process(process_id)
         .await
         .expect("button-triggered process finishes");
-    let stores = session_store_factory.stores();
-    let store = stores.first().expect("process worker session store");
-    let queued = crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+    let queued = crate::store::RuntimePersistence::list_queued_work(root_store.as_ref(), "root")
         .await
         .expect("queued wake");
     assert_eq!(queued.len(), 1);

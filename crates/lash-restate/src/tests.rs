@@ -104,6 +104,7 @@ fn external_registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
+        lash_core::ProcessProvenance::host("restate-test-host"),
     )
 }
 
@@ -845,19 +846,17 @@ async fn restate_controller_schedules_process_workflow_without_running_executor(
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "background-start"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Start {
-                        registration,
-                        grant: Some(lash_core::ProcessStartGrant {
-                            owner_scope: lash_core::ProcessScope::new("session"),
-                            descriptor: lash_core::ProcessHandleDescriptor::new(
-                                Some("tool"),
-                                Some("task"),
-                            ),
-                        }),
-                        execution_context: Box::new(ProcessExecutionContext::default()),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Start {
+                    registration,
+                    grant: Some(lash_core::ProcessStartGrant {
+                        session_scope: lash_core::SessionScope::new("session"),
+                        descriptor: lash_core::ProcessHandleDescriptor::new(
+                            Some("tool"),
+                            Some("task"),
+                        ),
+                    }),
+                    execution_context: Box::new(ProcessExecutionContext::default()),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry.clone()),
         )
@@ -887,10 +886,10 @@ async fn restate_controller_schedules_process_workflow_without_running_executor(
             .map(|external| external.id.as_str()),
         Some("LashProcessWorkflow/task-1")
     );
-    let owner_scope = lash_core::ProcessScope::new("session");
+    let session_scope = lash_core::SessionScope::new("session");
     assert_eq!(
         registry
-            .list_handle_grants(&owner_scope)
+            .list_handle_grants(&session_scope)
             .await
             .expect("grants")
             .into_iter()
@@ -952,23 +951,26 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
             process_name: "scan".to_string(),
             args: args.clone(),
         },
+        lash_core::ProcessProvenance::session(
+            lash_core::SessionScope::new("session"),
+            "restate-test-host",
+        ),
     )
-    .with_extra_event_types(lash_core::lashlang_process_event_types());
+    .with_extra_event_types(lash_core::lashlang_process_event_types())
+    .with_execution_env_ref(Some(lash_core::ProcessExecutionEnvRef::new(
+        "process-env:test:process-1",
+    )))
+    .with_wake_target(Some(lash_core::SessionScope::new("session")));
 
     let outcome = host
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "lashlang-process-start"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Start {
-                        registration,
-                        grant: None,
-                        execution_context: Box::new(
-                            ProcessExecutionContext::default()
-                                .with_wake_target_scope(lash_core::ProcessScope::new("session")),
-                        ),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Start {
+                    registration,
+                    grant: None,
+                    execution_context: Box::new(ProcessExecutionContext::default()),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry.clone()),
         )
@@ -998,7 +1000,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
             .map(|external| external.backend.as_str()),
         Some("restate")
     );
-    let started = context.started.lock().expect("started lock");
+    let started = context.started.lock().expect("started lock").clone();
     assert_eq!(started.len(), 1);
     let ProcessInput::LashlangProcess {
         module_ref,
@@ -1018,13 +1020,13 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     assert_eq!(sent_args, &args);
     assert_eq!(
         context
-            .started_execution_contexts
+            .started
             .lock()
-            .expect("started execution contexts lock")
+            .expect("started lock")
             .iter()
-            .map(|context| {
-                context
-                    .wake_target_scope
+            .map(|registration| {
+                registration
+                    .wake_target
                     .as_ref()
                     .map(|scope| scope.session_id.as_str())
             })
@@ -1038,8 +1040,8 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
     let registry = process_registry();
-    let s1 = lash_core::ProcessScope::new("s1");
-    let s2 = lash_core::ProcessScope::new("s2");
+    let s1 = lash_core::SessionScope::new("s1");
+    let s2 = lash_core::SessionScope::new("s2");
     registry
         .register_process(external_registration("task-list"))
         .await
@@ -1057,12 +1059,10 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "process-list-s1"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::List {
-                        owner_scope: s1.clone(),
-                        mode: lash_core::ProcessListMode::Live,
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::List {
+                    session_scope: s1.clone(),
+                    mode: lash_core::ProcessListMode::Live,
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry.clone()),
         )
@@ -1081,13 +1081,11 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "process-transfer"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Transfer {
-                        from_scope: s1.clone(),
-                        to_scope: s2.clone(),
-                        process_ids: vec!["task-list".to_string()],
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Transfer {
+                    from_scope: s1.clone(),
+                    to_scope: s2.clone(),
+                    process_ids: vec!["task-list".to_string()],
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry.clone()),
         )
@@ -1144,11 +1142,9 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "process-await"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Await {
-                        process_id: "task-await-signal".to_string(),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Await {
+                    process_id: "task-await-signal".to_string(),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry.clone()),
         )
@@ -1172,17 +1168,15 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "process-signal"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Signal {
-                        process_id: "task-signal".to_string(),
-                        signal_id: "notify".to_string(),
-                        request: lash_core::ProcessEventAppendRequest::new(
-                            "process.signal",
-                            serde_json::json!({ "signal": "notify" }),
-                        )
-                        .with_replay_key("signal:notify"),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Signal {
+                    process_id: "task-signal".to_string(),
+                    signal_id: "notify".to_string(),
+                    request: lash_core::ProcessEventAppendRequest::new(
+                        "process.signal",
+                        serde_json::json!({ "signal": "notify" }),
+                    )
+                    .with_replay_key("signal:notify"),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry.clone()),
         )
@@ -1213,12 +1207,10 @@ async fn restate_controller_cancel_requests_call_workflow_cancel() {
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "background-cancel"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Cancel {
-                        process_id: "task-cancel".to_string(),
-                        reason: Some("user requested".to_string()),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Cancel {
+                    process_id: "task-cancel".to_string(),
+                    reason: Some("user requested".to_string()),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry),
         )
@@ -1269,9 +1261,10 @@ impl RestateProcessRunner for RecordingRunner {
             .expect("runner ran lock")
             .push(RecordedProcessRun {
                 process_id: registration.id.clone(),
-                wake_target_session_id: execution_context
-                    .wake_target_scope
-                    .map(|scope| scope.session_id),
+                wake_target_session_id: registration
+                    .wake_target
+                    .as_ref()
+                    .map(|scope| scope.session_id.clone()),
                 tool_effect_id: execution_context
                     .causal_invocation
                     .and_then(|invocation| invocation.effect_id().map(str::to_string)),
@@ -1305,31 +1298,27 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
         .build();
     let context = Arc::new(RecordingContext::with_endpoint(endpoint));
     let host = RestateRuntimeEffectController::new(context.clone());
-    let registration = external_registration("task-smoke");
-    let execution_context = ProcessExecutionContext::default()
-        .with_wake_target_scope(lash_core::ProcessScope::new("wake-smoke"))
-        .with_causal_invocation(Some(runtime_invocation(
-            RuntimeEffectKind::ToolCall,
-            "tool-smoke",
-        )));
+    let registration = external_registration("task-smoke")
+        .with_wake_target(Some(lash_core::SessionScope::new("wake-smoke")));
+    let execution_context = ProcessExecutionContext::default().with_causal_invocation(Some(
+        runtime_invocation(RuntimeEffectKind::ToolCall, "tool-smoke"),
+    ));
 
     let outcome = host
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "background-smoke-start"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Start {
-                        registration,
-                        grant: Some(lash_core::ProcessStartGrant {
-                            owner_scope: lash_core::ProcessScope::new("session"),
-                            descriptor: lash_core::ProcessHandleDescriptor::new(
-                                Some("tool"),
-                                Some("task-smoke"),
-                            ),
-                        }),
-                        execution_context: Box::new(execution_context),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Start {
+                    registration,
+                    grant: Some(lash_core::ProcessStartGrant {
+                        session_scope: lash_core::SessionScope::new("session"),
+                        descriptor: lash_core::ProcessHandleDescriptor::new(
+                            Some("tool"),
+                            Some("task-smoke"),
+                        ),
+                    }),
+                    execution_context: Box::new(execution_context),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry.clone()),
         )
@@ -1353,9 +1342,9 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
         Some(&serde_json::json!("invocation-task-smoke"))
     );
 
-    let owner_scope = lash_core::ProcessScope::new("session");
+    let session_scope = lash_core::SessionScope::new("session");
     let grants = registry
-        .list_handle_grants(&owner_scope)
+        .list_handle_grants(&session_scope)
         .await
         .expect("session grants");
     assert_eq!(grants.len(), 1);
@@ -1375,21 +1364,6 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
         vec!["task-smoke"]
     );
     assert_eq!(
-        context
-            .started_execution_contexts
-            .lock()
-            .expect("started execution contexts lock")
-            .iter()
-            .map(|context| {
-                context
-                    .wake_target_scope
-                    .as_ref()
-                    .map(|scope| scope.session_id.as_str())
-            })
-            .collect::<Vec<_>>(),
-        vec![Some("wake-smoke")]
-    );
-    assert_eq!(
         runner.ran.lock().expect("runner ran lock").as_slice(),
         &[RecordedProcessRun {
             process_id: "task-smoke".to_string(),
@@ -1404,12 +1378,10 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "background-smoke-cancel"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Cancel {
-                        process_id: "task-smoke".to_string(),
-                        reason: Some("stop-smoke".to_string()),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Cancel {
+                    process_id: "task-smoke".to_string(),
+                    reason: Some("stop-smoke".to_string()),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(registry),
         )
@@ -1510,12 +1482,29 @@ fn recovery_worker(
             store_factory,
             registry,
         )
-        .with_session_policy(lash_core::SessionPolicy {
-            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
-                .expect("model spec"),
-            ..lash_core::SessionPolicy::default()
-        }),
+        .with_session_policy(recovery_session_policy()),
     )
+}
+
+fn recovery_session_policy() -> lash_core::SessionPolicy {
+    lash_core::SessionPolicy {
+        model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+            .expect("model spec"),
+        ..lash_core::SessionPolicy::default()
+    }
+}
+
+async fn persist_recovery_env_ref() -> lash_core::ProcessExecutionEnvRef {
+    let spec = lash_core::ProcessExecutionEnvSpec::new(
+        lash_core::PluginOptions::empty(),
+        recovery_session_policy(),
+    );
+    lash_core::runtime::persist_process_execution_env(
+        lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
+        &spec,
+    )
+    .await
+    .expect("persist recovery process execution env")
 }
 
 fn process_wake_event_type() -> lash_core::ProcessEventType {
@@ -1550,6 +1539,14 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
             .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     let worker_a = recovery_worker(Arc::clone(&registry_a), Arc::clone(&store_factory));
+    let _root_store = store_factory
+        .create_store(&lash_core::SessionStoreCreateRequest {
+            session_id: "root".to_string(),
+            relation: lash_core::SessionRelation::default(),
+            policy: recovery_session_policy(),
+        })
+        .await
+        .expect("create root session store before wake delivery");
     let endpoint_a = Endpoint::builder()
         .bind(
             LashProcessWorkflowImpl::new(
@@ -1561,8 +1558,9 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
         .build();
     let context_a = Arc::new(RecordingContext::with_endpoint(endpoint_a));
     let host_a = RestateRuntimeEffectController::new(context_a);
-    let creator_scope = lash_core::ProcessScope::new("root");
+    let creator_scope = lash_core::SessionScope::new("root");
     let scope_id = creator_scope.id();
+    let env_ref = persist_recovery_env_ref().await;
     let registration = ProcessRegistration::new(
         "recover-tool",
         ProcessInput::ToolCall {
@@ -1574,33 +1572,27 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                 prepared_payload: serde_json::Value::Null,
             },
         },
+        lash_core::ProcessProvenance::session(creator_scope.clone(), "recovery-host"),
     )
-    .with_process_provenance(lash_core::ProcessProvenance::new(
-        creator_scope.clone(),
-        "recovery-host",
-    ))
-    .with_extra_event_types([process_wake_event_type()]);
+    .with_extra_event_types([process_wake_event_type()])
+    .with_execution_env_ref(Some(env_ref))
+    .with_wake_target(Some(creator_scope.clone()));
 
     host_a
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "recovery-start"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Start {
-                        registration,
-                        grant: Some(lash_core::ProcessStartGrant {
-                            owner_scope: creator_scope.clone(),
-                            descriptor: lash_core::ProcessHandleDescriptor::new(
-                                Some("tool"),
-                                Some("recover-tool"),
-                            ),
-                        }),
-                        execution_context: Box::new(
-                            ProcessExecutionContext::default()
-                                .with_wake_target_scope(creator_scope.clone()),
+                RuntimeEffectCommand::process(ProcessCommand::Start {
+                    registration,
+                    grant: Some(lash_core::ProcessStartGrant {
+                        session_scope: creator_scope.clone(),
+                        descriptor: lash_core::ProcessHandleDescriptor::new(
+                            Some("tool"),
+                            Some("recover-tool"),
                         ),
-                    },
-                },
+                    }),
+                    execution_context: Box::new(ProcessExecutionContext::default()),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_a)),
         )
@@ -1671,12 +1663,10 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
         .execute_effect(
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::Process, "recovery-cancel"),
-                RuntimeEffectCommand::Process {
-                    command: ProcessCommand::Cancel {
-                        process_id: "recover-tool".to_string(),
-                        reason: Some("post-rebuild cancel probe".to_string()),
-                    },
-                },
+                RuntimeEffectCommand::process(ProcessCommand::Cancel {
+                    process_id: "recover-tool".to_string(),
+                    reason: Some("post-rebuild cancel probe".to_string()),
+                }),
             ),
             RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_b)),
         )
@@ -1726,6 +1716,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
         .clone();
     let mut args = serde_json::Map::new();
     args.insert("resource".to_string(), serde_json::json!(resource));
+    let env_ref = persist_recovery_env_ref().await;
     ProcessRegistration::new(
         process_id,
         ProcessInput::LashlangProcess {
@@ -1735,17 +1726,17 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
             process_name: "notify".to_string(),
             args,
         },
-    )
-    .with_process_provenance(
-        // Trigger-started: owner scope is the session that installed the
-        // trigger route; `caused_by` is the host event node, not a turn.
-        lash_core::ProcessProvenance::new(lash_core::ProcessScope::new("root"), "recovery-host")
-            .with_caused_by(Some(lash_core::CausalRef::SessionNode {
-                session_id: "root".to_string(),
-                node_id: "host-event:resource.updated".to_string(),
-            })),
+        lash_core::ProcessProvenance::session(
+            lash_core::SessionScope::new("root"),
+            "recovery-host",
+        )
+        .with_caused_by(Some(lash_core::CausalRef::SessionNode {
+            session_id: "root".to_string(),
+            node_id: "host-event:resource.updated".to_string(),
+        })),
     )
     .with_extra_event_types(lash_core::lashlang_process_event_types())
+    .with_execution_env_ref(Some(env_ref))
 }
 
 /// Phase-B recovery: a TRIGGER-started process whose worker died mid-flight is
@@ -2020,17 +2011,15 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
     let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
-    let registration = external_registration("task-workflow");
+    let registration = external_registration("task-workflow")
+        .with_wake_target(Some(lash_core::SessionScope::new("wake-session")));
     registry
         .register_process(registration.clone())
         .await
         .expect("register workflow process");
-    let execution_context = ProcessExecutionContext::default()
-        .with_wake_target_scope(lash_core::ProcessScope::new("wake-session"))
-        .with_causal_invocation(Some(runtime_invocation(
-            RuntimeEffectKind::ToolCall,
-            "tool-effect",
-        )));
+    let execution_context = ProcessExecutionContext::default().with_causal_invocation(Some(
+        runtime_invocation(RuntimeEffectKind::ToolCall, "tool-effect"),
+    ));
 
     let output = workflow
         .run_registration(

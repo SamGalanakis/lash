@@ -114,6 +114,60 @@ impl crate::plugin::SessionGraphService for RuntimeSessionGraphService {
 
 #[async_trait::async_trait]
 impl crate::ProcessService for RuntimeSessionProcessService {
+    async fn start_from_request(
+        &self,
+        session_id: &str,
+        request: crate::ProcessStartRequest,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessHandleSummary, crate::PluginError> {
+        let descriptor = request
+            .grant
+            .as_ref()
+            .map(|grant| grant.descriptor.clone())
+            .unwrap_or_default();
+        let env_ref = match request.env_spec.as_ref() {
+            Some(env_spec) => Some(
+                crate::persist_process_execution_env(
+                    self.services
+                        .current
+                        .host
+                        .core
+                        .durability
+                        .lashlang_artifact_store
+                        .as_ref(),
+                    env_spec,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        let registration = request.into_registration(
+            self.services
+                .current
+                .host
+                .core
+                .profile
+                .host_profile_id
+                .clone(),
+            env_ref,
+        );
+        let record = self
+            .start(
+                session_id,
+                registration,
+                crate::ProcessStartOptions::new().with_descriptor(descriptor.clone()),
+                scope,
+            )
+            .await?;
+        let definition = crate::ProcessDefinitionSummary::from_input(record.input.as_ref());
+        Ok(crate::ProcessHandleSummary::new(
+            record.id,
+            descriptor,
+            crate::ProcessLifecycleStatus::from(record.status),
+        )
+        .with_definition(definition))
+    }
+
     async fn start(
         &self,
         session_id: &str,

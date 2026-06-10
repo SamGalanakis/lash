@@ -17,7 +17,7 @@ use super::{
     SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
     ToolDiscoveryContributor, ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
 };
-use crate::ToolProvider;
+use crate::{PluginOptions, ToolProvider};
 
 #[derive(Clone, Default)]
 pub struct PluginSpec {
@@ -215,6 +215,7 @@ pub struct PluginSessionContext {
     pub session_id: String,
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionContext>,
+    pub plugin_options: PluginOptions,
     pub lashlang_abilities: lashlang::LashlangAbilities,
     pub lashlang_language_features: lashlang::LashlangLanguageFeatures,
     /// Session id of the caller that created this one. `None` identifies

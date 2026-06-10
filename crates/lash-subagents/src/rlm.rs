@@ -66,8 +66,12 @@ impl RlmSubagentToolsProvider {
                 turn_input: Box::new(prepared.turn_input),
                 output_contract: lash_core::ToolOutputContract::Static,
             },
-            lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("spawn")),
-        );
+            lash_core::ProcessOriginator::host(),
+        )
+        .with_grant(Some(lash_core::ProcessStartGrant {
+            session_scope: lash_core::SessionScope::new("request-descriptor"),
+            descriptor: lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("spawn")),
+        }));
         context
             .processes()
             .start(request)

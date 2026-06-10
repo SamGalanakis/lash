@@ -19,7 +19,6 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                     registry: Arc::clone(&registry),
                     call: call.clone(),
                     parent_invocation: execution_context.causal_invocation,
-                    wake_target_scope: execution_context.wake_target_scope,
                     scoped_effect_controller,
                     cancellation,
                 })

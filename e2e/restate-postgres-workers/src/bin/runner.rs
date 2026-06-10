@@ -8,9 +8,9 @@ use lash_restate::RestateProcessDeployment;
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_FINAL_TEXT,
     TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario, build_e2e_core,
-    default_session_child_owner_scope_pattern, default_session_owner_scope_id, ensure_e2e_schema,
-    env, expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows,
-    s3_store_from_env,
+    default_session_child_originator_scope_pattern, default_session_originator_scope_id,
+    ensure_e2e_schema, env, expected_attachment_bytes, process_registry_from_storage,
+    reset_e2e_rows, s3_store_from_env,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -612,8 +612,8 @@ async fn assert_processes_terminal(pool: &sqlx::PgPool) -> Result<()> {
          WHERE owner_scope_id = $1 OR owner_scope_id LIKE $2
          ORDER BY created_at_ms, process_id",
     )
-    .bind(default_session_owner_scope_id())
-    .bind(default_session_child_owner_scope_pattern())
+    .bind(default_session_originator_scope_id())
+    .bind(default_session_child_originator_scope_pattern())
     .fetch_all(pool)
     .await
     .context("load process rows")?;
@@ -661,8 +661,8 @@ async fn assert_processes_terminal(pool: &sqlx::PgPool) -> Result<()> {
             HAVING COUNT(e.process_id) <> 1
         ) inconsistent",
     )
-    .bind(default_session_owner_scope_id())
-    .bind(default_session_child_owner_scope_pattern())
+    .bind(default_session_originator_scope_id())
+    .bind(default_session_child_originator_scope_pattern())
     .fetch_one(pool)
     .await
     .context("count process rows without exactly one terminal event")?;

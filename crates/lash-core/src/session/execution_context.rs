@@ -52,6 +52,10 @@ pub struct RuntimeExecutionContext<'run> {
     chronological_projection: Arc<crate::ChronologicalProjection>,
     protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     turn_context: crate::TurnContext,
+    execution_env_spec: crate::ProcessExecutionEnvSpec,
+    process_originator: Option<crate::ProcessOriginator>,
+    process_env_ref: Option<crate::ProcessExecutionEnvRef>,
+    process_wake_target: Option<crate::SessionScope>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
     lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     lashlang_execution_context: lash_trace::TraceContext,
@@ -110,6 +114,13 @@ impl<'run> RuntimeExecutionContext<'run> {
             chronological_projection,
             protocol_extension,
             turn_context,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
+            process_originator: None,
+            process_env_ref: None,
+            process_wake_target: None,
             parent_invocation: None,
             lashlang_execution_sink: None,
             lashlang_execution_context: lash_trace::TraceContext::default(),
@@ -172,6 +183,55 @@ impl<'run> RuntimeExecutionContext<'run> {
     pub(crate) fn with_parent_invocation(mut self, metadata: crate::RuntimeInvocation) -> Self {
         self.parent_invocation = Some(metadata);
         self
+    }
+
+    pub(crate) fn with_execution_env_spec(
+        mut self,
+        execution_env_spec: crate::ProcessExecutionEnvSpec,
+    ) -> Self {
+        self.execution_env_spec = execution_env_spec;
+        self
+    }
+
+    pub(crate) fn with_process_registration_context(
+        mut self,
+        registration: &crate::ProcessRegistration,
+    ) -> Self {
+        self.process_originator = Some(registration.provenance.originator.clone());
+        self.process_env_ref = registration.env_ref.clone();
+        self.process_wake_target = registration.wake_target.clone();
+        self
+    }
+
+    pub(super) async fn attach_captured_process_execution_env(
+        &self,
+        registration: crate::ProcessRegistration,
+    ) -> Result<crate::ProcessRegistration, crate::PluginError> {
+        if registration.env_ref.is_some() {
+            return Ok(registration);
+        }
+        match registration.input.as_ref() {
+            crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::LashlangProcess { .. } => {
+                let env_ref = self.captured_process_execution_env_ref().await?;
+                Ok(registration.with_execution_env_ref(Some(env_ref)))
+            }
+            crate::ProcessInput::External { .. } | crate::ProcessInput::SessionTurn { .. } => {
+                Ok(registration)
+            }
+        }
+    }
+
+    async fn captured_process_execution_env_ref(
+        &self,
+    ) -> Result<crate::ProcessExecutionEnvRef, crate::PluginError> {
+        if let Some(env_ref) = self.process_env_ref.clone() {
+            return Ok(env_ref);
+        }
+        crate::persist_process_execution_env(
+            self.lashlang_artifact_store.as_ref(),
+            &self.execution_env_spec,
+        )
+        .await
     }
 
     pub(crate) fn with_lashlang_execution_trace(
@@ -265,7 +325,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             _ => return Err("process args must serialize as a record".to_string()),
         };
         let process_id = format!("process:{}", uuid::Uuid::new_v4());
-        let registration = crate::ProcessRegistration::new(
+        let registration = crate::ProcessRegistration::session_start_draft(
             process_id,
             crate::ProcessInput::LashlangProcess {
                 module_ref: start.module_ref,
@@ -351,9 +411,31 @@ impl<'run> RuntimeExecutionContext<'run> {
         let source_key = store
             .source_key_for_subscription(&source_type, &source_value)
             .await?;
+        let env_ref = match self.process_env_ref.clone() {
+            Some(env_ref) => env_ref,
+            None => {
+                crate::persist_process_execution_env(
+                    self.lashlang_artifact_store.as_ref(),
+                    &self.execution_env_spec,
+                )
+                .await?
+            }
+        };
+        let registrant = self.process_originator.clone().unwrap_or_else(|| {
+            crate::ProcessOriginator::session(crate::SessionScope::new(self.session_id.clone()))
+        });
+        let wake_target = self
+            .process_wake_target
+            .clone()
+            .or_else(|| match &registrant {
+                crate::ProcessOriginator::Session { scope } => Some(scope.clone()),
+                crate::ProcessOriginator::Host => None,
+            });
         let record = store
             .register_subscription(crate::TriggerSubscriptionDraft {
-                session_id: self.session_id.clone(),
+                registrant,
+                env_ref,
+                wake_target,
                 name: request.name,
                 source_type,
                 source_key,
@@ -427,6 +509,15 @@ impl<'run> RuntimeExecutionContext<'run> {
         registration: crate::ProcessRegistration,
         label: Option<String>,
     ) -> crate::ToolInvocationReply {
+        let registration = match self
+            .attach_captured_process_execution_env(registration)
+            .await
+        {
+            Ok(registration) => registration,
+            Err(err) => {
+                return crate::ToolInvocationReply::error(serde_json::json!(err.to_string()));
+            }
+        };
         let process_id = registration.id.clone();
         match self
             .dispatch
@@ -541,6 +632,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,
@@ -604,6 +699,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,
@@ -699,6 +798,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,
@@ -787,6 +890,10 @@ mod tests {
                 "direct completions are unavailable in this test context",
             ),
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             session_id: "session".to_string(),
             agent_frame_id: String::new(),
             event_tx,

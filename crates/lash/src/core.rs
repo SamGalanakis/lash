@@ -15,7 +15,6 @@ pub struct LashCore {
     pub(crate) plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) live_replay_store: Arc<dyn LiveReplayStore>,
-    pub(crate) process_observer: Option<ProcessWorkObserver>,
     /// Shared resolution of the process work runner. The poke it yields is
     /// threaded onto every session's host so the process control seam can wake
     /// the runner after a successful start. Shared across `LashCore` clones so
@@ -158,6 +157,10 @@ impl LashCore {
         crate::control::HostEventsControl { core: self.clone() }
     }
 
+    pub fn processes(&self) -> crate::control::Processes {
+        crate::control::Processes { core: self.clone() }
+    }
+
     pub fn effect_host(&self) -> Arc<dyn EffectHost> {
         Arc::clone(&self.env.core.control.effect_host)
     }
@@ -183,11 +186,9 @@ impl LashCore {
                 .execute_effect(
                     RuntimeEffectEnvelope::new(
                         invocation,
-                        RuntimeEffectCommand::Process {
-                            command: ProcessCommand::DeleteSession {
-                                session_id: session_id.clone(),
-                            },
-                        },
+                        RuntimeEffectCommand::process(ProcessCommand::DeleteSession {
+                            session_id: session_id.clone(),
+                        }),
                     ),
                     RuntimeEffectLocalExecutor::process_control(Arc::clone(process_registry)),
                 )
@@ -213,6 +214,15 @@ impl LashCore {
         } else {
             None
         };
+        if let Some(host_event_store) = self.env.host_event_store.as_ref() {
+            host_event_store
+                .delete_session_subscriptions(&session_id)
+                .await
+                .map_err(|err| EmbedError::SessionDeleteProcess {
+                    session_id: session_id.clone(),
+                    message: err.to_string(),
+                })?;
+        }
         store_factory
             .delete_session(&session_id)
             .await
@@ -228,10 +238,6 @@ impl LashCore {
 
     pub fn installed_modes(&self) -> impl Iterator<Item = &ModeId> {
         self.modes.keys()
-    }
-
-    pub fn process_observer(&self) -> Option<&ProcessWorkObserver> {
-        self.process_observer.as_ref()
     }
 
     pub fn process_registry(&self) -> Option<Arc<dyn ProcessRegistry>> {
@@ -728,7 +734,6 @@ impl LashCoreBuilder {
             plugin_factories: Arc::new(plugin_factories),
             provider: self.provider,
             live_replay_store,
-            process_observer: process_registry.map(ProcessWorkObserver::new),
             process_work_runner: Arc::new(ProcessWorkRunnerSlot::new(process_work_runner)),
         })
     }
