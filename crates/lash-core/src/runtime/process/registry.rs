@@ -100,6 +100,43 @@ pub trait ProcessRegistry: Send + Sync {
         after_sequence: u64,
     ) -> Result<Vec<ProcessEvent>, PluginError>;
 
+    /// Count events of `event_type` with `sequence <= up_to_sequence`.
+    ///
+    /// This is the signal-ordinal query: the Nth occurrence of a signal event
+    /// resolves the Nth durable wait key. The default scans the event log;
+    /// store backends override it with a COUNT so per-signal cost stays flat
+    /// instead of growing with a long-lived process's history.
+    async fn count_events_through(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        up_to_sequence: u64,
+    ) -> Result<u64, PluginError> {
+        Ok(self
+            .events_after(process_id, 0)
+            .await?
+            .into_iter()
+            .filter(|event| event.sequence <= up_to_sequence && event.event_type == event_type)
+            .count() as u64)
+    }
+
+    /// The most recent `limit` events, in ascending sequence order.
+    ///
+    /// Observation snapshots use this to show a bounded activity tail without
+    /// fetching a process's entire history on every poll. The default scans
+    /// the event log; store backends override it with ORDER BY ... LIMIT.
+    async fn recent_events(
+        &self,
+        process_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProcessEvent>, PluginError> {
+        let mut events = self.events_after(process_id, 0).await?;
+        if events.len() > limit {
+            events.drain(..events.len() - limit);
+        }
+        Ok(events)
+    }
+
     async fn wake_events_after(
         &self,
         process_id: &str,

@@ -20,7 +20,7 @@
 - **Slash Command**: CLI host command. Slash commands are not queued as model work.
 - **Document Overlay**: Non-history UI surface used by `/help`, `/controls`, and `/info`. It starts at the top, scrolls with PgUp/PgDn, and closes with Esc or Ctrl+C.
 - **Runtime Process**: Globally addressable, durable unit of work owned by the runtime. Its lifecycle is independent of any session: ending or deleting a session never ends a process by itself; what happens to related processes is host policy. Only runtime processes appear in the CLI process dock.
-- **Process Originator**: Provenance recording where a process came from — a session or the host. Pure metadata; carries no behavior.
+- **Process Originator**: Provenance recording where a process came from — a session or the host. Pure metadata; carries no behavior. Children started by a process inherit its originator and wake target (the chain, not the execution machinery), and a process may always await or cancel handles it created itself.
 - **Execution Environment**: The captured description of tools, plugins, and policy that work executes against. Sessions run in one; a process captures the required subset of its creator's at creation time as immutable references, and is self-contained thereafter. It is a description, never live state; it cannot drift after capture, and process arguments are the only state handover.
 - **Wake Target**: Optional session that receives a process's wakes as Queued Work. A process without one still records wake events; they are observable but deliver nowhere.
 - **Process Handle Grant**: Per-session visibility of a process. Grants are additive and revocable; they never affect whether the process runs.

@@ -1153,12 +1153,11 @@ async fn signal_ordinal_for_event(
     event_type: &str,
     sequence: u64,
 ) -> Result<u64, PluginError> {
-    Ok(registry
-        .events_after(process_id, 0)
-        .await?
-        .into_iter()
-        .filter(|event| event.sequence <= sequence && event.event_type == event_type)
-        .count() as u64)
+    // COUNT at the store, not a full log fetch: per-signal cost must stay
+    // flat for long-lived processes that accumulate large event histories.
+    registry
+        .count_events_through(process_id, event_type, sequence)
+        .await
 }
 
 async fn schedule_restate_process<'ctx, C>(

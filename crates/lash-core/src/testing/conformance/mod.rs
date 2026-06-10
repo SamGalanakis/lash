@@ -54,8 +54,9 @@ use crate::{
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
     ProcessEventType, ProcessExternalRef, ProcessHandleDescriptor, ProcessInput,
-    ProcessLeaseCompletion, ProcessListFilter, ProcessProvenance, ProcessRegistration,
-    ProcessRegistry, ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey,
+    ProcessLeaseCompletion, ProcessListFilter, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessStatusFilter, ProcessTerminalState,
+    ProcessValueSelector, ProcessWakeDedupeKey,
     ProcessWakeDelivery, ProcessWakeSpec, SessionScope, SessionScopeId, WaitKind, WaitState,
 };
 use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};

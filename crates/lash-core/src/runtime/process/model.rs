@@ -274,6 +274,24 @@ impl<'scope> ProcessOpScope<'scope> {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessStartOptions {
     pub descriptor: Option<ProcessHandleDescriptor>,
+    /// Runtime-internal spawn provenance override. Set by process execution
+    /// contexts so children started *by a process* inherit the parent's
+    /// originator and wake target instead of being stamped with the ephemeral
+    /// execution scope. `None` means the session start path stamps the
+    /// creating session (the in-session meaning of "start"). This rides
+    /// options — not the request — so in-session callers cannot forge
+    /// provenance through the session surface.
+    pub spawn_provenance: Option<ProcessSpawnProvenance>,
+}
+
+/// Provenance a process-run context hands to its children: the chain's
+/// originator and the chain's wake target. Mirrors the trigger fire path,
+/// where the spawned process inherits the registrant and the grant is derived
+/// from the wake target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessSpawnProvenance {
+    pub originator: ProcessOriginator,
+    pub wake_target: Option<SessionScope>,
 }
 
 impl ProcessStartOptions {
@@ -288,6 +306,11 @@ impl ProcessStartOptions {
 
     pub fn with_optional_descriptor(mut self, descriptor: Option<ProcessHandleDescriptor>) -> Self {
         self.descriptor = descriptor;
+        self
+    }
+
+    pub fn with_spawn_provenance(mut self, spawn_provenance: ProcessSpawnProvenance) -> Self {
+        self.spawn_provenance = Some(spawn_provenance);
         self
     }
 

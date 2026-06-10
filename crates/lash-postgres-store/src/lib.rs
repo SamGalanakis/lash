@@ -2316,6 +2316,61 @@ impl ProcessRegistry for PostgresProcessRegistry {
         Ok(events)
     }
 
+    async fn count_events_through(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        up_to_sequence: u64,
+    ) -> Result<u64, PluginError> {
+        if load_process(&self.pool, process_id).await?.is_none() {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let row = sqlx::query(
+            "SELECT COUNT(*) FROM lash_process_events
+             WHERE process_id = $1 AND event_type = $2 AND sequence <= $3",
+        )
+        .bind(process_id)
+        .bind(event_type)
+        .bind(up_to_sequence as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let count: i64 = row.get(0);
+        Ok(count as u64)
+    }
+
+    async fn recent_events(
+        &self,
+        process_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProcessEvent>, PluginError> {
+        if load_process(&self.pool, process_id).await?.is_none() {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let rows = sqlx::query(
+            "SELECT event_json FROM lash_process_events
+             WHERE process_id = $1
+             ORDER BY sequence DESC
+             LIMIT $2",
+        )
+        .bind(process_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let mut events = Vec::new();
+        for row in rows {
+            let json: String = row.get(0);
+            events.push(serde_json::from_str(&json).map_err(process_decode_error)?);
+        }
+        events.reverse();
+        Ok(events)
+    }
+
     async fn wake_events_after(
         &self,
         process_id: &str,

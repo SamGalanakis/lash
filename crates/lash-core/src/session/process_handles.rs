@@ -146,15 +146,19 @@ impl RuntimeExecutionContext<'_> {
                 return Self::recorded_process_error(call_id, "await_process", args, err, started);
             }
         };
-        if let Err(err) = self
-            .dispatch
-            .processes
-            .validate_visible(
-                &self.session_id,
-                std::slice::from_ref(&handle_id),
-                self.process_scope(self.parent_invocation.clone()),
-            )
-            .await
+        // Possession of a handle this run created is sufficient capability;
+        // session grant visibility only gates handles that arrived from
+        // elsewhere (run-local children carry no grants by design).
+        if !self.is_run_local_process(&handle_id)
+            && let Err(err) = self
+                .dispatch
+                .processes
+                .validate_visible(
+                    &self.session_id,
+                    std::slice::from_ref(&handle_id),
+                    self.process_scope(self.parent_invocation.clone()),
+                )
+                .await
         {
             return Self::recorded_process_error(
                 call_id,
@@ -233,22 +237,35 @@ impl RuntimeExecutionContext<'_> {
                 return Self::recorded_process_error(call_id, "cancel_process", args, err, started);
             }
         };
-        let output = match self
-            .dispatch
-            .process_cancel_ability
-            .cancel(
-                self.dispatch.processes.as_ref(),
-                crate::ProcessCancelRequest::new(
+        // Run-local children bypass the grant-validating cancel ability:
+        // possession of the handle this run created is the capability, and
+        // these children carry no session grants by design.
+        let result = if self.is_run_local_process(&handle_id) {
+            self.dispatch
+                .processes
+                .cancel(
                     &self.session_id,
                     &handle_id,
                     self.process_scope(self.parent_invocation.clone()),
-                    crate::ProcessCancelSource::Lashlang,
                 )
-                .with_handle(handle)
-                .with_reason("requested by lashlang"),
-            )
-            .await
-        {
+                .await
+        } else {
+            self.dispatch
+                .process_cancel_ability
+                .cancel(
+                    self.dispatch.processes.as_ref(),
+                    crate::ProcessCancelRequest::new(
+                        &self.session_id,
+                        &handle_id,
+                        self.process_scope(self.parent_invocation.clone()),
+                        crate::ProcessCancelSource::Lashlang,
+                    )
+                    .with_handle(handle)
+                    .with_reason("requested by lashlang"),
+                )
+                .await
+        };
+        let output = match result {
             Ok(status) => ToolCallOutput::success(Self::process_status_value(&status)),
             Err(err) => ToolInvocationReply::error(json!(format!("cancel failed: {err}"))).output,
         };

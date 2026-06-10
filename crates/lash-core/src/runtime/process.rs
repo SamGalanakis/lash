@@ -28,7 +28,8 @@ pub use model::{
     ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease,
     ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
     ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
-    ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
+    ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
+    ProcessStartRequest,
     ProcessStatus, ProcessStatusFilter, SessionScope, SessionScopeId, WaitKind, WaitState,
     load_process_execution_env, persist_process_execution_env,
 };

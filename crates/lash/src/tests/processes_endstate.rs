@@ -312,6 +312,364 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
 }
 
 #[tokio::test]
+async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> Result<()> {
+    let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
+        Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
+    let host_event_store: Arc<dyn lash_core::HostEventStore> =
+        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let registry: Arc<dyn lash_core::ProcessRegistry> =
+        Arc::new(TestLocalProcessRegistry::default());
+    let core = process_test_core(
+        Arc::clone(&artifact_store),
+        Arc::clone(&host_event_store),
+        Arc::clone(&registry),
+    )?;
+    let process = LinkedTestProcess::new(
+        artifact_store.as_ref(),
+        r#"
+        process main() signals { ready: string } {
+          value = wait_signal("ready")
+          finish value
+        }
+        "#,
+        "main",
+    )
+    .await;
+    let process_id = "signal-validation";
+
+    core.processes()
+        .start(
+            process.start_request(process_id),
+            runtime_operation_scope("signal-validation-start"),
+        )
+        .await?;
+    wait_for_waiting_signal(&core, process_id, "ready").await;
+
+    let undeclared = core
+        .processes()
+        .signal(
+            process_id,
+            "nope",
+            "undeclared-1",
+            signal_request(process_id, "nope", "undeclared-1", serde_json::json!("x")),
+            runtime_operation_scope("signal-validation-undeclared"),
+        )
+        .await;
+    let undeclared_err = undeclared.expect_err("undeclared signal name must be rejected");
+    assert!(
+        undeclared_err.to_string().contains("undeclared"),
+        "unexpected error: {undeclared_err}"
+    );
+
+    let mistyped = core
+        .processes()
+        .signal(
+            process_id,
+            "ready",
+            "mistyped-1",
+            signal_request(
+                process_id,
+                "ready",
+                "mistyped-1",
+                serde_json::json!({ "not": "a string" }),
+            ),
+            runtime_operation_scope("signal-validation-mistyped"),
+        )
+        .await;
+    assert!(
+        mistyped.is_err(),
+        "schema-invalid signal payload must be rejected"
+    );
+
+    // Both rejected sends left the process parked with nothing consumed.
+    let still_waiting = wait_for_waiting_signal(&core, process_id, "ready").await;
+    assert_eq!(still_waiting.lifecycle, lash_core::ProcessLifecycleStatus::Running);
+    assert!(
+        core.processes()
+            .events(process_id, 0)
+            .await?
+            .iter()
+            .all(|event| event.event_type != "signal.ready" && event.event_type != "signal.nope")
+    );
+
+    core.processes()
+        .signal(
+            process_id,
+            "ready",
+            "valid-1",
+            signal_request(process_id, "ready", "valid-1", serde_json::json!("done")),
+            runtime_operation_scope("signal-validation-valid"),
+        )
+        .await?;
+    let output = core.processes().await_output(process_id).await?;
+    let lash_core::ProcessAwaitOutput::Success { value, .. } = output else {
+        panic!("process did not succeed after valid signal: {output:#?}");
+    };
+    assert_eq!(value, serde_json::json!("done"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_waits_on_one_signal_consume_in_order() -> Result<()> {
+    let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
+        Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
+    let host_event_store: Arc<dyn lash_core::HostEventStore> =
+        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let registry: Arc<dyn lash_core::ProcessRegistry> =
+        Arc::new(TestLocalProcessRegistry::default());
+    let core = process_test_core(
+        Arc::clone(&artifact_store),
+        Arc::clone(&host_event_store),
+        Arc::clone(&registry),
+    )?;
+    let process = LinkedTestProcess::new(
+        artifact_store.as_ref(),
+        r#"
+        process main() signals { ready: any } {
+          first = wait_signal("ready")
+          second = wait_signal("ready")
+          finish { first: first, second: second }
+        }
+        "#,
+        "main",
+    )
+    .await;
+    let process_id = "repeated-waits";
+
+    core.processes()
+        .start(
+            process.start_request(process_id),
+            runtime_operation_scope("repeated-waits-start"),
+        )
+        .await?;
+
+    let first_wait = wait_for_waiting_signal(&core, process_id, "ready").await;
+    let lash_core::WaitKind::Signal { ordinal, .. } =
+        first_wait.wait.expect("first wait facet").kind;
+    assert_eq!(ordinal, 1, "first wait must use ordinal 1");
+    core.processes()
+        .signal(
+            process_id,
+            "ready",
+            "order-1",
+            signal_request(process_id, "ready", "order-1", serde_json::json!(1)),
+            runtime_operation_scope("repeated-waits-signal-1"),
+        )
+        .await?;
+
+    let second_wait = wait_for_process(&core, process_id, "second signal wait", |process| {
+        matches!(
+            process.wait.as_ref().map(|wait| &wait.kind),
+            Some(lash_core::WaitKind::Signal { ordinal, .. }) if *ordinal == 2
+        )
+    })
+    .await;
+    let lash_core::WaitKind::Signal {
+        key: second_key, ..
+    } = second_wait.wait.expect("second wait facet").kind;
+    assert!(
+        second_key.ends_with(":2"),
+        "second wait key must carry ordinal 2: {second_key}"
+    );
+    core.processes()
+        .signal(
+            process_id,
+            "ready",
+            "order-2",
+            signal_request(process_id, "ready", "order-2", serde_json::json!(2)),
+            runtime_operation_scope("repeated-waits-signal-2"),
+        )
+        .await?;
+
+    let output = core.processes().await_output(process_id).await?;
+    let lash_core::ProcessAwaitOutput::Success { value, .. } = output else {
+        panic!("process did not succeed: {output:#?}");
+    };
+    assert_eq!(value, serde_json::json!({ "first": 1, "second": 2 }));
+
+    // The suspension history is on the event log: two waits, two resumes.
+    let events = core.processes().events(process_id, 0).await?;
+    let waiting = events
+        .iter()
+        .filter(|event| event.event_type == "process.waiting")
+        .count();
+    let resumed = events
+        .iter()
+        .filter(|event| event.event_type == "process.resumed")
+        .count();
+    assert_eq!((waiting, resumed), (2, 2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_starts_and_awaits_child_process() -> Result<()> {
+    let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
+        Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
+    let host_event_store: Arc<dyn lash_core::HostEventStore> =
+        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let registry: Arc<dyn lash_core::ProcessRegistry> =
+        Arc::new(TestLocalProcessRegistry::default());
+    let core = process_test_core(
+        Arc::clone(&artifact_store),
+        Arc::clone(&host_event_store),
+        Arc::clone(&registry),
+    )?;
+    let process = LinkedTestProcess::new(
+        artifact_store.as_ref(),
+        r#"
+        process child() {
+          finish { from: "child" }
+        }
+
+        process main() {
+          handle = start child()
+          value = await handle
+          finish { joined: value }
+        }
+        "#,
+        "main",
+    )
+    .await;
+    let process_id = "parent-joins-child";
+
+    core.processes()
+        .start(
+            process.start_request(process_id),
+            runtime_operation_scope("parent-joins-child-start"),
+        )
+        .await?;
+    let output = core.processes().await_output(process_id).await?;
+    let lash_core::ProcessAwaitOutput::Success { value, .. } = output else {
+        panic!("parent process did not succeed: {output:#?}");
+    };
+    // `await handle` yields the await envelope: success flag plus the child's
+    // finish value.
+    assert_eq!(
+        value,
+        serde_json::json!({ "joined": { "ok": true, "value": { "from": "child" } } })
+    );
+
+    // Both parent and child are globally addressable, completed, and the
+    // child INHERITS its parent's provenance chain: Host originator, no wake
+    // target, no grants — the ephemeral execution scope appears nowhere.
+    let all = core
+        .processes()
+        .list(&lash_core::ProcessListFilter {
+            status: lash_core::ProcessStatusFilter::Completed,
+            ..lash_core::ProcessListFilter::default()
+        })
+        .await?;
+    assert_eq!(all.len(), 2, "parent and child should both be completed");
+    assert!(
+        all.iter()
+            .all(|process| matches!(process.originator, lash_core::ProcessOriginator::Host)),
+        "children of a host chain stay host-originated"
+    );
+    let child = all
+        .iter()
+        .find(|process| process.process_id != process_id)
+        .expect("child process record");
+    assert!(child.wake_target.is_none(), "host chain has no wake target");
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_children_inherit_session_chain_provenance() -> Result<()> {
+    let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
+        Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
+    let host_event_store: Arc<dyn lash_core::HostEventStore> =
+        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let registry: Arc<dyn lash_core::ProcessRegistry> =
+        Arc::new(TestLocalProcessRegistry::default());
+    let core = process_test_core(
+        Arc::clone(&artifact_store),
+        Arc::clone(&host_event_store),
+        Arc::clone(&registry),
+    )?;
+    let session_id = "chain-session";
+    let process_id = "chain-parent";
+    let process = LinkedTestProcess::new(
+        artifact_store.as_ref(),
+        r#"
+        process child() {
+          finish { from: "child" }
+        }
+
+        process main() {
+          handle = start child()
+          value = await handle
+          finish value
+        }
+        "#,
+        "main",
+    )
+    .await;
+    let session = core.session(session_id).open().await?;
+    session
+        .process_control()
+        .start(
+            {
+                let mut request = process.start_request(process_id);
+                request.originator = lash_core::ProcessOriginator::session(
+                    lash_core::SessionScope::new(session_id),
+                );
+                request
+            }
+                .with_wake_target(Some(lash_core::SessionScope::new(session_id)))
+                .with_grant(Some(lash_core::ProcessStartGrant {
+                    session_scope: lash_core::SessionScope::new(session_id),
+                    descriptor: lash_core::ProcessHandleDescriptor::new(
+                        Some("lashlang"),
+                        Some("chain parent"),
+                    ),
+                })),
+            runtime_operation_scope("chain-parent-start"),
+        )
+        .await?;
+    wait_for_terminal(
+        &core,
+        process_id,
+        lash_core::ProcessLifecycleStatus::Completed,
+    )
+    .await;
+
+    // The child inherited the chain: session originator, session wake target,
+    // and a grant derived from the wake target — so the session's snapshot
+    // shows the whole background tree, and the ephemeral execution scope
+    // appears nowhere.
+    let completed = core
+        .processes()
+        .list(&lash_core::ProcessListFilter {
+            status: lash_core::ProcessStatusFilter::Completed,
+            ..lash_core::ProcessListFilter::default()
+        })
+        .await?;
+    assert_eq!(completed.len(), 2);
+    for observed in &completed {
+        match &observed.originator {
+            lash_core::ProcessOriginator::Session { scope } => {
+                assert_eq!(scope.session_id, session_id)
+            }
+            other => panic!("expected session originator, got {other:?}"),
+        }
+        assert_eq!(
+            observed
+                .wake_target
+                .as_ref()
+                .map(|scope| scope.session_id.as_str()),
+            Some(session_id)
+        );
+    }
+    let snapshot = core.processes().session_snapshot(session_id).await?;
+    assert_eq!(
+        snapshot.items.len(),
+        2,
+        "parent and child are both visible in the originating session"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn process_outlives_deleted_session_and_resumes_from_host_signal() -> Result<()> {
     let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
         Arc::new(lash_core::InMemoryLashlangArtifactStore::new());

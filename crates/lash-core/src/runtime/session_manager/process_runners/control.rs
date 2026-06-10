@@ -253,16 +253,29 @@ impl ProcessCapability {
         let env_ref = self
             .capture_execution_env_ref(current, &registration)
             .await?;
+        // Children started *by a process* inherit the chain's provenance (the
+        // run context provides it); in-session starts stamp the creating
+        // session. The grant always follows the wake target, mirroring the
+        // trigger fire path — the ephemeral execution scope must never appear
+        // on a record.
+        let (originator, wake_target) = match options.spawn_provenance.clone() {
+            Some(spawn) => (spawn.originator, spawn.wake_target),
+            None => (
+                crate::ProcessOriginator::session(creator_scope.clone()),
+                Some(creator_scope.clone()),
+            ),
+        };
+        let grant_scope = wake_target.clone();
         let registration = registration
             .with_process_provenance(
                 crate::ProcessProvenance::new(
-                    crate::ProcessOriginator::session(creator_scope.clone()),
+                    originator,
                     current.host.core.profile.host_profile_id.clone(),
                 )
                 .with_caused_by(caused_by),
             )
             .with_execution_env_ref(env_ref)
-            .with_wake_target(Some(creator_scope.clone()));
+            .with_wake_target(wake_target);
         let execution_context = options.execution_context(&scope);
         let runner = ProcessCommandRunner::new(
             current,
@@ -272,12 +285,12 @@ impl ProcessCapability {
         runner
             .start(
                 registration,
-                options
-                    .descriptor
-                    .map(|descriptor| crate::ProcessStartGrant {
-                        session_scope: creator_scope,
+                options.descriptor.and_then(|descriptor| {
+                    grant_scope.map(|session_scope| crate::ProcessStartGrant {
+                        session_scope,
                         descriptor,
-                    }),
+                    })
+                }),
                 execution_context,
             )
             .await

@@ -61,6 +61,11 @@ pub struct RuntimeExecutionContext<'run> {
     lashlang_execution_context: lash_trace::TraceContext,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
+    /// Process ids started by THIS execution context. Possession of a handle
+    /// the run itself created is sufficient capability to await/cancel it —
+    /// run-local children are not session handle grants (the ephemeral
+    /// execution scope must never appear in durable grant state).
+    started_process_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl<'run> RuntimeExecutionContext<'run> {
@@ -119,6 +124,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 crate::SessionPolicy::default(),
             ),
             process_originator: None,
+            started_process_ids: Arc::default(),
             process_env_ref: None,
             process_wake_target: None,
             parent_invocation: None,
@@ -201,6 +207,32 @@ impl<'run> RuntimeExecutionContext<'run> {
         self.process_env_ref = registration.env_ref.clone();
         self.process_wake_target = registration.wake_target.clone();
         self
+    }
+
+    /// Spawn provenance for children started by this context, present only
+    /// when this context executes a process: children inherit the chain's
+    /// originator and wake target instead of the ephemeral execution scope.
+    pub(super) fn record_started_process(&self, process_id: &str) {
+        self.started_process_ids
+            .lock()
+            .expect("started process ids lock")
+            .insert(process_id.to_string());
+    }
+
+    pub(super) fn is_run_local_process(&self, process_id: &str) -> bool {
+        self.started_process_ids
+            .lock()
+            .expect("started process ids lock")
+            .contains(process_id)
+    }
+
+    pub(crate) fn process_spawn_provenance(&self) -> Option<crate::ProcessSpawnProvenance> {
+        self.process_originator
+            .clone()
+            .map(|originator| crate::ProcessSpawnProvenance {
+                originator,
+                wake_target: self.process_wake_target.clone(),
+            })
     }
 
     pub(super) async fn attach_captured_process_execution_env(
@@ -528,21 +560,28 @@ impl<'run> RuntimeExecutionContext<'run> {
             }
         };
         let process_id = registration.id.clone();
+        let mut options = crate::ProcessStartOptions::new()
+            .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label));
+        if let Some(spawn) = self.process_spawn_provenance() {
+            options = options.with_spawn_provenance(spawn);
+        }
         match self
             .dispatch
             .processes
             .start(
                 &self.session_id,
                 registration,
-                crate::ProcessStartOptions::new()
-                    .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label)),
+                options,
                 self.process_scope(self.parent_invocation.clone()),
             )
             .await
         {
-            Ok(_) => crate::ToolInvocationReply::success(
-                crate::lashlang_bridge::process_handle_json(&process_id),
-            ),
+            Ok(_) => {
+                self.record_started_process(&process_id);
+                crate::ToolInvocationReply::success(crate::lashlang_bridge::process_handle_json(
+                    &process_id,
+                ))
+            }
             Err(err) => crate::ToolInvocationReply::error(serde_json::json!(err.to_string())),
         }
     }
