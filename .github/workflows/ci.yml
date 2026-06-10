@@ -158,8 +158,12 @@ jobs:
         include:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            # No linking happens under `cargo check`, but build scripts still
+            # cc-compile target C code, so the cross gcc is required.
+            apt_packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
+            apt_packages: ""
 
     steps:
       - name: Check out repository
@@ -183,6 +187,10 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: protoc
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: scripts/ci-install-apt-packages.sh ${{ matrix.apt_packages }}
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
