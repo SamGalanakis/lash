@@ -14,15 +14,19 @@ keywords = ["lash", "agent", "tools", "llm", "runtime"]
 categories = ["asynchronous", "development-tools"]
 
 [features]
-default = []
-fff-zlob = ["fff-search/zlob"]
+default = ["search"]
+# The fff-search-backed `search.grep` tool family. Hosts that only need the
+# other tool families can set `default-features = false` to drop the
+# fff-search build dependency (whose build.rs requires Zig under CI).
+search = ["dep:fff-search"]
+fff-zlob = ["search", "fff-search/zlob"]
 
 [dependencies]
 lash-core = { workspace = true }
 lash-tool-support = { workspace = true }
 async-trait = { workspace = true }
 # Keep this exact until fff-search/zlob publish a Zig-compatible replacement.
-fff-search = { version = "=0.6.2-nightly.a677d64", default-features = false }
+fff-search = { version = "=0.6.2-nightly.a677d64", default-features = false, optional = true }
 globset = "0.4"
 libc = "0.2"
 pdf-extract = "0.7"

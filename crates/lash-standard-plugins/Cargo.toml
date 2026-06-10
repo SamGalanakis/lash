@@ -24,7 +24,7 @@ lash-plugin-observational-memory = { workspace = true }
 lash-plugin-process-controls = { workspace = true }
 lash-plugin-tool-discovery = { workspace = true }
 lash-plugin-tool-output-budget = { workspace = true }
-lash-tools = { workspace = true }
+lash-tools = { workspace = true, features = ["search"] }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
