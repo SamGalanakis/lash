@@ -8,6 +8,11 @@ on:
   push:
     branches:
       - main
+  # The release flow is two-pass and the bump commit is pushed with
+  # GITHUB_TOKEN, which never triggers `on: push` runs — so pass 1
+  # explicitly dispatches this workflow to validate the bump commit and
+  # cut the tag (pass 2).
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -337,7 +342,7 @@ jobs:
     # Allows release-automation-only fixes to run the full CI matrix without
     # immediately cutting the next version.
     if: >
-      github.event_name == 'push' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == 'refs/heads/main' &&
       !contains(github.event.head_commit.message, '[skip release]')
     needs:
@@ -402,6 +407,15 @@ jobs:
           git commit -m "Release v${{ steps.version.outputs.version }}"
           git push origin HEAD:main
           echo "created=true" >> "$GITHUB_OUTPUT"
+
+      # GITHUB_TOKEN pushes never trigger `on: push`, so the bump commit
+      # would otherwise sit on main forever with no pass-2 run to validate
+      # it and cut the tag. Dispatch the next pass explicitly.
+      - name: Dispatch validation pass for the release commit
+        if: steps.commit.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref main
 
       - name: Sync release version to staging
         run: |
