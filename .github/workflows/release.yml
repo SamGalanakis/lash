@@ -1,6 +1,10 @@
 name: Release
 
 on:
+  # The tags trigger only fires for tags pushed by humans: tags pushed with
+  # the workflow-provided GITHUB_TOKEN (as prepare-release does) never start
+  # workflows, which is why prepare-release also dispatches this workflow
+  # explicitly. Do not "simplify" the dispatch away.
   push:
     tags:
       - "v*"
@@ -98,20 +102,24 @@ jobs:
             target: x86_64-unknown-linux-gnu
             asset_name: lash-linux-x86_64.tar.gz
             linker: ""
-            apt_packages: protobuf-compiler
+            apt_packages: ""
             brew_packages: ""
+            # Perf Guard's release-profile cache, saved on main by ci.yml.
+            cache_key: linux-release
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             asset_name: lash-linux-aarch64.tar.gz
             linker: aarch64-linux-gnu-gcc
-            apt_packages: protobuf-compiler gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            apt_packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
             brew_packages: ""
+            cache_key: cross-aarch64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
             asset_name: lash-macos-aarch64.tar.gz
             linker: ""
             apt_packages: ""
-            brew_packages: protobuf llvm
+            brew_packages: llvm
+            cache_key: cross-aarch64-apple-darwin
 
     steps:
       - name: Check out repository
@@ -127,16 +135,24 @@ jobs:
       - name: Install Zig
         uses: ./.github/actions/setup-ci-zig
 
+      # Restore-only against the shared caches ci.yml saves on main. Caches
+      # saved here would be scoped to this run's tag ref, which no future
+      # run can read — saving them would only thrash the repo's cache quota.
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          shared-key: ${{ matrix.cache_key }}
+          save-if: false
+
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ${{ matrix.apt_packages }}
+        run: scripts/ci-install-apt-packages.sh ${{ matrix.apt_packages }}
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'

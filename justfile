@@ -142,6 +142,12 @@ restate-postgres-workers-e2e:
   set -euo pipefail
   compose="docker compose -f {{repo}}/e2e/restate-postgres-workers/docker-compose.yml"
 
+  # Binaries are built on the host (sharing the normal cargo cache) and
+  # bind-mounted into the compose services; see docker-compose.yml for the
+  # glibc compatibility note.
+  cargo build --locked -p lash-restate-postgres-workers-e2e --bins
+  export LASH_E2E_BIN_DIR="${CARGO_TARGET_DIR:-{{repo}}/target}/debug"
+
   cleanup() {
     status=$?
     if [ "$status" -ne 0 ]; then

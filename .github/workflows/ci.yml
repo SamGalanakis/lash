@@ -1,5 +1,8 @@
 name: CI
 
+# Note: GitHub natively skips push/PR runs when the head commit message
+# contains [skip ci], so no per-job guards are needed for it.
+
 on:
   pull_request:
   push:
@@ -15,11 +18,23 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # One feature set for every cargo invocation in this workflow so the
+  # dependency graph resolves (and compiles) exactly once per profile.
+  # fff-zlob is required wherever fff-search is built (its build.rs needs the
+  # zig-backed zlob under CI); bench keeps lash-cli's UI-bench code compiling
+  # on every push instead of only on the nightly Perf run.
+  LASH_CI_FEATURES: >-
+    -F lash-tools/fff-zlob
+    -F lash-standard-plugins/fff-zlob
+    -F lash-cli/fff-zlob
+    -F lash-cli/bench
+    -F lash-perf/fff-zlob
+    -F docs-snippets/fff-zlob
+    -F agent-workbench/fff-zlob
 
 jobs:
   test:
     name: Test
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
 
     steps:
@@ -36,30 +51,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          # This job builds a superset of what the other debug-profile jobs
+          # (Postgres store, Restate E2E, the distributed-workers e2e
+          # workflow) need, so it is the sole writer of the shared cache.
+          shared-key: linux-debug
 
-      - name: Install system dependencies
-        run: scripts/ci-install-apt-packages.sh protobuf-compiler
-
-      - name: Test lash-sansio
-        run: cargo test -p lash-sansio --locked
-
-      - name: Test lash core
-        run: cargo test -p lash-core --locked
-
-      - name: Test SQLite store
-        run: cargo test -p lash-sqlite-store --locked
-
-      - name: Test lash facade
-        run: cargo test -p lash-runtime --locked
+      - name: Install protoc and nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc,nextest
 
       - name: Lint docs
         run: python3 scripts/lint_docs.py
-
-      - name: Check docs snippets compile
-        run: cargo check -p docs-snippets --locked --features fff-zlob
-
-      - name: Enforce stack budget
-        run: bash scripts/ci-stack-budget.sh
 
       - name: Test release automation scripts
         run: |
@@ -67,25 +70,28 @@ jobs:
           python3 scripts/test_publish_workspace.py
           python3 scripts/test_profile_guard.py
 
-      - name: Test first-party standard plugins
-        run: cargo test -p lash-standard-plugins --locked --features fff-zlob
+      # Compiles every target of every workspace crate — libs, bins, tests,
+      # examples, and benches. This subsumes the old standalone checks for
+      # docs-snippets and the perf harness (lash-perf + lash-cli's bench
+      # feature), which would otherwise only break post-merge.
+      - name: Check workspace (all targets)
+        run: cargo check --workspace --all-targets --locked ${LASH_CI_FEATURES}
 
-      - name: Test lash CLI
-        run: cargo test -p lash-cli --locked --features fff-zlob
+      # Workspace-wide: every crate's tests run, not a hand-maintained crate
+      # list. Live tests (Restate e2e, Postgres conformance without a
+      # database URL) are #[ignore]d or self-skip.
+      - name: Test workspace
+        run: cargo nextest run --workspace --locked ${LASH_CI_FEATURES}
 
-      # The perf harness lives in the dev-only `lash-perf` crate (runtime
-      # benchmark) plus lash-cli's `bench` feature (UI benchmark). The Perf
-      # jobs build both but the steps above do not. Compile them here so a
-      # break in bench-only code surfaces on every PR instead of only
-      # post-merge on the (main-only, ~15 min) Perf jobs.
-      - name: Check perf harness builds
-        run: |
-          cargo check -p lash-perf --locked --all-targets --features fff-zlob
-          cargo check -p lash-cli --locked --features bench,fff-zlob
+      # nextest does not run doctests; keep them covered.
+      - name: Test workspace doctests
+        run: cargo test --doc --workspace --locked ${LASH_CI_FEATURES}
+
+      - name: Enforce stack budget
+        run: bash scripts/ci-stack-budget.sh
 
   postgres-store:
     name: Test Postgres store
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
 
     services:
@@ -114,9 +120,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          shared-key: linux-debug
+          save-if: false
 
-      - name: Install system dependencies
-        run: scripts/ci-install-apt-packages.sh protobuf-compiler
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
 
       # `lash-postgres-store`'s conformance tests run the backend-agnostic
       # RuntimePersistence / ProcessRegistry / HostEventStore / LashlangArtifactStore
@@ -125,14 +135,21 @@ jobs:
       # `ensure_schema` (CREATE TABLE IF NOT EXISTS), so no separate migrate step.
       # The suites self-serialize on a shared in-process guard (they share one
       # database and reset() truncates all lash_* tables), so no --test-threads=1.
+      # That guard is per-process, so this must stay `cargo test` — nextest's
+      # process-per-test model would race the suites against each other.
       - name: Test Postgres store (conformance)
         run: cargo test -p lash-postgres-store --locked
         env:
           LASH_POSTGRES_DATABASE_URL: postgres://lash:lash@localhost:5432/lash
 
-  build-release-assets:
-    name: Build (${{ matrix.target }})
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+  # Cross-target compile gate. The real release binaries are built from the
+  # tag by release.yml; building (and discarding) them here too just doubled
+  # the work, so this only type-checks the release feature set per target.
+  # x86_64-linux needs no leg: Perf Guard release-builds the CLI stack on
+  # every push. Release-profile link failures would surface in release.yml,
+  # which is rerunnable via workflow_dispatch after a fix.
+  cross-check:
+    name: Check (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -140,33 +157,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            asset_name: lash-linux-x86_64.tar.gz
-            package_asset: true
-            linker: ""
-            apt_packages: protobuf-compiler
-            brew_packages: ""
-          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            asset_name: lash-linux-aarch64.tar.gz
-            package_asset: true
-            linker: aarch64-linux-gnu-gcc
-            apt_packages: protobuf-compiler gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-            brew_packages: ""
           - os: macos-14
             target: aarch64-apple-darwin
-            asset_name: lash-macos-aarch64.tar.gz
-            package_asset: true
-            linker: ""
-            apt_packages: ""
-            brew_packages: protobuf llvm
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            asset_name: ""
-            package_asset: false
-            linker: ""
-            apt_packages: ""
-            brew_packages: ""
 
     steps:
       - name: Check out repository
@@ -184,35 +177,22 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-          save-if: ${{ runner.os != 'Windows' }}
+          shared-key: cross-${{ matrix.target }}
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: scripts/ci-install-apt-packages.sh ${{ matrix.apt_packages }}
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install ${{ matrix.brew_packages }}
+        run: brew install llvm
 
-      - name: Build release binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
-        run: cargo build --locked --release -p lash-cli --features fff-zlob --target ${{ matrix.target }}
-
-      - name: Package release artifact
-        if: matrix.package_asset
-        run: scripts/package-release.sh ${{ matrix.target }} ${{ matrix.asset_name }}
-
-      - name: Upload release artifact
-        if: matrix.package_asset
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.asset_name }}
+      - name: Check release target
+        run: cargo check --locked --release -p lash-cli --features fff-zlob --target ${{ matrix.target }}
 
   perf-guard:
     name: Perf Guard
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
 
     steps:
@@ -229,9 +209,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          # Sole writer of the linux release-profile cache; release.yml's
+          # x86_64 build restores it (tag runs can read main-branch caches).
+          shared-key: linux-release
 
-      - name: Install system dependencies
-        run: scripts/ci-install-apt-packages.sh protobuf-compiler
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
 
       - name: Run performance guard
         run: |
@@ -249,7 +234,6 @@ jobs:
 
   restate-e2e:
     name: Restate E2E
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
 
     steps:
@@ -266,9 +250,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          shared-key: linux-debug
+          save-if: false
 
-      - name: Install system dependencies
-        run: scripts/ci-install-apt-packages.sh protobuf-compiler
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
 
       - name: Install just
         uses: extractions/setup-just@v2
@@ -290,11 +278,11 @@ jobs:
     if: >
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      !contains(github.event.head_commit.message, '[skip ci]') &&
       !contains(github.event.head_commit.message, '[skip release]')
     needs:
       - test
-      - build-release-assets
+      - postgres-store
+      - cross-check
       - perf-guard
       - restate-e2e
     runs-on: ubuntu-latest
@@ -309,7 +297,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # release_version.py only inspects `git tag --list`; no commit
+          # history is needed beyond HEAD.
+          fetch-depth: 1
+          fetch-tags: true
 
       - name: Compute next release version
         id: version
@@ -348,9 +339,10 @@ jobs:
             exit 0
           fi
 
+          git fetch --depth=1 origin staging
           sync_dir="$(mktemp -d)"
           trap 'git worktree remove --force "$sync_dir"' EXIT
-          git worktree add --detach "$sync_dir" origin/staging
+          git worktree add --detach "$sync_dir" FETCH_HEAD
 
           cd "$sync_dir"
           python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
@@ -377,9 +369,8 @@ jobs:
             echo "Tag ${tag} already exists on origin; skipping."
             exit 0
           fi
-          git fetch origin main --tags
-          git checkout main
-          git reset --hard origin/main
+          git fetch --depth=1 origin main
+          git checkout --detach FETCH_HEAD
           git tag "${tag}"
           git push origin "${tag}"
 
