@@ -3,7 +3,8 @@ use crate::plugin::PluginError;
 use super::ToolProcessEventContext;
 
 pub(crate) async fn enqueue_wake_delivery(
-    store: Option<&dyn crate::RuntimePersistence>,
+    store: Option<std::sync::Arc<dyn crate::RuntimePersistence>>,
+    session_store_factory: Option<&std::sync::Arc<dyn crate::SessionStoreFactory>>,
     wake_delivery: Option<crate::ProcessWakeDelivery>,
     trace_host: Option<&dyn crate::plugin::SessionGraphService>,
     queued_work_poke: Option<&crate::QueuedWorkPoke>,
@@ -11,11 +12,27 @@ pub(crate) async fn enqueue_wake_delivery(
     let Some(wake_delivery) = wake_delivery else {
         return Ok(());
     };
-    let Some(store) = store else {
-        return Err(PluginError::Session(format!(
-            "process wake for session `{}` requires a runtime persistence store",
-            wake_delivery.target_session_id
-        )));
+    let target_session_id = wake_delivery.target_session_id.clone();
+    let store = if let Some(factory) = session_store_factory {
+        let request = crate::SessionStoreCreateRequest {
+            session_id: target_session_id.clone(),
+            relation: crate::SessionRelation::default(),
+            policy: crate::SessionPolicy::default(),
+        };
+        let Some(store) = factory
+            .open_existing_store(&request)
+            .await
+            .map_err(|err| PluginError::Session(err.to_string()))?
+        else {
+            return Ok(());
+        };
+        store
+    } else {
+        store.ok_or_else(|| {
+            PluginError::Session(format!(
+                "process wake for session `{target_session_id}` requires a runtime persistence store"
+            ))
+        })?
     };
     let enqueued = store
         .enqueue_queued_work(crate::process_wake_batch_draft(wake_delivery))
@@ -89,13 +106,11 @@ impl ToolProcessEventControl {
         };
         let result = process
             .registry
-            .append_event(
-                &process.process_id,
-                request.with_optional_wake_target_scope(process.wake_target_scope.clone()),
-            )
+            .append_event(&process.process_id, request)
             .await?;
         enqueue_wake_delivery(
-            process.store.as_deref(),
+            process.store.clone(),
+            process.session_store_factory.as_ref(),
             result.wake_delivery,
             Some(process.session_graph.as_ref()),
             process.queued_work_poke.as_ref(),

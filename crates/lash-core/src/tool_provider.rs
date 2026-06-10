@@ -59,6 +59,7 @@ pub struct ToolContext<'run> {
     pub(crate) max_attempts: u32,
     pub(crate) replay_key: Option<String>,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
+    pub(crate) execution_env_spec: crate::ProcessExecutionEnvSpec,
     pub(crate) lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
 }
 
@@ -93,8 +94,8 @@ impl ToolLashlangExecutionCallSite {
 pub(crate) struct ToolProcessEventContext {
     process_id: String,
     registry: Arc<dyn crate::ProcessRegistry>,
-    wake_target_scope: Option<crate::ProcessScope>,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
+    session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
     session_graph: Arc<dyn SessionGraphService>,
     queued_work_poke: Option<crate::QueuedWorkPoke>,
 }
@@ -117,6 +118,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     prepared_payload: serde_json::Value,
     tool_call_id: Option<String>,
     parent_invocation: Option<crate::RuntimeInvocation>,
+    execution_env_spec: crate::ProcessExecutionEnvSpec,
     lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
 }
 
@@ -142,6 +144,7 @@ impl<'run> ToolContextBuilder<'run> {
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
             parent_invocation: dispatch.parent_invocation.clone(),
+            execution_env_spec: dispatch.execution_env_spec.clone(),
             lashlang_execution_call_site: None,
         }
     }
@@ -180,15 +183,15 @@ impl<'run> ToolContextBuilder<'run> {
         mut self,
         process_id: impl Into<String>,
         registry: Arc<dyn crate::ProcessRegistry>,
-        wake_target_scope: Option<crate::ProcessScope>,
         store: Option<Arc<dyn crate::RuntimePersistence>>,
+        session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
         queued_work_poke: Option<crate::QueuedWorkPoke>,
     ) -> Self {
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
             registry,
-            wake_target_scope,
             store,
+            session_store_factory,
             session_graph: Arc::clone(&self.session_graph),
             queued_work_poke,
         });
@@ -229,6 +232,7 @@ impl<'run> ToolContextBuilder<'run> {
             max_attempts: 1,
             replay_key: None,
             parent_invocation: self.parent_invocation,
+            execution_env_spec: self.execution_env_spec,
             lashlang_execution_call_site: self.lashlang_execution_call_site,
         }
     }
@@ -269,6 +273,10 @@ impl<'run> ToolContext<'run> {
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
             parent_invocation: None,
+            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+                crate::PluginOptions::default(),
+                crate::SessionPolicy::default(),
+            ),
             lashlang_execution_call_site: None,
         }
     }
@@ -317,6 +325,7 @@ impl<'run> ToolContext<'run> {
             effect_controller: self.effect_controller.clone(),
             parent_invocation: self.parent_invocation.clone(),
             tool_call_id: self.tool_call_id.clone(),
+            execution_env_spec: self.execution_env_spec.clone(),
         }
     }
 
@@ -450,8 +459,8 @@ impl<'run> ToolContext<'run> {
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
             registry,
-            wake_target_scope: None,
             store: None,
+            session_store_factory: None,
             session_graph: Arc::new(crate::plugin::NoopSessionManager),
             queued_work_poke: None,
         });

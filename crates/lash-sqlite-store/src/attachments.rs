@@ -112,6 +112,67 @@ impl lashlang::LashlangArtifactStore for Store {
             .insert(module_ref.clone(), artifact.clone());
         Ok(Some(artifact))
     }
+
+    async fn put_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+        descriptor: &str,
+        bytes: &[u8],
+    ) -> Result<(), lashlang::ArtifactStoreError> {
+        let blob_profile = self.options.blob_profile;
+        let artifact_ref = artifact_ref.to_string();
+        let descriptor = match descriptor {
+            "process_execution_env" => BlobArtifactDescriptor::process_execution_env(),
+            _ => BlobArtifactDescriptor::new(PersistedArtifactKind::GenericBlob, Vec::new()),
+        };
+        let bytes = bytes.to_vec();
+        self.conn
+            .write(move |tx| {
+                let blob_ref =
+                    Self::insert_artifact_blob_conn(tx, descriptor, &bytes, blob_profile)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
+                    params![artifact_ref, blob_ref.as_str()],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
+    }
+
+    async fn get_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
+        let artifact_ref = artifact_ref.to_string();
+        let diagnostic_ref = artifact_ref.clone();
+        let resolved = self
+            .conn
+            .call(move |conn| {
+                let blob_ref: Option<String> = conn
+                    .query_row(
+                        "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
+                        params![artifact_ref],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let Some(blob_ref) = blob_ref else {
+                    return Ok(None);
+                };
+                Ok(Some(Self::get_blob_conn(conn, &BlobRef(blob_ref))))
+            })
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        let Some(blob) = resolved else {
+            return Ok(None);
+        };
+        let bytes = blob.ok_or_else(|| {
+            lashlang::ArtifactStoreError::Backend(format!(
+                "artifact `{diagnostic_ref}` points at a missing blob"
+            ))
+        })?;
+        Ok(Some(bytes))
+    }
 }
 
 impl AttachmentManifest for Store {

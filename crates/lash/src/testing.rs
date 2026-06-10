@@ -291,9 +291,33 @@ submit "registered"
         input: lash_core::ProcessInput,
         id: &str,
     ) -> lash_core::ProcessRegistration {
-        lash_core::ProcessRegistration::new(id, input).with_process_provenance(
-            lash_core::ProcessProvenance::new(lash_core::ProcessScope::new(SESSION_ID), "default"),
+        lash_core::ProcessRegistration::new(
+            id,
+            input,
+            lash_core::ProcessProvenance::session(
+                lash_core::SessionScope::new(SESSION_ID),
+                "default",
+            ),
         )
+    }
+
+    async fn attach_rebuild_process_env(
+        core: &LashCore,
+        registration: lash_core::ProcessRegistration,
+    ) -> lash_core::ProcessRegistration {
+        let env_ref = lash_core::runtime::persist_process_execution_env(
+            core.env.core.durability.lashlang_artifact_store.as_ref(),
+            &lash_core::ProcessExecutionEnvSpec::new(
+                lash_core::PluginOptions::default(),
+                lash_core::SessionPolicy {
+                    model: rebuild_model(),
+                    ..lash_core::SessionPolicy::default()
+                },
+            ),
+        )
+        .await
+        .expect("persist rebuild process env");
+        registration.with_execution_env_ref(Some(env_ref))
     }
 
     /// Open the session, register the trigger route through Lashlang, optionally
@@ -555,6 +579,7 @@ submit "registered"
             },
             "proc-tool-call",
         );
+        let registration = attach_rebuild_process_env(&core, registration).await;
         open_mutate_and_restart(&core, Some(registration), &registry).await;
         await_success(&registry, "proc-tool-call").await;
     }

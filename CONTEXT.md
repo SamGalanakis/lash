@@ -19,7 +19,12 @@
 - **Next Full Turn**: User input submitted with Tab while a turn is active. The runtime delivers it only after the current turn commits.
 - **Slash Command**: CLI host command. Slash commands are not queued as model work.
 - **Document Overlay**: Non-history UI surface used by `/help`, `/controls`, and `/info`. It starts at the top, scrolls with PgUp/PgDn, and closes with Esc or Ctrl+C.
-- **Runtime Process**: Durable Lash process handle owned by the runtime. Only runtime processes appear in the CLI process dock.
+- **Runtime Process**: Globally addressable, durable unit of work owned by the runtime. Its lifecycle is independent of any session: ending or deleting a session never ends a process by itself; what happens to related processes is host policy. Only runtime processes appear in the CLI process dock.
+- **Process Originator**: Provenance recording where a process came from — a session or the host. Pure metadata; carries no behavior.
+- **Execution Environment**: The captured description of tools, plugins, and policy that work executes against. Sessions run in one; a process captures the required subset of its creator's at creation time as immutable references, and is self-contained thereafter. It is a description, never live state; it cannot drift after capture, and process arguments are the only state handover.
+- **Wake Target**: Optional session that receives a process's wakes as Queued Work. A process without one still records wake events; they are observable but deliver nowhere.
+- **Process Handle Grant**: Per-session visibility of a process. Grants are additive and revocable; they never affect whether the process runs.
+- **Process Signal**: Named, typed message delivered to one specific Runtime Process. A process declares its signals and senders are validated against the declaration. Distinct from a Host Event, which is a broadcast world signal routed by subscriptions.
 
 The CLI owns presentation state: editor contents, overlays, scroll position, process focus, and disposable draft metadata. The runtime and store own durable work and operational state.
 

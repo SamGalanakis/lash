@@ -102,10 +102,10 @@ flowchart LR
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
+    .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(std::sync::Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db"))?))
+    .lashlang_artifact_store(std::sync::Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db")).await?))
     .attachment_store(std::sync::Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
     .build()?;
 

@@ -7,9 +7,10 @@ use super::effect::ProcessRunner;
 use super::session_manager::RuntimeSessionServices;
 use super::{EmbeddedRuntimeBuilder, RUNTIME_TURN_LEASE_TTL_MS, RuntimeHostConfig};
 use crate::{
-    LashRuntime, PluginError, PluginFactory, PluginHost, PluginStack, ProcessAwaitOutput,
-    ProcessExecutionContext, ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, SessionStoreCreateRequest, SessionStoreFactory,
+    InMemorySessionStore, LashRuntime, PluginError, PluginFactory, PluginHost, PluginStack,
+    ProcessAwaitOutput, ProcessExecutionContext, ProcessInput, ProcessLease,
+    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    SessionStoreFactory,
 };
 
 /// Deployment-local configuration for rebuilding durable process executions.
@@ -170,17 +171,10 @@ impl DurableProcessWorker {
                 control: None,
             });
         }
-        let session_id = registration.provenance.owner_scope.session_id.as_str();
-        if session_id.is_empty() {
-            return Err(PluginError::Session(format!(
-                "process `{}` is missing a structured owner scope",
-                registration.id
-            )));
-        }
-        let runtime = self.rebuild_runtime(session_id).await?;
+        let runtime = self.runtime_for_registration(&registration).await?;
         let manager = RuntimeSessionServices::new(&runtime, true, None).map_err(|err| {
             PluginError::Session(format!(
-                "failed to rebuild runtime session `{session_id}` for process `{}`: {err}",
+                "failed to build runtime env for process `{}`: {err}",
                 registration.id
             ))
         })?;
@@ -267,11 +261,10 @@ impl DurableProcessWorker {
             input: record.input,
             event_types: record.event_types,
             provenance: record.provenance.clone(),
+            env_ref: record.env_ref.clone(),
+            wake_target: record.wake_target.clone(),
         };
-        // Wakes route to the creator scope; on recovery the owner scope persisted
-        // in provenance is that creator scope, so it is the wake target.
-        let execution_context = ProcessExecutionContext::default()
-            .with_wake_target_scope(record.provenance.owner_scope);
+        let execution_context = ProcessExecutionContext::default();
         match self
             .run_process_with_lease_renewal(registration, execution_context, lease.clone())
             .await
@@ -440,26 +433,85 @@ impl DurableProcessWorker {
             .map(|_| ())
     }
 
-    async fn rebuild_runtime(&self, session_id: &str) -> Result<LashRuntime, PluginError> {
-        let store = self
-            .config
-            .session_store_factory
-            .create_store(&SessionStoreCreateRequest {
-                session_id: session_id.to_string(),
-                relation: crate::SessionRelation::Root,
-                policy: self.config.session_policy.clone(),
-            })
-            .await
-            .map_err(|err| {
-                PluginError::Session(format!(
-                    "failed to open session store for process worker session `{session_id}`: {err}"
-                ))
-            })?;
+    async fn runtime_for_registration(
+        &self,
+        registration: &ProcessRegistration,
+    ) -> Result<LashRuntime, PluginError> {
+        match registration.input.as_ref() {
+            ProcessInput::SessionTurn { create_request, .. } => {
+                self.runtime_for_session_turn(registration, create_request.as_ref())
+                    .await
+            }
+            ProcessInput::ToolCall { .. } | ProcessInput::LashlangProcess { .. } => {
+                self.runtime_for_process_env(registration).await
+            }
+            ProcessInput::External { .. } => unreachable!("external processes short-circuit"),
+        }
+    }
+
+    async fn runtime_for_session_turn(
+        &self,
+        registration: &ProcessRegistration,
+        create_request: &crate::SessionCreateRequest,
+    ) -> Result<LashRuntime, PluginError> {
+        let mut policy = create_request
+            .policy
+            .clone()
+            .unwrap_or_else(|| self.config.session_policy.clone());
+        if policy.recorded_provider_id().is_empty() {
+            policy.provider_id = self.config.session_policy.provider_id.clone();
+        }
+        self.build_ephemeral_runtime(
+            format!("process-session-turn:{}", registration.id),
+            policy,
+            create_request.plugin_options.clone(),
+            "session turn request",
+        )
+        .await
+    }
+
+    async fn runtime_for_process_env(
+        &self,
+        registration: &ProcessRegistration,
+    ) -> Result<LashRuntime, PluginError> {
+        let Some(env_ref) = registration.env_ref.as_ref() else {
+            return Err(PluginError::Session(format!(
+                "process `{}` is missing a captured execution env",
+                registration.id
+            )));
+        };
+        let env = crate::load_process_execution_env(
+            self.config
+                .runtime_host
+                .durability
+                .lashlang_artifact_store
+                .as_ref(),
+            env_ref,
+        )
+        .await?;
+        self.build_ephemeral_runtime(
+            format!("process-env:{}", registration.id),
+            env.policy,
+            env.plugin_options,
+            env_ref.as_str(),
+        )
+        .await
+    }
+
+    async fn build_ephemeral_runtime(
+        &self,
+        session_id: String,
+        policy: crate::SessionPolicy,
+        plugin_options: crate::PluginOptions,
+        source_label: &str,
+    ) -> Result<LashRuntime, PluginError> {
+        let store = Arc::new(InMemorySessionStore::default());
         EmbeddedRuntimeBuilder::new()
             .with_session_id(session_id.to_string())
             .with_plugin_host(self.config.plugin_host.as_ref().clone())
             .with_runtime_host(self.config.runtime_host.clone())
-            .with_policy(self.config.session_policy.clone())
+            .with_policy(policy)
+            .with_plugin_options(plugin_options)
             .with_session_store_factory(Arc::clone(&self.config.session_store_factory))
             .with_host_event_store(Arc::clone(&self.config.host_event_store))
             .with_process_registry(Arc::clone(&self.config.process_registry))
@@ -469,7 +521,7 @@ impl DurableProcessWorker {
             .await
             .map_err(|err| {
                 PluginError::Session(format!(
-                    "failed to rebuild process worker runtime for session `{session_id}`: {err}"
+                    "failed to build process worker runtime for {source_label}: {err}"
                 ))
             })
     }
@@ -658,6 +710,24 @@ mod boundary_tests {
         ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
             self.inner.get_module_artifact(module_ref).await
         }
+
+        async fn put_artifact_bytes(
+            &self,
+            artifact_ref: &str,
+            descriptor: &str,
+            bytes: &[u8],
+        ) -> Result<(), lashlang::ArtifactStoreError> {
+            self.inner
+                .put_artifact_bytes(artifact_ref, descriptor, bytes)
+                .await
+        }
+
+        async fn get_artifact_bytes(
+            &self,
+            artifact_ref: &str,
+        ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
+            self.inner.get_artifact_bytes(artifact_ref).await
+        }
     }
 
     /// Session store factory whose declared tier is configurable; it never has
@@ -726,6 +796,13 @@ mod boundary_tests {
             self.inner.cancel_subscription(session_id, handle).await
         }
 
+        async fn delete_session_subscriptions(
+            &self,
+            session_id: &str,
+        ) -> Result<usize, PluginError> {
+            self.inner.delete_session_subscriptions(session_id).await
+        }
+
         async fn record_occurrence(
             &self,
             request: crate::HostEventOccurrenceRequest,
@@ -791,6 +868,7 @@ mod boundary_tests {
             ProcessInput::External {
                 metadata: serde_json::json!({}),
             },
+            crate::ProcessProvenance::host("default"),
         )
     }
 

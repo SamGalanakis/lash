@@ -207,20 +207,20 @@ CREATE TABLE IF NOT EXISTS host_event_subscription_seq (
 );
 
 CREATE TABLE IF NOT EXISTS host_event_trigger_subscriptions (
-    subscription_id  TEXT PRIMARY KEY,
-    session_id       TEXT NOT NULL,
-    handle           TEXT NOT NULL,
-    source_type      TEXT NOT NULL,
-    source_key       TEXT NOT NULL,
-    enabled          INTEGER NOT NULL,
-    created_at_ms    INTEGER NOT NULL,
-    updated_at_ms    INTEGER NOT NULL,
-    record_json      TEXT NOT NULL,
-    UNIQUE(session_id, handle)
+    subscription_id      TEXT PRIMARY KEY,
+    registrant_scope_id  TEXT NOT NULL,
+    handle               TEXT NOT NULL,
+    source_type          TEXT NOT NULL,
+    source_key           TEXT NOT NULL,
+    enabled              INTEGER NOT NULL,
+    created_at_ms        INTEGER NOT NULL,
+    updated_at_ms        INTEGER NOT NULL,
+    record_json          TEXT NOT NULL,
+    UNIQUE(registrant_scope_id, handle)
 );
 
-CREATE INDEX IF NOT EXISTS idx_host_event_trigger_subscriptions_session
-    ON host_event_trigger_subscriptions(session_id, handle);
+CREATE INDEX IF NOT EXISTS idx_host_event_trigger_subscriptions_registrant
+    ON host_event_trigger_subscriptions(registrant_scope_id, handle);
 
 CREATE INDEX IF NOT EXISTS idx_host_event_trigger_subscriptions_source
     ON host_event_trigger_subscriptions(source_type, source_key, enabled);

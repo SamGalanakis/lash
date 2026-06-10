@@ -26,12 +26,12 @@ pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
 
-pub fn default_session_owner_scope_id() -> String {
+pub fn default_session_originator_scope_id() -> String {
     format!("session:{DEFAULT_SESSION_ID}")
 }
 
-pub fn default_session_child_owner_scope_pattern() -> String {
-    format!("{}/%", default_session_owner_scope_id())
+pub fn default_session_child_originator_scope_pattern() -> String {
+    format!("{}/%", default_session_originator_scope_id())
 }
 
 pub fn env(name: &str, default: &str) -> String {
@@ -62,6 +62,17 @@ pub enum TurnScenario {
     KitchenSink,
     TriggerSetup,
     DrainQueued,
+    SignalSuspend,
+    SignalProcess,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessSignalRequest {
+    pub process_id: String,
+    pub signal_name: String,
+    pub signal_id: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +82,8 @@ pub struct TurnRequest {
     pub fail_once: bool,
     #[serde(default)]
     pub scenario: TurnScenario,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<ProcessSignalRequest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

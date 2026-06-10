@@ -21,6 +21,7 @@ impl HostEventsControl {
         let process_work_poke = self.core.process_work_runner.poke().await;
         let router = lash_core::HostEventRouter::new(
             Arc::clone(store),
+            Arc::clone(&self.core.env.core.durability.lashlang_artifact_store),
             self.core.env.process_registry.clone(),
             process_work_poke,
             self.core.env.core.profile.host_profile_id.clone(),
@@ -45,6 +46,190 @@ impl HostEventsControl {
             .iter()
             .map(lash_core::TriggerRegistration::from)
             .collect())
+    }
+}
+
+#[derive(Clone)]
+pub struct Processes {
+    pub(crate) core: LashCore,
+}
+
+impl Processes {
+    fn registry(&self) -> Result<Arc<dyn lash_core::ProcessRegistry>> {
+        self.core
+            .env
+            .process_registry
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                EmbedError::Plugin(lash_core::PluginError::Session(
+                    "process registry is unavailable in this runtime".to_string(),
+                ))
+            })
+    }
+
+    fn make_observer(&self) -> Result<lash_core::ProcessWorkObserver> {
+        Ok(lash_core::ProcessWorkObserver::new(self.registry()?))
+    }
+
+    fn process_invocation(command: &lash_core::ProcessCommand) -> lash_core::RuntimeInvocation {
+        let effect_id = command.effect_id();
+        lash_core::RuntimeInvocation::effect(
+            lash_core::runtime::RuntimeScope::new("runtime"),
+            effect_id.clone(),
+            lash_core::RuntimeEffectKind::Process,
+            effect_id,
+        )
+    }
+
+    async fn run_command(
+        &self,
+        command: lash_core::ProcessCommand,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessEffectOutcome> {
+        let registry = self.registry()?;
+        let invocation = Self::process_invocation(&command);
+        let outcome = scoped_effect_controller
+            .controller()
+            .execute_effect(
+                lash_core::RuntimeEffectEnvelope::new(
+                    invocation,
+                    lash_core::RuntimeEffectCommand::process(command),
+                ),
+                lash_core::RuntimeEffectLocalExecutor::process_control(registry),
+            )
+            .await
+            .map_err(|err| EmbedError::Plugin(lash_core::PluginError::Session(err.to_string())))?;
+        match outcome {
+            lash_core::RuntimeEffectOutcome::Process { result } => Ok(result),
+            _ => Err(EmbedError::Plugin(lash_core::PluginError::Session(
+                "process effect returned non-process outcome".to_string(),
+            ))),
+        }
+    }
+
+    pub async fn start(
+        &self,
+        request: lash_core::ProcessStartRequest,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessRecord> {
+        let env_ref = match request.env_spec.as_ref() {
+            Some(env_spec) => Some(
+                lash_core::runtime::persist_process_execution_env(
+                    self.core
+                        .env
+                        .core
+                        .durability
+                        .lashlang_artifact_store
+                        .as_ref(),
+                    env_spec,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        let grant = request.grant.clone();
+        let registration =
+            request.into_registration(self.core.env.core.profile.host_profile_id.clone(), env_ref);
+        let command = lash_core::ProcessCommand::Start {
+            registration,
+            grant,
+            execution_context: Box::new(lash_core::ProcessExecutionContext::default()),
+        };
+        let outcome = self.run_command(command, scoped_effect_controller).await?;
+        let lash_core::ProcessEffectOutcome::Start { record } = outcome else {
+            return Err(EmbedError::Plugin(lash_core::PluginError::Session(
+                "process start returned the wrong outcome".to_string(),
+            )));
+        };
+        if let Some(poke) = self.core.process_work_runner.poke().await {
+            poke.poke();
+        }
+        Ok(record)
+    }
+
+    pub async fn list(
+        &self,
+        filter: &lash_core::ProcessListFilter,
+    ) -> Result<Vec<lash_core::ObservedProcess>> {
+        self.make_observer()?.list(filter).await.map_err(Into::into)
+    }
+
+    pub async fn get(&self, process_id: &str) -> Result<Option<lash_core::ObservedProcess>> {
+        Ok(self.make_observer()?.process(process_id).await)
+    }
+
+    pub async fn events(
+        &self,
+        process_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<lash_core::ObservedProcessEvent>> {
+        self.make_observer()?
+            .events_after(process_id, after_sequence)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn await_output(&self, process_id: &str) -> Result<lash_core::ProcessAwaitOutput> {
+        self.registry()?
+            .await_process(process_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn cancel(
+        &self,
+        process_id: &str,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessCancelSummary> {
+        let command = lash_core::ProcessCommand::Cancel {
+            process_id: process_id.to_string(),
+            reason: Some("requested by host".to_string()),
+        };
+        let outcome = self.run_command(command, scoped_effect_controller).await?;
+        let lash_core::ProcessEffectOutcome::Cancel { record } = outcome else {
+            return Err(EmbedError::Plugin(lash_core::PluginError::Session(
+                "process cancel returned the wrong outcome".to_string(),
+            )));
+        };
+        Ok(lash_core::ProcessCancelSummary::from_record(record))
+    }
+
+    pub async fn signal(
+        &self,
+        process_id: &str,
+        signal_name: impl Into<String>,
+        signal_id: impl Into<String>,
+        request: lash_core::ProcessEventAppendRequest,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessEvent> {
+        let command = lash_core::ProcessCommand::Signal {
+            process_id: process_id.to_string(),
+            signal_name: signal_name.into(),
+            signal_id: signal_id.into(),
+            request,
+        };
+        let outcome = self.run_command(command, scoped_effect_controller).await?;
+        let lash_core::ProcessEffectOutcome::Signal { event } = outcome else {
+            return Err(EmbedError::Plugin(lash_core::PluginError::Session(
+                "process signal returned the wrong outcome".to_string(),
+            )));
+        };
+        Ok(event)
+    }
+
+    pub async fn session_snapshot(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<lash_core::ProcessWorkSnapshot> {
+        self.make_observer()?
+            .snapshot_for_session(session_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub fn observer(&self) -> Result<lash_core::ProcessWorkObserver> {
+        self.make_observer()
     }
 }
 

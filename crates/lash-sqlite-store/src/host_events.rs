@@ -82,7 +82,9 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                     let now = current_epoch_ms();
                     let record = lash_core::TriggerSubscriptionRecord {
                         subscription_id: subscription_id.clone(),
-                        session_id: draft.session_id,
+                        registrant: draft.registrant,
+                        env_ref: draft.env_ref,
+                        wake_target: draft.wake_target,
                         handle,
                         name: draft.name,
                         source_type: draft.source_type,
@@ -100,13 +102,13 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                     };
                     tx.execute(
                         "INSERT INTO host_event_trigger_subscriptions (
-                            subscription_id, session_id, handle, source_type, source_key,
+                            subscription_id, registrant_scope_id, handle, source_type, source_key,
                             enabled, created_at_ms, updated_at_ms, record_json
                          )
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             record.subscription_id.as_str(),
-                            record.session_id.as_str(),
+                            record.registrant_scope_id().as_str(),
                             record.handle.as_str(),
                             record.source_type.as_str(),
                             record.source_key.as_str(),
@@ -135,10 +137,6 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                         "SELECT record_json FROM host_event_trigger_subscriptions WHERE 1 = 1"
                             .to_string();
                     let mut values = Vec::<rusqlite::types::Value>::new();
-                    if let Some(session_id) = filter.session_id.as_ref() {
-                        sql.push_str(" AND session_id = ?");
-                        values.push(session_id.clone().into());
-                    }
                     if let Some(handle) = filter.handle.as_ref() {
                         sql.push_str(" AND handle = ?");
                         values.push(handle.clone().into());
@@ -159,7 +157,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                         sql.push_str(" AND enabled = ?");
                         values.push(i64::from(enabled).into());
                     }
-                    sql.push_str(" ORDER BY session_id ASC, handle ASC");
+                    sql.push_str(" ORDER BY registrant_scope_id ASC, handle ASC");
                     let mut stmt = conn.prepare(&sql).map_err(process_sqlite_error)?;
                     let rows = stmt
                         .query_map(rusqlite::params_from_iter(values.iter()), |row| {
@@ -190,16 +188,29 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
         self.conn
             .write_flow(move |tx| {
                 Ok(host_event_tx_outcome((|| {
-                    let json: Option<String> = tx
-                        .query_row(
-                            "SELECT record_json
-                             FROM host_event_trigger_subscriptions
-                             WHERE session_id = ?1 AND handle = ?2",
-                            params![session_id.as_str(), handle.as_str()],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(process_sqlite_error)?;
+                    let json = {
+                        let mut stmt = tx
+                            .prepare(
+                                "SELECT record_json
+                                 FROM host_event_trigger_subscriptions
+                                 WHERE handle = ?1
+                                 ORDER BY registrant_scope_id ASC",
+                            )
+                            .map_err(process_sqlite_error)?;
+                        let rows = stmt
+                            .query_map(params![handle.as_str()], |row| row.get::<_, String>(0))
+                            .map_err(process_sqlite_error)?;
+                        let mut matched = None;
+                        for row in rows {
+                            let json = row.map_err(process_sqlite_error)?;
+                            let record = Self::decode_subscription(json.clone())?;
+                            if record.registrant_session_id() == Some(session_id.as_str()) {
+                                matched = Some(json);
+                                break;
+                            }
+                        }
+                        matched
+                    };
                     let Some(json) = json else {
                         return Ok(false);
                     };
@@ -210,9 +221,9 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                     tx.execute(
                         "UPDATE host_event_trigger_subscriptions
                          SET enabled = ?3, updated_at_ms = ?4, record_json = ?5
-                         WHERE session_id = ?1 AND handle = ?2",
+                         WHERE registrant_scope_id = ?1 AND handle = ?2",
                         params![
-                            session_id.as_str(),
+                            record.registrant_scope_id().as_str(),
                             handle.as_str(),
                             i64::from(record.enabled),
                             record.updated_at_ms as i64,
@@ -221,6 +232,53 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                     )
                     .map_err(process_sqlite_error)?;
                     Ok(changed)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn delete_session_subscriptions(
+        &self,
+        session_id: &str,
+    ) -> Result<usize, lash_core::PluginError> {
+        let session_id = session_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(host_event_tx_outcome((|| {
+                    let rows = {
+                        let mut stmt = tx
+                            .prepare(
+                                "SELECT subscription_id, record_json
+                                 FROM host_event_trigger_subscriptions
+                                 ORDER BY registrant_scope_id ASC, handle ASC",
+                            )
+                            .map_err(process_sqlite_error)?;
+                        let rows = stmt
+                            .query_map([], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                            })
+                            .map_err(process_sqlite_error)?;
+                        let mut rows_out = Vec::new();
+                        for row in rows {
+                            rows_out.push(row.map_err(process_sqlite_error)?);
+                        }
+                        rows_out
+                    };
+                    let mut deleted = 0usize;
+                    for (subscription_id, json) in rows {
+                        let record = Self::decode_subscription(json)?;
+                        if record.registrant_session_id() != Some(session_id.as_str()) {
+                            continue;
+                        }
+                        tx.execute(
+                            "DELETE FROM host_event_trigger_subscriptions WHERE subscription_id = ?1",
+                            params![subscription_id.as_str()],
+                        )
+                        .map_err(process_sqlite_error)?;
+                        deleted = deleted.saturating_add(1);
+                    }
+                    Ok(deleted)
                 })()))
             })
             .await
@@ -319,7 +377,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                                 "SELECT record_json
                                  FROM host_event_trigger_subscriptions
                                  WHERE enabled = 1 AND source_type = ?1 AND source_key = ?2
-                                 ORDER BY session_id ASC, handle ASC",
+                                 ORDER BY registrant_scope_id ASC, handle ASC",
                             )
                             .map_err(process_sqlite_error)?;
                         let rows = stmt

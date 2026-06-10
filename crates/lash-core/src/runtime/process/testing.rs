@@ -13,8 +13,9 @@ use super::events::{
 };
 use super::model::{
     PROCESS_LEASE_SCHEMA_VERSION, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseCompletion, ProcessRecord,
-    ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
+    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseCompletion, ProcessListFilter,
+    ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, SessionScopeId,
+    WaitState,
 };
 use super::registry::ProcessRegistry;
 use super::time::current_epoch_ms;
@@ -43,7 +44,7 @@ impl Default for TestLocalProcessRegistry {
 }
 
 type ManagedProcessMap = HashMap<String, ManagedProcessRecord>;
-type ManagedGrantMap = HashMap<ProcessScopeId, HashMap<String, ProcessHandleGrant>>;
+type ManagedGrantMap = HashMap<SessionScopeId, HashMap<String, ProcessHandleGrant>>;
 type ManagedLeaseMap = HashMap<String, ProcessLease>;
 
 struct ManagedProcessRecord {
@@ -132,7 +133,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
 
     async fn grant_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
         descriptor: ProcessHandleDescriptor,
     ) -> Result<ProcessHandleGrant, PluginError> {
@@ -142,14 +143,14 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             )));
         }
         let grant = ProcessHandleGrant {
-            session_id: owner_scope.session_id.clone(),
+            session_id: session_scope.session_id.clone(),
             process_id: process_id.to_string(),
             descriptor,
         };
         self.grants
             .lock()
             .await
-            .entry(owner_scope.id())
+            .entry(session_scope.id())
             .or_default()
             .insert(process_id.to_string(), grant.clone());
         Ok(grant)
@@ -157,10 +158,10 @@ impl ProcessRegistry for TestLocalProcessRegistry {
 
     async fn revoke_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<(), PluginError> {
-        if let Some(session_grants) = self.grants.lock().await.get_mut(&owner_scope.id()) {
+        if let Some(session_grants) = self.grants.lock().await.get_mut(&session_scope.id()) {
             session_grants.remove(process_id);
         }
         Ok(())
@@ -168,8 +169,8 @@ impl ProcessRegistry for TestLocalProcessRegistry {
 
     async fn transfer_handle_grants(
         &self,
-        from_scope: &ProcessScope,
-        to_scope: &ProcessScope,
+        from_scope: &SessionScope,
+        to_scope: &SessionScope,
         process_ids: &[String],
     ) -> Result<(), PluginError> {
         let mut grants = self.grants.lock().await;
@@ -199,13 +200,13 @@ impl ProcessRegistry for TestLocalProcessRegistry {
 
     async fn list_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
         let grants = self
             .grants
             .lock()
             .await
-            .get(&owner_scope.id())
+            .get(&session_scope.id())
             .cloned()
             .unwrap_or_default();
         let managed = self.managed.lock().await;
@@ -223,13 +224,13 @@ impl ProcessRegistry for TestLocalProcessRegistry {
 
     async fn list_live_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
         let grants = self
             .grants
             .lock()
             .await
-            .get(&owner_scope.id())
+            .get(&session_scope.id())
             .cloned()
             .unwrap_or_default();
         let managed = self.managed.lock().await;
@@ -248,15 +249,15 @@ impl ProcessRegistry for TestLocalProcessRegistry {
 
     async fn has_handle_grant(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<bool, PluginError> {
-        let owner_scope_id = owner_scope.id();
+        let session_scope_id = session_scope.id();
         let granted = self
             .grants
             .lock()
             .await
-            .get(&owner_scope_id)
+            .get(&session_scope_id)
             .is_some_and(|session_grants| session_grants.contains_key(process_id));
         if !granted {
             return Ok(false);
@@ -305,7 +306,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         };
         let managed = self.managed.lock().await;
         let grants = self.grants.lock().await;
-        let mut cancel_process_ids = Vec::new();
+        let mut orphaned_process_ids = Vec::new();
         let mut preserved_process_ids = Vec::new();
         for grant in &removed {
             let Some(record) = managed.get(&grant.process_id) else {
@@ -320,18 +321,18 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             if still_granted {
                 preserved_process_ids.push(grant.process_id.clone());
             } else {
-                cancel_process_ids.push(grant.process_id.clone());
+                orphaned_process_ids.push(grant.process_id.clone());
             }
         }
-        cancel_process_ids.sort();
-        cancel_process_ids.dedup();
+        orphaned_process_ids.sort();
+        orphaned_process_ids.dedup();
         preserved_process_ids.sort();
         preserved_process_ids.dedup();
         Ok(ProcessSessionDeleteReport {
             session_id: session_id.to_string(),
             revoked_handle_count: removed.len(),
             deleted_wake_count: 0,
-            cancel_process_ids,
+            orphaned_process_ids,
             preserved_process_ids,
         })
     }
@@ -363,6 +364,9 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         if prepared.replayed {
             if let Some(status) = prepared.status_update.clone() {
                 record.record.status = status;
+                if record.record.status.is_terminal() {
+                    record.record.wait = None;
+                }
                 record.record.updated_at_ms = prepared.occurred_at_ms;
                 record.notify.notify_waiters();
             }
@@ -374,6 +378,9 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         let event = prepared.event;
         if let Some(status) = prepared.status_update.clone() {
             record.record.status = status;
+            if record.record.status.is_terminal() {
+                record.record.wait = None;
+            }
         }
         record.record.updated_at_ms = prepared.occurred_at_ms;
         record.events.push(event.clone());
@@ -502,9 +509,58 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         })
     }
 
+    async fn set_process_wait(
+        &self,
+        process_id: &str,
+        wait: WaitState,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        if record.record.is_terminal() {
+            return Err(PluginError::Session(format!(
+                "terminal process `{process_id}` cannot enter a wait state"
+            )));
+        }
+        record.record.wait = Some(wait);
+        record.record.updated_at_ms = current_epoch_ms();
+        record.notify.notify_waiters();
+        Ok(record.record.clone())
+    }
+
+    async fn clear_process_wait(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        record.record.wait = None;
+        record.record.updated_at_ms = current_epoch_ms();
+        record.notify.notify_waiters();
+        Ok(record.record.clone())
+    }
+
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
         let managed = self.managed.lock().await;
         managed.get(process_id).map(|record| record.record.clone())
+    }
+
+    async fn list_processes(
+        &self,
+        filter: &ProcessListFilter,
+    ) -> Result<Vec<ProcessRecord>, PluginError> {
+        let managed = self.managed.lock().await;
+        let mut records = managed
+            .values()
+            .map(|record| record.record.clone())
+            .filter(|record| filter.matches_record(record))
+            .collect::<Vec<_>>();
+        records.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(records)
     }
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {

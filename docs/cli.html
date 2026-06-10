@@ -54,7 +54,7 @@
                 <tr><td><code>/fork</code></td><td>—</td><td><code>/fork</code></td><td>Open a forked session in a new terminal</td></tr>
                 <tr><td><code>/tree</code></td><td>—</td><td><code>/tree</code></td><td>Browse and switch branches in the current session</td></tr>
                 <tr><td><code>/version</code></td><td>—</td><td><code>/version</code></td><td>Show <code>lash-cli</code> and <code>lash-sansio</code> versions</td></tr>
-                <tr><td><code>/info</code></td><td>—</td><td><code>/info</code></td><td>Show current session/runtime info</td></tr>
+                <tr><td><code>/info</code></td><td><code>/status</code></td><td><code>/info</code></td><td>Show current session/runtime info</td></tr>
                 <tr><td><code>/model</code></td><td>—</td><td><code>/model [name]</code></td><td>Show or switch the LLM model</td></tr>
                 <tr><td><code>/variant</code></td><td>—</td><td><code>/variant [name]</code></td><td>Show or switch the model variant (e.g. <code>high</code>, <code>max</code>)</td></tr>
                 <tr><td><code>/mode</code></td><td>—</td><td><code>/mode [name]</code></td><td>Show the session's execution mode (<code>standard</code> / <code>rlm</code>); it is locked for the session, so changing it requires a new session started with <code>--execution-mode</code></td></tr>
@@ -110,6 +110,14 @@
                 <dt><kbd>Tab</kbd> / <kbd>BackTab</kbd></dt><dd>Add / remove a note on a selection when supported.</dd>
               </dl>
             </article>
+            <article class="panel">
+              <h3>Background process dock</h3>
+              <dl class="def-list">
+                <dt><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></dt><dd>With an empty prompt, cycle focus through the dock of background processes. The dock lists only processes granted to the current session.</dd>
+                <dt><kbd>Enter</kbd></dt><dd>Open an overview of the focused process.</dd>
+                <dt><kbd>Delete</kbd></dt><dd>Cancel the focused process.</dd>
+              </dl>
+            </article>
           </div>
         </div>
 
@@ -133,7 +141,7 @@
             <article class="panel">
               <h3>Execution</h3>
               <dl class="def-list">
-                <dt><code>-em</code>, <code>--execution-mode &lt;mode&gt;</code></dt><dd><code>standard</code> (default) or <code>rlm</code>.</dd>
+                <dt><code>--execution-mode &lt;mode&gt;</code></dt><dd><code>standard</code> (default) or <code>rlm</code>.</dd>
                 <dt><code>-c</code>, <code>--context-approach &lt;approach&gt;</code></dt><dd>For standard mode: <code>rolling_history</code> or <code>observational_memory</code>.</dd>
                 <dt><code>--rlm-var name=&lt;json&gt;</code></dt><dd>Repeatable. Project a read-only bound variable into the RLM autonomous turn.</dd>
                 <dt><code>--rlm-vars-file &lt;path&gt;</code></dt><dd>Same as above but load the projections from a JSON object file.</dd>
@@ -246,7 +254,7 @@ $ lash --print "Investigate the latest test failure." \
               <tbody>
                 <tr><td><code>LASH_HOME</code></td><td>Override the root data directory (defaults to <code>~/.lash/</code>).</td></tr>
                 <tr><td><code>TAVILY_API_KEY</code></td><td>Tavily API key for the bundled web search tool. Alternative to <code>--tavily-api-key</code> and the config file.</td></tr>
-                <tr><td><code>LASH_COPY_BINDING</code></td><td>Override the copy keystroke (<code>ctrl-c</code>, <code>ctrl-shift-c</code>, or <code>ctrl-y</code>).</td></tr>
+                <tr><td><code>LASH_COPY_BINDING</code></td><td>Override the copy keystroke: <code>ctrl-shift-c</code> (default) or <code>ctrl-y</code>. <code>Ctrl+C</code> stays reserved for cancel semantics, so <code>ctrl-c</code> falls back to the default.</td></tr>
                 <tr><td><code>LASH_LOG</code></td><td><code>tracing-subscriber</code> log filter (e.g. <code>debug</code>, <code>warn</code>, <code>lash=trace</code>).</td></tr>
                 <tr><td><code>LASH_NO_OSC52</code></td><td>Disable OSC 52 clipboard escape sequences.</td></tr>
                 <tr><td><code>LASH_INSTALL_DIR</code></td><td>Override the install dir used by <code>--update</code>.</td></tr>
@@ -260,7 +268,7 @@ $ lash --print "Investigate the latest test failure." \
         <div class="section" id="resume-fork">
           <div class="section-header">
             <h2>Resume &amp; Fork</h2>
-            <p>Every session has a UUID and a generated human-readable name. <code>--resume &lt;id_or_name&gt;</code> accepts either, plus the legacy <code>.db</code> filename for old sessions. Without an argument, <code>/resume</code> opens an interactive picker showing the 50 most recent sessions sorted by recency.</p>
+            <p>Every session has a UUID and a generated human-readable name. <code>--resume &lt;id_or_name&gt;</code> accepts either, plus the legacy <code>.db</code> filename for old sessions. Without an argument, <code>/resume</code> opens an interactive picker showing the 50 most recent sessions sorted by recency. The picker hides zero-turn sessions when any non-empty session exists; direct <code>/resume &lt;id-or-name&gt;</code> may still target any session.</p>
           </div>
           <p><code>/fork</code> branches the current session at the current message and opens the fork in a new terminal window. Lash resolves the launcher from the running executable and falls back to finding <code>lash</code> on <code>$PATH</code> if that binary isn't launchable. The launched fork runs <code>lash --resume &lt;new-session-id&gt;</code> in the new terminal.</p>
         </div>

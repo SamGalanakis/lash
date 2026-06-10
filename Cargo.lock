@@ -2923,6 +2923,7 @@ dependencies = [
  "lash-subagents",
  "lash-tool-support",
  "lash-trace",
+ "lashlang",
  "rusqlite",
  "serde",
  "serde_json",

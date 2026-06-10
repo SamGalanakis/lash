@@ -76,7 +76,7 @@ use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
     SharedWorkflowContext, WorkflowContext,
 };
-use restate_sdk::context::{ContextClient, InvocationHandle, RequestTarget};
+use restate_sdk::context::{ContextClient, ContextPromises, InvocationHandle, RequestTarget};
 use restate_sdk::errors::{HandlerError, HandlerResult, TerminalError};
 use restate_sdk::serde::Json;
 use serde::{Serialize, de::DeserializeOwned};
@@ -334,11 +334,10 @@ impl RestateProcessIngressRunner {
             input: record.input,
             event_types: record.event_types,
             provenance: record.provenance.clone(),
+            env_ref: record.env_ref,
+            wake_target: record.wake_target,
         };
-        // Wakes route to the creator scope; the owner scope persisted in
-        // provenance is that creator scope, mirroring the inline worker sweep.
-        let execution_context = ProcessExecutionContext::default()
-            .with_wake_target_scope(record.provenance.owner_scope);
+        let execution_context = ProcessExecutionContext::default();
         let url = format!(
             "{}/LashProcessWorkflow/{}/run/send",
             self.ingress_url.trim_end_matches('/'),
@@ -449,6 +448,11 @@ pub trait LashProcessWorkflow {
 
     #[shared]
     async fn cancel(request: Json<RestateProcessCancelRequest>) -> HandlerResult<Json<()>>;
+
+    #[shared]
+    async fn resolve_event(
+        request: Json<RestateProcessEventResolveRequest>,
+    ) -> HandlerResult<Json<()>>;
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -456,6 +460,13 @@ pub struct RestateProcessWorkflowInput {
     pub registration: ProcessRegistration,
     #[serde(default, skip_serializing_if = "ProcessExecutionContext::is_empty")]
     pub execution_context: ProcessExecutionContext,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateProcessEventResolveRequest {
+    pub process_id: String,
+    pub key: String,
+    pub payload: serde_json::Value,
 }
 
 pub struct LashProcessWorkflowImpl<R> {
@@ -556,6 +567,17 @@ where
             .map(Json)
             .map_err(|err| TerminalError::from_error(err).into())
     }
+
+    async fn resolve_event(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        Json(request): Json<RestateProcessEventResolveRequest>,
+    ) -> HandlerResult<Json<()>> {
+        let payload = serde_json::to_string(&request.payload)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        ctx.resolve_promise(&request.key, payload);
+        Ok(Json(()))
+    }
 }
 
 /// Configuration for [`RestateRuntimeEffectController`].
@@ -622,7 +644,73 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
+
+    fn await_event<'run>(
+        &'run self,
+        key: String,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run;
+
+    fn resolve_event<'run>(
+        &'run self,
+        request: RestateProcessEventResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run;
 }
+
+trait RestateAwaitEventContext {
+    fn await_event_json<'run>(
+        &'run self,
+        key: String,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>;
+}
+
+macro_rules! impl_unsupported_await_event_context {
+    ($($context:ident),+ $(,)?) => {
+        $(
+            impl<'ctx> RestateAwaitEventContext for $context<'ctx> {
+                fn await_event_json<'run>(
+                    &'run self,
+                    _key: String,
+                ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>> {
+                    Box::pin(async move {
+                        Err(TerminalError::from_error(
+                            RestateEffectError::BackgroundScheduler(
+                                "AwaitEvent requires a Restate workflow context".to_string(),
+                            ),
+                        ))
+                    })
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! impl_workflow_await_event_context {
+    ($($context:ident),+ $(,)?) => {
+        $(
+            impl<'ctx> RestateAwaitEventContext for $context<'ctx> {
+                fn await_event_json<'run>(
+                    &'run self,
+                    key: String,
+                ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>> {
+                    Box::pin(async move {
+                        let payload =
+                            restate_sdk::context::ContextPromises::promise::<String>(self, &key)
+                                .await?;
+                        serde_json::from_str(&payload)
+                            .map_err(|err| TerminalError::from_error(err))
+                    })
+                }
+            }
+        )+
+    };
+}
+
+impl_unsupported_await_event_context!(RestateContext, SharedObjectContext, ObjectContext);
+impl_workflow_await_event_context!(SharedWorkflowContext, WorkflowContext);
 
 macro_rules! impl_restate_controller_context {
     ($($context:ident),+ $(,)?) => {
@@ -709,6 +797,44 @@ macro_rules! impl_restate_controller_context {
                             "LashProcessWorkflow",
                             workflow_key.clone(),
                             "cancel",
+                        ),
+                        Json(request),
+                    );
+                    let call = request.call();
+                    Box::pin(async move {
+                        let Json(()) = call.await?;
+                        Ok(())
+                    })
+                }
+
+                fn await_event<'run>(
+                    &'run self,
+                    key: String,
+                ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    RestateAwaitEventContext::await_event_json(self, key)
+                }
+
+                fn resolve_event<'run>(
+                    &'run self,
+                    request: RestateProcessEventResolveRequest,
+                ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    let workflow_key = request.process_id.clone();
+                    let request: restate_sdk::context::Request<
+                        '_,
+                        Json<RestateProcessEventResolveRequest>,
+                        Json<()>,
+                    > = ContextClient::request(
+                        self,
+                        RequestTarget::workflow(
+                            "LashProcessWorkflow",
+                            workflow_key,
+                            "resolve_event",
                         ),
                         Json(request),
                     );
@@ -851,7 +977,7 @@ where
                 let RuntimeEffectCommand::Process { command } = envelope.command else {
                     unreachable!("direct process execution is only selected for process effects");
                 };
-                execute_restate_process_command(&self.context, command, local_executor)
+                execute_restate_process_command(&self.context, *command, local_executor)
                     .await
                     .map(|result| RuntimeEffectOutcome::Process { result })
             }
@@ -868,6 +994,21 @@ where
                     ));
                 }
                 Ok(RuntimeEffectOutcome::Sleep)
+            }
+            RestateEffectExecution::AwaitEvent => {
+                let RuntimeEffectCommand::AwaitEvent { key } = envelope.command else {
+                    unreachable!("await-event execution is only selected for event waits");
+                };
+                self.context
+                    .await_event(key)
+                    .await
+                    .map(|payload| RuntimeEffectOutcome::AwaitEvent { payload })
+                    .map_err(|err| {
+                        RuntimeEffectControllerError::new(
+                            "restate_effect_controller",
+                            err.to_string(),
+                        )
+                    })
             }
             RestateEffectExecution::JournaledRun => {
                 let current_hash = envelope.stable_hash()?;
@@ -920,13 +1061,16 @@ where
             .await?;
             Ok(ProcessEffectOutcome::Start { record })
         }
-        ProcessCommand::List { owner_scope, mode } => {
+        ProcessCommand::List {
+            session_scope,
+            mode,
+        } => {
             let entries = match mode {
                 lash_core::ProcessListMode::Live => {
-                    registry.list_live_handle_grants(&owner_scope).await?
+                    registry.list_live_handle_grants(&session_scope).await?
                 }
                 lash_core::ProcessListMode::All => {
-                    registry.list_handle_grants(&owner_scope).await?
+                    registry.list_handle_grants(&session_scope).await?
                 }
             };
             Ok(ProcessEffectOutcome::List { entries })
@@ -943,26 +1087,6 @@ where
         }
         ProcessCommand::DeleteSession { session_id } => {
             let report = registry.delete_session_process_state(&session_id).await?;
-            for process_id in &report.cancel_process_ids {
-                registry
-                    .append_event(
-                        process_id,
-                        lash_core::ProcessEventAppendRequest::cancel_requested(
-                            process_id,
-                            Some("session deleted".to_string()),
-                        ),
-                    )
-                    .await?;
-                context
-                    .request_process_workflow_cancel(RestateProcessCancelRequest {
-                        process_id: process_id.clone(),
-                        reason: Some("session deleted".to_string()),
-                    })
-                    .await
-                    .map_err(|err| {
-                        RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
-                    })?;
-            }
             Ok(ProcessEffectOutcome::DeleteSession { report })
         }
         ProcessCommand::Await { process_id } => {
@@ -993,15 +1117,48 @@ where
         }
         ProcessCommand::Signal {
             process_id,
+            signal_name,
             request,
             ..
         } => {
             let result = registry.append_event(&process_id, request).await?;
+            let ordinal = signal_ordinal_for_event(
+                registry.as_ref(),
+                &process_id,
+                result.event.event_type.as_str(),
+                result.event.sequence,
+            )
+            .await?;
+            let key = lash_core::process_signal_wait_key(&process_id, &signal_name, ordinal);
+            context
+                .resolve_event(RestateProcessEventResolveRequest {
+                    process_id: process_id.clone(),
+                    key,
+                    payload: result.event.payload.clone(),
+                })
+                .await
+                .map_err(|err| {
+                    RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
+                })?;
             Ok(ProcessEffectOutcome::Signal {
                 event: result.event,
             })
         }
     }
+}
+
+async fn signal_ordinal_for_event(
+    registry: &dyn ProcessRegistry,
+    process_id: &str,
+    event_type: &str,
+    sequence: u64,
+) -> Result<u64, PluginError> {
+    Ok(registry
+        .events_after(process_id, 0)
+        .await?
+        .into_iter()
+        .filter(|event| event.sequence <= sequence && event.event_type == event_type)
+        .count() as u64)
 }
 
 async fn schedule_restate_process<'ctx, C>(
@@ -1018,7 +1175,7 @@ where
     let record = registry.register_process(registration.clone()).await?;
     if let Some(grant) = grant {
         registry
-            .grant_handle(&grant.owner_scope, &process_id, grant.descriptor)
+            .grant_handle(&grant.session_scope, &process_id, grant.descriptor)
             .await?;
     }
     if record.external_ref.is_some() {
@@ -1046,6 +1203,7 @@ where
 enum RestateEffectExecution {
     DirectProcess,
     Timer,
+    AwaitEvent,
     JournaledRun,
 }
 
@@ -1053,6 +1211,7 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
     match command {
         RuntimeEffectCommand::Process { .. } => RestateEffectExecution::DirectProcess,
         RuntimeEffectCommand::Sleep { .. } => RestateEffectExecution::Timer,
+        RuntimeEffectCommand::AwaitEvent { .. } => RestateEffectExecution::AwaitEvent,
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::Direct { .. }
         | RuntimeEffectCommand::ToolCall { .. }

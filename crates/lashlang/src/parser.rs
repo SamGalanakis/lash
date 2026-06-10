@@ -1,6 +1,7 @@
 use crate::ast::{
     AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, LabelMetadata,
-    ProcessDecl, ProcessParam, ProcessStartExpr, Program, TypeDecl, TypeExpr, TypeField, UnaryOp,
+    ProcessDecl, ProcessParam, ProcessSignalDecl, ProcessStartExpr, Program, TypeDecl, TypeExpr,
+    TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -208,6 +209,11 @@ impl Parser {
             break;
         }
         self.expect_exact(TokenKind::RParen, "`)`")?;
+        let signals = if self.peek_contextual("signals") && !self.peek_assignment_target() {
+            self.parse_process_signal_decls()?
+        } else {
+            Vec::new()
+        };
         let return_ty = if matches!(self.peek_kind(), TokenKind::Minus)
             && self
                 .tokens
@@ -226,10 +232,33 @@ impl Parser {
         Ok(ProcessDecl {
             name,
             params,
+            signals,
             return_ty,
             label,
             body,
         })
+    }
+
+    fn parse_process_signal_decls(&mut self) -> Result<Vec<ProcessSignalDecl>, ParseError> {
+        self.expect_contextual("signals")?;
+        self.expect_exact(TokenKind::LBrace, "`{`")?;
+        let mut signals = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            let name = self.expect_ident()?;
+            self.expect_exact(TokenKind::Colon, "`:`")?;
+            let ty = self.parse_type_expr()?;
+            signals.push(ProcessSignalDecl { name, ty });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+                if matches!(self.peek_kind(), TokenKind::RBrace) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect_exact(TokenKind::RBrace, "`}`")?;
+        Ok(signals)
     }
 
     fn parse_statement_expr(&mut self) -> Result<Expr, ParseError> {
@@ -772,20 +801,6 @@ impl Parser {
                 if name == "sleep" {
                     return self.parse_sleep_expr();
                 }
-                if name == "wait" && self.peek_contextual("signal") {
-                    self.bump();
-                    return Ok(Expr::WaitSignal);
-                }
-                if name == "signal" && self.peek_contextual("run") {
-                    self.bump();
-                    let run = self.parse_expr()?;
-                    self.expect_contextual("with")?;
-                    let payload = self.parse_expr()?;
-                    return Ok(Expr::SignalRun {
-                        run: Box::new(run),
-                        payload: Box::new(payload),
-                    });
-                }
                 if name == "start" && matches!(self.peek_kind(), TokenKind::Call) {
                     return Err(ParseError::Unexpected {
                         found: "`start call`".to_string(),
@@ -805,6 +820,32 @@ impl Parser {
                 }
                 if matches!(self.peek_kind(), TokenKind::LParen) {
                     let args = self.parse_call_arguments()?;
+                    if name == "wait_signal" {
+                        if args.len() != 1 {
+                            return Err(ParseError::Expected {
+                                expected: "one signal name argument",
+                                found: format!("{} arguments", args.len()),
+                                span: self.tokens[self.index.saturating_sub(1)].span,
+                            });
+                        }
+                        return Ok(Expr::WaitSignal {
+                            name: static_signal_name_arg(&args[0], "wait_signal")?,
+                        });
+                    }
+                    if name == "signal_run" {
+                        if args.len() != 3 {
+                            return Err(ParseError::Expected {
+                                expected: "run handle, signal name, and payload arguments",
+                                found: format!("{} arguments", args.len()),
+                                span: self.tokens[self.index.saturating_sub(1)].span,
+                            });
+                        }
+                        return Ok(Expr::SignalRun {
+                            run: Box::new(args[0].clone()),
+                            name: static_signal_name_arg(&args[1], "signal_run")?,
+                            payload: Box::new(args[2].clone()),
+                        });
+                    }
                     Ok(Expr::BuiltinCall { name, args })
                 } else {
                     Ok(Expr::Variable(name))
@@ -1314,6 +1355,16 @@ impl Parser {
         self.index += 1;
         token
     }
+}
+
+fn static_signal_name_arg(expr: &Expr, call: &'static str) -> Result<AstString, ParseError> {
+    if let Expr::String(name) = expr {
+        return Ok(name.clone());
+    }
+    Err(ParseError::Unexpected {
+        found: format!("non-literal signal name in `{call}`"),
+        span: Span { start: 0, end: 0 },
+    })
 }
 
 fn token_can_be_key(kind: &TokenKind) -> bool {

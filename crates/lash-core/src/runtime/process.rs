@@ -17,16 +17,20 @@ pub use events::{
     ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessTerminalSemantics,
     ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
     ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, lashlang_process_event_types,
+    lashlang_process_signal_event_types, process_signal_event_type,
+    process_signal_name_from_event_type, process_signal_wait_key, validate_process_signal_name,
 };
 pub use materialization::materialize_process_event_semantics;
 pub use model::{
     PROCESS_LEASE_SCHEMA_VERSION, ProcessCancelSummary, ProcessDefinitionSelector,
-    ProcessDefinitionSummary, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput,
-    ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
-    ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord, ProcessRegistration,
-    ProcessScope, ProcessScopeId, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+    ProcessDefinitionSummary, ProcessExecutionContext, ProcessExecutionEnvRef,
+    ProcessExecutionEnvSpec, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease,
+    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+    ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
+    ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
+    ProcessStatus, ProcessStatusFilter, SessionScope, SessionScopeId, WaitKind, WaitState,
+    load_process_execution_env, persist_process_execution_env,
 };
 pub use observation::{
     ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessWorkObserver,

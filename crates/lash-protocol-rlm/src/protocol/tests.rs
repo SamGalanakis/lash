@@ -83,8 +83,8 @@ fn execution_section_hides_processes_when_disabled() {
     assert!(!section.contains("process name"));
     assert!(!section.contains("start name"));
     assert!(!section.contains("sleep for"));
-    assert!(!section.contains("wait signal"));
-    assert!(!section.contains("signal run"));
+    assert!(!section.contains("wait_signal"));
+    assert!(!section.contains("signal_run"));
 }
 
 #[test]
@@ -125,8 +125,8 @@ fn execution_section_hides_sleep_and_signals_independently() {
 
     assert!(section.contains("process name"));
     assert!(!section.contains("sleep for"));
-    assert!(!section.contains("wait signal"));
-    assert!(!section.contains("signal run"));
+    assert!(!section.contains("wait_signal"));
+    assert!(!section.contains("signal_run"));
 }
 
 #[test]
@@ -139,11 +139,11 @@ fn execution_section_documents_foreground_signal_run_when_enabled() {
     );
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
-    // Sending (`signal run`) is documented as foreground-legal; receiving
-    // (`wait signal`) stays process-only.
-    assert!(section.contains("signal run handle with payload"));
+    // Sending (`signal_run`) is documented as foreground-legal; receiving
+    // (`wait_signal`) stays process-only.
+    assert!(section.contains("signal_run(handle, \"name\", payload)"));
     assert!(section.contains("foreground turn as well as inside a process body"));
-    assert!(section.contains("wait signal"));
+    assert!(section.contains("wait_signal(\"name\")"));
     assert!(section.contains("only valid inside a process body"));
 }
 

@@ -323,6 +323,25 @@ impl RuntimeSessionState {
             .unwrap_or(&self.policy)
     }
 
+    pub fn process_execution_env_spec(
+        &self,
+        fallback_policy: &SessionPolicy,
+    ) -> crate::ProcessExecutionEnvSpec {
+        self.current_agent_frame()
+            .map(|frame| {
+                crate::ProcessExecutionEnvSpec::new(
+                    frame.assignment.plugin_options.clone(),
+                    frame.assignment.policy.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                crate::ProcessExecutionEnvSpec::new(
+                    crate::PluginOptions::default(),
+                    fallback_policy.clone(),
+                )
+            })
+    }
+
     pub fn effective_protocol_turn_options(&self) -> &crate::ProtocolTurnOptions {
         self.current_agent_frame()
             .map(|frame| &frame.protocol_turn_options)

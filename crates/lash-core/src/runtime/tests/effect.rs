@@ -198,6 +198,9 @@ impl RuntimeEffectController for RecordingEffectController {
                 }),
             }),
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
+            RuntimeEffectCommand::AwaitEvent { .. } => Ok(RuntimeEffectOutcome::AwaitEvent {
+                payload: serde_json::json!(null),
+            }),
             RuntimeEffectCommand::Direct { request, .. } => {
                 // Both the text-only (`direct_completion`) and full-response
                 // (`direct_llm_completion`) client methods now flow through the
@@ -320,6 +323,24 @@ impl lashlang::LashlangArtifactStore for DurableInMemoryArtifactStore {
         module_ref: &lashlang::ModuleRef,
     ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
         self.inner.get_module_artifact(module_ref).await
+    }
+
+    async fn put_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+        descriptor: &str,
+        bytes: &[u8],
+    ) -> Result<(), lashlang::ArtifactStoreError> {
+        self.inner
+            .put_artifact_bytes(artifact_ref, descriptor, bytes)
+            .await
+    }
+
+    async fn get_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
+        self.inner.get_artifact_bytes(artifact_ref).await
     }
 }
 

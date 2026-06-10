@@ -14,10 +14,11 @@ use lash_core::testing::conformance::{
 };
 use lash_core::{
     DurabilityTier, EffectHost, EffectScope, HostEventOccurrenceRequest, HostEventStore,
-    LashlangArtifactStore, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence,
-    TriggerSubscriptionDraft, TriggerSubscriptionFilter,
+    LashlangArtifactStore, ProcessExecutionEnvRef, ProcessOriginator, ProcessRegistry,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeInvocation, RuntimePersistence, SessionScope, TriggerSubscriptionDraft,
+    TriggerSubscriptionFilter,
 };
 use lash_sqlite_store::{
     SqliteEffectHost, SqliteEffectReplayOptions, SqliteHostEventStore, SqliteProcessRegistry,
@@ -87,8 +88,11 @@ fn trigger_subscription_draft(
 ) -> TriggerSubscriptionDraft {
     let mut inputs = BTreeMap::new();
     inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+    let registrant_scope = SessionScope::new(session_id);
     TriggerSubscriptionDraft {
-        session_id: session_id.to_string(),
+        registrant: ProcessOriginator::session(registrant_scope.clone()),
+        env_ref: ProcessExecutionEnvRef::new(format!("process-env:{session_id}")),
+        wake_target: Some(registrant_scope),
         name: Some(process_name.to_string()),
         source_type: "ui.button.pressed".to_string(),
         source_key: source_key.to_string(),

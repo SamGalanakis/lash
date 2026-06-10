@@ -7,10 +7,9 @@ use lash_postgres_store::PostgresStorage;
 use lash_restate::RestateProcessDeployment;
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_FINAL_TEXT,
-    TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario, build_e2e_core,
-    default_session_child_owner_scope_pattern, default_session_owner_scope_id, ensure_e2e_schema,
-    env, expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows,
-    s3_store_from_env,
+    ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
+    build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
+    process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -46,6 +45,7 @@ async fn main() -> Result<()> {
         workflow_id: "e2e-main".to_string(),
         fail_once: false,
         scenario: TurnScenario::KitchenSink,
+        signal: None,
     };
     submit_workflow(&ingress_url, &main_request).await?;
     let main_response = wait_for_terminal_result(storage.pool(), &main_request.workflow_id).await?;
@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         workflow_id: "e2e-main-wake".to_string(),
         fail_once: false,
         scenario: TurnScenario::DrainQueued,
+        signal: None,
     };
     submit_workflow(&ingress_url, &main_wake_request).await?;
     let main_wake_response =
@@ -71,6 +72,7 @@ async fn main() -> Result<()> {
         workflow_id: "e2e-trigger-setup".to_string(),
         fail_once: false,
         scenario: TurnScenario::TriggerSetup,
+        signal: None,
     };
     submit_workflow(&ingress_url, &trigger_request).await?;
     let trigger_setup_response =
@@ -85,15 +87,29 @@ async fn main() -> Result<()> {
     .await?;
     wait_for_process_terminal(storage.pool(), &trigger_process_id).await?;
 
+    let signal_setup_request = TurnRequest {
+        workflow_id: "e2e-signal-suspend-setup".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::SignalSuspend,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &signal_setup_request).await?;
+    let signal_setup_response =
+        wait_for_terminal_result(storage.pool(), &signal_setup_request.workflow_id).await?;
+    let signal_process_id = assert_signal_suspend_setup_response(&signal_setup_response)?;
+    wait_for_process_signal_wait(storage.pool(), &signal_process_id, "first", 1).await?;
+
     let failover_request = TurnRequest {
         workflow_id: "e2e-failover".to_string(),
         fail_once: true,
         scenario: TurnScenario::KitchenSink,
+        signal: None,
     };
     submit_workflow(&ingress_url, &failover_request).await?;
     let failover_response =
         wait_for_terminal_result(storage.pool(), &failover_request.workflow_id).await?;
     assert_kitchen_sink_response(&failover_response, true)?;
+    wait_for_process_signal_wait(storage.pool(), &signal_process_id, "first", 1).await?;
     wait_for_queued_work(
         &storage,
         &mock_provider_base_url,
@@ -105,13 +121,38 @@ async fn main() -> Result<()> {
         workflow_id: "e2e-failover-wake".to_string(),
         fail_once: false,
         scenario: TurnScenario::DrainQueued,
+        signal: None,
     };
     submit_workflow(&ingress_url, &failover_wake_request).await?;
     let failover_wake_response =
         wait_for_terminal_result(storage.pool(), &failover_wake_request.workflow_id).await?;
     assert_queued_wake_response(&failover_wake_response)?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 5).await?;
+    submit_signal_workflow(
+        &ingress_url,
+        storage.pool(),
+        "e2e-signal-first",
+        &signal_process_id,
+        "first",
+        "first-1",
+        json!({ "phase": "first" }),
+    )
+    .await?;
+    wait_for_process_signal_wait(storage.pool(), &signal_process_id, "second", 1).await?;
+    submit_signal_workflow(
+        &ingress_url,
+        storage.pool(),
+        "e2e-signal-second",
+        &signal_process_id,
+        "second",
+        "second-1",
+        json!({ "phase": "second" }),
+    )
+    .await?;
+    wait_for_process_terminal(storage.pool(), &signal_process_id).await?;
+    assert_signal_process_output(storage.pool(), &signal_process_id).await?;
+
+    let responses = wait_for_terminal_results(storage.pool(), 8).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -134,9 +175,10 @@ async fn main() -> Result<()> {
     }
 
     println!(
-        "restate-postgres-workers e2e passed: {} workflows, trigger process {}, traces {}",
+        "restate-postgres-workers e2e passed: {} workflows, trigger process {}, signal process {}, traces {}",
         responses.len(),
         trigger_process_id,
+        signal_process_id,
         trace_dir
             .as_ref()
             .map(|dir| dir.display().to_string())
@@ -300,6 +342,40 @@ async fn submit_workflow(ingress_url: &str, request: &TurnRequest) -> Result<()>
         request.workflow_id,
         last_error.unwrap_or_else(|| "unknown error".to_string())
     )
+}
+
+async fn submit_signal_workflow(
+    ingress_url: &str,
+    pool: &sqlx::PgPool,
+    workflow_id: &str,
+    process_id: &str,
+    signal_name: &str,
+    signal_id: &str,
+    payload: serde_json::Value,
+) -> Result<TurnResponse> {
+    let request = TurnRequest {
+        workflow_id: workflow_id.to_string(),
+        fail_once: false,
+        scenario: TurnScenario::SignalProcess,
+        signal: Some(ProcessSignalRequest {
+            process_id: process_id.to_string(),
+            signal_name: signal_name.to_string(),
+            signal_id: signal_id.to_string(),
+            payload,
+        }),
+    };
+    submit_workflow(ingress_url, &request).await?;
+    let response = wait_for_terminal_result(pool, workflow_id).await?;
+    anyhow::ensure!(
+        response
+            .submitted_value
+            .get("signalled")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "signal workflow `{workflow_id}` did not submit signalled=true: {}",
+        response.submitted_value
+    );
+    Ok(response)
 }
 
 fn workflow_send_url(ingress_url: &str, workflow_id: &str) -> String {
@@ -501,6 +577,24 @@ fn assert_trigger_setup_response(response: &TurnResponse) -> Result<()> {
     Ok(())
 }
 
+fn assert_signal_suspend_setup_response(response: &TurnResponse) -> Result<String> {
+    anyhow::ensure!(
+        response
+            .submitted_value
+            .get("final")
+            .and_then(Value::as_str)
+            == Some("signal-suspend-started"),
+        "signal setup did not submit signal-suspend-started: {}",
+        response.submitted_value
+    );
+    let process_id = response
+        .submitted_value
+        .get("process_id")
+        .and_then(Value::as_str)
+        .context("signal setup submitted no process_id")?;
+    Ok(process_id.to_string())
+}
+
 async fn wait_for_queued_work(
     storage: &PostgresStorage,
     mock_provider_base_url: &str,
@@ -530,6 +624,41 @@ async fn wait_for_queued_work(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     anyhow::bail!("timed out waiting for queued process wake")
+}
+
+async fn wait_for_process_signal_wait(
+    pool: &sqlx::PgPool,
+    process_id: &str,
+    signal_name: &str,
+    ordinal: u64,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT status, record_json FROM lash_processes WHERE process_id = $1")
+                .bind(process_id)
+                .fetch_optional(pool)
+                .await
+                .with_context(|| format!("load process `{process_id}` wait state"))?;
+        if let Some((status, record_json)) = row {
+            anyhow::ensure!(
+                status == "running",
+                "process `{process_id}` reached status `{status}` before signal `{signal_name}` wait"
+            );
+            let record: Value = serde_json::from_str(&record_json)
+                .with_context(|| format!("decode process `{process_id}` record"))?;
+            let wait = record.get("wait").cloned().unwrap_or(Value::Null);
+            let kind = wait.get("kind").cloned().unwrap_or(Value::Null);
+            if kind.get("kind").and_then(Value::as_str) == Some("signal")
+                && kind.get("name").and_then(Value::as_str) == Some(signal_name)
+                && kind.get("ordinal").and_then(Value::as_u64) == Some(ordinal)
+            {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    anyhow::bail!("timed out waiting for process `{process_id}` signal `{signal_name}` wait")
 }
 
 async fn emit_button_event(
@@ -581,6 +710,63 @@ async fn emit_button_event(
         .context("host event did not start a process")
 }
 
+async fn assert_signal_process_output(pool: &sqlx::PgPool, process_id: &str) -> Result<()> {
+    let event_json: String = sqlx::query_scalar(
+        "SELECT event_json
+         FROM lash_process_events
+         WHERE process_id = $1 AND event_type = 'process.completed'",
+    )
+    .bind(process_id)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("load completed event for signal process `{process_id}`"))?;
+    let event: Value = serde_json::from_str(&event_json)
+        .with_context(|| format!("decode completed event for signal process `{process_id}`"))?;
+    let await_output = event
+        .pointer("/payload/await_output")
+        .with_context(|| format!("completed event missing await output: {event}"))?;
+    anyhow::ensure!(
+        await_output.get("type").and_then(Value::as_str) == Some("success"),
+        "signal process `{process_id}` completed with non-success output: {await_output}"
+    );
+    let value = await_output
+        .get("value")
+        .with_context(|| format!("completed event missing success value: {event}"))?;
+    anyhow::ensure!(
+        value.pointer("/first/phase").and_then(Value::as_str) == Some("first")
+            && value.pointer("/second/phase").and_then(Value::as_str) == Some("second"),
+        "signal process `{process_id}` completed with unexpected value: {value}"
+    );
+
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT event_type
+         FROM lash_process_events
+         WHERE process_id = $1
+         ORDER BY sequence",
+    )
+    .bind(process_id)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("load signal process `{process_id}` events"))?;
+    let first_signal = events
+        .iter()
+        .position(|event| event == "signal.first")
+        .context("signal.first event missing")?;
+    let second_signal = events
+        .iter()
+        .position(|event| event == "signal.second")
+        .context("signal.second event missing")?;
+    let completed = events
+        .iter()
+        .position(|event| event == "process.completed")
+        .context("process.completed event missing")?;
+    anyhow::ensure!(
+        first_signal < second_signal && second_signal < completed,
+        "signal process events out of order: {events:?}"
+    );
+    Ok(())
+}
+
 async fn wait_for_process_terminal(pool: &sqlx::PgPool, process_id: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
@@ -609,17 +795,14 @@ async fn assert_processes_terminal(pool: &sqlx::PgPool) -> Result<()> {
     let rows = sqlx::query_as::<_, (String, String, String)>(
         "SELECT process_id, status, record_json
          FROM lash_processes
-         WHERE owner_scope_id = $1 OR owner_scope_id LIKE $2
          ORDER BY created_at_ms, process_id",
     )
-    .bind(default_session_owner_scope_id())
-    .bind(default_session_child_owner_scope_pattern())
     .fetch_all(pool)
     .await
     .context("load process rows")?;
     anyhow::ensure!(
-        rows.len() >= 9,
-        "expected at least 9 process rows for kitchen sink + failover + trigger, got {}",
+        rows.len() >= 10,
+        "expected at least 10 process rows for kitchen sink + failover + trigger + signal, got {}",
         rows.len()
     );
     let terminal = rows
@@ -656,13 +839,10 @@ async fn assert_processes_terminal(pool: &sqlx::PgPool) -> Result<()> {
             LEFT JOIN lash_process_events e
               ON e.process_id = p.process_id
              AND e.event_type IN ('process.completed', 'process.failed', 'process.cancelled')
-            WHERE p.owner_scope_id = $1 OR p.owner_scope_id LIKE $2
             GROUP BY p.process_id
             HAVING COUNT(e.process_id) <> 1
         ) inconsistent",
     )
-    .bind(default_session_owner_scope_id())
-    .bind(default_session_child_owner_scope_pattern())
     .fetch_one(pool)
     .await
     .context("count process rows without exactly one terminal event")?;
@@ -787,7 +967,12 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
     .fetch_all(pool)
     .await
     .context("list provider scenarios")?;
-    for expected in ["kitchen_sink", "queued_wake", "trigger_setup"] {
+    for expected in [
+        "kitchen_sink",
+        "queued_wake",
+        "trigger_setup",
+        "signal_suspend",
+    ] {
         anyhow::ensure!(
             scenarios.iter().any(|scenario| scenario == expected),
             "provider scenario `{expected}` missing from {scenarios:?}"
@@ -829,8 +1014,8 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
     .await
     .context("count live replay checks")?;
     anyhow::ensure!(
-        live_replay_checks >= 3,
-        "expected live replay checks for three workflow turns, got {live_replay_checks}"
+        live_replay_checks >= 4,
+        "expected live replay checks for four workflow turns, got {live_replay_checks}"
     );
     Ok(())
 }
@@ -838,9 +1023,8 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
 async fn assert_host_event_delivery(pool: &sqlx::PgPool, trigger_process_id: &str) -> Result<()> {
     let trigger_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM lash_host_event_trigger_subscriptions
-         WHERE session_id = $1 AND source_type = $2 AND enabled = true",
+         WHERE source_type = $1 AND enabled = true",
     )
-    .bind(DEFAULT_SESSION_ID)
     .bind(BUTTON_SOURCE_TYPE)
     .fetch_one(pool)
     .await

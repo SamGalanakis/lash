@@ -34,7 +34,7 @@
             <div class="diagram-title">TurnOutcome shape</div>
             <pre data-lang="rust"><code>pub enum TurnOutcome {
     Finished(TurnFinish),
-    AgentFrameSwitch { frame_id: String },
+    AgentFrameSwitch { frame_id: String, task: String },
     Stopped(TurnStop),
 }
 

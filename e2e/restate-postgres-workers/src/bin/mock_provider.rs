@@ -58,6 +58,7 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
     let (scenario, content) = match scenario {
         MockScenario::TriggerSetup => ("trigger_setup", trigger_setup_script()),
         MockScenario::QueuedWake => ("queued_wake", queued_wake_script()),
+        MockScenario::SignalSuspend => ("signal_suspend", signal_suspend_script(&workflow_id)),
         MockScenario::KitchenSink => (
             "kitchen_sink",
             kitchen_sink_script(&workflow_id, full_text.contains("fail_once=true")),
@@ -157,11 +158,13 @@ enum MockScenario {
     KitchenSink,
     QueuedWake,
     TriggerSetup,
+    SignalSuspend,
 }
 
 fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     [
         ("trigger_setup=true", MockScenario::TriggerSetup),
+        ("signal_suspend=true", MockScenario::SignalSuspend),
         ("Background process wake", MockScenario::QueuedWake),
         ("fail_once=", MockScenario::KitchenSink),
     ]
@@ -277,6 +280,33 @@ submit { registered: true, handle: handle }
 ```
 "#
     .to_string()
+}
+
+fn signal_suspend_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Start the signal suspension process but do not await it.
+
+```lashlang
+process waiter(workflow_id: str) signals {{ first: any, second: any }} {{
+  first = wait_signal("first")
+  second = wait_signal("second")
+  finish {{
+    workflow_id: workflow_id,
+    first: first,
+    second: second
+  }}
+}}
+
+handle = start waiter(workflow_id: "{workflow_id}")
+submit {{
+  workflow_id: "{workflow_id}",
+  process_id: handle.id,
+  final: "signal-suspend-started"
+}}
+```
+"#
+    )
 }
 
 fn queued_wake_script() -> String {

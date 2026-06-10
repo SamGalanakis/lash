@@ -252,7 +252,7 @@
           <dt>host app owns</dt>
           <dd>Auth, transport, product state, storage backends, and workflow/effect hosts. The host decides which providers, stores, resources, and authorities exist.</dd>
           <dt>lash owns</dt>
-          <dd>The runtime records inside that boundary: session graph, turn commit stamps, committed checkpoints, queued work, attachment manifest, semantic events, and plugin execution.</dd>
+          <dd>The runtime records inside that boundary: session graph, turn commit stamps, committed checkpoints, queued work, process records, attachment manifest, semantic events, and plugin execution.</dd>
         </dl>
       </div>
     </section>
@@ -301,9 +301,9 @@ submit notes</code></pre>
 finding = await agents.spawn({ task: "audit auth.rs", output: Finding })?
 
 // identity is the path the model names: gmail.work, never gmail.personal
-process notify(mail: Gmail) { await mail.send({ body: finding })? finish true }
-start notify(mail: gmail.work)</code></pre>
-        <p><code>agents.spawn</code> runs a typed subagent on the side. Identity is the resource path the model names, and the host decides which paths exist. <code>start</code> launches a durable background process the turn can <code>await</code>, <code>signal</code>, or <code>cancel</code>.</p>
+process notify(mail: Gmail, finding: Finding) { await mail.send({ body: finding })? finish true }
+start notify(mail: gmail.work, finding: finding)</code></pre>
+        <p><code>agents.spawn</code> runs a typed subagent on the side. Identity is the resource path the model names, and the host decides which paths exist. <code>start</code> launches a durable background process the turn can <code>await</code>, <code>signal</code>, or <code>cancel</code>. The process captures its execution environment at start and runs as a self-contained runtime entity — arguments are the only state handover, and it outlives the session that started it.</p>
       </div>
     </section>
 

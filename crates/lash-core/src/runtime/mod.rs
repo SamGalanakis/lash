@@ -108,20 +108,24 @@ pub use process::{
     ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
     ProcessCancelSummary, ProcessDefinitionSelector, ProcessDefinitionSummary, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
-    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
-    ProcessId, ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus,
-    ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId, ProcessService,
-    ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
-    ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec,
-    ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
-    ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver, ProcessWorkSnapshot,
-    UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
-    lashlang_process_event_types, materialize_process_event_semantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef,
+    ProcessExecutionEnvSpec, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease,
+    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+    ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
+    ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver,
+    ProcessWorkSnapshot, SessionScope, SessionScopeId, UnavailableProcessService, WaitKind,
+    WaitState, current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
+    lashlang_process_signal_event_types, load_process_execution_env,
+    materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
+    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
+    validate_process_signal_name,
 };
 pub use process_work_runner::{
     InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner,
@@ -862,6 +866,13 @@ pub trait SessionStoreFactory: Send + Sync {
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String>;
+
+    async fn open_existing_store(
+        &self,
+        _request: &SessionStoreCreateRequest,
+    ) -> Result<Option<Arc<dyn crate::store::RuntimePersistence>>, String> {
+        Ok(None)
+    }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), String>;
 }

@@ -618,7 +618,7 @@ impl ObservableSession {
         self.snapshot().list_all_process_handles().await
     }
 
-    pub fn process_scope(&self) -> ProcessScope {
+    pub fn process_scope(&self) -> SessionScope {
         self.snapshot().process_scope()
     }
 }

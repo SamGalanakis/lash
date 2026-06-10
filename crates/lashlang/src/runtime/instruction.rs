@@ -183,8 +183,12 @@ pub(crate) enum Instruction {
     AwaitHandle,
     SleepFor,
     SleepUntil,
-    ProcessWaitSignal,
-    ProcessSignalRun,
+    ProcessWaitSignal {
+        name: usize,
+    },
+    ProcessSignalRun {
+        name: usize,
+    },
     AwaitHandleUnwrap,
     CancelHandle,
     Intrinsic(IntrinsicOp),
@@ -319,9 +323,9 @@ impl Instruction {
             Instruction::StartProcess { .. } => InstructionProfileTag::StartProcess,
             Instruction::AwaitHandle
             | Instruction::AwaitHandleUnwrap
-            | Instruction::ProcessWaitSignal => InstructionProfileTag::AwaitHandle,
+            | Instruction::ProcessWaitSignal { .. } => InstructionProfileTag::AwaitHandle,
             Instruction::SleepFor | Instruction::SleepUntil => InstructionProfileTag::Sleep,
-            Instruction::ProcessSignalRun => InstructionProfileTag::ProcessControl,
+            Instruction::ProcessSignalRun { .. } => InstructionProfileTag::ProcessControl,
             Instruction::CancelHandle => InstructionProfileTag::CancelHandle,
             Instruction::Intrinsic(_) => InstructionProfileTag::Intrinsic,
             Instruction::AddAssign(_)

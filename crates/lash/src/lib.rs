@@ -202,7 +202,7 @@ pub mod remote {
 }
 
 pub mod process {
-    pub use crate::control::ProcessControl;
+    pub use crate::control::{ProcessControl, Processes};
     pub use lash_core::{
         ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessAwaitOutput,
         ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
@@ -211,11 +211,12 @@ pub mod process {
         ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary, ProcessInput,
         ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
         ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry,
-        ProcessRunHandle, ProcessRuntimeHost, ProcessScope, ProcessScopeId, ProcessService,
-        ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
-        ProcessStatusFilter, ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey,
-        ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver,
-        ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, lashlang_process_event_types,
+        ProcessRunHandle, ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport,
+        ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+        ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery,
+        ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkPoke,
+        ProcessWorkRunner, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+        lashlang_process_event_types,
     };
 }
 

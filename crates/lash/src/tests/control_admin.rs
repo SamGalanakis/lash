@@ -336,9 +336,16 @@ async fn process_start_and_cancel_emit_typed_observation_events() -> Result<()> 
         .start(
             lash_core::ProcessStartRequest::external(
                 process_id,
-                lash_core::ProcessHandleDescriptor::new(Some("test"), Some("observed process")),
+                lash_core::ProcessOriginator::host(),
                 serde_json::Value::Null,
-            ),
+            )
+            .with_grant(Some(lash_core::ProcessStartGrant {
+                session_scope: lash_core::SessionScope::new("request-descriptor"),
+                descriptor: lash_core::ProcessHandleDescriptor::new(
+                    Some("test"),
+                    Some("observed process"),
+                ),
+            })),
             inline_scope(lash_core::EffectScope::process(process_id)),
         )
         .await?;
@@ -492,9 +499,16 @@ async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
         .start(
             lash_core::ProcessStartRequest::external(
                 "host-process",
-                lash_core::ProcessHandleDescriptor::new(Some("test"), Some("host process")),
+                lash_core::ProcessOriginator::host(),
                 serde_json::Value::Null,
-            ),
+            )
+            .with_grant(Some(lash_core::ProcessStartGrant {
+                session_scope: lash_core::SessionScope::new("request-descriptor"),
+                descriptor: lash_core::ProcessHandleDescriptor::new(
+                    Some("test"),
+                    Some("host process"),
+                ),
+            })),
             inline_scope(lash_core::EffectScope::process("host-process")),
         )
         .await?;
@@ -545,9 +559,16 @@ async fn process_control_cancel_all_uses_host_cancel_ability() -> Result<()> {
             .start(
                 lash_core::ProcessStartRequest::external(
                     process_id,
-                    lash_core::ProcessHandleDescriptor::new(Some("test"), Some(process_id)),
+                    lash_core::ProcessOriginator::host(),
                     serde_json::Value::Null,
-                ),
+                )
+                .with_grant(Some(lash_core::ProcessStartGrant {
+                    session_scope: lash_core::SessionScope::new("request-descriptor"),
+                    descriptor: lash_core::ProcessHandleDescriptor::new(
+                        Some("test"),
+                        Some(process_id),
+                    ),
+                })),
                 inline_scope(lash_core::EffectScope::process(process_id)),
             )
             .await?;

@@ -1394,7 +1394,7 @@ async fn queued_wake_delivery_is_source_key_idempotent_and_claimed_once(
     let wake = ProcessWakeDelivery {
         wake_id: "wake-1".to_string(),
         target_session_id: "root".to_string(),
-        target_scope_id: ProcessScopeId::new("session:root"),
+        target_scope_id: SessionScopeId::new("session:root"),
         process_id: "process-1".to_string(),
         sequence: 7,
         event_type: "process.wake".to_string(),

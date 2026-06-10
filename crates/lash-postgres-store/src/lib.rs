@@ -25,8 +25,8 @@ use lash_core::{
     DeliveryPolicy, DurabilityTier, GcReport, MergeKey, ProcessAwaitOutput, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope, RuntimePersistence,
-    SessionMeta, SessionNodeRecord, SessionReadScope, SessionStoreCreateRequest,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, RuntimePersistence, SessionMeta,
+    SessionNodeRecord, SessionReadScope, SessionScope, SessionStoreCreateRequest,
     SessionStoreFactory, SlotPolicy, StoreError, TokenLedgerEntry, VacuumReport,
 };
 use lash_core::{
@@ -392,7 +392,7 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
         CREATE SEQUENCE IF NOT EXISTS lash_host_event_subscription_seq;
         CREATE TABLE IF NOT EXISTS lash_host_event_trigger_subscriptions (
             subscription_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
+            registrant_scope_id TEXT NOT NULL,
             handle TEXT NOT NULL,
             source_type TEXT NOT NULL,
             source_key TEXT NOT NULL,
@@ -400,8 +400,10 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             created_at_ms BIGINT NOT NULL,
             updated_at_ms BIGINT NOT NULL,
             record_json TEXT NOT NULL,
-            UNIQUE(session_id, handle)
+            UNIQUE(registrant_scope_id, handle)
         );
+        CREATE INDEX IF NOT EXISTS idx_lash_host_event_subscriptions_registrant
+            ON lash_host_event_trigger_subscriptions(registrant_scope_id, handle);
         CREATE INDEX IF NOT EXISTS idx_lash_host_event_subscriptions_source
             ON lash_host_event_trigger_subscriptions(source_type, source_key, enabled);
 
@@ -851,6 +853,27 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
                 .map_err(|err| err.to_string())?;
         }
         Ok(Arc::new(store))
+    }
+
+    async fn open_existing_store(
+        &self,
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Option<Arc<dyn RuntimePersistence>>, String> {
+        let store = PostgresSessionStore {
+            pool: self.pool.clone(),
+            session_id: Some(request.session_id.clone()),
+            bound_session: Arc::new(OnceLock::new()),
+        };
+        if store
+            .load_session_meta()
+            .await
+            .map_err(|err| err.to_string())?
+            .is_some()
+        {
+            Ok(Some(Arc::new(store)))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), String> {
@@ -1844,7 +1867,7 @@ fn guard_lease(current: Option<&ProcessLease>, lease_token: &str, now: u64) -> b
 
 async fn list_grants_for_scope(
     pool: &PgPool,
-    owner_scope: &ProcessScope,
+    session_scope: &SessionScope,
     live_only: bool,
 ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
     let status_clause = if live_only {
@@ -1860,7 +1883,7 @@ async fn list_grants_for_scope(
          ORDER BY g.process_id ASC"
     );
     let rows = sqlx::query(&sql)
-        .bind(owner_scope.id().as_str())
+        .bind(session_scope.id().as_str())
         .fetch_all(pool)
         .await
         .map_err(plugin_sqlx_error)?;
@@ -1875,7 +1898,7 @@ async fn list_grants_for_scope(
             serde_json::from_str(&record_json).map_err(process_decode_error)?;
         entries.push((
             ProcessHandleGrant {
-                session_id: owner_scope.session_id.clone(),
+                session_id: session_scope.session_id.clone(),
                 process_id,
                 descriptor,
             },
@@ -1921,7 +1944,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
         )
         .bind(&record.id)
         .bind(&record.registration_hash)
-        .bind(record.owner_scope_id().as_str())
+        .bind(record.originator_scope_id().as_str())
         .bind(record.host_profile_id())
         .bind(record.created_at_ms as i64)
         .bind(record.updated_at_ms as i64)
@@ -1952,7 +1975,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
 
     async fn grant_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
         descriptor: ProcessHandleDescriptor,
     ) -> Result<ProcessHandleGrant, PluginError> {
@@ -1969,8 +1992,8 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 session_id = EXCLUDED.session_id,
                 descriptor_json = EXCLUDED.descriptor_json",
         )
-        .bind(&owner_scope.session_id)
-        .bind(owner_scope.id().as_str())
+        .bind(&session_scope.session_id)
+        .bind(session_scope.id().as_str())
         .bind(process_id)
         .bind(serde_json::to_string(&descriptor).map_err(process_decode_error)?)
         .execute(&mut *tx)
@@ -1978,7 +2001,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
         .map_err(plugin_sqlx_error)?;
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(ProcessHandleGrant {
-            session_id: owner_scope.session_id.clone(),
+            session_id: session_scope.session_id.clone(),
             process_id: process_id.to_string(),
             descriptor,
         })
@@ -1986,13 +2009,13 @@ impl ProcessRegistry for PostgresProcessRegistry {
 
     async fn revoke_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<(), PluginError> {
         sqlx::query(
             "DELETE FROM lash_process_handle_grants WHERE scope_id = $1 AND process_id = $2",
         )
-        .bind(owner_scope.id().as_str())
+        .bind(session_scope.id().as_str())
         .bind(process_id)
         .execute(&self.pool)
         .await
@@ -2002,8 +2025,8 @@ impl ProcessRegistry for PostgresProcessRegistry {
 
     async fn transfer_handle_grants(
         &self,
-        from_scope: &ProcessScope,
-        to_scope: &ProcessScope,
+        from_scope: &SessionScope,
+        to_scope: &SessionScope,
         process_ids: &[String],
     ) -> Result<(), PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
@@ -2051,21 +2074,21 @@ impl ProcessRegistry for PostgresProcessRegistry {
 
     async fn list_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
-        list_grants_for_scope(&self.pool, owner_scope, false).await
+        list_grants_for_scope(&self.pool, session_scope, false).await
     }
 
     async fn list_live_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
-        list_grants_for_scope(&self.pool, owner_scope, true).await
+        list_grants_for_scope(&self.pool, session_scope, true).await
     }
 
     async fn has_handle_grant(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<bool, PluginError> {
         let exists: Option<i64> = sqlx::query_scalar(
@@ -2073,7 +2096,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
              WHERE scope_id = $1 AND process_id = $2
              LIMIT 1",
         )
-        .bind(owner_scope.id().as_str())
+        .bind(session_scope.id().as_str())
         .bind(process_id)
         .fetch_optional(&self.pool)
         .await
@@ -2136,13 +2159,18 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 serde_json::from_str(&record_json).map_err(process_decode_error)?;
             removed.push((process_id, record));
         }
+        // Wake acknowledgements are process-scoped consumed-event markers. Session
+        // deletion removes materialized session-addressed deliveries through the
+        // session store; clearing these rows would re-expose already-consumed wakes
+        // to surviving grants or future host readers.
+        let deleted_wake_count = 0;
         let revoked = sqlx::query("DELETE FROM lash_process_handle_grants WHERE session_id = $1")
             .bind(session_id)
             .execute(&mut *tx)
             .await
             .map_err(plugin_sqlx_error)?
             .rows_affected() as usize;
-        let mut cancel_process_ids = Vec::new();
+        let mut orphaned_process_ids = Vec::new();
         let mut preserved_process_ids = Vec::new();
         for (process_id, record) in removed {
             if record.is_terminal() {
@@ -2156,21 +2184,21 @@ impl ProcessRegistry for PostgresProcessRegistry {
             .await
             .map_err(plugin_sqlx_error)?;
             if remaining == 0 {
-                cancel_process_ids.push(process_id);
+                orphaned_process_ids.push(process_id);
             } else {
                 preserved_process_ids.push(process_id);
             }
         }
         tx.commit().await.map_err(plugin_sqlx_error)?;
-        cancel_process_ids.sort();
-        cancel_process_ids.dedup();
+        orphaned_process_ids.sort();
+        orphaned_process_ids.dedup();
         preserved_process_ids.sort();
         preserved_process_ids.dedup();
         Ok(lash_core::ProcessSessionDeleteReport {
             session_id: session_id.to_string(),
             revoked_handle_count: revoked,
-            deleted_wake_count: 0,
-            cancel_process_ids,
+            deleted_wake_count,
+            orphaned_process_ids,
             preserved_process_ids,
         })
     }
@@ -2208,6 +2236,9 @@ impl ProcessRegistry for PostgresProcessRegistry {
         if prepared.replayed {
             let repaired = if let Some(status) = prepared.status_update.clone() {
                 record.status = status;
+                if record.status.is_terminal() {
+                    record.wait = None;
+                }
                 record.updated_at_ms = prepared.occurred_at_ms;
                 save_process_tx(&mut tx, &record).await?;
                 true
@@ -2243,6 +2274,9 @@ impl ProcessRegistry for PostgresProcessRegistry {
         .map_err(plugin_sqlx_error)?;
         if let Some(status) = prepared.status_update.clone() {
             record.status = status;
+            if record.status.is_terminal() {
+                record.wait = None;
+            }
         }
         record.updated_at_ms = prepared.occurred_at_ms;
         save_process_tx(&mut tx, &record).await?;
@@ -2367,8 +2401,66 @@ impl ProcessRegistry for PostgresProcessRegistry {
         })
     }
 
+    async fn set_process_wait(
+        &self,
+        process_id: &str,
+        wait: lash_core::WaitState,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        if record.is_terminal() {
+            return Err(PluginError::Session(format!(
+                "terminal process `{process_id}` cannot enter a wait state"
+            )));
+        }
+        record.wait = Some(wait);
+        record.updated_at_ms = current_epoch_ms();
+        save_process_tx(&mut tx, &record).await?;
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        self.notify.notify_waiters();
+        Ok(record)
+    }
+
+    async fn clear_process_wait(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        record.wait = None;
+        record.updated_at_ms = current_epoch_ms();
+        save_process_tx(&mut tx, &record).await?;
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        self.notify.notify_waiters();
+        Ok(record)
+    }
+
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
         load_process(&self.pool, process_id).await.ok().flatten()
+    }
+
+    async fn list_processes(
+        &self,
+        filter: &lash_core::ProcessListFilter,
+    ) -> Result<Vec<ProcessRecord>, PluginError> {
+        let rows = sqlx::query(
+            "SELECT record_json FROM lash_processes
+             ORDER BY process_id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let mut records = Vec::new();
+        for row in rows {
+            let json: String = row.get(0);
+            let record: ProcessRecord =
+                serde_json::from_str(&json).map_err(process_decode_error)?;
+            if filter.matches_record(&record) {
+                records.push(record);
+            }
+        }
+        Ok(records)
     }
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {
@@ -2544,7 +2636,9 @@ impl HostEventStore for PostgresHostEventStore {
         let now = current_epoch_ms();
         let record = TriggerSubscriptionRecord {
             subscription_id: subscription_id.clone(),
-            session_id: draft.session_id,
+            registrant: draft.registrant,
+            env_ref: draft.env_ref,
+            wake_target: draft.wake_target,
             handle,
             name: draft.name,
             source_type: draft.source_type,
@@ -2562,13 +2656,13 @@ impl HostEventStore for PostgresHostEventStore {
         };
         sqlx::query(
             "INSERT INTO lash_host_event_trigger_subscriptions (
-                subscription_id, session_id, handle, source_type, source_key,
+                subscription_id, registrant_scope_id, handle, source_type, source_key,
                 enabled, created_at_ms, updated_at_ms, record_json
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(&record.subscription_id)
-        .bind(&record.session_id)
+        .bind(record.registrant_scope_id())
         .bind(&record.handle)
         .bind(&record.source_type)
         .bind(&record.source_key)
@@ -2589,7 +2683,7 @@ impl HostEventStore for PostgresHostEventStore {
     ) -> Result<Vec<TriggerSubscriptionRecord>, PluginError> {
         let rows = sqlx::query(
             "SELECT record_json FROM lash_host_event_trigger_subscriptions
-             ORDER BY session_id ASC, handle ASC",
+             ORDER BY registrant_scope_id ASC, handle ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -2612,16 +2706,26 @@ impl HostEventStore for PostgresHostEventStore {
         handle: &str,
     ) -> Result<bool, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        let json: Option<String> = sqlx::query_scalar(
+        let rows = sqlx::query(
             "SELECT record_json FROM lash_host_event_trigger_subscriptions
-             WHERE session_id = $1 AND handle = $2
+             WHERE handle = $1
+             ORDER BY registrant_scope_id ASC
              FOR UPDATE",
         )
-        .bind(session_id)
         .bind(handle)
-        .fetch_optional(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(plugin_sqlx_error)?;
+        let mut json = None;
+        for row in rows {
+            let candidate: String = row.get(0);
+            let record: TriggerSubscriptionRecord =
+                serde_json::from_str(&candidate).map_err(process_decode_error)?;
+            if record.registrant_session_id() == Some(session_id) {
+                json = Some(candidate);
+                break;
+            }
+        }
         let Some(json) = json else {
             tx.commit().await.map_err(plugin_sqlx_error)?;
             return Ok(false);
@@ -2634,9 +2738,9 @@ impl HostEventStore for PostgresHostEventStore {
         sqlx::query(
             "UPDATE lash_host_event_trigger_subscriptions
              SET enabled = $3, updated_at_ms = $4, record_json = $5
-             WHERE session_id = $1 AND handle = $2",
+             WHERE registrant_scope_id = $1 AND handle = $2",
         )
-        .bind(session_id)
+        .bind(record.registrant_scope_id())
         .bind(handle)
         .bind(record.enabled)
         .bind(record.updated_at_ms as i64)
@@ -2646,6 +2750,39 @@ impl HostEventStore for PostgresHostEventStore {
         .map_err(plugin_sqlx_error)?;
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(changed)
+    }
+
+    async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let rows = sqlx::query(
+            "SELECT subscription_id, record_json
+             FROM lash_host_event_trigger_subscriptions
+             ORDER BY registrant_scope_id ASC, handle ASC
+             FOR UPDATE",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let mut deleted = 0usize;
+        for row in rows {
+            let subscription_id: String = row.get(0);
+            let json: String = row.get(1);
+            let record: TriggerSubscriptionRecord =
+                serde_json::from_str(&json).map_err(process_decode_error)?;
+            if record.registrant_session_id() != Some(session_id) {
+                continue;
+            }
+            sqlx::query(
+                "DELETE FROM lash_host_event_trigger_subscriptions WHERE subscription_id = $1",
+            )
+            .bind(&subscription_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+            deleted = deleted.saturating_add(1);
+        }
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(deleted)
     }
 
     async fn record_occurrence(
@@ -2731,7 +2868,7 @@ impl HostEventStore for PostgresHostEventStore {
         let rows = sqlx::query(
             "SELECT record_json FROM lash_host_event_trigger_subscriptions
              WHERE enabled = TRUE AND source_type = $1 AND source_key = $2
-             ORDER BY session_id ASC, handle ASC",
+             ORDER BY registrant_scope_id ASC, handle ASC",
         )
         .bind(&occurrence.source_type)
         .bind(&occurrence.source_key)
@@ -2820,5 +2957,37 @@ impl lashlang::LashlangArtifactStore for PostgresLashlangArtifactStore {
                     .map_err(lashlang::ArtifactStoreError::from)
             })
             .transpose()
+    }
+
+    async fn put_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+        _descriptor: &str,
+        bytes: &[u8],
+    ) -> Result<(), lashlang::ArtifactStoreError> {
+        sqlx::query(
+            "INSERT INTO lash_lashlang_artifacts (module_ref, artifact_bytes)
+             VALUES ($1, $2)
+             ON CONFLICT (module_ref) DO UPDATE SET artifact_bytes = EXCLUDED.artifact_bytes",
+        )
+        .bind(artifact_ref)
+        .bind(bytes)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_artifact_bytes(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
+        sqlx::query_scalar(
+            "SELECT artifact_bytes FROM lash_lashlang_artifacts WHERE module_ref = $1",
+        )
+        .bind(artifact_ref)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 }

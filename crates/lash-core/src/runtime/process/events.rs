@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use super::model::{ProcessId, ProcessScope, ProcessScopeId};
+use super::model::{ProcessId, SessionScope, SessionScopeId};
 use super::validation::process_event_payload_hash;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -180,6 +180,33 @@ pub struct ProcessWake {
     pub dedupe_key: String,
 }
 
+pub fn process_signal_event_type(signal_name: &str) -> Result<String, crate::PluginError> {
+    validate_process_signal_name(signal_name)?;
+    Ok(format!("signal.{signal_name}"))
+}
+
+pub fn process_signal_name_from_event_type(event_type: &str) -> Option<&str> {
+    event_type.strip_prefix("signal.")
+}
+
+pub fn process_signal_wait_key(process_id: &str, signal_name: &str, ordinal: u64) -> String {
+    format!("process:{process_id}:signal.{signal_name}:{ordinal}")
+}
+
+pub fn validate_process_signal_name(signal_name: &str) -> Result<(), crate::PluginError> {
+    let valid = !signal_name.is_empty()
+        && signal_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(crate::PluginError::Session(format!(
+            "process signal name must be non-empty and contain only ASCII letters, digits, `_`, or `-`, got `{signal_name}`"
+        )))
+    }
+}
+
 pub fn lashlang_process_event_types() -> Vec<ProcessEventType> {
     vec![
         ProcessEventType {
@@ -199,12 +226,74 @@ pub fn lashlang_process_event_types() -> Vec<ProcessEventType> {
                 ..ProcessEventSemanticsSpec::default()
             },
         },
-        ProcessEventType {
-            name: "process.signal".to_string(),
-            payload_schema: crate::LashSchema::any(),
-            semantics: ProcessEventSemanticsSpec::default(),
-        },
     ]
+}
+
+pub fn lashlang_process_signal_event_types(
+    process: &lashlang::ProcessDecl,
+) -> Vec<ProcessEventType> {
+    process
+        .signals
+        .iter()
+        .map(|signal| ProcessEventType {
+            name: process_signal_event_type(signal.name.as_str())
+                .expect("lashlang process signal declarations use parser-validated names"),
+            payload_schema: crate::LashSchema::new(lashlang_type_expr_schema(&signal.ty)),
+            semantics: ProcessEventSemanticsSpec::default(),
+        })
+        .collect()
+}
+
+fn lashlang_type_expr_schema(ty: &lashlang::TypeExpr) -> serde_json::Value {
+    match ty {
+        lashlang::TypeExpr::Any
+        | lashlang::TypeExpr::Dict
+        | lashlang::TypeExpr::Ref(_)
+        | lashlang::TypeExpr::Process { .. }
+        | lashlang::TypeExpr::TriggerHandle(_) => serde_json::json!({}),
+        lashlang::TypeExpr::Str => serde_json::json!({ "type": "string" }),
+        lashlang::TypeExpr::Int => serde_json::json!({ "type": "integer" }),
+        lashlang::TypeExpr::Float => serde_json::json!({ "type": "number" }),
+        lashlang::TypeExpr::Bool => serde_json::json!({ "type": "boolean" }),
+        lashlang::TypeExpr::Null => serde_json::json!({ "type": "null" }),
+        lashlang::TypeExpr::Enum(values) => serde_json::json!({
+            "enum": values.iter().map(|value| value.as_str()).collect::<Vec<_>>()
+        }),
+        lashlang::TypeExpr::List(item) => serde_json::json!({
+            "type": "array",
+            "items": lashlang_type_expr_schema(item),
+        }),
+        lashlang::TypeExpr::Object(fields) => {
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+            for field in fields {
+                properties.insert(field.name.to_string(), lashlang_type_expr_schema(&field.ty));
+                if !field.optional {
+                    required.push(serde_json::Value::String(field.name.to_string()));
+                }
+            }
+            let mut schema = serde_json::Map::new();
+            schema.insert(
+                "type".to_string(),
+                serde_json::Value::String("object".to_string()),
+            );
+            schema.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+            if !required.is_empty() {
+                schema.insert("required".to_string(), serde_json::Value::Array(required));
+            }
+            schema.insert(
+                "additionalProperties".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            serde_json::Value::Object(schema)
+        }
+        lashlang::TypeExpr::Union(variants) => serde_json::json!({
+            "anyOf": variants.iter().map(lashlang_type_expr_schema).collect::<Vec<_>>()
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -232,7 +321,7 @@ pub struct ProcessEventAppendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<crate::RuntimeReplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_target_scope: Option<ProcessScope>,
+    pub wake_target_scope: Option<SessionScope>,
 }
 
 impl ProcessEventAppendRequest {
@@ -257,12 +346,12 @@ impl ProcessEventAppendRequest {
         self
     }
 
-    pub fn with_wake_target_scope(mut self, scope: ProcessScope) -> Self {
+    pub fn with_wake_target_scope(mut self, scope: SessionScope) -> Self {
         self.wake_target_scope = Some(scope);
         self
     }
 
-    pub fn with_optional_wake_target_scope(mut self, scope: Option<ProcessScope>) -> Self {
+    pub fn with_optional_wake_target_scope(mut self, scope: Option<SessionScope>) -> Self {
         self.wake_target_scope = scope;
         self
     }
@@ -283,7 +372,7 @@ impl ProcessEventAppendRequest {
 pub struct ProcessWakeDelivery {
     pub wake_id: String,
     pub target_session_id: String,
-    pub target_scope_id: ProcessScopeId,
+    pub target_scope_id: SessionScopeId,
     pub process_id: ProcessId,
     pub sequence: u64,
     #[serde(default = "default_process_wake_event_type")]
@@ -318,6 +407,16 @@ pub(super) fn default_process_event_types() -> Vec<ProcessEventType> {
     vec![
         ProcessEventType {
             name: "process.cancel_requested".to_string(),
+            payload_schema: crate::LashSchema::any(),
+            semantics: ProcessEventSemanticsSpec::default(),
+        },
+        ProcessEventType {
+            name: "process.waiting".to_string(),
+            payload_schema: crate::LashSchema::any(),
+            semantics: ProcessEventSemanticsSpec::default(),
+        },
+        ProcessEventType {
+            name: "process.resumed".to_string(),
             payload_schema: crate::LashSchema::any(),
             semantics: ProcessEventSemanticsSpec::default(),
         },

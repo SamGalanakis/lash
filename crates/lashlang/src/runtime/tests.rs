@@ -84,7 +84,8 @@ impl ExecutionHost for RecordingProcessHost {
                 self.sleeps.lock().expect("sleeps lock").push(sleep);
                 Ok(AbilityResult::Value(Value::Null))
             }
-            AbilityOp::WaitSignal => {
+            AbilityOp::WaitSignal { name } => {
+                assert_eq!(name, "ready");
                 Ok(AbilityResult::Value(Value::String("signal-payload".into())))
             }
             AbilityOp::SignalRun(signal) => {
@@ -634,8 +635,12 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
         Instruction::AwaitHandle => "await_handle".to_string(),
         Instruction::SleepFor => "sleep_for".to_string(),
         Instruction::SleepUntil => "sleep_until".to_string(),
-        Instruction::ProcessWaitSignal => "process_wait_signal".to_string(),
-        Instruction::ProcessSignalRun => "process_signal_run".to_string(),
+        Instruction::ProcessWaitSignal { name } => {
+            format!("process_wait_signal {}", name_text(chunk, name))
+        }
+        Instruction::ProcessSignalRun { name } => {
+            format!("process_signal_run {}", name_text(chunk, name))
+        }
         Instruction::AwaitHandleUnwrap => "await_handle_unwrap".to_string(),
         Instruction::CancelHandle => "cancel_handle".to_string(),
         Instruction::Intrinsic(op) => intrinsic_snapshot(chunk, op),
@@ -3801,10 +3806,13 @@ async fn process_lifecycle_controls_sleep_wait_and_signal() {
         Expr::SleepFor(Box::new(Expr::Number(5.0))),
         Expr::Assign {
             target: crate::AssignTarget::variable("payload".into()),
-            expr: Box::new(Expr::WaitSignal),
+            expr: Box::new(Expr::WaitSignal {
+                name: "ready".into(),
+            }),
         },
         Expr::SignalRun {
             run: Box::new(Expr::Variable("run".into())),
+            name: "ready".into(),
             payload: Box::new(Expr::Variable("payload".into())),
         },
         Expr::Finish(Some(Box::new(Expr::Variable("payload".into())))),
@@ -3868,13 +3876,18 @@ async fn process_mode_falling_off_end_finishes_null() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn foreground_rejects_programmatic_process_controls() {
-    // `signal run` (sending) is intentionally NOT in this list: it is allowed
+    // `signal_run` (sending) is intentionally NOT in this list: it is allowed
     // from the foreground turn, like `await` / `cancel`. Only the receiving
-    // side, `wait signal`, plus the run-completion controls, are process-only.
+    // side, `wait_signal`, plus the run-completion controls, are process-only.
     for (keyword, stmt) in [
         ("yield", Expr::Yield(Box::new(Expr::String("event".into())))),
         ("wake", Expr::Wake(Box::new(Expr::String("event".into())))),
-        ("wait signal", Expr::WaitSignal),
+        (
+            "wait_signal",
+            Expr::WaitSignal {
+                name: "ready".into(),
+            },
+        ),
         (
             "finish",
             Expr::Finish(Some(Box::new(Expr::String("done".into())))),
@@ -3895,15 +3908,17 @@ async fn foreground_rejects_programmatic_process_controls() {
 async fn foreground_allows_signal_run() {
     let program = Program::block(vec![Expr::SignalRun {
         run: Box::new(Expr::String("handle".into())),
+        name: "ready".into(),
         payload: Box::new(Expr::String("ping".into())),
     }]);
     let mut state = State::new();
     let host = RecordingProcessHost::default();
     execute_program(&program, &mut state, &host)
         .await
-        .expect("foreground signal run should be allowed");
+        .expect("foreground signal_run should be allowed");
     let signals = host.signals.lock().expect("signals lock");
     assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].name, "ready");
     assert_eq!(signals[0].payload, Value::String("ping".into()));
 }
 

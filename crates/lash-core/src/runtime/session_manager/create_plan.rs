@@ -40,6 +40,7 @@ pub(in crate::runtime::session_manager) async fn resolve_session_create_plan(
     let plugin_authority = crate::plugin::SessionAuthorityContext {
         tool_access: request.tool_access.clone(),
         subagent: request.subagent.clone(),
+        plugin_options: request.plugin_options.clone(),
     };
 
     Ok(SessionCreatePlan {

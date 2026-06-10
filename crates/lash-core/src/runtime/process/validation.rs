@@ -46,7 +46,10 @@ pub fn prepare_process_event_append(
                 existing.invocation.clone(),
                 existing.occurred_at,
                 existing.semantics.wake.clone(),
-                request.wake_target_scope.clone(),
+                request
+                    .wake_target_scope
+                    .clone()
+                    .or_else(|| record.wake_target.clone()),
             )?;
             return Ok(PreparedProcessEventAppend {
                 event: existing,
@@ -96,7 +99,6 @@ pub fn prepare_process_event_append(
         event_type: request.event_type,
         payload: request.payload,
         invocation: crate::runtime::causal::process_event_invocation(
-            &record.provenance.owner_scope.session_id,
             process_id,
             sequence,
             declared.name.as_str(),
@@ -113,7 +115,9 @@ pub fn prepare_process_event_append(
         event.invocation.clone(),
         event.occurred_at,
         semantics.wake.clone(),
-        request.wake_target_scope,
+        request
+            .wake_target_scope
+            .or_else(|| record.wake_target.clone()),
     )?;
     Ok(PreparedProcessEventAppend {
         event,
@@ -137,15 +141,13 @@ fn prepare_wake_delivery(
     event_invocation: crate::RuntimeInvocation,
     occurred_at: std::time::SystemTime,
     wake: Option<super::events::ProcessWake>,
-    wake_target_scope: Option<super::model::ProcessScope>,
+    wake_target_scope: Option<super::model::SessionScope>,
 ) -> Result<Option<ProcessWakeDelivery>, PluginError> {
     let Some(wake) = wake else {
         return Ok(None);
     };
     let Some(target_scope) = wake_target_scope else {
-        return Err(PluginError::Session(format!(
-            "process `{process_id}` emitted wake event `{event_type}` without a wake target scope"
-        )));
+        return Ok(None);
     };
     process_wake_delivery(ProcessWakeDeliveryRequest {
         target_scope,
@@ -233,17 +235,31 @@ pub(super) fn validate_process_registration(
             "process id must be a non-empty string".to_string(),
         ));
     }
-    if registration.provenance.owner_scope.is_empty() {
-        return Err(PluginError::Session(format!(
-            "process `{}` owner scope must include a session id",
-            registration.id
-        )));
-    }
     if registration.provenance.host_profile_id.trim().is_empty() {
         return Err(PluginError::Session(format!(
             "process `{}` host profile id must be non-empty",
             registration.id
         )));
+    }
+    match registration.input.as_ref() {
+        super::model::ProcessInput::ToolCall { .. }
+        | super::model::ProcessInput::LashlangProcess { .. } => {
+            if registration.env_ref.is_none() {
+                return Err(PluginError::Session(format!(
+                    "process `{}` requires a captured execution env",
+                    registration.id
+                )));
+            }
+        }
+        super::model::ProcessInput::External { .. }
+        | super::model::ProcessInput::SessionTurn { .. } => {
+            if registration.env_ref.is_some() {
+                return Err(PluginError::Session(format!(
+                    "process `{}` must not capture an execution env for this input kind",
+                    registration.id
+                )));
+            }
+        }
     }
     let mut names = HashSet::new();
     for event_type in &registration.event_types {

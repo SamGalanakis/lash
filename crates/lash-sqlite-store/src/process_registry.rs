@@ -143,10 +143,10 @@ impl SqliteProcessRegistry {
 
     fn list_grants_for_scope_conn(
         conn: &Connection,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         live_only: bool,
     ) -> Result<Vec<ProcessHandleGrantEntry>, lash_core::PluginError> {
-        let owner_scope_id = owner_scope.id();
+        let session_scope_id = session_scope.id();
         let status_clause = if live_only {
             "AND p.status = 'running'"
         } else {
@@ -162,7 +162,7 @@ impl SqliteProcessRegistry {
             ))
             .map_err(process_sqlite_error)?;
         let rows = stmt
-            .query_map(params![owner_scope_id.as_str()], |row| {
+            .query_map(params![session_scope_id.as_str()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -179,7 +179,7 @@ impl SqliteProcessRegistry {
                 serde_json::from_str(&record_json).map_err(process_decode_error)?;
             entries.push((
                 ProcessHandleGrant {
-                    session_id: owner_scope.session_id.clone(),
+                    session_id: session_scope.session_id.clone(),
                     process_id,
                     descriptor,
                 },
@@ -214,7 +214,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
         registration: ProcessRegistration,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let (registration, registration_hash) = prepare_process_registration(registration)?;
-        self.conn
+        let record = self
+            .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
                     if let Some(existing) = Self::load_process_conn(tx, &registration.id)? {
@@ -232,7 +233,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         registration_hash,
                         now,
                     );
-                    let owner_scope_id = record.owner_scope_id();
+                    let originator_scope_id = record.originator_scope_id();
                     tx.execute(
                         "INSERT INTO processes (
                             process_id, registration_hash, owner_scope_id, host_profile_id,
@@ -242,7 +243,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         params![
                             record.id.as_str(),
                             record.registration_hash.as_str(),
-                            owner_scope_id.as_str(),
+                            originator_scope_id.as_str(),
                             record.host_profile_id(),
                             record.created_at_ms as i64,
                             record.updated_at_ms as i64,
@@ -255,7 +256,9 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 })()))
             })
             .await
-            .map_err(process_sqlite_error)?
+            .map_err(process_sqlite_error)??;
+        self.notify.notify_waiters();
+        Ok(record)
     }
 
     async fn set_external_ref(
@@ -264,7 +267,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
         external_ref: ProcessExternalRef,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
-        self.conn
+        let record = self
+            .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
                     let mut record =
@@ -280,21 +284,23 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 })()))
             })
             .await
-            .map_err(process_sqlite_error)?
+            .map_err(process_sqlite_error)??;
+        self.notify.notify_waiters();
+        Ok(record)
     }
 
     async fn grant_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
         descriptor: ProcessHandleDescriptor,
     ) -> Result<ProcessHandleGrant, lash_core::PluginError> {
-        let owner_scope = owner_scope.clone();
+        let session_scope = session_scope.clone();
         let process_id = process_id.to_string();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
-                    let owner_scope_id = owner_scope.id();
+                    let session_scope_id = session_scope.id();
                     if Self::load_process_conn(tx, &process_id)?.is_none() {
                         return Err(lash_core::PluginError::Session(format!(
                             "unknown process `{process_id}`"
@@ -307,15 +313,15 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             session_id = excluded.session_id,
                             descriptor_json = excluded.descriptor_json",
                         params![
-                            owner_scope.session_id.as_str(),
-                            owner_scope_id.as_str(),
+                            session_scope.session_id.as_str(),
+                            session_scope_id.as_str(),
                             process_id.as_str(),
                             process_encode_json(&descriptor)?
                         ],
                     )
                     .map_err(process_sqlite_error)?;
                     Ok(ProcessHandleGrant {
-                        session_id: owner_scope.session_id.clone(),
+                        session_id: session_scope.session_id.clone(),
                         process_id: process_id.clone(),
                         descriptor,
                     })
@@ -327,16 +333,16 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn revoke_handle(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<(), lash_core::PluginError> {
-        let owner_scope_id = owner_scope.id().as_str().to_string();
+        let session_scope_id = session_scope.id().as_str().to_string();
         let process_id = process_id.to_string();
         self.conn
             .call(move |conn| {
                 conn.execute(
                     "DELETE FROM process_handle_grants WHERE scope_id = ?1 AND process_id = ?2",
-                    params![owner_scope_id, process_id],
+                    params![session_scope_id, process_id],
                 )
             })
             .await
@@ -346,8 +352,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn transfer_handle_grants(
         &self,
-        from_scope: &ProcessScope,
-        to_scope: &ProcessScope,
+        from_scope: &SessionScope,
+        to_scope: &SessionScope,
         process_ids: &[String],
     ) -> Result<(), lash_core::PluginError> {
         let from_scope = from_scope.clone();
@@ -405,32 +411,38 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn list_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, lash_core::PluginError> {
-        let owner_scope = owner_scope.clone();
+        let session_scope = session_scope.clone();
         self.conn
-            .call(move |conn| Ok(Self::list_grants_for_scope_conn(conn, &owner_scope, false)))
+            .call(move |conn| {
+                Ok(Self::list_grants_for_scope_conn(
+                    conn,
+                    &session_scope,
+                    false,
+                ))
+            })
             .await
             .map_err(process_sqlite_error)?
     }
 
     async fn list_live_handle_grants(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, lash_core::PluginError> {
-        let owner_scope = owner_scope.clone();
+        let session_scope = session_scope.clone();
         self.conn
-            .call(move |conn| Ok(Self::list_grants_for_scope_conn(conn, &owner_scope, true)))
+            .call(move |conn| Ok(Self::list_grants_for_scope_conn(conn, &session_scope, true)))
             .await
             .map_err(process_sqlite_error)?
     }
 
     async fn has_handle_grant(
         &self,
-        owner_scope: &ProcessScope,
+        session_scope: &SessionScope,
         process_id: &str,
     ) -> Result<bool, lash_core::PluginError> {
-        let owner_scope_id = owner_scope.id().as_str().to_string();
+        let session_scope_id = session_scope.id().as_str().to_string();
         let process_id = process_id.to_string();
         self.conn
             .call(move |conn| {
@@ -441,7 +453,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                          JOIN processes p ON p.process_id = g.process_id
                          WHERE g.scope_id = ?1 AND g.process_id = ?2
                          LIMIT 1",
-                        params![owner_scope_id, process_id],
+                        params![session_scope_id, process_id],
                         |_| Ok(()),
                     )
                     .optional()?
@@ -501,7 +513,12 @@ impl ProcessRegistry for SqliteProcessRegistry {
         session_id: &str,
     ) -> Result<lash_core::ProcessSessionDeleteReport, lash_core::PluginError> {
         let session_id_owned = session_id.to_string();
-        let (revoked_handle_count, mut cancel_process_ids, mut preserved_process_ids) = self
+        let (
+            revoked_handle_count,
+            deleted_wake_count,
+            mut orphaned_process_ids,
+            mut preserved_process_ids,
+        ) = self
             .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -531,13 +548,18 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         removed
                     };
 
+                    // Wake acknowledgements are process-scoped consumed-event markers.
+                    // Session deletion removes materialized session-addressed deliveries
+                    // through the session store; clearing these rows would re-expose
+                    // already-consumed wakes to surviving grants or future host readers.
+                    let deleted_wake_count = 0;
                     let revoked_handle_count = tx
                         .execute(
                             "DELETE FROM process_handle_grants WHERE session_id = ?1",
                             params![session_id],
                         )
                         .map_err(process_sqlite_error)?;
-                    let mut cancel_process_ids = Vec::new();
+                    let mut orphaned_process_ids = Vec::new();
                     let mut preserved_process_ids = Vec::new();
                     for (process_id, record) in removed {
                         if record.is_terminal() {
@@ -551,29 +573,30 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             )
                             .map_err(process_sqlite_error)?;
                         if remaining_grants == 0 {
-                            cancel_process_ids.push(process_id);
+                            orphaned_process_ids.push(process_id);
                         } else {
                             preserved_process_ids.push(process_id);
                         }
                     }
                     Ok((
                         revoked_handle_count,
-                        cancel_process_ids,
+                        deleted_wake_count,
+                        orphaned_process_ids,
                         preserved_process_ids,
                     ))
                 })()))
             })
             .await
             .map_err(process_sqlite_error)??;
-        cancel_process_ids.sort();
-        cancel_process_ids.dedup();
+        orphaned_process_ids.sort();
+        orphaned_process_ids.dedup();
         preserved_process_ids.sort();
         preserved_process_ids.dedup();
         Ok(lash_core::ProcessSessionDeleteReport {
             session_id: session_id.to_string(),
             revoked_handle_count,
-            deleted_wake_count: 0,
-            cancel_process_ids,
+            deleted_wake_count,
+            orphaned_process_ids,
             preserved_process_ids,
         })
     }
@@ -645,6 +668,9 @@ impl ProcessRegistry for SqliteProcessRegistry {
                     .map_err(process_sqlite_error)?;
                     if let Some(status) = prepared.status_update.clone() {
                         record.status = status;
+                        if record.status.is_terminal() {
+                            record.wait = None;
+                        }
                     }
                     record.updated_at_ms = prepared.occurred_at_ms;
                     Self::save_process_conn(tx, &record)?;
@@ -809,6 +835,60 @@ impl ProcessRegistry for SqliteProcessRegistry {
         })
     }
 
+    async fn set_process_wait(
+        &self,
+        process_id: &str,
+        wait: lash_core::WaitState,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(tx_outcome((|| {
+                    let mut record =
+                        Self::load_process_conn(tx, &process_id)?.ok_or_else(|| {
+                            lash_core::PluginError::Session(format!(
+                                "unknown process `{process_id}`"
+                            ))
+                        })?;
+                    if record.is_terminal() {
+                        return Err(lash_core::PluginError::Session(format!(
+                            "terminal process `{process_id}` cannot enter a wait state"
+                        )));
+                    }
+                    record.wait = Some(wait);
+                    record.updated_at_ms = current_epoch_ms();
+                    Self::save_process_conn(tx, &record)?;
+                    Ok(record)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn clear_process_wait(
+        &self,
+        process_id: &str,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(tx_outcome((|| {
+                    let mut record =
+                        Self::load_process_conn(tx, &process_id)?.ok_or_else(|| {
+                            lash_core::PluginError::Session(format!(
+                                "unknown process `{process_id}`"
+                            ))
+                        })?;
+                    record.wait = None;
+                    record.updated_at_ms = current_epoch_ms();
+                    Self::save_process_conn(tx, &record)?;
+                    Ok(record)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
         let process_id = process_id.to_string();
         self.conn
@@ -816,6 +896,39 @@ impl ProcessRegistry for SqliteProcessRegistry {
             .await
             .ok()
             .flatten()
+    }
+
+    async fn list_processes(
+        &self,
+        filter: &lash_core::ProcessListFilter,
+    ) -> Result<Vec<ProcessRecord>, lash_core::PluginError> {
+        let filter = filter.clone();
+        self.conn
+            .call(move |conn| {
+                Ok((|| {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT record_json FROM processes
+                             ORDER BY process_id ASC",
+                        )
+                        .map_err(process_sqlite_error)?;
+                    let rows = stmt
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .map_err(process_sqlite_error)?;
+                    let mut records = Vec::new();
+                    for row in rows {
+                        let record: ProcessRecord =
+                            serde_json::from_str(&row.map_err(process_sqlite_error)?)
+                                .map_err(process_decode_error)?;
+                        if filter.matches_record(&record) {
+                            records.push(record);
+                        }
+                    }
+                    Ok(records)
+                })())
+            })
+            .await
+            .map_err(process_sqlite_error)?
     }
 
     async fn ack_wake(

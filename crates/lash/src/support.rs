@@ -10,9 +10,9 @@ pub(crate) use lash_core::runtime::{
 pub(crate) use lash_core::{
     DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, InMemoryLiveReplayStore,
     LashRuntime, LiveReplayStore, MessageRole, ModelSpec, PluginHost, PluginSpec, PluginStack,
-    ProcessHandleSummary, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkPoke,
-    ProcessWorkRunner, QueuedWorkPoke, RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig,
-    RuntimeObservation, SessionPolicy, SessionSpec,
+    ProcessHandleSummary, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner, QueuedWorkPoke,
+    RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig, RuntimeObservation, SessionPolicy,
+    SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
@@ -23,10 +23,10 @@ pub(crate) use lash_core::TestLocalProcessRegistry;
 pub(crate) use lash_core::plugin::runtime_host::SessionStateService;
 pub(crate) use lash_core::{
     AssembledTurn, AttachmentStore, EventSink, ExecutionSummary, Message, PluginFactory,
-    PluginMessage, ProcessRegistry, ProcessScope, ProtocolTurnOptions, ProviderHandle, Residency,
+    PluginMessage, ProcessRegistry, ProtocolTurnOptions, ProviderHandle, Residency,
     RuntimeErrorCode, RuntimePersistence, SessionCreateRequest, SessionCursor, SessionError,
     SessionHandle, SessionObservation, SessionObservationSubscription, SessionProcessEventKind,
-    SessionReadView, SessionResume, SessionSnapshot, SessionStoreCreateRequest,
+    SessionReadView, SessionResume, SessionScope, SessionSnapshot, SessionStoreCreateRequest,
     SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord,
     ToolManifest, ToolProvider, ToolRestoreReport, ToolResult, ToolSourceHandle, ToolState,
     TurnActivitySink, TurnOutcome,

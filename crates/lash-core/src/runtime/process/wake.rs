@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use crate::plugin::PluginError;
 
 use super::events::{ProcessWake, ProcessWakeDelivery};
-use super::model::{ProcessId, ProcessScope};
+use super::model::{ProcessId, SessionScope};
 use super::time::epoch_ms_from_system_time;
 
 /// Extracts the model-facing wake input from a process wake event payload.
@@ -40,7 +40,7 @@ pub fn process_wake_turn_cause(wake: &ProcessWakeDelivery) -> crate::TurnCause {
 
 #[derive(Clone, Debug)]
 pub struct ProcessWakeDeliveryRequest {
-    pub target_scope: ProcessScope,
+    pub target_scope: SessionScope,
     pub process_id: ProcessId,
     pub sequence: u64,
     pub event_type: String,

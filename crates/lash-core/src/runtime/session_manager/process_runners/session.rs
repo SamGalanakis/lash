@@ -9,6 +9,9 @@ impl RuntimeSessionServices {
         scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
+        create_request = create_request.with_caused_by(crate::CausalRef::Process {
+            process_id: registration.id.clone(),
+        });
         // `ProcessInput::SessionTurn` is durable input. Its `create_request`
         // carries only persisted policy, so fill an omitted provider_id from
         // the parent runtime policy before the child session is built.

@@ -1538,7 +1538,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
     let build_started = Instant::now();
     let registry: Arc<dyn lash_core::ProcessRegistry> =
         Arc::new(lash_core::TestLocalProcessRegistry::default());
-    let owner_scope = lash_core::ProcessScope::new("runtime-perf-process-list");
+    let session_scope = lash_core::SessionScope::new("runtime-perf-process-list");
     let build_runtime_ms = elapsed_ms(build_started);
     let build_runtime_alloc = alloc_delta(build_before_alloc, allocator_stats());
     let after_build_memory = process_memory_sample();
@@ -1551,13 +1551,13 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         registry
             .register_process(process_list_stress_registration(
                 process_id.clone(),
-                owner_scope.clone(),
+                session_scope.clone(),
                 index,
             ))
             .await?;
         registry
             .grant_handle(
-                &owner_scope,
+                &session_scope,
                 &process_id,
                 lash_core::ProcessHandleDescriptor::new(
                     Some("stress"),
@@ -1592,7 +1592,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         let phase_started = Instant::now();
         let phase_before_alloc = allocator_stats();
         let phase_before_memory = process_memory_sample();
-        let live_entries = registry.list_live_handle_grants(&owner_scope).await?;
+        let live_entries = registry.list_live_handle_grants(&session_scope).await?;
         phase_profile.insert(
             "process_list_stress.list_live".to_string(),
             RuntimePerfPhaseRunResult {
@@ -1611,7 +1611,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         let phase_started = Instant::now();
         let phase_before_alloc = allocator_stats();
         let phase_before_memory = process_memory_sample();
-        let all_entries = registry.list_handle_grants(&owner_scope).await?;
+        let all_entries = registry.list_handle_grants(&session_scope).await?;
         phase_profile.insert(
             "process_list_stress.list_all".to_string(),
             RuntimePerfPhaseRunResult {
@@ -1750,7 +1750,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
 
 fn process_list_stress_registration(
     process_id: String,
-    owner_scope: lash_core::ProcessScope,
+    session_scope: lash_core::SessionScope,
     index: usize,
 ) -> lash_core::ProcessRegistration {
     lash_core::ProcessRegistration::new(
@@ -1758,11 +1758,8 @@ fn process_list_stress_registration(
         lash_core::ProcessInput::External {
             metadata: serde_json::json!({ "index": index }),
         },
+        lash_core::ProcessProvenance::session(session_scope, "runtime-perf-process-list"),
     )
-    .with_process_provenance(lash_core::ProcessProvenance::new(
-        owner_scope,
-        "runtime-perf-process-list",
-    ))
 }
 
 fn process_list_tool_payload(

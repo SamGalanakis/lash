@@ -15,6 +15,10 @@ impl<'run> RuntimeTurnDriver<'run> {
         let effect_controller = self.effect_controller_handle();
         let direct_completions = manager
             .direct_completion_client(effect_controller.clone_scoped(), Some(self.turn_id.clone()));
+        let execution_env_spec = self
+            .turn_pipeline
+            .state()
+            .process_execution_env_spec(&self.policy.policy);
         self.session.code_execution_context(
             &self.session_id,
             &self.turn_pipeline.state().current_agent_frame_id,
@@ -30,6 +34,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             chronological_projection,
             self.protocol_extension.clone(),
             self.turn_context.clone(),
+            execution_env_spec,
             self.checkpoint_messages.clone(),
         )
     }

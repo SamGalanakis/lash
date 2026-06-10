@@ -104,6 +104,7 @@ mod tests {
                     prepared_payload: serde_json::json!({"context": "prepared"}),
                 },
             },
+            crate::ProcessProvenance::host("effect-test-host"),
         );
         let invocation = RuntimeInvocation::effect(
             RuntimeScope::for_turn("session", "turn", 0, 0),
@@ -113,13 +114,11 @@ mod tests {
         );
         let envelope = RuntimeEffectEnvelope::new(
             invocation,
-            RuntimeEffectCommand::Process {
-                command: ProcessCommand::Start {
-                    registration,
-                    grant: None,
-                    execution_context: Box::new(crate::ProcessExecutionContext::default()),
-                },
-            },
+            RuntimeEffectCommand::process(ProcessCommand::Start {
+                registration,
+                grant: None,
+                execution_context: Box::new(crate::ProcessExecutionContext::default()),
+            }),
         );
 
         let hash = envelope.stable_hash().expect("hash");
@@ -129,14 +128,14 @@ mod tests {
 
         assert_eq!(decoded.command.kind(), RuntimeEffectKind::Process);
         assert_eq!(decoded.stable_hash().expect("decoded hash"), hash);
-        let RuntimeEffectCommand::Process {
-            command:
-                ProcessCommand::Start {
-                    registration,
-                    grant: None,
-                    execution_context,
-                },
-        } = decoded.command
+        let RuntimeEffectCommand::Process { command } = decoded.command else {
+            panic!("wrong process command");
+        };
+        let ProcessCommand::Start {
+            registration,
+            grant: None,
+            execution_context,
+        } = *command
         else {
             panic!("wrong process command");
         };

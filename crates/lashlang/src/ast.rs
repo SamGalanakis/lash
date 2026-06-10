@@ -73,6 +73,8 @@ pub struct TypeDecl {
 pub struct ProcessDecl {
     pub name: AstString,
     pub params: Vec<ProcessParam>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<ProcessSignalDecl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_ty: Option<TypeExpr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,6 +84,12 @@ pub struct ProcessDecl {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessParam {
+    pub name: AstString,
+    pub ty: TypeExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessSignalDecl {
     pub name: AstString,
     pub ty: TypeExpr,
 }
@@ -170,9 +178,12 @@ pub enum Expr {
     Await(Box<Expr>),
     SleepFor(Box<Expr>),
     SleepUntil(Box<Expr>),
-    WaitSignal,
+    WaitSignal {
+        name: AstString,
+    },
     SignalRun {
         run: Box<Expr>,
+        name: AstString,
         payload: Box<Expr>,
     },
     ResultUnwrap(Box<Expr>),
@@ -231,7 +242,7 @@ impl Expr {
             | Expr::Variable(_)
             | Expr::Break
             | Expr::Continue
-            | Expr::WaitSignal
+            | Expr::WaitSignal { .. }
             | Expr::ProcessRef { .. }
             | Expr::ResourceRef(_)
             | Expr::TypeLiteral(_) => {}
@@ -271,7 +282,7 @@ impl Expr {
                 buffer.push(receiver);
                 buffer.extend(args.iter());
             }
-            Expr::SignalRun { run, payload } => {
+            Expr::SignalRun { run, payload, .. } => {
                 buffer.push(run);
                 buffer.push(payload);
             }
@@ -437,8 +448,9 @@ where
         Expr::Await(expr) => Expr::Await(Box::new(folder.fold_expr(*expr))),
         Expr::SleepFor(expr) => Expr::SleepFor(Box::new(folder.fold_expr(*expr))),
         Expr::SleepUntil(expr) => Expr::SleepUntil(Box::new(folder.fold_expr(*expr))),
-        Expr::SignalRun { run, payload } => Expr::SignalRun {
+        Expr::SignalRun { run, name, payload } => Expr::SignalRun {
             run: Box::new(folder.fold_expr(*run)),
+            name,
             payload: Box::new(folder.fold_expr(*payload)),
         },
         Expr::ResultUnwrap(expr) => Expr::ResultUnwrap(Box::new(folder.fold_expr(*expr))),
@@ -481,7 +493,7 @@ where
         | Expr::Break
         | Expr::Continue
         | Expr::ResourceRef(_)
-        | Expr::WaitSignal
+        | Expr::WaitSignal { .. }
         | Expr::TypeLiteral(_)) => leaf,
     }
 }
@@ -726,7 +738,9 @@ mod tests {
             var("x"),
             Expr::Break,
             Expr::Continue,
-            Expr::WaitSignal,
+            Expr::WaitSignal {
+                name: "ready".into(),
+            },
             Expr::TypeLiteral(Box::new(TypeExpr::Str)),
         ] {
             let children: Vec<_> = leaf.children().collect();

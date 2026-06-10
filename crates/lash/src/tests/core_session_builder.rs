@@ -1486,7 +1486,7 @@ async fn process_work_driver_configures_external_runner_without_inline_store_fac
         .process_registry()
         .expect("external driver configures the core registry");
     assert!(Arc::ptr_eq(&configured, &registry));
-    assert!(core.process_observer().is_some());
+    assert!(core.processes().observer().is_ok());
     assert!(core.process_work_runner.poke().await.is_some());
     Ok(())
 }
@@ -1534,7 +1534,7 @@ async fn durable_process_worker_config_uses_core_process_registry() -> Result<()
         .process_registry(Arc::clone(&registry))
         .build()?;
 
-    assert!(core.process_observer().is_some());
+    assert!(core.processes().observer().is_ok());
     let config = core.durable_process_worker_config()?;
     assert!(Arc::ptr_eq(&config.process_registry, &registry));
     assert!(Arc::ptr_eq(&config.host_event_store, &host_event_store));

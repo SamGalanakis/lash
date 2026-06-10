@@ -11,6 +11,7 @@ pub struct ToolProcessControl<'run> {
     pub(super) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
     pub(super) tool_call_id: Option<String>,
+    pub(super) execution_env_spec: crate::ProcessExecutionEnvSpec,
 }
 
 impl ToolProcessControl<'_> {
@@ -27,8 +28,16 @@ impl ToolProcessControl<'_> {
     /// durable, and recoverable through the worker.
     pub async fn start(
         &self,
-        request: crate::ProcessStartRequest,
+        mut request: crate::ProcessStartRequest,
     ) -> Result<crate::ProcessHandleSummary, PluginError> {
+        if request.env_spec.is_none()
+            && matches!(
+                &request.input,
+                crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::LashlangProcess { .. }
+            )
+        {
+            request.env_spec = Some(self.execution_env_spec.clone());
+        }
         self.processes
             .start_from_request(&self.session_id, request, self.process_scope())
             .await
@@ -111,6 +120,7 @@ impl ToolProcessControl<'_> {
     pub async fn signal(
         &self,
         process_id: &str,
+        signal_name: &str,
         payload: serde_json::Value,
     ) -> Result<crate::ProcessEvent, PluginError> {
         let signal_id = self
@@ -121,6 +131,7 @@ impl ToolProcessControl<'_> {
             .signal(
                 &self.session_id,
                 process_id,
+                signal_name.to_string(),
                 signal_id,
                 payload,
                 self.process_scope(),

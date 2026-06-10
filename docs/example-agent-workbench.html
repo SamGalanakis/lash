@@ -44,19 +44,20 @@
         <dt><code>AGENT_WORKBENCH_DATA_DIR</code></dt>
         <dd>Persistence, plus the JSONL turn and Lashlang-execution traces. Defaults to <code>.agent-workbench</code>.</dd>
       </dl>
-      <p>The entrypoint also manages the Restate container ports (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, admin <code>19070</code>, node <code>19071</code>) and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 16&nbsp;MiB — RLM + Restate + Lashlang execution has deep debug-build futures). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
+      <p>The entrypoint also manages the Restate container ports (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, admin <code>19070</code>, node <code>19071</code>) and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 2&nbsp;MiB — override only when diagnosing stack regressions). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
     </div>
 
     <div class="section" id="demonstrates">
       <div class="section-header">
         <h2>What It Demonstrates</h2>
-        <p>The browser UI has three work areas: a left rail of host-event buttons, a cron schedule card, and per-turn model controls; a center chat/event stream; and a right rail that polls the process registry for visible background work.</p>
+        <p>The browser UI has three work areas: a left rail of host-event buttons, a cron schedule card, and per-turn model controls; a center pane that switches between the chat/event stream and a mock multi-account inbox; and a right rail that polls the process registry for the session's granted background work.</p>
       </div>
       <div class="module-grid">
         <article class="panel"><h3>Background processes</h3><p>The model emits named Lashlang <code>process</code> declarations and <code>start name(...)</code>; started processes appear in the right-rail registry view.</p></article>
         <article class="panel"><h3>Subagents</h3><p><code>agents.spawn(...)</code> runs child sessions as background process work, observed through the same registry and graph panel.</p></article>
         <article class="panel"><h3>Web tools</h3><p><code>web.search(...)</code> and <code>web.fetch(...)</code> back onto Tavily, the same web tools the CLI exposes.</p></article>
         <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code>; a registered trigger wakes a process with the validated event payload.</p></article>
+        <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang surface as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
         <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>ProcessControl</code> facade.</p></article>
       </div>

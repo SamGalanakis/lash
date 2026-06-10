@@ -13,8 +13,8 @@ use crate::tool_dispatch::ToolHostEventEffectOutcome;
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
     ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
-    ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration, ProcessScope,
-    ProcessStartGrant,
+    ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration,
+    ProcessStartGrant, SessionScope,
 };
 
 use super::executor::RuntimeEffectControllerError;
@@ -31,6 +31,7 @@ pub enum RuntimeEffectKind {
     Checkpoint,
     SyncExecutionSurface,
     Sleep,
+    AwaitEvent,
 }
 
 impl RuntimeEffectKind {
@@ -44,6 +45,7 @@ impl RuntimeEffectKind {
             Self::Checkpoint => "checkpoint",
             Self::SyncExecutionSurface => "sync_execution_surface",
             Self::Sleep => "sleep",
+            Self::AwaitEvent => "await_event",
         }
     }
 }
@@ -282,7 +284,7 @@ pub enum RuntimeEffectCommand {
         call: crate::PreparedToolCall,
     },
     Process {
-        command: ProcessCommand,
+        command: Box<ProcessCommand>,
     },
     ExecCode {
         code: String,
@@ -296,9 +298,18 @@ pub enum RuntimeEffectCommand {
     Sleep {
         duration_ms: u64,
     },
+    AwaitEvent {
+        key: String,
+    },
 }
 
 impl RuntimeEffectCommand {
+    pub fn process(command: ProcessCommand) -> Self {
+        Self::Process {
+            command: Box::new(command),
+        }
+    }
+
     pub fn kind(&self) -> RuntimeEffectKind {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
@@ -309,6 +320,7 @@ impl RuntimeEffectCommand {
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
             Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
             Self::Sleep { .. } => RuntimeEffectKind::Sleep,
+            Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }
     }
 }
@@ -328,13 +340,13 @@ pub enum ProcessCommand {
         execution_context: Box<ProcessExecutionContext>,
     },
     List {
-        owner_scope: ProcessScope,
+        session_scope: SessionScope,
         #[serde(default)]
         mode: ProcessListMode,
     },
     Transfer {
-        from_scope: ProcessScope,
-        to_scope: ProcessScope,
+        from_scope: SessionScope,
+        to_scope: SessionScope,
         process_ids: Vec<String>,
     },
     DeleteSession {
@@ -349,6 +361,7 @@ pub enum ProcessCommand {
     },
     Signal {
         process_id: String,
+        signal_name: String,
         signal_id: String,
         request: crate::ProcessEventAppendRequest,
     },
@@ -364,8 +377,11 @@ impl ProcessCommand {
     pub fn effect_id(&self) -> String {
         match self {
             Self::Start { registration, .. } => format!("process:start:{}", registration.id),
-            Self::List { owner_scope, mode } => {
-                format!("process:list:{}:{}", owner_scope.id(), mode.as_str())
+            Self::List {
+                session_scope,
+                mode,
+            } => {
+                format!("process:list:{}:{}", session_scope.id(), mode.as_str())
             }
             Self::Transfer {
                 from_scope,
@@ -385,10 +401,11 @@ impl ProcessCommand {
             Self::Cancel { process_id, .. } => format!("process:cancel:{process_id}"),
             Self::Signal {
                 process_id,
+                signal_name,
                 signal_id,
                 ..
             } => {
-                format!("process:signal:{process_id}:{signal_id}")
+                format!("process:signal:{process_id}:signal.{signal_name}:{signal_id}")
             }
         }
     }
@@ -455,6 +472,9 @@ pub enum RuntimeEffectOutcome {
         result: Result<Option<ExecutionSurfaceSync>, String>,
     },
     Sleep,
+    AwaitEvent {
+        payload: serde_json::Value,
+    },
 }
 
 // =============================================================================
@@ -688,6 +708,16 @@ impl RuntimeEffectOutcome {
         }
     }
 
+    pub fn into_await_event(self) -> Result<serde_json::Value, RuntimeEffectControllerError> {
+        match self {
+            Self::AwaitEvent { payload } => Ok(payload),
+            other => Err(RuntimeEffectControllerError::wrong_outcome(
+                RuntimeEffectKind::AwaitEvent,
+                other.kind(),
+            )),
+        }
+    }
+
     pub fn kind(&self) -> RuntimeEffectKind {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
@@ -698,6 +728,7 @@ impl RuntimeEffectOutcome {
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
             Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
             Self::Sleep => RuntimeEffectKind::Sleep,
+            Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }
     }
 }

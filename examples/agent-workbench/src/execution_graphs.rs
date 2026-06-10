@@ -493,9 +493,9 @@ mod tests {
             .process_registry(registry)
             .build()
             .expect("build core");
-        core.process_observer()
+        core.processes()
+            .observer()
             .expect("process observer configured")
-            .clone()
     }
 
     fn test_graph(
@@ -539,6 +539,10 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
+                lash_core::ProcessProvenance::session(
+                    lash::process::SessionScope::new("root"),
+                    "workbench-test-host",
+                ),
             ))
             .await
             .expect("register subagent process");
@@ -639,12 +643,16 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
+                lash_core::ProcessProvenance::session(
+                    lash::process::SessionScope::new(current_session_id),
+                    "workbench-test-host",
+                ),
             ))
             .await
             .expect("register subagent process");
         registry
             .grant_handle(
-                &lash::process::ProcessScope::new(current_session_id),
+                &lash::process::SessionScope::new(current_session_id),
                 "subagent-process",
                 lash::process::ProcessHandleDescriptor::new(Some("subagent"), Some("Subagent")),
             )
@@ -656,12 +664,13 @@ mod tests {
                 RuntimeInput::External {
                     metadata: json!({ "old": true }),
                 },
+                lash_core::ProcessProvenance::host("workbench-test-host"),
             ))
             .await
             .expect("register old process");
         registry
             .grant_handle(
-                &lash::process::ProcessScope::new(old_session_id),
+                &lash::process::SessionScope::new(old_session_id),
                 "old-process",
                 lash::process::ProcessHandleDescriptor::new(Some("old"), Some("Old")),
             )
