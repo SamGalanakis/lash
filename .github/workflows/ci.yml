@@ -11,7 +11,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -22,7 +22,7 @@ env:
   # dependency graph resolves (and compiles) exactly once per profile.
   # fff-zlob is required wherever fff-search is built (its build.rs needs the
   # zig-backed zlob under CI); bench keeps lash-cli's UI-bench code compiling
-  # on every push instead of only on the nightly Perf run.
+  # on every push without running the heavyweight performance guard in CI/CD.
   LASH_CI_FEATURES: >-
     -F lash-tools/fff-zlob
     -F lash-standard-plugins/fff-zlob
@@ -69,26 +69,30 @@ jobs:
           python3 scripts/test_release_version.py
           python3 scripts/test_publish_workspace.py
           python3 scripts/test_profile_guard.py
+          python3 scripts/test_release_notes.py
 
       # Compiles every target of every workspace crate — libs, bins, tests,
       # examples, and benches. This subsumes the old standalone checks for
       # docs-snippets and the perf harness (lash-perf + lash-cli's bench
       # feature), which would otherwise only break post-merge.
       - name: Check workspace (all targets)
-        run: cargo check --workspace --all-targets --locked ${LASH_CI_FEATURES}
+        run: |
+          # shellcheck disable=SC2086
+          cargo check --workspace --all-targets --locked ${LASH_CI_FEATURES}
 
       # Workspace-wide: every crate's tests run, not a hand-maintained crate
       # list. Live tests (Restate e2e, Postgres conformance without a
       # database URL) are #[ignore]d or self-skip.
       - name: Test workspace
-        run: cargo nextest run --workspace --locked ${LASH_CI_FEATURES}
+        run: |
+          # shellcheck disable=SC2086
+          cargo nextest run --workspace --locked ${LASH_CI_FEATURES}
 
       # nextest does not run doctests; keep them covered.
       - name: Test workspace doctests
-        run: cargo test --doc --workspace --locked ${LASH_CI_FEATURES}
-
-      - name: Enforce stack budget
-        run: bash scripts/ci-stack-budget.sh
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --doc --workspace --locked ${LASH_CI_FEATURES}
 
   postgres-store:
     name: Test Postgres store
@@ -142,12 +146,35 @@ jobs:
         env:
           LASH_POSTGRES_DATABASE_URL: postgres://lash:lash@localhost:5432/lash
 
-  # Cross-target compile gate. The real release binaries are built from the
-  # tag by release.yml; building (and discarding) them here too just doubled
-  # the work, so this only type-checks the release feature set per target.
-  # x86_64-linux needs no leg: Perf Guard release-builds the CLI stack on
-  # every push. Release-profile link failures would surface in release.yml,
-  # which is rerunnable via workflow_dispatch after a fix.
+  stack-budget:
+    name: Stack budget
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
+
+      - name: Enforce stack budget
+        run: bash scripts/ci-stack-budget.sh
+
+  # Cross-target compile gate. Release-profile link coverage is split by
+  # platform: x86_64 Linux is built by linux-release-cache, while the cross
+  # targets are type-checked here and fully linked by release.yml.
   cross-check:
     name: Check (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -199,8 +226,8 @@ jobs:
       - name: Check release target
         run: cargo check --locked --release -p lash-cli --features fff-zlob --target ${{ matrix.target }}
 
-  perf-guard:
-    name: Perf Guard
+  linux-release-cache:
+    name: Build Linux release cache
     runs-on: ubuntu-latest
 
     steps:
@@ -218,7 +245,7 @@ jobs:
         with:
           cache-bin: false
           # Sole writer of the linux release-profile cache; release.yml's
-          # x86_64 build restores it (tag runs can read main-branch caches).
+          # x86_64 build restores it after the versioned release commit passes CI.
           shared-key: linux-release
 
       - name: Install protoc
@@ -226,23 +253,21 @@ jobs:
         with:
           tool: protoc
 
-      - name: Run performance guard
-        run: |
-          python3 scripts/profile_guard.py --profile quick --release --cargo-feature fff-zlob --skip-dhat --enforce --out .benchmarks/perf-guard/ci.json
-
-      - name: Publish performance guard summary
-        run: |
-          python3 scripts/perfreport.py .benchmarks/perf-guard/ci.json >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload performance guard artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-guard
-          path: .benchmarks/perf-guard/*
+      - name: Build release binary
+        run: cargo build --locked --release -p lash-cli --features fff-zlob --target x86_64-unknown-linux-gnu
 
   restate-e2e:
-    name: Restate E2E
+    name: Restate E2E (${{ matrix.name }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agent-service
+            recipe: agent-service-restate-e2e
+          - name: agent-workbench
+            recipe: agent-workbench-restate-e2e
 
     steps:
       - name: Check out repository
@@ -269,15 +294,43 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
 
-      # Each recipe boots a `restatedev/restate` container with host networking,
-      # waits for the admin port, then runs the crate's `#[ignore]`d live e2e
-      # test against it. The recipes own container lifecycle (cleanup on EXIT)
-      # and use distinct ports/names, so they run back-to-back safely.
-      - name: agent-service live Restate ingress e2e
-        run: just agent-service-restate-e2e
+      # Each recipe owns its container lifecycle and uses distinct ports/names,
+      # so the matrix legs run independently without cross-job coordination.
+      - name: Run live Restate e2e
+        run: just ${{ matrix.recipe }}
 
-      - name: agent-workbench live Restate cron e2e
-        run: just agent-workbench-restate-e2e
+  restate-postgres-workers:
+    name: Restate + Postgres + MinIO Workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The e2e binaries are built on the host by the just recipe and
+      # bind-mounted into the compose services, so the build reuses the
+      # workspace debug cache that the Test job saves.
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Run distributed backend E2E
+        run: just restate-postgres-workers-e2e
 
   prepare-release:
     name: Prepare release
@@ -290,9 +343,11 @@ jobs:
     needs:
       - test
       - postgres-store
+      - stack-budget
       - cross-check
-      - perf-guard
+      - linux-release-cache
       - restate-e2e
+      - restate-postgres-workers
     runs-on: ubuntu-latest
     concurrency:
       group: lash-release-main
@@ -310,6 +365,13 @@ jobs:
           # does NOT deliver the tags (tag-following only covers fetched
           # commits), which silently re-releases the current version forever.
           fetch-depth: 0
+
+      # Every release ships curated notes: at least one commit in
+      # last-tag..HEAD must carry a `Release-Notes:` section (Markdown after
+      # the marker line). Fails BEFORE any release mutation; push with
+      # [skip release] if this range deliberately cuts no release.
+      - name: Require release notes
+        run: python3 scripts/release_notes.py collect --require
 
       - name: Compute next release version
         id: version
@@ -337,7 +399,7 @@ jobs:
           # checkout is clean, so -A captures exactly the bump's edits. Staging
           # only Cargo files here is what let the docs drift behind the version.
           git add -A
-          git commit -m "Release v${{ steps.version.outputs.version }} [skip ci]"
+          git commit -m "Release v${{ steps.version.outputs.version }}"
           git push origin HEAD:main
           echo "created=true" >> "$GITHUB_OUTPUT"
 
@@ -367,10 +429,11 @@ jobs:
           # so a stale README/docs heals on the next release even if Cargo is
           # already current.
           git add -A
-          git commit -m "Sync release version to staging (v${{ steps.version.outputs.version }}) [skip ci]"
+          git commit -m "Sync release version to staging (v${{ steps.version.outputs.version }})"
           git push origin HEAD:staging
 
       - name: Create and push release tag
+        if: steps.commit.outputs.created != 'true'
         run: |
           tag="v${{ steps.version.outputs.version }}"
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
@@ -384,6 +447,7 @@ jobs:
           git push origin "${tag}"
 
       - name: Trigger release workflow
+        if: steps.commit.outputs.created != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

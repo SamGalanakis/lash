@@ -1241,6 +1241,53 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
     };
     assert_eq!(event.event_type, "signal.notify");
     assert!(context.started.lock().expect("started lock").is_empty());
+
+    // Append-before-resolve discipline: the durable event is the record, the
+    // promise resolution is only the wake-up, keyed by the Nth occurrence of
+    // this signal name so repeated signals map onto one-shot engine promises.
+    {
+        let resolved = context.resolved_events.lock().expect("resolved lock");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].process_id, "task-signal");
+        assert_eq!(
+            resolved[0].key,
+            lash_core::process_signal_wait_key("task-signal", "notify", 1)
+        );
+        assert_eq!(resolved[0].payload, serde_json::json!({ "signal": "notify" }));
+    }
+
+    let outcome = host
+        .execute_effect(
+            RuntimeEffectEnvelope::new(
+                runtime_invocation(RuntimeEffectKind::Process, "process-signal-2"),
+                RuntimeEffectCommand::process(ProcessCommand::Signal {
+                    process_id: "task-signal".to_string(),
+                    signal_name: "notify".to_string(),
+                    signal_id: "notify-2".to_string(),
+                    request: lash_core::ProcessEventAppendRequest::new(
+                        "signal.notify",
+                        serde_json::json!({ "signal": "notify-2" }),
+                    )
+                    .with_replay_key("signal:notify-2"),
+                }),
+            ),
+            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+        )
+        .await
+        .expect("second signal");
+    let RuntimeEffectOutcome::Process {
+        result: ProcessEffectOutcome::Signal { .. },
+    } = outcome
+    else {
+        panic!("wrong second signal outcome");
+    };
+    let resolved = context.resolved_events.lock().expect("resolved lock");
+    assert_eq!(resolved.len(), 2);
+    assert_eq!(
+        resolved[1].key,
+        lash_core::process_signal_wait_key("task-signal", "notify", 2),
+        "second signal must resolve the ordinal-2 wait key"
+    );
 }
 
 #[tokio::test]

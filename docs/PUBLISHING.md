@@ -39,7 +39,10 @@ dependency order and waits for crates.io visibility between crates.
    Already-published versions are skipped, so a failed run can be re-run to
    resume.
 4. The same release workflow builds the CLI release assets and publishes the
-   GitHub release. The normal CI workflow does not auto-release when its commit
+   GitHub release. On `main`, CI prepares automated releases in two passes:
+   the first passing run may push the version-bump commit, and the next CI run
+   validates that exact versioned commit before creating the tag and dispatching
+   `release.yml`. The normal CI workflow does not auto-release when its commit
    message contains `[skip release]`.
 
 The main CI workflow also runs:
@@ -47,10 +50,37 @@ The main CI workflow also runs:
 ```bash
 python3 scripts/test_release_version.py
 python3 scripts/test_publish_workspace.py
+python3 scripts/test_release_notes.py
 ```
 
-Those tests pin the lockstep/private-crate version behavior and the publisher's
-transient retry classification.
+Those tests pin the lockstep/private-crate version behavior, the publisher's
+transient retry classification, and the release-notes extraction rules.
+
+## Release notes (required)
+
+Every release ships curated notes. Any commit that should contribute
+user-facing notes carries a `Release-Notes:` section in its body — everything
+after the marker line, written as Markdown:
+
+```text
+Add durable suspension to processes
+
+Implementation details for reviewers...
+
+Release-Notes:
+- Processes now suspend durably while waiting on signals or timers.
+- Signals are named and typed; the unnamed `wait_signal()` is removed.
+```
+
+`prepare-release` runs `scripts/release_notes.py collect --require` before
+mutating anything: if no commit in `previous-tag..HEAD` carries a section, the
+release fails loudly (push with `[skip release]` if the range deliberately
+cuts no release). The publish job collects the same range's sections (oldest
+first) into the GitHub release body; the auto-generated commit list is
+appended below. The previous tag is resolved by graph ancestry
+(`git describe`), not version sorting, so tags from unrelated history lines
+are ignored. Release-automation commits ("Release vX", staging version syncs)
+never contribute notes.
 
 ## Docs code snippets
 

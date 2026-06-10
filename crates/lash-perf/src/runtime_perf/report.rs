@@ -439,6 +439,10 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
         RuntimePerfScenario::ProcessListStress => &[
             "process_list_stress.list_live",
             "process_list_stress.list_all",
+            "process_list_stress.list_global",
+            "process_list_stress.signal_append",
+            "process_list_stress.wait_roundtrip",
+            "process_list_stress.env_spec_hash",
             "process_list_stress.render_live_json",
             "process_list_stress.render_all_json",
         ],

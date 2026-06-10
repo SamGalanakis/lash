@@ -161,13 +161,13 @@ CLI reference: [`docs/cli.html`](https://lash.run/cli.html).
 
 ## Development
 
-The CI performance gate uses the quick general guard:
+The performance guard is intentionally local/manual rather than part of CI/CD:
 
 ```bash
 just perf-guard
 ```
 
-That guard runs the quick runtime profile, runtime stack-sensitivity checks at the 2 MiB budget, UI perf budgets, and the Lashlang perf/profile sweep. Runtime coverage includes standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect-controller turns, store reopen, sans-IO turn-checkpoint round trips, live replay pressure, and JSONL trace-sink overhead. The nightly / manual `Performance` workflow runs the full guard, including DHAT runtime heap attribution:
+That guard runs the quick runtime profile, runtime stack-sensitivity checks at the 2 MiB budget, UI perf budgets, and the Lashlang perf/profile sweep. Runtime coverage includes standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect-controller turns, store reopen, sans-IO turn-checkpoint round trips, live replay pressure, and JSONL trace-sink overhead. For deeper investigations, run the full guard locally, including DHAT runtime heap attribution:
 
 ```bash
 python3 scripts/profile_guard.py --profile full --release --cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
@@ -181,7 +181,7 @@ python3 scripts/profile_ui.py --profile full --release --cargo-feature fff-zlob 
 python3 scripts/profile_lashlang.py --iterations 2500 --profile-iterations 2500 --out .benchmarks/lashlang-perf/full.json
 ```
 
-Focused blocking gates:
+Focused local gates:
 
 ```bash
 just perf-guard

@@ -41,6 +41,8 @@ pub async fn process_registry_with_expected_durability<F>(
     terminal_and_cancel_events_require_keys(make()).await;
     await_reads_terminal_materialized_output(make()).await;
     wait_state_round_trips_filters_and_clears_on_terminal(make()).await;
+    list_processes_filters_by_status_and_waiting(make()).await;
+    count_and_recent_events_match_the_log(make()).await;
     transfer_handle_grants_moves_addressability(make()).await;
     multiple_sessions_can_hold_grants(make()).await;
     processes_can_exist_with_zero_grants(make()).await;
@@ -961,6 +963,189 @@ async fn await_reads_terminal_materialized_output(registry: Arc<dyn ProcessRegis
             .expect("record")
             .is_terminal()
     );
+}
+
+async fn count_and_recent_events_match_the_log(registry: Arc<dyn ProcessRegistry>) {
+    assert!(
+        registry
+            .count_events_through("missing-process", "signal.ready", 10)
+            .await
+            .is_err(),
+        "counting events for an unknown process must fail"
+    );
+    assert!(
+        registry.recent_events("missing-process", 4).await.is_err(),
+        "recent events for an unknown process must fail"
+    );
+
+    registry
+        .register_process(
+            registration("proc-event-queries")
+                .with_event_types(vec![plain_event_type("signal.a"), plain_event_type("b")]),
+        )
+        .await
+        .expect("register");
+    let mut sequences = Vec::new();
+    for (index, event_type) in ["signal.a", "b", "signal.a", "signal.a", "b"]
+        .iter()
+        .enumerate()
+    {
+        let appended = registry
+            .append_event(
+                "proc-event-queries",
+                ProcessEventAppendRequest::new(*event_type, serde_json::json!({ "n": index }))
+                    .with_replay_key(format!("proc-event-queries:{index}")),
+            )
+            .await
+            .expect("append");
+        sequences.push(appended.event.sequence);
+    }
+
+    // Counts honor both the type filter and the sequence bound.
+    let count_all = registry
+        .count_events_through("proc-event-queries", "signal.a", *sequences.last().unwrap())
+        .await
+        .expect("count all");
+    assert_eq!(count_all, 3);
+    let count_bounded = registry
+        .count_events_through("proc-event-queries", "signal.a", sequences[2])
+        .await
+        .expect("count bounded");
+    assert_eq!(count_bounded, 2, "the bound is inclusive and type-filtered");
+    let count_none = registry
+        .count_events_through("proc-event-queries", "signal.missing", u64::MAX)
+        .await
+        .expect("count missing type");
+    assert_eq!(count_none, 0);
+
+    // Recent events are the LAST `limit`, returned in ascending order —
+    // identical to the tail of the full log.
+    let full = registry
+        .events_after("proc-event-queries", 0)
+        .await
+        .expect("full log");
+    let recent = registry
+        .recent_events("proc-event-queries", 2)
+        .await
+        .expect("recent");
+    assert_eq!(
+        recent
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        full[full.len() - 2..]
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+    );
+    let generous = registry
+        .recent_events("proc-event-queries", 100)
+        .await
+        .expect("generous limit");
+    assert_eq!(generous.len(), full.len(), "limit above log length is the whole log");
+}
+
+async fn list_processes_filters_by_status_and_waiting(registry: Arc<dyn ProcessRegistry>) {
+    for id in ["proc-list-running", "proc-list-waiting", "proc-list-done"] {
+        registry
+            .register_process(registration(id))
+            .await
+            .expect("register list process");
+    }
+    registry
+        .set_process_wait(
+            "proc-list-waiting",
+            WaitState {
+                since_ms: 1,
+                kind: WaitKind::Signal {
+                    name: "ready".to_string(),
+                    event_type: "signal.ready".to_string(),
+                    key: "process:proc-list-waiting:signal.ready:1".to_string(),
+                    ordinal: 1,
+                },
+            },
+        )
+        .await
+        .expect("set wait state");
+    registry
+        .complete_process(
+            "proc-list-done",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete process");
+
+    let ids = |records: Vec<ProcessRecord>| {
+        records
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>()
+    };
+
+    let any = registry
+        .list_processes(&ProcessListFilter {
+            status: ProcessStatusFilter::Any,
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list any");
+    assert_eq!(
+        ids(any),
+        vec![
+            "proc-list-done".to_string(),
+            "proc-list-running".to_string(),
+            "proc-list-waiting".to_string(),
+        ],
+        "list_processes(Any) returns every record in stable id order"
+    );
+
+    let running = registry
+        .list_processes(&ProcessListFilter {
+            status: ProcessStatusFilter::Running,
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list running");
+    assert_eq!(
+        ids(running),
+        vec![
+            "proc-list-running".to_string(),
+            "proc-list-waiting".to_string(),
+        ],
+        "waiting processes are lifecycle-running"
+    );
+
+    let completed = registry
+        .list_processes(&ProcessListFilter {
+            status: ProcessStatusFilter::Completed,
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list completed");
+    assert_eq!(ids(completed), vec!["proc-list-done".to_string()]);
+
+    let waiting = registry
+        .list_processes(&ProcessListFilter {
+            status: ProcessStatusFilter::Any,
+            waiting: Some(true),
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list waiting");
+    assert_eq!(ids(waiting), vec!["proc-list-waiting".to_string()]);
+
+    let not_waiting = registry
+        .list_processes(&ProcessListFilter {
+            status: ProcessStatusFilter::Running,
+            waiting: Some(false),
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list not waiting");
+    assert_eq!(ids(not_waiting), vec!["proc-list-running".to_string()]);
 }
 
 async fn wait_state_round_trips_filters_and_clears_on_terminal(registry: Arc<dyn ProcessRegistry>) {

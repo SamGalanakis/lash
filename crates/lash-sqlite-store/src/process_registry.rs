@@ -731,6 +731,78 @@ impl ProcessRegistry for SqliteProcessRegistry {
             .map_err(process_sqlite_error)?
     }
 
+    async fn count_events_through(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        up_to_sequence: u64,
+    ) -> Result<u64, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        let event_type = event_type.to_string();
+        self.conn
+            .call(move |conn| {
+                Ok((|| {
+                    if Self::load_process_conn(conn, &process_id)?.is_none() {
+                        return Err(lash_core::PluginError::Session(format!(
+                            "unknown process `{process_id}`"
+                        )));
+                    }
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM process_events
+                         WHERE process_id = ?1 AND event_type = ?2 AND sequence <= ?3",
+                        params![process_id, event_type, up_to_sequence as i64],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map(|count| count as u64)
+                    .map_err(process_sqlite_error)
+                })())
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn recent_events(
+        &self,
+        process_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProcessEvent>, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .call(move |conn| {
+                Ok((|| {
+                    if Self::load_process_conn(conn, &process_id)?.is_none() {
+                        return Err(lash_core::PluginError::Session(format!(
+                            "unknown process `{process_id}`"
+                        )));
+                    }
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT event_json FROM process_events
+                             WHERE process_id = ?1
+                             ORDER BY sequence DESC
+                             LIMIT ?2",
+                        )
+                        .map_err(process_sqlite_error)?;
+                    let rows = stmt
+                        .query_map(params![process_id, limit as i64], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .map_err(process_sqlite_error)?;
+                    let mut events: Vec<ProcessEvent> = Vec::new();
+                    for row in rows {
+                        events.push(
+                            serde_json::from_str(&row.map_err(process_sqlite_error)?)
+                                .map_err(process_decode_error)?,
+                        );
+                    }
+                    events.reverse();
+                    Ok(events)
+                })())
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
     async fn wake_events_after(
         &self,
         process_id: &str,

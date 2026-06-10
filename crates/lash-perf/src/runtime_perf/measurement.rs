@@ -1577,6 +1577,27 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
                 .await?;
         }
     }
+    // Dedicated long-lived process for the signal/wait phases: its event log
+    // grows across turns, so the phases also expose append-cost growth with
+    // log length (the durable-suspension hot path).
+    let signal_process_id = "process-signal-stress";
+    let signal_event_type = lash_core::process_signal_event_type("stress")?;
+    registry
+        .register_process(
+            lash_core::ProcessRegistration::new(
+                signal_process_id,
+                lash_core::ProcessInput::External {
+                    metadata: serde_json::json!({ "label": "signal stress" }),
+                },
+                lash_core::ProcessProvenance::host("runtime-perf"),
+            )
+            .with_event_types(vec![lash_core::ProcessEventType {
+                name: signal_event_type.clone(),
+                payload_schema: lash_core::LashSchema::any(),
+                semantics: lash_core::ProcessEventSemanticsSpec::default(),
+            }]),
+        )
+        .await?;
     let seed_state_ms = elapsed_ms(seed_started);
     let seed_state_alloc = alloc_delta(seed_before_alloc, allocator_stats());
     let after_seed_memory = process_memory_sample();
@@ -1629,6 +1650,136 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
                 all_entries.len()
             );
         }
+
+        let phase_started = Instant::now();
+        let phase_before_alloc = allocator_stats();
+        let phase_before_memory = process_memory_sample();
+        let global_records = registry
+            .list_processes(&lash_core::ProcessListFilter {
+                status: lash_core::ProcessStatusFilter::Any,
+                ..lash_core::ProcessListFilter::default()
+            })
+            .await?;
+        phase_profile.insert(
+            "process_list_stress.list_global".to_string(),
+            RuntimePerfPhaseRunResult {
+                duration_ms: elapsed_ms(phase_started),
+                allocations: alloc_delta(phase_before_alloc, allocator_stats()),
+                rss_growth_kb: diff_opt_i64(
+                    phase_before_memory.rss_kb,
+                    process_memory_sample().rss_kb,
+                ),
+            },
+        );
+        if global_records.len() != process_count + 1 {
+            anyhow::bail!(
+                "process_list_stress global listing expected {} records, got {}",
+                process_count + 1,
+                global_records.len()
+            );
+        }
+
+        const SIGNALS_PER_TURN: usize = 32;
+        let phase_started = Instant::now();
+        let phase_before_alloc = allocator_stats();
+        let phase_before_memory = process_memory_sample();
+        for signal_index in 0..SIGNALS_PER_TURN {
+            registry
+                .append_event(
+                    signal_process_id,
+                    lash_core::ProcessEventAppendRequest::new(
+                        signal_event_type.clone(),
+                        serde_json::json!({ "turn": turn_index, "n": signal_index }),
+                    )
+                    .with_replay_key(format!(
+                        "process:{signal_process_id}:signal.stress:{turn_index}:{signal_index}"
+                    )),
+                )
+                .await?;
+        }
+        phase_profile.insert(
+            "process_list_stress.signal_append".to_string(),
+            RuntimePerfPhaseRunResult {
+                duration_ms: elapsed_ms(phase_started),
+                allocations: alloc_delta(phase_before_alloc, allocator_stats()),
+                rss_growth_kb: diff_opt_i64(
+                    phase_before_memory.rss_kb,
+                    process_memory_sample().rss_kb,
+                ),
+            },
+        );
+
+        let phase_started = Instant::now();
+        let phase_before_alloc = allocator_stats();
+        let phase_before_memory = process_memory_sample();
+        let waiting = registry
+            .set_process_wait(
+                signal_process_id,
+                lash_core::WaitState {
+                    since_ms: turn_index as u64 + 1,
+                    kind: lash_core::WaitKind::Signal {
+                        name: "stress".to_string(),
+                        event_type: signal_event_type.clone(),
+                        key: format!(
+                            "process:{signal_process_id}:signal.stress:{}",
+                            turn_index + 1
+                        ),
+                        ordinal: turn_index as u64 + 1,
+                    },
+                },
+            )
+            .await?;
+        if waiting.wait.is_none() {
+            anyhow::bail!("process_list_stress wait facet did not round-trip");
+        }
+        registry.clear_process_wait(signal_process_id).await?;
+        phase_profile.insert(
+            "process_list_stress.wait_roundtrip".to_string(),
+            RuntimePerfPhaseRunResult {
+                duration_ms: elapsed_ms(phase_started),
+                allocations: alloc_delta(phase_before_alloc, allocator_stats()),
+                rss_growth_kb: diff_opt_i64(
+                    phase_before_memory.rss_kb,
+                    process_memory_sample().rss_kb,
+                ),
+            },
+        );
+
+        // Env-spec hashing is the new per-start cost (content-addressed
+        // capture); measure it standalone so regressions in stable_hash or
+        // spec encoding surface here rather than inside start latency.
+        const ENV_HASHES_PER_TURN: usize = 64;
+        let phase_started = Instant::now();
+        let phase_before_alloc = allocator_stats();
+        let phase_before_memory = process_memory_sample();
+        for hash_index in 0..ENV_HASHES_PER_TURN {
+            let mut options = lash_core::PluginOptions::default();
+            options.plugins.insert(
+                "stress".to_string(),
+                serde_json::json!({ "turn": turn_index, "n": hash_index }),
+            );
+            let spec = lash_core::ProcessExecutionEnvSpec::new(
+                options,
+                lash_core::SessionPolicy::default(),
+            );
+            let env_ref = spec
+                .stable_ref()
+                .map_err(|err| anyhow::anyhow!("env spec hashing failed: {err}"))?;
+            if env_ref.as_str().is_empty() {
+                anyhow::bail!("process_list_stress env hash produced an empty ref");
+            }
+        }
+        phase_profile.insert(
+            "process_list_stress.env_spec_hash".to_string(),
+            RuntimePerfPhaseRunResult {
+                duration_ms: elapsed_ms(phase_started),
+                allocations: alloc_delta(phase_before_alloc, allocator_stats()),
+                rss_growth_kb: diff_opt_i64(
+                    phase_before_memory.rss_kb,
+                    process_memory_sample().rss_kb,
+                ),
+            },
+        );
 
         let (live_payload_len, live_render_phase) =
             measure_runtime_perf_phase("process_list_stress.render_live_json", || {

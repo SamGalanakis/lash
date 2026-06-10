@@ -71,6 +71,12 @@ pub struct ObservedProcessEvent {
     pub payload: serde_json::Value,
 }
 
+/// Per-item event tail in session snapshots. Snapshots are polled by
+/// docks/UIs, so per-poll cost must stay bounded instead of growing with a
+/// process's full event history; detail views page through `events_after`
+/// with a cursor.
+pub const SNAPSHOT_EVENT_TAIL: usize = 32;
+
 impl ProcessWorkObserver {
     pub fn new(registry: Arc<dyn ProcessRegistry>) -> Self {
         Self { registry }
@@ -87,7 +93,7 @@ impl ProcessWorkObserver {
         for (grant, record) in entries {
             let events = self
                 .registry
-                .events_after(&record.id, 0)
+                .recent_events(&record.id, SNAPSHOT_EVENT_TAIL)
                 .await?
                 .into_iter()
                 .map(ObservedProcessEvent::from)
