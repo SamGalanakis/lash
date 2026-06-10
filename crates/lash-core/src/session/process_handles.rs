@@ -182,10 +182,15 @@ impl RuntimeExecutionContext<'_> {
         &self,
         call_id: String,
         handle: serde_json::Value,
+        signal_name: String,
         payload: serde_json::Value,
     ) -> ToolInvocationReply {
         let started = std::time::Instant::now();
-        let args = json!({ "handle": handle.clone(), "payload": payload.clone() });
+        let args = json!({
+            "handle": handle.clone(),
+            "signal_name": signal_name.clone(),
+            "payload": payload.clone()
+        });
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => {
@@ -199,6 +204,7 @@ impl RuntimeExecutionContext<'_> {
             .signal(
                 &self.session_id,
                 &handle_id,
+                signal_name,
                 signal_id,
                 payload,
                 self.process_scope(self.parent_invocation.clone()),
@@ -468,7 +474,15 @@ mod tests {
                     },
                     crate::ProcessProvenance::host("process-handle-test-host"),
                 )
-                .with_extra_event_types(crate::lashlang_process_event_types()),
+                .with_extra_event_types(
+                    crate::lashlang_process_event_types().into_iter().chain([
+                        crate::ProcessEventType {
+                            name: "signal.ready".to_string(),
+                            payload_schema: crate::LashSchema::any(),
+                            semantics: crate::ProcessEventSemanticsSpec::default(),
+                        },
+                    ]),
+                ),
             )
             .await
             .expect("register target process");
@@ -516,7 +530,12 @@ mod tests {
 
         let handle = json!({ "__handle__": "process", "id": "target-process" });
         let signalled = context
-            .signal_process_handle("signal-1".to_string(), handle, json!({ "kind": "ping" }))
+            .signal_process_handle(
+                "signal-1".to_string(),
+                handle,
+                "ready".to_string(),
+                json!({ "kind": "ping" }),
+            )
             .await;
 
         assert!(
@@ -533,11 +552,9 @@ mod tests {
             .await
             .expect("list events");
         assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == "process.signal"
-                    && event.payload.get("kind") == Some(&json!("ping"))),
-            "expected appended process.signal event, got {events:?}"
+            events.iter().any(|event| event.event_type == "signal.ready"
+                && event.payload.get("kind") == Some(&json!("ping"))),
+            "expected appended signal.ready event, got {events:?}"
         );
     }
 

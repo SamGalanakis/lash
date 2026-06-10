@@ -719,19 +719,19 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             Instruction::SleepUntil => {
                 return Ok(Some(VmStep::Effect(VmEffect::Sleep(SleepKind::Until))));
             }
-            Instruction::ProcessWaitSignal => {
+            Instruction::ProcessWaitSignal { name } => {
                 if self.mode != VmMode::Process {
                     return Err(RuntimeError::ProcessControlOutsideProcess {
-                        keyword: "wait signal",
+                        keyword: "wait_signal",
                     });
                 }
-                return Ok(Some(VmStep::Effect(VmEffect::WaitSignal)));
+                return Ok(Some(VmStep::Effect(VmEffect::WaitSignal { name })));
             }
-            Instruction::ProcessSignalRun => {
-                // `signal run` (sending) is allowed from the foreground turn as
+            Instruction::ProcessSignalRun { name } => {
+                // `signal_run` (sending) is allowed from the foreground turn as
                 // well as inside a process body, mirroring `await` / `cancel`.
-                // Only `wait signal` (receiving) is gated to `VmMode::Process`.
-                return Ok(Some(VmStep::Effect(VmEffect::SignalRun)));
+                // Only `wait_signal` (receiving) is gated to `VmMode::Process`.
+                return Ok(Some(VmStep::Effect(VmEffect::SignalRun { name })));
             }
             Instruction::ProcessYield => {
                 if self.mode != VmMode::Process {
@@ -1248,8 +1248,8 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             | Instruction::Submit
             | Instruction::SleepFor
             | Instruction::SleepUntil
-            | Instruction::ProcessWaitSignal
-            | Instruction::ProcessSignalRun
+            | Instruction::ProcessWaitSignal { .. }
+            | Instruction::ProcessSignalRun { .. }
             | Instruction::ProcessYield
             | Instruction::ProcessWake
             | Instruction::ProcessFinish

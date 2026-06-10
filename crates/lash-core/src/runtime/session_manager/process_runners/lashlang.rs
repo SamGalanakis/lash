@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -192,10 +193,10 @@ impl RuntimeSessionServices {
             store: self.current.store.clone(),
             session_store_factory: self.current.host.session_store_factory.clone(),
             queued_work_poke: self.current.host.queued_work_poke.clone(),
-            cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
             event_sequence: AtomicU64::new(0),
-            signal_sequence: tokio::sync::Mutex::new(0),
+            signal_send_sequence: AtomicU64::new(0),
+            signal_wait_ordinals: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let env = ::lashlang::ExecutionEnvironment::new(&host).process();
 
@@ -203,7 +204,11 @@ impl RuntimeSessionServices {
             tokio::select! {
                 _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process was cancelled"),
                 result = ::lashlang::execute(compiled.as_ref(), &mut state, &env) => {
-                    process_lashlang_execution_result(result)
+                    if cancellation.is_cancelled() {
+                        process_lashlang_cancelled("lashlang process was cancelled")
+                    } else {
+                        process_lashlang_execution_result(result)
+                    }
                 }
             }
         };
@@ -242,14 +247,14 @@ struct LashlangProcessHost<'run> {
     store: Option<Arc<dyn crate::RuntimePersistence>>,
     session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
     queued_work_poke: Option<crate::QueuedWorkPoke>,
-    cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
     /// Per-execution ordinal for wake/yield emissions. Deterministic replay
     /// re-issues `process_event` calls in the same order, so the Nth emission
     /// gets the same ordinal — and thus the same replay key — across a
     /// crash-recovery re-run, making the append idempotent on redelivery.
     event_sequence: AtomicU64,
-    signal_sequence: tokio::sync::Mutex<u64>,
+    signal_send_sequence: AtomicU64,
+    signal_wait_ordinals: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
 
 impl LashlangProcessHost<'_> {
@@ -444,25 +449,136 @@ impl LashlangProcessHost<'_> {
         Ok(::lashlang::Value::Null)
     }
 
-    async fn wait_signal(&self) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-        let after_sequence = *self.signal_sequence.lock().await;
-        let wait =
-            self.registry
-                .wait_event_after(&self.process_id, "process.signal", after_sequence);
-        let event = tokio::select! {
-            _ = self.cancellation.cancelled() => {
-                return Err(::lashlang::ExecutionHostError::new("wait signal was cancelled"));
-            }
-            event = wait => event.map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?,
+    async fn wait_signal(
+        &self,
+        name: String,
+    ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
+        let event_type = crate::process_signal_event_type(&name)
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        let event_ordinal = {
+            let mut ordinals = self.signal_wait_ordinals.lock().await;
+            let ordinal = ordinals.entry(name.clone()).or_insert(0);
+            *ordinal += 1;
+            *ordinal
         };
-        *self.signal_sequence.lock().await = event.sequence;
-        Ok(::lashlang::from_json(
-            event
-                .payload
-                .get("payload")
-                .cloned()
-                .unwrap_or(event.payload),
-        ))
+        let key = crate::process_signal_wait_key(&self.process_id, &name, event_ordinal);
+        let waiting_replay_key = format!(
+            "process:{}:waiting:signal.{}:{event_ordinal}",
+            self.process_id, name
+        );
+        let since_ms = self
+            .wait_since_ms(&key, &waiting_replay_key)
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        let wait = crate::WaitState {
+            since_ms,
+            kind: crate::WaitKind::Signal {
+                name: name.clone(),
+                event_type: event_type.clone(),
+                key: key.clone(),
+                ordinal: event_ordinal,
+            },
+        };
+        self.registry
+            .set_process_wait(&self.process_id, wait.clone())
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        self.registry
+            .append_event(
+                &self.process_id,
+                crate::ProcessEventAppendRequest::new(
+                    "process.waiting",
+                    serde_json::json!({ "wait": wait }),
+                )
+                .with_replay_key(waiting_replay_key),
+            )
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        let payload = self
+            .ctx
+            .await_process_event_lashlang(
+                Arc::clone(&self.registry),
+                &self.process_id,
+                &name,
+                &event_type,
+                event_ordinal,
+            )
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        self.registry
+            .clear_process_wait(&self.process_id)
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        self.registry
+            .append_event(
+                &self.process_id,
+                crate::ProcessEventAppendRequest::new(
+                    "process.resumed",
+                    serde_json::json!({
+                        "signal": name,
+                        "key": key,
+                        "ordinal": event_ordinal,
+                    }),
+                )
+                .with_replay_key(format!(
+                    "process:{}:resumed:signal.{}:{event_ordinal}",
+                    self.process_id, name
+                )),
+            )
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        Ok(::lashlang::from_json(payload))
+    }
+
+    async fn wait_since_ms(
+        &self,
+        key: &str,
+        waiting_replay_key: &str,
+    ) -> Result<u64, crate::PluginError> {
+        if let Some(since_ms) =
+            self.registry
+                .get_process(&self.process_id)
+                .await
+                .and_then(|record| {
+                    let wait = record.wait?;
+                    match &wait.kind {
+                        crate::WaitKind::Signal { key: wait_key, .. } if wait_key == key => {
+                            Some(wait.since_ms)
+                        }
+                        _ => None,
+                    }
+                })
+        {
+            return Ok(since_ms);
+        }
+
+        for event in self
+            .registry
+            .events_after(&self.process_id, 0)
+            .await?
+            .into_iter()
+            .rev()
+        {
+            if event.event_type != "process.waiting"
+                || event.invocation.replay_key() != Some(waiting_replay_key)
+            {
+                continue;
+            }
+            let Some(wait_value) = event.payload.get("wait") else {
+                continue;
+            };
+            let Ok(wait) = serde_json::from_value::<crate::WaitState>(wait_value.clone()) else {
+                continue;
+            };
+            match &wait.kind {
+                crate::WaitKind::Signal { key: wait_key, .. } if wait_key == key => {
+                    return Ok(wait.since_ms);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(crate::current_epoch_ms())
     }
 
     async fn signal_run(
@@ -471,16 +587,18 @@ impl LashlangProcessHost<'_> {
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
         let target = process_id_from_lashlang_handle(&signal.run)?;
         let payload = crate::lashlang_bridge::lashlang_value_to_json(&signal.payload)?;
-        self.registry
-            .append_event(
+        let sequence = self.signal_send_sequence.fetch_add(1, Ordering::Relaxed);
+        let signal_id = format!(
+            "lashlang:{}:signal.{}:{sequence}",
+            self.process_id, signal.name
+        );
+        self.ctx
+            .signal_lashlang_process(
+                Arc::clone(&self.registry),
                 &target,
-                crate::ProcessEventAppendRequest::new(
-                    "process.signal",
-                    serde_json::json!({
-                        "payload": payload,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    }),
-                ),
+                &signal.name,
+                signal_id,
+                payload,
             )
             .await
             .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
@@ -523,8 +641,8 @@ impl ::lashlang::ExecutionHost for LashlangProcessHost<'_> {
                 .sleep(sleep)
                 .await
                 .map(::lashlang::AbilityResult::Value),
-            ::lashlang::AbilityOp::WaitSignal => self
-                .wait_signal()
+            ::lashlang::AbilityOp::WaitSignal { name } => self
+                .wait_signal(name)
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::SignalRun(signal) => self
@@ -811,11 +929,11 @@ fn process_id_from_lashlang_handle(
         .get("__handle__")
         .and_then(|value| value.as_str())
         .ok_or_else(|| {
-            ::lashlang::ExecutionHostError::new("signal run expects a process handle")
+            ::lashlang::ExecutionHostError::new("signal_run expects a process handle")
         })?;
     if kind != "process" {
         return Err(::lashlang::ExecutionHostError::new(format!(
-            "signal run expects a process handle, got `{kind}`"
+            "signal_run expects a process handle, got `{kind}`"
         )));
     }
     value
@@ -824,7 +942,7 @@ fn process_id_from_lashlang_handle(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
-            ::lashlang::ExecutionHostError::new("signal run process handle is missing `id`")
+            ::lashlang::ExecutionHostError::new("signal_run process handle is missing `id`")
         })
 }
 

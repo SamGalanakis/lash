@@ -257,6 +257,7 @@ mod tests {
                 declarations: vec![::lashlang::Declaration::Process(::lashlang::ProcessDecl {
                     name: "main".into(),
                     params: Vec::new(),
+                    signals: Vec::new(),
                     return_ty: None,
                     label: None,
                     body: program.main,
@@ -285,6 +286,12 @@ mod tests {
             .process_ref("main")
             .expect("main process ref")
             .clone();
+        let signal_event_types = linked_module
+            .artifact
+            .canonical_ir
+            .process("main")
+            .map(crate::lashlang_process_signal_event_types)
+            .unwrap_or_default();
         Ok(crate::ProcessRegistration::session_start_draft(
             process_id,
             crate::ProcessInput::LashlangProcess {
@@ -295,7 +302,11 @@ mod tests {
                 args,
             },
         )
-        .with_extra_event_types(crate::lashlang_process_event_types()))
+        .with_extra_event_types(
+            crate::lashlang_process_event_types()
+                .into_iter()
+                .chain(signal_event_types),
+        ))
     }
 
     struct ProcessEchoTool;
@@ -1580,7 +1591,7 @@ mod tests {
         // The runner is the sole executor; run its worker against the recording
         // controller so the signaler's sleep effect is observed exactly as the
         // inline run observed it. Two lease-fenced runners run the target (which
-        // blocks on `wait signal`) and the signaler concurrently.
+        // blocks on `wait_signal`) and the signaler concurrently.
         let worker = process_worker_with_core(
             Arc::clone(&registry),
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
@@ -1597,8 +1608,8 @@ mod tests {
             "signal-target",
             ::lashlang::parse(
                 r#"
-                process main() {
-                  value = wait signal
+                process main() signals { ready: any } {
+                  value = wait_signal("ready")
                   finish value
                 }
                 "#,
@@ -1634,7 +1645,7 @@ mod tests {
                 r#"
                 process main(target: any) {
                   sleep for "0ms"
-                  signal run target with { ok: true }
+                  signal_run(target, "ready", { ok: true })
                   finish "sent"
                 }
                 "#,
@@ -1668,10 +1679,13 @@ mod tests {
             )
             .await
             .expect("await signaler");
-        assert!(matches!(
-            signaler_output,
-            crate::ProcessAwaitOutput::Success { value, .. } if value == serde_json::json!("sent")
-        ));
+        assert!(
+            matches!(
+                &signaler_output,
+                crate::ProcessAwaitOutput::Success { value, .. } if *value == serde_json::json!("sent")
+            ),
+            "unexpected signaler output: {signaler_output:?}"
+        );
 
         let target_output = manager
             .processes
@@ -1690,11 +1704,46 @@ mod tests {
             .events_after("signal-target", 0)
             .await
             .expect("target events");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == "process.signal"
-                    && event.payload["payload"] == serde_json::json!({ "ok": true }))
+        assert!(events.iter().any(|event| event.event_type == "signal.ready"
+            && event.payload == serde_json::json!({ "ok": true })));
+        let waiting_events = events
+            .iter()
+            .filter(|event| event.event_type == "process.waiting")
+            .collect::<Vec<_>>();
+        assert_eq!(waiting_events.len(), 1);
+        let wait = serde_json::from_value::<crate::WaitState>(
+            waiting_events[0]
+                .payload
+                .get("wait")
+                .expect("wait payload")
+                .clone(),
+        )
+        .expect("decode wait state");
+        assert!(wait.since_ms > 0);
+        assert!(matches!(
+            wait.kind,
+            crate::WaitKind::Signal {
+                ref name,
+                ref event_type,
+                ordinal: 1,
+                ..
+            } if name == "ready" && event_type == "signal.ready"
+        ));
+        assert!(events.iter().any(|event| {
+            event.event_type == "process.resumed"
+                && event
+                    .payload
+                    .get("signal")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ready")
+        }));
+        assert_eq!(
+            registry
+                .get_process("signal-target")
+                .await
+                .expect("target record")
+                .wait,
+            None
         );
         let sleep_records = controller
             .records()

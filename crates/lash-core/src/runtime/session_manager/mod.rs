@@ -259,6 +259,7 @@ impl RuntimeSessionServices {
         self.current.host.host_event_store.as_ref().map(|store| {
             crate::HostEventRouter::new(
                 Arc::clone(store),
+                Arc::clone(&self.current.host.core.durability.lashlang_artifact_store),
                 self.current.host.process_registry.clone(),
                 self.current.host.process_work_poke.clone(),
                 self.current.host.core.profile.host_profile_id.clone(),

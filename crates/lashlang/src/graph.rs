@@ -102,14 +102,14 @@ fn collect_expr_graph(
                 collect_expr_graph(child, &sleep_id, span, nodes, edges);
             }
         }
-        Expr::WaitSignal => {
+        Expr::WaitSignal { name } => {
             let wait_id = format!("{owner}:wait:{}", nodes.len());
-            nodes.push(node(&wait_id, "wait", "wait signal", span));
+            nodes.push(node(&wait_id, "wait", format!("wait_signal {name}"), span));
             edges.push(edge(owner, &wait_id, "waits", span));
         }
         Expr::SignalRun { .. } => {
             let signal_id = format!("{owner}:signal:{}", nodes.len());
-            nodes.push(node(&signal_id, "signal", "signal run", span));
+            nodes.push(node(&signal_id, "signal", "signal_run", span));
             edges.push(edge(owner, &signal_id, "signals", span));
             for child in expr.children() {
                 collect_expr_graph(child, &signal_id, span, nodes, edges);
@@ -495,8 +495,8 @@ impl LashlangMapBuilder<'_> {
                 }
                 vec![site.node_id]
             }
-            Expr::WaitSignal => {
-                let site = site_builder.node_site(&path, "wait", "wait signal");
+            Expr::WaitSignal { name } => {
+                let site = site_builder.node_site(&path, "wait", format!("wait_signal {name}"));
                 self.node(
                     &site.node_id,
                     &site.node_kind,
@@ -507,7 +507,7 @@ impl LashlangMapBuilder<'_> {
                 vec![site.node_id]
             }
             Expr::SignalRun { .. } => {
-                let site = site_builder.node_site(&path, "signal", "signal run");
+                let site = site_builder.node_site(&path, "signal", "signal_run");
                 self.node(
                     &site.node_id,
                     &site.node_kind,
@@ -726,7 +726,7 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::StartProcess(_)
         | Expr::SleepFor(_)
         | Expr::SleepUntil(_)
-        | Expr::WaitSignal
+        | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
         | Expr::Submit(_)
         | Expr::Yield(_)
@@ -767,7 +767,7 @@ fn label_attaches_to_assignment_value(expr: &Expr) -> bool {
         | Expr::StartProcess(_)
         | Expr::SleepFor(_)
         | Expr::SleepUntil(_)
-        | Expr::WaitSignal
+        | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
         | Expr::Submit(_)
         | Expr::Yield(_)

@@ -607,6 +607,7 @@ async fn emit_test_occurrence(
             .as_ref()
             .expect("host event store")
             .clone(),
+        Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
         runtime.host.process_registry.clone(),
         runtime.host.process_work_poke.clone(),
         runtime.host.core.profile.host_profile_id.clone(),
@@ -648,6 +649,7 @@ async fn try_emit_test_occurrence(
             .as_ref()
             .expect("host event store")
             .clone(),
+        Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
         runtime.host.process_registry.clone(),
         runtime.host.process_work_poke.clone(),
         runtime.host.core.profile.host_profile_id.clone(),

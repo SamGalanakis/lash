@@ -789,7 +789,7 @@ impl Compiler {
             | Expr::Await(_)
             | Expr::SleepFor(_)
             | Expr::SleepUntil(_)
-            | Expr::WaitSignal
+            | Expr::WaitSignal { .. }
             | Expr::SignalRun { .. }
             | Expr::ResultUnwrap(_)
             | Expr::Cancel(_)
@@ -1011,19 +1011,21 @@ impl Compiler {
                     self.mark_lashlang_execution_site(instruction, site);
                 }
             }
-            Expr::WaitSignal => {
+            Expr::WaitSignal { name } => {
+                let name = self.push_name(name);
                 let instruction = self.code.len();
-                self.code.push(Instruction::ProcessWaitSignal);
-                if let Some(site) = self.lashlang_execution_site(expr, "wait", "wait signal") {
+                self.code.push(Instruction::ProcessWaitSignal { name });
+                if let Some(site) = self.lashlang_execution_site(expr, "wait", "wait_signal") {
                     self.mark_lashlang_execution_site(instruction, site);
                 }
             }
-            Expr::SignalRun { run, payload } => {
+            Expr::SignalRun { run, name, payload } => {
                 self.compile_expr(run);
                 self.compile_expr(payload);
+                let name = self.push_name(name);
                 let instruction = self.code.len();
-                self.code.push(Instruction::ProcessSignalRun);
-                if let Some(site) = self.lashlang_execution_site(expr, "signal", "signal run") {
+                self.code.push(Instruction::ProcessSignalRun { name });
+                if let Some(site) = self.lashlang_execution_site(expr, "signal", "signal_run") {
                     self.mark_lashlang_execution_site(instruction, site);
                 }
             }
@@ -1262,8 +1264,8 @@ impl Compiler {
             ),
             Expr::SleepFor(_) => self.lashlang_execution_site(expr, "sleep", "sleep for"),
             Expr::SleepUntil(_) => self.lashlang_execution_site(expr, "sleep", "sleep until"),
-            Expr::WaitSignal => self.lashlang_execution_site(expr, "wait", "wait signal"),
-            Expr::SignalRun { .. } => self.lashlang_execution_site(expr, "signal", "signal run"),
+            Expr::WaitSignal { .. } => self.lashlang_execution_site(expr, "wait", "wait_signal"),
+            Expr::SignalRun { .. } => self.lashlang_execution_site(expr, "signal", "signal_run"),
             Expr::Submit(_) | Expr::Finish(_) => {
                 self.lashlang_execution_site(expr, "terminal", "result")
             }
@@ -1850,7 +1852,7 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::StartProcess(_)
         | Expr::SleepFor(_)
         | Expr::SleepUntil(_)
-        | Expr::WaitSignal
+        | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
         | Expr::Submit(_)
         | Expr::Yield(_)
@@ -1891,7 +1893,7 @@ fn label_attaches_to_assignment_value(expr: &Expr) -> bool {
         | Expr::StartProcess(_)
         | Expr::SleepFor(_)
         | Expr::SleepUntil(_)
-        | Expr::WaitSignal
+        | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
         | Expr::Submit(_)
         | Expr::Yield(_)
@@ -1939,7 +1941,7 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         | Expr::Await(_)
         | Expr::SleepFor(_)
         | Expr::SleepUntil(_)
-        | Expr::WaitSignal
+        | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
         | Expr::Cancel(_)
         | Expr::Print(_)

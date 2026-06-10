@@ -18,7 +18,7 @@ pub enum AbilityOp {
     StartProcess(Box<ProcessStart>),
     ProcessEvent(ProcessEvent),
     Sleep(Sleep),
-    WaitSignal,
+    WaitSignal { name: String },
     SignalRun(ProcessSignal),
 }
 
@@ -81,6 +81,7 @@ pub struct Sleep {
 #[derive(Clone, Debug)]
 pub struct ProcessSignal {
     pub run: Value,
+    pub name: String,
     pub payload: Value,
 }
 

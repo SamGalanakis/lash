@@ -699,6 +699,7 @@ pub fn deterministic_delivery_process_id(
 #[derive(Clone)]
 pub struct HostEventRouter {
     store: Arc<dyn HostEventStore>,
+    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
     process_work_poke: Option<crate::ProcessWorkPoke>,
     host_profile_id: String,
@@ -707,12 +708,14 @@ pub struct HostEventRouter {
 impl HostEventRouter {
     pub fn new(
         store: Arc<dyn HostEventStore>,
+        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
         process_work_poke: Option<crate::ProcessWorkPoke>,
         host_profile_id: impl Into<String>,
     ) -> Self {
         Self {
             store,
+            artifact_store,
             process_registry,
             process_work_poke,
             host_profile_id: host_profile_id.into(),
@@ -780,6 +783,27 @@ impl HostEventRouter {
                 subscription.handle
             ))
         })?;
+        let artifact = self
+            .artifact_store
+            .get_module_artifact(&subscription.module_ref)
+            .await
+            .map_err(|err| {
+                PluginError::Session(format!(
+                    "failed to load trigger target module `{}`: {err}",
+                    subscription.module_ref
+                ))
+            })?
+            .ok_or_else(|| {
+                PluginError::Session(format!(
+                    "missing trigger target module `{}`",
+                    subscription.module_ref
+                ))
+            })?;
+        let signal_event_types = artifact
+            .canonical_ir
+            .process(&subscription.process_name)
+            .map(crate::lashlang_process_signal_event_types)
+            .unwrap_or_default();
         let args =
             materialize_trigger_process_args(&subscription.input_template, &occurrence.payload)?;
         let originator_scope_id = subscription.registrant_scope_id();
@@ -802,7 +826,11 @@ impl HostEventRouter {
             )
             .with_caused_by(host_event_invocation.causal_ref()),
         )
-        .with_extra_event_types(crate::lashlang_process_event_types())
+        .with_extra_event_types(
+            crate::lashlang_process_event_types()
+                .into_iter()
+                .chain(signal_event_types),
+        )
         .with_execution_env_ref(Some(subscription.env_ref.clone()))
         .with_wake_target(subscription.wake_target.clone());
         let grant =

@@ -1054,6 +1054,7 @@ mod harness;
 use harness::{mock_model_spec, model_spec, run_async_test_on_stack_budget};
 mod lash_e2e;
 mod plugin_stack;
+mod processes_endstate;
 mod rebuild_conformance;
 mod stack_budget;
 mod turn_streaming;

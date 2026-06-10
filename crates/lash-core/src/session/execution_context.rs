@@ -324,6 +324,11 @@ impl<'run> RuntimeExecutionContext<'run> {
             serde_json::Value::Object(map) => map,
             _ => return Err("process args must serialize as a record".to_string()),
         };
+        let signal_event_types = artifact
+            .canonical_ir
+            .process(&start.process_name)
+            .map(crate::lashlang_process_signal_event_types)
+            .unwrap_or_default();
         let process_id = format!("process:{}", uuid::Uuid::new_v4());
         let registration = crate::ProcessRegistration::session_start_draft(
             process_id,
@@ -335,7 +340,11 @@ impl<'run> RuntimeExecutionContext<'run> {
                 args,
             },
         )
-        .with_extra_event_types(crate::lashlang_process_event_types());
+        .with_extra_event_types(
+            crate::lashlang_process_event_types()
+                .into_iter()
+                .chain(signal_event_types),
+        );
         Ok((registration, display_name))
     }
 
@@ -568,6 +577,89 @@ impl<'run> RuntimeExecutionContext<'run> {
             other => Err(crate::RuntimeEffectControllerError::new(
                 "runtime_effect_wrong_outcome",
                 format!("expected sleep outcome, got {}", other.kind().as_str()),
+            )),
+        }
+    }
+
+    pub async fn await_process_event_lashlang(
+        &self,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        process_id: &str,
+        signal_name: &str,
+        event_type: &str,
+        event_ordinal: u64,
+    ) -> Result<serde_json::Value, crate::RuntimeEffectControllerError> {
+        let cancellation = self.cancellation_token.clone().unwrap_or_default();
+        let key = crate::process_signal_wait_key(process_id, signal_name, event_ordinal);
+        let invocation = crate::runtime::causal::lashlang_await_event_invocation(
+            &self.session_id,
+            self.parent_invocation.as_ref(),
+            process_id,
+            signal_name,
+            event_ordinal,
+        );
+        let outcome = self
+            .dispatch
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::AwaitEvent { key: key.clone() },
+                ),
+                crate::RuntimeEffectLocalExecutor::await_process_event(
+                    key,
+                    registry,
+                    process_id.to_string(),
+                    event_type.to_string(),
+                    event_ordinal,
+                    cancellation,
+                ),
+            )
+            .await?;
+        outcome.into_await_event()
+    }
+
+    pub async fn signal_lashlang_process(
+        &self,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        process_id: &str,
+        signal_name: &str,
+        signal_id: String,
+        payload: serde_json::Value,
+    ) -> Result<crate::ProcessEvent, crate::RuntimeEffectControllerError> {
+        let event_type = crate::process_signal_event_type(signal_name)?;
+        let replay_key = format!("process:{process_id}:signal.{signal_name}:{signal_id}");
+        let command = crate::ProcessCommand::Signal {
+            process_id: process_id.to_string(),
+            signal_name: signal_name.to_string(),
+            signal_id,
+            request: crate::ProcessEventAppendRequest::new(event_type, payload)
+                .with_replay_key(replay_key),
+        };
+        let effect_id = command.effect_id();
+        let invocation = crate::runtime::causal::process_effect_invocation(
+            &self.session_id,
+            self.parent_invocation.clone(),
+            &effect_id,
+        );
+        let outcome = self
+            .dispatch
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::process(command),
+                ),
+                crate::RuntimeEffectLocalExecutor::process_control(registry),
+            )
+            .await?;
+        match outcome.into_process()? {
+            crate::ProcessEffectOutcome::Signal { event } => Ok(event),
+            other => Err(crate::RuntimeEffectControllerError::new(
+                "runtime_effect_wrong_outcome",
+                format!("expected signal outcome, got {other:?}"),
             )),
         }
     }

@@ -405,7 +405,17 @@ struct TestingRuntimeEffectLocalRunner<'run> {
 
 enum RuntimeEffectLocalExecutorState<'run> {
     Unavailable,
-    SleepOnly { cancellation: CancellationToken },
+    SleepOnly {
+        cancellation: CancellationToken,
+    },
+    AwaitEvent {
+        key: String,
+        registry: Arc<dyn ProcessRegistry>,
+        process_id: String,
+        event_type: String,
+        event_ordinal: u64,
+        cancellation: CancellationToken,
+    },
     Process(ProcessLocalExecution),
     Runner(Box<dyn RuntimeEffectLocalRunner + Send + 'run>),
 }
@@ -429,6 +439,26 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
     pub fn sleep(cancellation: CancellationToken) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::SleepOnly { cancellation },
+        }
+    }
+
+    pub fn await_process_event(
+        key: impl Into<String>,
+        registry: Arc<dyn ProcessRegistry>,
+        process_id: impl Into<String>,
+        event_type: impl Into<String>,
+        event_ordinal: u64,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            state: RuntimeEffectLocalExecutorState::AwaitEvent {
+                key: key.into(),
+                registry,
+                process_id: process_id.into(),
+                event_type: event_type.into(),
+                event_ordinal,
+                cancellation,
+            },
         }
     }
 
@@ -494,6 +524,25 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
             RuntimeEffectLocalExecutorState::Runner(runner) => runner.execute(envelope).await,
             RuntimeEffectLocalExecutorState::SleepOnly { cancellation } => {
                 execute_local_sleep(envelope, cancellation).await
+            }
+            RuntimeEffectLocalExecutorState::AwaitEvent {
+                key,
+                registry,
+                process_id,
+                event_type,
+                event_ordinal,
+                cancellation,
+            } => {
+                execute_local_await_event(
+                    envelope,
+                    &key,
+                    registry,
+                    &process_id,
+                    &event_type,
+                    event_ordinal,
+                    cancellation,
+                )
+                .await
             }
             RuntimeEffectLocalExecutorState::Unavailable => Err(RuntimeEffectControllerError::new(
                 "runtime_effect_local_executor_unavailable",
@@ -697,6 +746,61 @@ async fn execute_local_sleep(
             "runtime_effect_local_executor_mismatch",
             format!(
                 "local sleep executor cannot execute {} command",
+                command.kind().as_str()
+            ),
+        )),
+    }
+}
+
+async fn execute_local_await_event(
+    envelope: RuntimeEffectEnvelope,
+    expected_key: &str,
+    registry: Arc<dyn ProcessRegistry>,
+    process_id: &str,
+    event_type: &str,
+    event_ordinal: u64,
+    cancellation: CancellationToken,
+) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+    match envelope.command {
+        RuntimeEffectCommand::AwaitEvent { key } if key == expected_key => {
+            if event_ordinal == 0 {
+                return Err(RuntimeEffectControllerError::new(
+                    "runtime_effect_await_event_invalid_ordinal",
+                    "event ordinal must be one-based",
+                ));
+            }
+            let mut after_sequence = 0;
+            let mut matching_count = 0;
+            let event = loop {
+                let wait = registry.wait_event_after(process_id, event_type, after_sequence);
+                tokio::pin!(wait);
+                let event = tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        return Err(RuntimeEffectControllerError::new(
+                            "runtime_effect_await_event_cancelled",
+                            "runtime effect event wait was cancelled",
+                        ));
+                    }
+                    event = &mut wait => event?,
+                };
+                matching_count += 1;
+                if matching_count == event_ordinal {
+                    break event;
+                }
+                after_sequence = event.sequence;
+            };
+            Ok(RuntimeEffectOutcome::AwaitEvent {
+                payload: event.payload,
+            })
+        }
+        RuntimeEffectCommand::AwaitEvent { key } => Err(RuntimeEffectControllerError::new(
+            "runtime_effect_await_event_key_mismatch",
+            format!("local event wait expected `{expected_key}`, got `{key}`"),
+        )),
+        command => Err(RuntimeEffectControllerError::new(
+            "runtime_effect_local_executor_mismatch",
+            format!(
+                "local event wait executor cannot execute {} command",
                 command.kind().as_str()
             ),
         )),

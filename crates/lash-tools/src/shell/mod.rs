@@ -37,6 +37,9 @@ use crate::shell::runtime::{
     PipeExecProcessRequest, ShellRuntime, StartCommandParams, WaitBehavior,
 };
 
+const SHELL_STDIN_SIGNAL: &str = "stdin";
+const SHELL_STDIN_SIGNAL_EVENT: &str = "signal.stdin";
+
 pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
     shell_prompt_contributions_for_access(&SessionToolAccess::default())
 }
@@ -360,7 +363,7 @@ impl StandardShell {
             loop {
                 let event = tokio::select! {
                     _ = done.cancelled() => break,
-                    event = events.wait_event_after("process.signal", after_sequence) => event,
+                    event = events.wait_event_after(SHELL_STDIN_SIGNAL_EVENT, after_sequence) => event,
                 };
                 let Ok(event) = event else {
                     break;
@@ -402,6 +405,7 @@ impl StandardShell {
             .processes()
             .signal(
                 &process_id,
+                SHELL_STDIN_SIGNAL,
                 json!({
                     "chars": chars,
                     "close_stdin": close_stdin,
@@ -440,7 +444,7 @@ fn start_command_process_args(params: &StartCommandParams) -> serde_json::Value 
 
 fn shell_signal_event_type() -> ProcessEventType {
     ProcessEventType {
-        name: "process.signal".to_string(),
+        name: SHELL_STDIN_SIGNAL_EVENT.to_string(),
         payload_schema: lash_core::LashSchema::any(),
         semantics: ProcessEventSemanticsSpec::default(),
     }
@@ -920,15 +924,18 @@ mod tests {
             &self,
             _session_id: &str,
             process_id: &str,
+            signal_name: String,
             signal_id: String,
             payload: serde_json::Value,
             _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<lash_core::ProcessEvent, PluginError> {
+            let event_type = lash_core::process_signal_event_type(&signal_name)?;
             self.registry
                 .append_event(
                     process_id,
-                    lash_core::ProcessEventAppendRequest::new("process.signal", payload)
-                        .with_replay_key(format!("process:{process_id}:signal:{signal_id}")),
+                    lash_core::ProcessEventAppendRequest::new(event_type, payload).with_replay_key(
+                        format!("process:{process_id}:signal.{signal_name}:{signal_id}"),
+                    ),
                 )
                 .await
                 .map(|result| result.event)
@@ -1235,7 +1242,7 @@ mod tests {
             .await
             .expect("events");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "process.signal");
+        assert_eq!(events[0].event_type, SHELL_STDIN_SIGNAL_EVENT);
         assert_eq!(events[0].payload["chars"], "hello\n");
         assert_eq!(events[0].payload["close_stdin"], true);
     }
@@ -1277,7 +1284,7 @@ mod tests {
             .append_event(
                 "shell-worker",
                 lash_core::ProcessEventAppendRequest::new(
-                    "process.signal",
+                    SHELL_STDIN_SIGNAL_EVENT,
                     json!({"chars": "hello\n", "close_stdin": false}),
                 ),
             )
@@ -1329,7 +1336,7 @@ mod tests {
             .append_event(
                 "shell-close-stdin",
                 lash_core::ProcessEventAppendRequest::new(
-                    "process.signal",
+                    SHELL_STDIN_SIGNAL_EVENT,
                     json!({"chars": "hello", "close_stdin": true}),
                 ),
             )
@@ -1423,7 +1430,7 @@ mod tests {
             .append_event(
                 "shell-short",
                 lash_core::ProcessEventAppendRequest::new(
-                    "process.signal",
+                    SHELL_STDIN_SIGNAL_EVENT,
                     json!({"chars": "hello\n", "close_stdin": false}),
                 ),
             )

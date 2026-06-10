@@ -423,6 +423,7 @@ struct RecordingContext {
     started: Mutex<Vec<ProcessRegistration>>,
     started_execution_contexts: Mutex<Vec<ProcessExecutionContext>>,
     cancelled: Mutex<Vec<(String, Option<String>)>>,
+    resolved_events: Mutex<Vec<RestateProcessEventResolveRequest>>,
 }
 
 impl RecordingContext {
@@ -519,6 +520,30 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
             }
             Ok(())
         })
+    }
+
+    fn await_event<'run>(
+        &'run self,
+        _key: String,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
+    }
+
+    fn resolve_event<'run>(
+        &'run self,
+        request: RestateProcessEventResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        self.resolved_events
+            .lock()
+            .expect("resolved events lock")
+            .push(request);
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -620,6 +645,26 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
         'ctx: 'run,
     {
         Box::pin(async { Err(TerminalError::new("process workflow cancel is unsupported")) })
+    }
+
+    fn await_event<'run>(
+        &'run self,
+        _key: String,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
+    }
+
+    fn resolve_event<'run>(
+        &'run self,
+        _request: RestateProcessEventResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("event resolve is unsupported")) })
     }
 }
 
@@ -1123,7 +1168,12 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
     registry
         .register_process(
             external_registration("task-signal")
-                .with_extra_event_types(lash_core::lashlang_process_event_types()),
+                .with_extra_event_types(lash_core::lashlang_process_event_types())
+                .with_extra_event_types([lash_core::ProcessEventType {
+                    name: "signal.notify".to_string(),
+                    payload_schema: lash_core::LashSchema::any(),
+                    semantics: lash_core::ProcessEventSemanticsSpec::default(),
+                }]),
         )
         .await
         .expect("register signal target");
@@ -1170,9 +1220,10 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                 runtime_invocation(RuntimeEffectKind::Process, "process-signal"),
                 RuntimeEffectCommand::process(ProcessCommand::Signal {
                     process_id: "task-signal".to_string(),
+                    signal_name: "notify".to_string(),
                     signal_id: "notify".to_string(),
                     request: lash_core::ProcessEventAppendRequest::new(
-                        "process.signal",
+                        "signal.notify",
                         serde_json::json!({ "signal": "notify" }),
                     )
                     .with_replay_key("signal:notify"),
@@ -1188,7 +1239,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
     else {
         panic!("wrong signal outcome");
     };
-    assert_eq!(event.event_type, "process.signal");
+    assert_eq!(event.event_type, "signal.notify");
     assert!(context.started.lock().expect("started lock").is_empty());
 }
 
@@ -1904,7 +1955,7 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         discovery.ty.to_string(),
         restate_sdk::discovery::ServiceType::Workflow.to_string()
     );
-    assert_eq!(discovery.handlers.len(), 2);
+    assert_eq!(discovery.handlers.len(), 3);
 
     let run = discovery
         .handlers
@@ -1916,6 +1967,11 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         .iter()
         .find(|handler| handler.name.to_string() == "cancel")
         .expect("cancel handler discovery");
+    let resolve_event = discovery
+        .handlers
+        .iter()
+        .find(|handler| handler.name.to_string() == "resolve_event")
+        .expect("resolve_event handler discovery");
 
     assert_eq!(
         run.ty.as_ref().map(ToString::to_string).as_deref(),
@@ -1923,6 +1979,14 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
     );
     assert_eq!(
         cancel.ty.as_ref().map(ToString::to_string).as_deref(),
+        Some("SHARED")
+    );
+    assert_eq!(
+        resolve_event
+            .ty
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
         Some("SHARED")
     );
 
@@ -1966,6 +2030,11 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
             .iter()
             .any(|handler| handler["name"] == "cancel" && handler["ty"] == "SHARED")
     );
+    assert!(
+        handlers
+            .iter()
+            .any(|handler| handler["name"] == "resolve_event" && handler["ty"] == "SHARED")
+    );
 }
 
 #[tokio::test]
@@ -1993,6 +2062,10 @@ async fn process_deployment_driver_and_workflow_share_registry() {
     }));
     assert!(discovery.handlers.iter().any(|handler| {
         handler.name.to_string() == "cancel"
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
+    }));
+    assert!(discovery.handlers.iter().any(|handler| {
+        handler.name.to_string() == "resolve_event"
             && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
     }));
 

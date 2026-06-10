@@ -102,10 +102,12 @@ clean worker-owns-execution-durability model belongs.
 ## Design: separate intent from execution
 
 **1. Start = durable intent, full stop.** `start name(...)` in a turn and a
-matched host-event delivery each do one thing: write a durable process record +
+matched host-event delivery each do one thing: write a durable process record
+(carrying the captured execution-environment ref the worker will execute
+against — see `docs/adr/0001-self-contained-processes.md`) plus any handle
 grant to the registry. The rows survive restart. Turn starts carry turn
 causality; host-event deliveries carry `CausalRef::HostEvent { occurrence_id }`.
-Neither path carries a borrowed execution scope.
+Neither path carries a borrowed execution scope or a live session binding.
 
 **2. Execution = a lash-owned durable worker with a per-process lease +
 recovery.** Turns use effect-host replay plus final commit stamps; processes use
@@ -226,14 +228,17 @@ gone — out of turn there is no turn-scoped controller, so the host's explicitl
 named runtime effect controller is used for the effect that registers the row. A
 `Start` only *registers* the row (the inline off-lease `tokio::spawn` is
 deleted), and `ProcessCommandRunner::run` pokes the host's
-`ProcessWorkRunner` after a successful `Start`. The runner is wired by the host:
-the `lash` facade lazily spawns a default inline runner on first
-`session().open()` when a process registry **and** a store factory are present
-(it cannot rebuild session runtimes without one), suppressed by an explicit
-`with_process_work_runner(...)` and guarded by
-`EmbedError::ProcessRegistryWithoutWorkRunner` when the default is disabled with
-no replacement; a Restate deployment registers the ingress-client runner at the
-serve path (`lash-restate/src/lib.rs`) and hands the core its poke.
+`ProcessWorkRunner` after a successful `Start`. The runner is wired by the
+host through one of two facade sources: `.process_registry(...)` selects the
+inline source — the default runner's `DurableProcessWorkerConfig` is built
+eagerly at `build()` (failing loudly with
+`EmbedError::ProcessRegistryRequiresStoreFactory` when no session store
+factory is wired) and the runner is spawned lazily exactly once on the first
+`session().open()` that needs it — while `.process_work_driver(...)` installs
+an externally owned runner whose registry becomes the core's process registry,
+so no inline runner is spawned. A Restate deployment registers the
+ingress-client runner at the serve path (`lash-restate/src/lib.rs`) and hands
+the core its poke.
 
 An emitter-supplied durability API was **not** added — the worker owns execution
 durability, not the emitter.
@@ -271,7 +276,7 @@ terminal are carried as request config / tool-access, not lost.
   (poke + poll + startup loop), `ProcessWorkPoke`, `ProcessRunHandle` /
   `InlineProcessRunHandle`.
 - `crates/lash/src/core.rs` — `ProcessWorkRunnerSlot` (lazy default-runner spawn
-  on first open), `with_process_work_runner` / `disable_default_process_work_runner`.
+  on first open), `.process_registry(...)` / `.process_work_driver(...)`.
 - `crates/lash-core/src/runtime/process/model.rs` — `ProcessLease` /
   `ProcessLeaseCompletion`.
 - `crates/lash-core/src/runtime/process/registry.rs` — `ProcessRegistry`
@@ -297,5 +302,5 @@ terminal are carried as request config / tool-access, not lost.
 - `crates/lash-restate/src/tests.rs` —
   `sqlite_trigger_started_process_recovered_after_worker_registry_reopen` and
   `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`.
-- `crates/lash-core/src/testing/conformance.rs` — process-lease single-owner /
-  fencing conformance suite.
+- `crates/lash-core/src/testing/conformance/` — process-lease single-owner /
+  fencing conformance suite (`process_registry.rs`).

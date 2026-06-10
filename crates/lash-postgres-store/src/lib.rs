@@ -2159,16 +2159,11 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 serde_json::from_str(&record_json).map_err(process_decode_error)?;
             removed.push((process_id, record));
         }
-        let deleted_wake_count = sqlx::query(
-            "DELETE FROM lash_process_wake_acks WHERE process_id IN (
-                SELECT process_id FROM lash_process_handle_grants WHERE session_id = $1
-             )",
-        )
-        .bind(session_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?
-        .rows_affected() as usize;
+        // Wake acknowledgements are process-scoped consumed-event markers. Session
+        // deletion removes materialized session-addressed deliveries through the
+        // session store; clearing these rows would re-expose already-consumed wakes
+        // to surviving grants or future host readers.
+        let deleted_wake_count = 0;
         let revoked = sqlx::query("DELETE FROM lash_process_handle_grants WHERE session_id = $1")
             .bind(session_id)
             .execute(&mut *tx)
@@ -2241,6 +2236,9 @@ impl ProcessRegistry for PostgresProcessRegistry {
         if prepared.replayed {
             let repaired = if let Some(status) = prepared.status_update.clone() {
                 record.status = status;
+                if record.status.is_terminal() {
+                    record.wait = None;
+                }
                 record.updated_at_ms = prepared.occurred_at_ms;
                 save_process_tx(&mut tx, &record).await?;
                 true
@@ -2276,6 +2274,9 @@ impl ProcessRegistry for PostgresProcessRegistry {
         .map_err(plugin_sqlx_error)?;
         if let Some(status) = prepared.status_update.clone() {
             record.status = status;
+            if record.status.is_terminal() {
+                record.wait = None;
+            }
         }
         record.updated_at_ms = prepared.occurred_at_ms;
         save_process_tx(&mut tx, &record).await?;
@@ -2398,6 +2399,41 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 "unknown process `{process_id}` after terminal event"
             ))
         })
+    }
+
+    async fn set_process_wait(
+        &self,
+        process_id: &str,
+        wait: lash_core::WaitState,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        if record.is_terminal() {
+            return Err(PluginError::Session(format!(
+                "terminal process `{process_id}` cannot enter a wait state"
+            )));
+        }
+        record.wait = Some(wait);
+        record.updated_at_ms = current_epoch_ms();
+        save_process_tx(&mut tx, &record).await?;
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        self.notify.notify_waiters();
+        Ok(record)
+    }
+
+    async fn clear_process_wait(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        record.wait = None;
+        record.updated_at_ms = current_epoch_ms();
+        save_process_tx(&mut tx, &record).await?;
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        self.notify.notify_waiters();
+        Ok(record)
     }
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {

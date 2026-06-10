@@ -260,9 +260,11 @@ pub use runtime::{
     SessionScopeId, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
     TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
     TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UnavailableProcessService,
-    UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger, diff_usage_reports,
-    ensure_durable_effect_input, epoch_ms_from_system_time, lashlang_process_event_types,
-    system_time_from_epoch_ms,
+    UsageReportRow, UsageTotals, WaitKind, WaitState, current_epoch_ms, diff_token_ledger,
+    diff_usage_reports, ensure_durable_effect_input, epoch_ms_from_system_time,
+    lashlang_process_event_types, lashlang_process_signal_event_types, process_signal_event_type,
+    process_signal_name_from_event_type, process_signal_wait_key, system_time_from_epoch_ms,
+    validate_process_signal_name,
 };
 #[allow(unused_imports)]
 pub(crate) use runtime::{

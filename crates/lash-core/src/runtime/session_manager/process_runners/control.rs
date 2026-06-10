@@ -99,12 +99,14 @@ impl<'scope> ProcessCommandRunner<'scope> {
     async fn signal(
         &self,
         process_id: &str,
+        signal_name: String,
         signal_id: String,
         request: crate::ProcessEventAppendRequest,
     ) -> Result<crate::ProcessEvent, crate::PluginError> {
         match self
             .run(crate::ProcessCommand::Signal {
                 process_id: process_id.to_string(),
+                signal_name,
                 signal_id,
                 request,
             })
@@ -330,6 +332,7 @@ impl ProcessCapability {
         current: &CurrentSessionCapability,
         session_id: &str,
         process_id: &str,
+        signal_name: String,
         signal_id: String,
         payload: serde_json::Value,
         scope: crate::ProcessOpScope<'_>,
@@ -347,9 +350,13 @@ impl ProcessCapability {
                 "process handle `{process_id}` is not live or visible in this session"
             )));
         }
-        let request = crate::ProcessEventAppendRequest::new("process.signal", payload)
-            .with_replay_key(format!("process:{process_id}:signal:{signal_id}"));
-        runner.signal(process_id, signal_id, request).await
+        let event_type = crate::process_signal_event_type(&signal_name)?;
+        let request = crate::ProcessEventAppendRequest::new(event_type, payload).with_replay_key(
+            format!("process:{process_id}:signal.{signal_name}:{signal_id}"),
+        );
+        runner
+            .signal(process_id, signal_name, signal_id, request)
+            .await
     }
 
     pub(in crate::runtime::session_manager) async fn validate_process_handles_visible(

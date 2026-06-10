@@ -846,6 +846,8 @@ pub enum LinkError {
     DuplicateDeclaration { name: String, span: Option<Span> },
     #[error("duplicate process parameter `{name}`")]
     DuplicateProcessParam { name: String, span: Option<Span> },
+    #[error("duplicate process signal `{name}`")]
+    DuplicateProcessSignal { name: String, span: Option<Span> },
     #[error("unknown process `{name}`")]
     UnknownProcess { name: String, span: Option<Span> },
     #[error("process `{process}` is missing argument `{arg}`")]
@@ -994,6 +996,7 @@ impl LinkError {
         match self {
             Self::DuplicateDeclaration { span, .. }
             | Self::DuplicateProcessParam { span, .. }
+            | Self::DuplicateProcessSignal { span, .. }
             | Self::UnknownProcess { span, .. }
             | Self::MissingProcessArgument { span, .. }
             | Self::UnexpectedProcessArgument { span, .. }
@@ -1124,6 +1127,9 @@ impl<'module> Linker<'module> {
                 Declaration::Process(process) => {
                     for param in &process.params {
                         self.validate_type_refs(&param.ty, None)?;
+                    }
+                    for signal in &process.signals {
+                        self.validate_type_refs(&signal.ty, None)?;
                     }
                     if let Some(return_ty) = &process.return_ty {
                         self.validate_type_refs(return_ty, None)?;
@@ -1407,12 +1413,27 @@ impl<'module> Linker<'module> {
                     }
                     scope.bind(param.name.as_str(), self.binding_for_type(&param.ty));
                 }
+                let mut seen_signals = BTreeSet::new();
+                for signal in &process.signals {
+                    self.ensure_feature(
+                        self.surface.abilities.process_signals,
+                        "process signals",
+                        span,
+                    )?;
+                    if !seen_signals.insert(signal.name.to_string()) {
+                        return Err(LinkError::DuplicateProcessSignal {
+                            name: signal.name.to_string(),
+                            span,
+                        });
+                    }
+                }
                 scope.bind("input", Binding::Value(process_input_type(process)));
                 scope.bind("inputs", Binding::Value(process_input_record_type(process)));
                 let body = self.lower_expr(&process.body, &mut scope)?.0;
                 Declaration::Process(ProcessDecl {
                     name: process.name.clone(),
                     params: process.params.clone(),
+                    signals: process.signals.clone(),
                     return_ty: process.return_ty.clone(),
                     label: process.label.clone(),
                     body,
@@ -1849,7 +1870,7 @@ impl<'module> Linker<'module> {
                     Some(Binding::Value(TypeExpr::Null)),
                 )
             }
-            Expr::WaitSignal => {
+            Expr::WaitSignal { name } => {
                 self.ensure_feature(
                     self.surface.abilities.process_signals,
                     "process signals",
@@ -1857,24 +1878,28 @@ impl<'module> Linker<'module> {
                 )?;
                 if !scope.process_body {
                     return Err(LinkError::ProcessLifecycleOutsideProcess {
-                        keyword: "wait signal",
+                        keyword: "wait_signal",
                         span: scope.span,
                     });
                 }
-                (Expr::WaitSignal, Some(Binding::Value(TypeExpr::Any)))
+                (
+                    Expr::WaitSignal { name: name.clone() },
+                    Some(Binding::Value(TypeExpr::Any)),
+                )
             }
-            Expr::SignalRun { run, payload } => {
+            Expr::SignalRun { run, name, payload } => {
                 self.ensure_feature(
                     self.surface.abilities.process_signals,
                     "process signals",
                     scope.span,
                 )?;
-                // `signal run` (sending) is a control-plane op like `await` /
+                // `signal_run` (sending) is a control-plane op like `await` /
                 // `cancel`, valid from the foreground turn as well as inside a
-                // process body. Only `wait signal` (receiving) is process-only.
+                // process body. Only `wait_signal` (receiving) is process-only.
                 (
                     Expr::SignalRun {
                         run: Box::new(self.lower_expr(run, scope)?.0),
+                        name: name.clone(),
                         payload: Box::new(self.lower_expr(payload, scope)?.0),
                     },
                     Some(Binding::Value(TypeExpr::Null)),
@@ -2629,7 +2654,7 @@ impl<'module> Linker<'module> {
             }
             Expr::Await(inner) | Expr::ResultUnwrap(inner) => self.infer_expr_type(inner, scope)?,
             Expr::SleepFor(_) | Expr::SleepUntil(_) => TypeExpr::Null,
-            Expr::WaitSignal => TypeExpr::Any,
+            Expr::WaitSignal { .. } => TypeExpr::Any,
             Expr::SignalRun { .. }
             | Expr::Cancel(_)
             | Expr::Print(_)
@@ -3108,10 +3133,10 @@ mod tests {
               text = await tool.read_file({ path: "changed.txt" })?
               finish text
             }
-            process watcher(run: any) {
+            process watcher(run: any) signals { ready: any } {
               sleep for "0ms"
-              signal = wait signal
-              signal run run with signal
+              signal = wait_signal("ready")
+              signal_run(run, "ready", signal)
               finish signal
             }
             process from_tick(tick: timer.Tick) {
@@ -3266,7 +3291,7 @@ mod tests {
 
     #[test]
     fn linked_module_rejects_process_lifecycle_outside_process_body() {
-        let program = crate::parse("payload = wait signal").expect("parse wait signal");
+        let program = crate::parse("payload = wait_signal(\"ready\")").expect("parse wait_signal");
 
         let err = LinkedModule::link(program, full_surface())
             .expect_err("top-level process lifecycle should be rejected");
@@ -3275,7 +3300,7 @@ mod tests {
             matches!(
                 err,
                 LinkError::ProcessLifecycleOutsideProcess {
-                    keyword: "wait signal",
+                    keyword: "wait_signal",
                     ..
                 }
             ),
@@ -3285,12 +3310,12 @@ mod tests {
 
     #[test]
     fn linked_module_accepts_top_level_signal_run() {
-        // `signal run` (sending) mirrors `await` / `cancel`: legal from the
-        // foreground turn, unlike the process-only `wait signal`.
+        // `signal_run` (sending) mirrors `await` / `cancel`: legal from the
+        // foreground turn, unlike the process-only `wait_signal`.
         let program =
-            crate::parse("signal run \"handle\" with \"ping\"").expect("parse signal run");
+            crate::parse("signal_run(\"handle\", \"ready\", \"ping\")").expect("parse signal_run");
 
-        LinkedModule::link(program, full_surface()).expect("top-level signal run should link");
+        LinkedModule::link(program, full_surface()).expect("top-level signal_run should link");
     }
 
     #[test]
@@ -3360,8 +3385,10 @@ mod tests {
             })
         ));
 
-        let signal = crate::parse("process worker() { payload = wait signal }")
-            .expect("parse disabled process signal");
+        let signal = crate::parse(
+            "process worker() signals { ready: any } { payload = wait_signal(\"ready\") }",
+        )
+        .expect("parse disabled process signal");
         assert!(matches!(
             LinkedModule::link(
                 signal,

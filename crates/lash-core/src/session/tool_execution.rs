@@ -407,8 +407,10 @@ impl RuntimeExecutionContext<'_> {
         &self,
         call_id: String,
         handle: serde_json::Value,
+        signal_name: String,
         payload: serde_json::Value,
     ) -> ToolInvocationReply {
-        self.signal_process_handle(call_id, handle, payload).await
+        self.signal_process_handle(call_id, handle, signal_name, payload)
+            .await
     }
 }

@@ -118,6 +118,31 @@ pub(crate) fn lashlang_sleep_invocation(
     )
 }
 
+pub(crate) fn lashlang_await_event_invocation(
+    session_id: &str,
+    parent: Option<&RuntimeInvocation>,
+    process_id: &str,
+    signal_name: &str,
+    ordinal: u64,
+) -> RuntimeInvocation {
+    let suffix = format!("lashlang:process:{process_id}:signal.{signal_name}:await:{ordinal}");
+    if let Some(parent) = parent {
+        let parent_effect_id = parent.effect_id().unwrap_or("effect");
+        return child_effect_invocation(
+            parent,
+            format!("{parent_effect_id}:{suffix}"),
+            RuntimeEffectKind::AwaitEvent,
+            suffix,
+        );
+    }
+    RuntimeInvocation::effect(
+        RuntimeScope::new(session_id),
+        suffix.clone(),
+        RuntimeEffectKind::AwaitEvent,
+        suffix,
+    )
+}
+
 pub(crate) fn process_effect_invocation(
     session_id: &str,
     parent: Option<RuntimeInvocation>,

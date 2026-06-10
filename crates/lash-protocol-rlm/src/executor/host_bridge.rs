@@ -261,10 +261,15 @@ impl HostBridge<'_> {
         let payload = handle_to_json(&signal.payload).await?;
         let reply = self
             .ctx
-            .signal_tool_handle(uuid::Uuid::new_v4().to_string(), handle, payload)
+            .signal_tool_handle(
+                uuid::Uuid::new_v4().to_string(),
+                handle,
+                signal.name,
+                payload,
+            )
             .await;
         self.consume_reply("signal_run", reply)?;
-        // `signal run` evaluates to null in the language; the appended event is
+        // `signal_run` evaluates to null in the language; the appended event is
         // recorded as a tool call but not surfaced as the expression value.
         Ok(FlowValue::Null)
     }
@@ -330,8 +335,8 @@ impl ExecutionHost for HostBridge<'_> {
             AbilityOp::ProcessEvent(_) => Err(ExecutionHostError::new(
                 "process events are only available inside lashlang process bodies",
             )),
-            AbilityOp::WaitSignal => Err(ExecutionHostError::new(
-                "`wait signal` is only available inside lashlang process bodies",
+            AbilityOp::WaitSignal { .. } => Err(ExecutionHostError::new(
+                "`wait_signal` is only available inside lashlang process bodies",
             )),
             AbilityOp::SignalRun(signal) => self.signal_run(signal).await.map(AbilityResult::Value),
             AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {

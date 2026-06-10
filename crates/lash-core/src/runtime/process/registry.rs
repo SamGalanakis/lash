@@ -6,7 +6,7 @@ use super::events::{
 use super::model::{
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
     ProcessLease, ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
-    ProcessSessionDeleteReport, SessionScope,
+    ProcessSessionDeleteReport, SessionScope, WaitState,
 };
 
 /// Durability-neutral process registry.
@@ -120,6 +120,14 @@ pub trait ProcessRegistry: Send + Sync {
         process_id: &str,
         await_output: ProcessAwaitOutput,
     ) -> Result<ProcessRecord, PluginError>;
+
+    async fn set_process_wait(
+        &self,
+        process_id: &str,
+        wait: WaitState,
+    ) -> Result<ProcessRecord, PluginError>;
+
+    async fn clear_process_wait(&self, process_id: &str) -> Result<ProcessRecord, PluginError>;
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord>;
 

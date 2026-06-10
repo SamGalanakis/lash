@@ -55,6 +55,7 @@
                 <tr><td><code>context.sessions().tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
                 <tr><td><code>context.sessions().set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
                 <tr><td><code>context.sessions()</code></td><td>Cloneable child-session control: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses process handles granted to sessions, not child-turn handles.</td></tr>
+                <tr><td><code>context.processes()</code></td><td>Session-scoped process control: start a process from a tool, await its output, and list the process handles granted to the session.</td></tr>
                 <tr><td><code>context.process_events().emit(...).await?</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
                 <tr><td><code>context.direct_completions().complete(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>caused_by</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect replay keys; set <code>DirectRequest::replay</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
               </tbody>

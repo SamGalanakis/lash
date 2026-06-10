@@ -180,7 +180,7 @@ impl RuntimeEffectController for WorkflowEffectController {
 flowchart LR
   Start["start &lt;tool&gt; / start name(...)"] --> Register["register_process<br/>ProcessRecord"]
   Register --> Grant["grant_handle<br/>per-session handle"]
-  Register --> Worker["DurableProcessWorker<br/>(rebuilds from host config)"]
+  Register --> Worker["DurableProcessWorker<br/>(ephemeral runtime from captured env)"]
   Worker --> Events["append_event<br/>(event-sourced state)"]
   Events --> Terminal["keyed terminal event"]
   Grant --> Await["await handle"]
@@ -188,7 +188,8 @@ flowchart LR
   Terminal --> Await
             </div>
           </div>
-          <p>Records are event-sourced: terminal state and cancellation are keyed process events on the record (<code>process.cancel_requested</code> routes to the workflow's shared <code>cancel</code> handler), not mutable state fields. Tool and Lashlang process rows carry a captured execution-environment reference, and workers instantiate an ephemeral runtime from that immutable environment plus host-owned worker config; they do not rebuild the origin session. A Restate-backed start stores <code>external_ref.backend == "restate"</code> with <code>external_ref.id == "LashProcessWorkflow/{process_id}"</code>. Wake semantics write durable wake-inbox rows only when the process has a live target session scope; checkpoints drain those rows beside in-memory turn injections.</p>
+          <p>A process is self-contained: the record carries its <code>ProcessOriginator</code> (host or session) as pure provenance, a captured execution-environment reference, and an optional 0..1 wake target. Session relationships are explicit, optional edges that never imply cleanup — deleting a session revokes that session's handle grants and pending wake deliveries, never cancels a process, and the <code>ProcessSessionDeleteReport</code> lists the non-terminal processes left with no remaining grants (<code>orphaned_process_ids</code>); their lifecycle is host policy. See <code>docs/adr/0001-self-contained-processes.md</code> for the full model.</p>
+          <p>Records are event-sourced: terminal state and cancellation are keyed process events on the record (<code>process.cancel_requested</code> routes to the workflow's shared <code>cancel</code> handler), not mutable state fields. Tool and Lashlang process rows carry a captured execution-environment reference — a content-addressed <code>process_execution_env</code> artifact holding plugin options and policy — and workers instantiate an ephemeral runtime from that immutable environment plus host-owned worker config; they never rebuild the originating session. A Restate-backed start stores <code>external_ref.backend == "restate"</code> with <code>external_ref.id == "LashProcessWorkflow/{process_id}"</code>. Wake semantics write durable wake-inbox rows only when the process has a wake target; a process without one still records wake events, but they deliver nowhere. Checkpoints drain inbox rows beside in-memory turn injections.</p>
           <div class="table">
             <table>
               <thead><tr><th><code>ProcessInput</code></th><th>Started by</th></tr></thead>
@@ -230,7 +231,7 @@ flowchart LR
               </tbody>
             </table>
           </div>
-          <p>The per-invocation durable controller is deliberately invisible at facade <code>build()</code>: a durable controller is constructed per-invocation from a host <code>ctx</code>, so the build-time controller is inline by construction. Build therefore validates peer-coherence among the stores it can see — a durable session store factory requires a durable attachment store and a durable artifact store, and a durable process registry requires a durable session store factory — while the effect-host-vs-store check happens later at the turn-scope and worker boundaries where the controller's tier is finally known. The rejected emitter-supplied durability stopgap was deliberately not added: the worker owns execution durability, not whoever emitted the event.</p>
+          <p>The per-invocation durable controller is deliberately invisible at facade <code>build()</code>: a durable controller is constructed per-invocation from a host <code>ctx</code>, so the build-time controller is inline by construction. Build therefore validates peer-coherence among the stores it can see — a durable session store factory requires a durable attachment store and a durable artifact store, and a durable process registry requires a durable session store factory and a durable host-event store — while the effect-host-vs-store check happens later at the turn-scope and worker boundaries where the controller's tier is finally known. The rejected emitter-supplied durability stopgap was deliberately not added: the worker owns execution durability, not whoever emitted the event.</p>
         </div>
 
         <div class="section">

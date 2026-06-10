@@ -21,6 +21,7 @@ impl HostEventsControl {
         let process_work_poke = self.core.process_work_runner.poke().await;
         let router = lash_core::HostEventRouter::new(
             Arc::clone(store),
+            Arc::clone(&self.core.env.core.durability.lashlang_artifact_store),
             self.core.env.process_registry.clone(),
             process_work_poke,
             self.core.env.core.profile.host_profile_id.clone(),
@@ -197,12 +198,14 @@ impl Processes {
     pub async fn signal(
         &self,
         process_id: &str,
+        signal_name: impl Into<String>,
         signal_id: impl Into<String>,
         request: lash_core::ProcessEventAppendRequest,
         scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::ProcessEvent> {
         let command = lash_core::ProcessCommand::Signal {
             process_id: process_id.to_string(),
+            signal_name: signal_name.into(),
             signal_id: signal_id.into(),
             request,
         };

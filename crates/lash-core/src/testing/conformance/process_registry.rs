@@ -40,6 +40,7 @@ pub async fn process_registry_with_expected_durability<F>(
     wake_semantic_events_without_target_record_without_delivery(make()).await;
     terminal_and_cancel_events_require_keys(make()).await;
     await_reads_terminal_materialized_output(make()).await;
+    wait_state_round_trips_filters_and_clears_on_terminal(make()).await;
     transfer_handle_grants_moves_addressability(make()).await;
     multiple_sessions_can_hold_grants(make()).await;
     processes_can_exist_with_zero_grants(make()).await;
@@ -962,6 +963,123 @@ async fn await_reads_terminal_materialized_output(registry: Arc<dyn ProcessRegis
     );
 }
 
+async fn wait_state_round_trips_filters_and_clears_on_terminal(registry: Arc<dyn ProcessRegistry>) {
+    assert!(
+        registry
+            .set_process_wait(
+                "missing-process",
+                WaitState {
+                    since_ms: 1,
+                    kind: WaitKind::Signal {
+                        name: "ready".to_string(),
+                        event_type: "signal.ready".to_string(),
+                        key: "process:missing-process:signal.ready:1".to_string(),
+                        ordinal: 1,
+                    },
+                },
+            )
+            .await
+            .is_err(),
+        "setting wait state for an unknown process must fail"
+    );
+
+    registry
+        .register_process(registration("proc-wait-roundtrip"))
+        .await
+        .expect("register wait process");
+    let wait = WaitState {
+        since_ms: 1234,
+        kind: WaitKind::Signal {
+            name: "ready".to_string(),
+            event_type: "signal.ready".to_string(),
+            key: "process:proc-wait-roundtrip:signal.ready:1".to_string(),
+            ordinal: 1,
+        },
+    };
+
+    let waiting = registry
+        .set_process_wait("proc-wait-roundtrip", wait.clone())
+        .await
+        .expect("set wait state");
+    assert_eq!(waiting.wait, Some(wait.clone()));
+    assert_eq!(
+        registry
+            .get_process("proc-wait-roundtrip")
+            .await
+            .expect("wait process")
+            .wait,
+        Some(wait.clone()),
+        "wait state must persist on the process record"
+    );
+    assert!(
+        registry
+            .list_processes(&ProcessListFilter {
+                waiting: Some(true),
+                ..ProcessListFilter::default()
+            })
+            .await
+            .expect("list waiting processes")
+            .iter()
+            .any(|record| record.id == "proc-wait-roundtrip"),
+        "waiting=true must include processes with a current wait state"
+    );
+    assert!(
+        registry
+            .list_processes(&ProcessListFilter {
+                waiting: Some(false),
+                ..ProcessListFilter::default()
+            })
+            .await
+            .expect("list idle processes")
+            .iter()
+            .all(|record| record.id != "proc-wait-roundtrip"),
+        "waiting=false must exclude processes with a current wait state"
+    );
+
+    let resumed = registry
+        .clear_process_wait("proc-wait-roundtrip")
+        .await
+        .expect("clear wait state");
+    assert_eq!(resumed.wait, None);
+
+    registry
+        .set_process_wait("proc-wait-roundtrip", wait)
+        .await
+        .expect("set wait state before terminal completion");
+    let completed = registry
+        .complete_process(
+            "proc-wait-roundtrip",
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "done": true }),
+                control: None,
+            },
+        )
+        .await
+        .expect("complete waiting process");
+    assert!(
+        completed.wait.is_none(),
+        "terminal completion must clear current wait state"
+    );
+    assert!(
+        registry
+            .set_process_wait(
+                "proc-wait-roundtrip",
+                WaitState {
+                    since_ms: 5678,
+                    kind: WaitKind::Signal {
+                        name: "again".to_string(),
+                        event_type: "signal.again".to_string(),
+                        key: "process:proc-wait-roundtrip:signal.again:1".to_string(),
+                        ordinal: 1,
+                    },
+                },
+            )
+            .await
+            .is_err(),
+        "terminal processes cannot enter a wait state"
+    );
+}
+
 async fn transfer_handle_grants_moves_addressability(registry: Arc<dyn ProcessRegistry>) {
     let s1 = SessionScope::new("s1");
     let s2 = SessionScope::new("s2");
@@ -1126,6 +1244,29 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
         )
         .await
         .expect("append wake");
+    let shared_wake = registry
+        .append_event(
+            "shared",
+            ProcessEventAppendRequest::new(
+                "producer.wake",
+                serde_json::json!({ "wake_input": "wake shared" }),
+            )
+            .with_wake_target_scope(remaining_scope.clone()),
+        )
+        .await
+        .expect("append shared wake");
+    registry
+        .ack_wake("shared", shared_wake.event.sequence)
+        .await
+        .expect("ack shared wake");
+    assert!(
+        registry
+            .wake_events_after("shared", 0)
+            .await
+            .expect("shared wake events before delete")
+            .is_empty(),
+        "acked shared wake should be suppressed before session deletion"
+    );
 
     let report = registry
         .delete_session_process_state("deleted")
@@ -1150,6 +1291,14 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
             .expect("remaining grants")
             .len(),
         1
+    );
+    assert!(
+        registry
+            .wake_events_after("shared", 0)
+            .await
+            .expect("shared wake events after delete")
+            .is_empty(),
+        "session deletion must preserve process-scoped wake acknowledgements"
     );
 }
 

@@ -321,6 +321,8 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         .expect("test plugin session");
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
     let attachment_store = Arc::new(crate::InMemoryAttachmentStore::new());
+    let artifact_store: Arc<dyn lashlang::LashlangArtifactStore> =
+        Arc::new(lashlang::InMemoryLashlangArtifactStore::new());
     let host_event_store = Arc::new(crate::InMemoryHostEventStore::default());
     let process_registry: Arc<dyn crate::ProcessRegistry> =
         Arc::new(crate::TestLocalProcessRegistry::default());
@@ -338,6 +340,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         host_event_router: Some(crate::HostEventRouter::new(
             host_event_store,
+            Arc::clone(&artifact_store),
             Some(process_registry),
             None,
             "test".to_string(),
@@ -367,7 +370,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         dispatch,
         abilities,
         Default::default(),
-        Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+        artifact_store,
         attachment_store,
         Arc::new(crate::ChronologicalProjection::default()),
         None,
@@ -652,15 +655,18 @@ impl crate::ProcessService for MockSessionManager {
         &self,
         _session_id: &str,
         process_id: &str,
+        signal_name: String,
         signal_id: String,
         payload: serde_json::Value,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessEvent, PluginError> {
+        let event_type = crate::process_signal_event_type(&signal_name)?;
         self.process_registry
             .append_event(
                 process_id,
-                crate::ProcessEventAppendRequest::new("process.signal", payload)
-                    .with_replay_key(format!("process:{process_id}:signal:{signal_id}")),
+                crate::ProcessEventAppendRequest::new(event_type, payload).with_replay_key(
+                    format!("process:{process_id}:signal.{signal_name}:{signal_id}"),
+                ),
             )
             .await
             .map(|result| result.event)

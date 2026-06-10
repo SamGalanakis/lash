@@ -531,6 +531,12 @@ fn write_process(writer: &mut HashWriter, process: &ProcessDecl) {
         writer.atom(param.name.as_str());
         write_type(writer, &param.ty);
     }
+    writer.atom("signals");
+    writer.usize(process.signals.len());
+    for signal in &process.signals {
+        writer.atom(signal.name.as_str());
+        write_type(writer, &signal.ty);
+    }
     match &process.return_ty {
         Some(ty) => {
             writer.atom("return");
@@ -737,9 +743,13 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
         Expr::Await(expr) => write_unary_expr(writer, "await", expr, normalizer),
         Expr::SleepFor(expr) => write_unary_expr(writer, "sleep-for", expr, normalizer),
         Expr::SleepUntil(expr) => write_unary_expr(writer, "sleep-until", expr, normalizer),
-        Expr::WaitSignal => writer.atom("wait-signal"),
-        Expr::SignalRun { run, payload } => {
+        Expr::WaitSignal { name } => {
+            writer.atom("wait-signal");
+            writer.atom(name.as_str());
+        }
+        Expr::SignalRun { run, name, payload } => {
             writer.atom("signal-run");
+            writer.atom(name.as_str());
             write_expr(writer, run, normalizer);
             write_expr(writer, payload, normalizer);
         }
@@ -1266,11 +1276,11 @@ impl<'program> RequirementsCollector<'program> {
                 self.collect_expr(expr, scope);
                 Some(RequirementBinding::Value)
             }
-            Expr::WaitSignal => {
+            Expr::WaitSignal { .. } => {
                 self.requirements.abilities.process_signals = true;
                 Some(RequirementBinding::Value)
             }
-            Expr::SignalRun { run, payload } => {
+            Expr::SignalRun { run, payload, .. } => {
                 self.requirements.abilities.process_signals = true;
                 self.collect_expr(run, scope);
                 self.collect_expr(payload, scope);

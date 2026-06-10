@@ -31,6 +31,7 @@ pub enum RuntimeEffectKind {
     Checkpoint,
     SyncExecutionSurface,
     Sleep,
+    AwaitEvent,
 }
 
 impl RuntimeEffectKind {
@@ -44,6 +45,7 @@ impl RuntimeEffectKind {
             Self::Checkpoint => "checkpoint",
             Self::SyncExecutionSurface => "sync_execution_surface",
             Self::Sleep => "sleep",
+            Self::AwaitEvent => "await_event",
         }
     }
 }
@@ -296,6 +298,9 @@ pub enum RuntimeEffectCommand {
     Sleep {
         duration_ms: u64,
     },
+    AwaitEvent {
+        key: String,
+    },
 }
 
 impl RuntimeEffectCommand {
@@ -315,6 +320,7 @@ impl RuntimeEffectCommand {
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
             Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
             Self::Sleep { .. } => RuntimeEffectKind::Sleep,
+            Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }
     }
 }
@@ -355,6 +361,7 @@ pub enum ProcessCommand {
     },
     Signal {
         process_id: String,
+        signal_name: String,
         signal_id: String,
         request: crate::ProcessEventAppendRequest,
     },
@@ -394,10 +401,11 @@ impl ProcessCommand {
             Self::Cancel { process_id, .. } => format!("process:cancel:{process_id}"),
             Self::Signal {
                 process_id,
+                signal_name,
                 signal_id,
                 ..
             } => {
-                format!("process:signal:{process_id}:{signal_id}")
+                format!("process:signal:{process_id}:signal.{signal_name}:{signal_id}")
             }
         }
     }
@@ -464,6 +472,9 @@ pub enum RuntimeEffectOutcome {
         result: Result<Option<ExecutionSurfaceSync>, String>,
     },
     Sleep,
+    AwaitEvent {
+        payload: serde_json::Value,
+    },
 }
 
 // =============================================================================
@@ -697,6 +708,16 @@ impl RuntimeEffectOutcome {
         }
     }
 
+    pub fn into_await_event(self) -> Result<serde_json::Value, RuntimeEffectControllerError> {
+        match self {
+            Self::AwaitEvent { payload } => Ok(payload),
+            other => Err(RuntimeEffectControllerError::wrong_outcome(
+                RuntimeEffectKind::AwaitEvent,
+                other.kind(),
+            )),
+        }
+    }
+
     pub fn kind(&self) -> RuntimeEffectKind {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
@@ -707,6 +728,7 @@ impl RuntimeEffectOutcome {
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
             Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
             Self::Sleep => RuntimeEffectKind::Sleep,
+            Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }
     }
 }

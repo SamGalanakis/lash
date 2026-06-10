@@ -649,8 +649,27 @@ pub struct ProcessRecord {
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<ProcessExternalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitState>,
     #[serde(default)]
     pub status: ProcessStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitState {
+    pub kind: WaitKind,
+    pub since_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WaitKind {
+    Signal {
+        name: String,
+        event_type: String,
+        key: String,
+        ordinal: u64,
+    },
 }
 
 impl ProcessRecord {
@@ -679,6 +698,7 @@ impl ProcessRecord {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             external_ref: None,
+            wait: None,
             status: ProcessStatus::Running,
         }
     }
@@ -1033,6 +1053,7 @@ impl ProcessStatusFilter {
 pub struct ProcessListFilter {
     pub definition: Option<ProcessDefinitionSelector>,
     pub status: ProcessStatusFilter,
+    pub waiting: Option<bool>,
 }
 
 impl ProcessListFilter {
@@ -1042,7 +1063,7 @@ impl ProcessListFilter {
             .ok_or_else(|| "processes.list expects a record of process filters".to_string())?;
         for key in map.keys() {
             match key.as_str() {
-                "definition" | "status" => {}
+                "definition" | "status" | "waiting" => {}
                 _ => return Err(format!("processes.list unknown filter `{key}`")),
             }
         }
@@ -1052,7 +1073,19 @@ impl ProcessListFilter {
             .transpose()?;
         let status =
             ProcessStatusFilter::decode(args.get("status").and_then(serde_json::Value::as_str))?;
-        Ok(Self { definition, status })
+        let waiting = args
+            .get("waiting")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| "processes.list `waiting` filter must be a boolean".to_string())
+            })
+            .transpose()?;
+        Ok(Self {
+            definition,
+            status,
+            waiting,
+        })
     }
 
     pub fn list_mode(&self) -> ProcessListMode {
@@ -1071,6 +1104,9 @@ impl ProcessListFilter {
                 .definition
                 .as_ref()
                 .is_none_or(|definition| definition.matches_input(record.input.as_ref()))
+            && self
+                .waiting
+                .is_none_or(|waiting| record.wait.is_some() == waiting)
     }
 }
 
@@ -1215,5 +1251,52 @@ mod tests {
         assert_eq!(filter.list_mode(), ProcessListMode::All);
         assert!(filter.matches_entry(&matching));
         assert!(!filter.matches_entry(&wrong_definition));
+    }
+
+    #[test]
+    fn process_list_filter_matches_waiting_facet() {
+        let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
+        let surface_ref = lashlang::RequiredSurfaceRef::new(&lashlang::ContentHash::new("surface"));
+        let process_ref = process_ref("target", 0);
+        let mut waiting_entry = lashlang_entry(
+            "waiting",
+            module_ref.clone(),
+            surface_ref.clone(),
+            process_ref.clone(),
+            "target",
+            ProcessStatus::Running,
+        );
+        waiting_entry.1.wait = Some(WaitState {
+            since_ms: 42,
+            kind: WaitKind::Signal {
+                name: "ready".to_string(),
+                event_type: "signal.ready".to_string(),
+                key: "process:waiting:signal.ready:1".to_string(),
+                ordinal: 1,
+            },
+        });
+        let idle_entry = lashlang_entry(
+            "idle",
+            module_ref,
+            surface_ref,
+            process_ref,
+            "target",
+            ProcessStatus::Running,
+        );
+        let waiting_filter =
+            ProcessListFilter::decode(&json!({ "waiting": true })).expect("decode waiting filter");
+        let idle_filter =
+            ProcessListFilter::decode(&json!({ "waiting": false })).expect("decode idle filter");
+
+        assert_eq!(waiting_filter.list_mode(), ProcessListMode::Live);
+        assert!(waiting_filter.matches_entry(&waiting_entry));
+        assert!(!waiting_filter.matches_entry(&idle_entry));
+        assert!(!idle_filter.matches_entry(&waiting_entry));
+        assert!(idle_filter.matches_entry(&idle_entry));
+        assert!(
+            ProcessListFilter::decode(&json!({ "waiting": "yes" }))
+                .expect_err("invalid waiting filter")
+                .contains("must be a boolean")
+        );
     }
 }

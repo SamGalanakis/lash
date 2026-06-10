@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use lash::durability::DurableProcessWorker;
 use lash::observe::SessionResume;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
+use lash_core::{EffectScope, ProcessEventAppendRequest};
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{LashProcessWorkflow, RestateProcessDeployment, RestateRuntimeEffectController};
 use restate_sdk::errors::{HandlerResult, TerminalError};
@@ -101,6 +102,12 @@ impl AppState {
 
         let controller = RestateRuntimeEffectController::new(ctx);
         let core = self.build_core().map_err(terminal_error)?;
+        if request.scenario == TurnScenario::SignalProcess {
+            return self
+                .signal_process(&controller, &core, &request)
+                .await
+                .map(Json);
+        }
         let session = core
             .session(DEFAULT_SESSION_ID)
             .rlm()
@@ -224,6 +231,8 @@ impl AppState {
                 TurnScenario::KitchenSink => EXPECTED_FINAL_TEXT,
                 TurnScenario::TriggerSetup => "trigger-registered",
                 TurnScenario::DrainQueued => "wake-consumed",
+                TurnScenario::SignalSuspend => "signal-suspend-started",
+                TurnScenario::SignalProcess => "signal-sent",
             })
             .to_string();
         let response = TurnResponse {
@@ -253,6 +262,56 @@ impl AppState {
         )
         .await?;
         Ok(response)
+    }
+
+    async fn signal_process(
+        &self,
+        controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+        core: &lash::LashCore,
+        request: &TurnRequest,
+    ) -> HandlerResult<TurnResponse> {
+        let signal = request
+            .signal
+            .as_ref()
+            .ok_or_else(|| terminal_error("signal_process scenario requires a signal payload"))?;
+        let event_type =
+            lash_core::process_signal_event_type(&signal.signal_name).map_err(terminal_error)?;
+        let append = ProcessEventAppendRequest::new(event_type, signal.payload.clone())
+            .with_replay_key(format!(
+                "process:{}:signal.{}:{}",
+                signal.process_id, signal.signal_name, signal.signal_id
+            ));
+        let scoped = controller
+            .scoped_effect_controller(EffectScope::runtime_operation(format!(
+                "e2e:{}:{}",
+                request.workflow_id, signal.signal_id
+            )))
+            .map_err(terminal_error)?;
+        let event = core
+            .processes()
+            .signal(
+                &signal.process_id,
+                signal.signal_name.clone(),
+                signal.signal_id.clone(),
+                append,
+                scoped,
+            )
+            .await
+            .map_err(terminal_error)?;
+        self.finish_response(
+            request,
+            json!({
+                "signalled": true,
+                "process_id": signal.process_id,
+                "signal": signal.signal_name,
+                "sequence": event.sequence,
+                "final": "signal-sent",
+            }),
+            0,
+            None,
+            false,
+        )
+        .await
     }
 
     async fn load_session_process_ids(&self) -> HandlerResult<Vec<String>> {
@@ -300,6 +359,14 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         ),
         TurnScenario::DrainQueued => format!(
             "Drain the next queued E2E wake turn. workflow_id={} drain_queued=true",
+            request.workflow_id
+        ),
+        TurnScenario::SignalSuspend => format!(
+            "Start the E2E signal suspension process. workflow_id={} signal_suspend=true",
+            request.workflow_id
+        ),
+        TurnScenario::SignalProcess => format!(
+            "Signal the E2E process. workflow_id={} signal_process=true",
             request.workflow_id
         ),
     }

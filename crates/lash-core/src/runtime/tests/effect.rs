@@ -198,6 +198,9 @@ impl RuntimeEffectController for RecordingEffectController {
                 }),
             }),
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
+            RuntimeEffectCommand::AwaitEvent { .. } => Ok(RuntimeEffectOutcome::AwaitEvent {
+                payload: serde_json::json!(null),
+            }),
             RuntimeEffectCommand::Direct { request, .. } => {
                 // Both the text-only (`direct_completion`) and full-response
                 // (`direct_llm_completion`) client methods now flow through the

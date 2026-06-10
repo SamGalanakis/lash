@@ -59,7 +59,7 @@ let core = LashCore::standard()
         <div class="section" id="lashlang-execution">
           <div class="section-header">
             <h2>Lashlang Execution Graphs</h2>
-            <p>Host-level Lashlang execution graphs are a separate opt-in sink. They are observability only: they are not written to <code>process_events</code>, do not create process-registry storage, and the normal <code>trace_sink</code> does not receive them unless the host explicitly tees the sink itself. Commands remain on <code>ProcessControl</code>; observation is optional trace projection.</p>
+            <p>Host-level Lashlang execution graphs are a separate opt-in sink. They are observability only: they are not written to <code>process_events</code>, do not create process-registry storage, and the normal <code>trace_sink</code> does not receive them unless the host explicitly tees the sink itself. Commands remain on the process control surfaces — the session-scoped <code>ProcessControl</code> and the runtime-level <code>LashCore::processes()</code> handle; observation is optional trace projection.</p>
           </div>
           <pre data-lang="rust" data-snippet="tracing#lashlang-execution-jsonl"><code>let core = LashCore::rlm()
     .provider(provider)

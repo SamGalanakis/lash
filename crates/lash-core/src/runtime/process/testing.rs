@@ -15,6 +15,7 @@ use super::model::{
     PROCESS_LEASE_SCHEMA_VERSION, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleGrantEntry, ProcessLease, ProcessLeaseCompletion, ProcessListFilter,
     ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, SessionScopeId,
+    WaitState,
 };
 use super::registry::ProcessRegistry;
 use super::time::current_epoch_ms;
@@ -363,6 +364,9 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         if prepared.replayed {
             if let Some(status) = prepared.status_update.clone() {
                 record.record.status = status;
+                if record.record.status.is_terminal() {
+                    record.record.wait = None;
+                }
                 record.record.updated_at_ms = prepared.occurred_at_ms;
                 record.notify.notify_waiters();
             }
@@ -374,6 +378,9 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         let event = prepared.event;
         if let Some(status) = prepared.status_update.clone() {
             record.record.status = status;
+            if record.record.status.is_terminal() {
+                record.record.wait = None;
+            }
         }
         record.record.updated_at_ms = prepared.occurred_at_ms;
         record.events.push(event.clone());
@@ -500,6 +507,41 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                 "unknown process `{process_id}` after terminal event"
             ))
         })
+    }
+
+    async fn set_process_wait(
+        &self,
+        process_id: &str,
+        wait: WaitState,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        if record.record.is_terminal() {
+            return Err(PluginError::Session(format!(
+                "terminal process `{process_id}` cannot enter a wait state"
+            )));
+        }
+        record.record.wait = Some(wait);
+        record.record.updated_at_ms = current_epoch_ms();
+        record.notify.notify_waiters();
+        Ok(record.record.clone())
+    }
+
+    async fn clear_process_wait(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        record.record.wait = None;
+        record.record.updated_at_ms = current_epoch_ms();
+        record.notify.notify_waiters();
+        Ok(record.record.clone())
     }
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {

@@ -20,8 +20,8 @@ pub(super) enum VmEffect {
     StartProcess { process: usize, keys: usize },
     AwaitHandle,
     Sleep(SleepKind),
-    WaitSignal,
-    SignalRun,
+    WaitSignal { name: usize },
+    SignalRun { name: usize },
     AwaitHandleUnwrap,
     CancelHandle,
     Print,
@@ -166,26 +166,32 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 self.last_value = Some(Value::Null);
                 self.stack.push(Value::Null);
             }
-            VmEffect::WaitSignal => {
+            VmEffect::WaitSignal { name } => {
                 let value = self
                     .host
-                    .perform(AbilityOp::WaitSignal)
+                    .perform(AbilityOp::WaitSignal {
+                        name: self.chunk.names[name].text.to_string(),
+                    })
                     .await
-                    .and_then(|result| result.into_value("wait signal"))
+                    .and_then(|result| result.into_value("wait_signal"))
                     .map_err(|err| RuntimeError::ValueError {
-                        message: format!("wait signal failed: {err}"),
+                        message: format!("wait_signal failed: {err}"),
                     })?;
                 self.stack.push(value);
             }
-            VmEffect::SignalRun => {
+            VmEffect::SignalRun { name } => {
                 let payload = self.pop_stack()?;
                 let run = self.pop_stack()?;
                 self.host
-                    .perform(AbilityOp::SignalRun(ProcessSignal { run, payload }))
+                    .perform(AbilityOp::SignalRun(ProcessSignal {
+                        run,
+                        name: self.chunk.names[name].text.to_string(),
+                        payload,
+                    }))
                     .await
-                    .and_then(|result| result.into_value("signal run"))
+                    .and_then(|result| result.into_value("signal_run"))
                     .map_err(|err| RuntimeError::ValueError {
-                        message: format!("signal run failed: {err}"),
+                        message: format!("signal_run failed: {err}"),
                     })?;
                 self.last_value = Some(Value::Null);
                 self.stack.push(Value::Null);

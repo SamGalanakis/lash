@@ -62,6 +62,17 @@ pub enum TurnScenario {
     KitchenSink,
     TriggerSetup,
     DrainQueued,
+    SignalSuspend,
+    SignalProcess,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessSignalRequest {
+    pub process_id: String,
+    pub signal_name: String,
+    pub signal_id: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +82,8 @@ pub struct TurnRequest {
     pub fail_once: bool,
     #[serde(default)]
     pub scenario: TurnScenario,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<ProcessSignalRequest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -54,9 +54,9 @@ use crate::{
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
     ProcessEventType, ProcessExternalRef, ProcessHandleDescriptor, ProcessInput,
-    ProcessLeaseCompletion, ProcessProvenance, ProcessRegistration, ProcessRegistry,
-    ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeDelivery,
-    ProcessWakeSpec, SessionScope, SessionScopeId,
+    ProcessLeaseCompletion, ProcessListFilter, ProcessProvenance, ProcessRegistration,
+    ProcessRegistry, ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey,
+    ProcessWakeDelivery, ProcessWakeSpec, SessionScope, SessionScopeId, WaitKind, WaitState,
 };
 use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
 
@@ -116,6 +116,14 @@ mod tests {
             },
             Duration::from_millis(20),
         )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_process_registry_satisfies_conformance() {
+        process_registry(|| {
+            Arc::new(crate::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>
+        })
         .await;
     }
 

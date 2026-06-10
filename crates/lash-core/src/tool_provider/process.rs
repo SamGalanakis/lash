@@ -120,6 +120,7 @@ impl ToolProcessControl<'_> {
     pub async fn signal(
         &self,
         process_id: &str,
+        signal_name: &str,
         payload: serde_json::Value,
     ) -> Result<crate::ProcessEvent, PluginError> {
         let signal_id = self
@@ -130,6 +131,7 @@ impl ToolProcessControl<'_> {
             .signal(
                 &self.session_id,
                 process_id,
+                signal_name.to_string(),
                 signal_id,
                 payload,
                 self.process_scope(),

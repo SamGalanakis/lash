@@ -214,7 +214,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
         registration: ProcessRegistration,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let (registration, registration_hash) = prepare_process_registration(registration)?;
-        self.conn
+        let record = self
+            .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
                     if let Some(existing) = Self::load_process_conn(tx, &registration.id)? {
@@ -255,7 +256,9 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 })()))
             })
             .await
-            .map_err(process_sqlite_error)?
+            .map_err(process_sqlite_error)??;
+        self.notify.notify_waiters();
+        Ok(record)
     }
 
     async fn set_external_ref(
@@ -264,7 +267,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
         external_ref: ProcessExternalRef,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
-        self.conn
+        let record = self
+            .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
                     let mut record =
@@ -280,7 +284,9 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 })()))
             })
             .await
-            .map_err(process_sqlite_error)?
+            .map_err(process_sqlite_error)??;
+        self.notify.notify_waiters();
+        Ok(record)
     }
 
     async fn grant_handle(
@@ -542,14 +548,11 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         removed
                     };
 
-                    let deleted_wake_count = tx
-                        .execute(
-                            "DELETE FROM process_wake_acks WHERE process_id IN (
-                                SELECT process_id FROM process_handle_grants WHERE session_id = ?1
-                             )",
-                            params![session_id],
-                        )
-                        .map_err(process_sqlite_error)?;
+                    // Wake acknowledgements are process-scoped consumed-event markers.
+                    // Session deletion removes materialized session-addressed deliveries
+                    // through the session store; clearing these rows would re-expose
+                    // already-consumed wakes to surviving grants or future host readers.
+                    let deleted_wake_count = 0;
                     let revoked_handle_count = tx
                         .execute(
                             "DELETE FROM process_handle_grants WHERE session_id = ?1",
@@ -665,6 +668,9 @@ impl ProcessRegistry for SqliteProcessRegistry {
                     .map_err(process_sqlite_error)?;
                     if let Some(status) = prepared.status_update.clone() {
                         record.status = status;
+                        if record.status.is_terminal() {
+                            record.wait = None;
+                        }
                     }
                     record.updated_at_ms = prepared.occurred_at_ms;
                     Self::save_process_conn(tx, &record)?;
@@ -827,6 +833,60 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 "unknown process `{process_id}` after terminal event"
             ))
         })
+    }
+
+    async fn set_process_wait(
+        &self,
+        process_id: &str,
+        wait: lash_core::WaitState,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(tx_outcome((|| {
+                    let mut record =
+                        Self::load_process_conn(tx, &process_id)?.ok_or_else(|| {
+                            lash_core::PluginError::Session(format!(
+                                "unknown process `{process_id}`"
+                            ))
+                        })?;
+                    if record.is_terminal() {
+                        return Err(lash_core::PluginError::Session(format!(
+                            "terminal process `{process_id}` cannot enter a wait state"
+                        )));
+                    }
+                    record.wait = Some(wait);
+                    record.updated_at_ms = current_epoch_ms();
+                    Self::save_process_conn(tx, &record)?;
+                    Ok(record)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn clear_process_wait(
+        &self,
+        process_id: &str,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(tx_outcome((|| {
+                    let mut record =
+                        Self::load_process_conn(tx, &process_id)?.ok_or_else(|| {
+                            lash_core::PluginError::Session(format!(
+                                "unknown process `{process_id}`"
+                            ))
+                        })?;
+                    record.wait = None;
+                    record.updated_at_ms = current_epoch_ms();
+                    Self::save_process_conn(tx, &record)?;
+                    Ok(record)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
     }
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {

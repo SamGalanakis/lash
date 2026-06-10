@@ -8,6 +8,7 @@ use super::events::{ProcessAwaitOutput, ProcessEvent};
 use super::model::{
     ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessId, ProcessInput,
     ProcessLifecycleStatus, ProcessListFilter, ProcessOriginator, ProcessRecord, SessionScope,
+    WaitState,
 };
 use super::registry::ProcessRegistry;
 use super::time::epoch_ms_from_system_time;
@@ -55,6 +56,8 @@ pub struct ObservedProcess {
     pub caused_by: Option<crate::CausalRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<ProcessExternalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_session_id: Option<String>,
     pub label: String,
@@ -182,6 +185,7 @@ impl ObservedProcess {
             wake_target: record.wake_target,
             caused_by: record.provenance.caused_by,
             external_ref: record.external_ref,
+            wait: record.wait,
             child_session_id: child_session_id(&input),
             input,
             label,
@@ -257,7 +261,7 @@ mod tests {
         InputItem, PluginOptions, PreparedToolCall, ProcessEventAppendRequest,
         ProcessExecutionEnvRef, ProcessProvenance, ProcessRegistration, SessionCreateRequest,
         SessionScope, SessionStartPoint, SubagentSessionContext, ToolFailureClass,
-        ToolOutputContract, TurnInput,
+        ToolOutputContract, TurnInput, WaitKind,
     };
 
     fn observer(registry: Arc<dyn ProcessRegistry>) -> ProcessWorkObserver {
@@ -421,6 +425,47 @@ mod tests {
         assert_eq!(cancelled.status_label, "cancelled");
         assert!(cancelled.terminal);
         assert_eq!(cancelled.error.as_deref(), Some("cancelled intentionally"));
+    }
+
+    #[tokio::test]
+    async fn observed_process_exposes_current_wait_state() {
+        let registry =
+            Arc::new(super::super::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let scope = SessionScope::new("wait");
+        register_visible(
+            &registry,
+            &scope,
+            external_registration("waiting-process", "Waiting"),
+            ProcessHandleDescriptor::new(Some("external"), Some("Waiting")),
+        )
+        .await;
+        let wait = WaitState {
+            since_ms: 1234,
+            kind: WaitKind::Signal {
+                name: "ready".to_string(),
+                event_type: "signal.ready".to_string(),
+                key: "process:waiting-process:signal.ready:1".to_string(),
+                ordinal: 1,
+            },
+        };
+        registry
+            .set_process_wait("waiting-process", wait.clone())
+            .await
+            .expect("set wait");
+
+        let observer = observer(Arc::clone(&registry));
+        let observed = observer
+            .process("waiting-process")
+            .await
+            .expect("waiting process");
+        let snapshot = observer
+            .snapshot_for_session("wait")
+            .await
+            .expect("snapshot");
+
+        assert_eq!(observed.wait, Some(wait.clone()));
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].process.wait, Some(wait));
     }
 
     #[tokio::test]

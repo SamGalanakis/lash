@@ -305,6 +305,7 @@ mod tests {
             &self,
             _session_id: &str,
             _process_id: &str,
+            _signal_name: String,
             _signal_id: String,
             _payload: serde_json::Value,
             _scope: lash_core::ProcessOpScope<'_>,

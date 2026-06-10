@@ -117,12 +117,15 @@ pub use process::{
     ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
     ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
     ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver,
-    ProcessWorkSnapshot, SessionScope, SessionScopeId, UnavailableProcessService, current_epoch_ms,
-    epoch_ms_from_system_time, lashlang_process_event_types, load_process_execution_env,
+    ProcessWorkSnapshot, SessionScope, SessionScopeId, UnavailableProcessService, WaitKind,
+    WaitState, current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
+    lashlang_process_signal_event_types, load_process_execution_env,
     materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
+    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
+    validate_process_signal_name,
 };
 pub use process_work_runner::{
     InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner,

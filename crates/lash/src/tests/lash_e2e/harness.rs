@@ -139,6 +139,7 @@ async fn all_host_process_summaries(
         .list(&lash_core::ProcessListFilter {
             definition: None,
             status: lash_core::ProcessStatusFilter::Any,
+            waiting: None,
         })
         .await?;
     Ok(processes
