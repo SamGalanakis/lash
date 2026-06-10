@@ -305,10 +305,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          # release_version.py only inspects `git tag --list`; no commit
-          # history is needed beyond HEAD.
-          fetch-depth: 1
-          fetch-tags: true
+          # Full history INCLUDING TAGS: release_version.py computes the next
+          # version from `git tag --list`. A shallow checkout with fetch-tags
+          # does NOT deliver the tags (tag-following only covers fetched
+          # commits), which silently re-releases the current version forever.
+          fetch-depth: 0
 
       - name: Compute next release version
         id: version
@@ -347,10 +348,9 @@ jobs:
             exit 0
           fi
 
-          git fetch --depth=1 origin staging
           sync_dir="$(mktemp -d)"
           trap 'git worktree remove --force "$sync_dir"' EXIT
-          git worktree add --detach "$sync_dir" FETCH_HEAD
+          git worktree add --detach "$sync_dir" origin/staging
 
           cd "$sync_dir"
           python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
@@ -377,8 +377,9 @@ jobs:
             echo "Tag ${tag} already exists on origin; skipping."
             exit 0
           fi
-          git fetch --depth=1 origin main
-          git checkout --detach FETCH_HEAD
+          git fetch origin main --tags
+          git checkout main
+          git reset --hard origin/main
           git tag "${tag}"
           git push origin "${tag}"
 
