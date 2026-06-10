@@ -52,6 +52,8 @@ agent-service-restate-e2e:
   trap cleanup EXIT
   cleanup
 
+  bash "{{repo}}/scripts/docker-pull-with-retry.sh" "$image"
+
   docker run -d --name "$container" --network host \
     -e RESTATE_ADMIN__BIND_PORT="$admin_port" \
     -e RESTATE_INGRESS__BIND_PORT="$ingress_port" \
@@ -102,6 +104,8 @@ agent-workbench-restate-e2e:
   trap cleanup EXIT
   cleanup
 
+  bash "{{repo}}/scripts/docker-pull-with-retry.sh" "$image"
+
   docker run -d --name "$container" --network host \
     -e RESTATE_ADMIN__BIND_PORT="$admin_port" \
     -e RESTATE_INGRESS__BIND_PORT="$ingress_port" \
@@ -130,7 +134,7 @@ agent-workbench-restate-e2e:
   RESTATE_ADMIN_URL="$admin_url" \
   AGENT_WORKBENCH_E2E_ENDPOINT_BIND="$endpoint_bind" \
   AGENT_WORKBENCH_E2E_ENDPOINT_URL="$endpoint_url" \
-  cargo test -p agent-workbench \
+  cargo test -p agent-workbench --features fff-zlob \
     live_restate_cron_runs_trigger_and_queued_turn_end_to_end -- --ignored --nocapture
 
 restate-postgres-workers-e2e:

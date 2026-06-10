@@ -39,3 +39,7 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
 lash = { workspace = true, features = ["testing"] }
+
+[features]
+default = []
+fff-zlob = ["lash-tools/fff-zlob"]
