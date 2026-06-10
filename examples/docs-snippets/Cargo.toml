@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 description = "Compiled sources for the Rust code blocks in docs/*.html. cargo check fails when a doc snippet stops compiling; scripts/lint_docs.py fails when the HTML drifts from these files."
 
+[features]
+default = []
+fff-zlob = ["lash-standard-plugins/fff-zlob"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }

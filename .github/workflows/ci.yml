@@ -56,7 +56,7 @@ jobs:
         run: python3 scripts/lint_docs.py
 
       - name: Check docs snippets compile
-        run: cargo check -p docs-snippets --locked
+        run: cargo check -p docs-snippets --locked --features fff-zlob
 
       - name: Enforce stack budget
         run: bash scripts/ci-stack-budget.sh
