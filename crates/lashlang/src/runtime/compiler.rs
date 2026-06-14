@@ -28,11 +28,11 @@ use super::record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, 
 use super::schema::{ValidationPlan, compile_schema_value};
 use super::{
     Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep, CompiledFormatTemplate,
-    Instruction, IntrinsicOp, LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY,
-    LASH_PROCESS_VALUE_KEY, LASH_REQUIRED_SURFACE_REF_KEY, LASH_TYPE_KEY, Name, Value, as_number,
-    compile_format_template, eval_binary_values, execute_integer_div_builtin, execute_len_direct,
-    execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op, is_truthy,
-    read_field_direct, read_index_direct, transient_name, unwrap_type_value,
+    Instruction, IntrinsicOp, LASH_HOST_REQUIREMENTS_REF_KEY, LASH_MODULE_REF_KEY,
+    LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_TYPE_KEY, Name,
+    Value, as_number, compile_format_template, eval_binary_values, execute_integer_div_builtin,
+    execute_len_direct, execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op,
+    is_truthy, read_field_direct, read_index_direct, transient_name, unwrap_type_value,
 };
 
 pub(crate) struct Compiler {
@@ -678,7 +678,7 @@ impl Compiler {
                 resource.resource_type.to_string(),
                 resource.alias.to_string(),
             ))),
-            Expr::ProcessRef { .. } | Expr::HostValueConstructor { .. } => None,
+            Expr::ProcessRef { .. } | Expr::HostDescriptorConstructor { .. } => None,
             Expr::Variable(name) => self.const_for_name(name),
             Expr::List(items) => Some(Value::List(
                 items
@@ -981,10 +981,10 @@ impl Compiler {
                 }
             }
             Expr::ProcessRef { process } => self.compile_process_ref_expr(process),
-            Expr::HostValueConstructor { type_name, input } => {
+            Expr::HostDescriptorConstructor { type_name, input } => {
                 self.compile_expr(input);
                 let type_name = self.push_name(type_name);
-                self.code.push(Instruction::WrapHostValue(type_name));
+                self.code.push(Instruction::WrapHostDescriptor(type_name));
             }
             Expr::ResourceRef(resource) => {
                 self.emit_push_value(Value::Resource(super::ResourceHandle::new(
@@ -1484,8 +1484,8 @@ impl Compiler {
             Value::Record(Arc::new(process_ref_record)),
         );
         record.insert(
-            LASH_REQUIRED_SURFACE_REF_KEY.to_string(),
-            Value::String(module_context.required_surface_ref.to_string().into()),
+            LASH_HOST_REQUIREMENTS_REF_KEY.to_string(),
+            Value::String(module_context.host_requirements_ref.to_string().into()),
         );
         self.emit_push_value(Value::Record(Arc::new(record)));
     }
@@ -1873,7 +1873,7 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::Break
         | Expr::Continue
         | Expr::ProcessRef { .. }
-        | Expr::HostValueConstructor { .. }
+        | Expr::HostDescriptorConstructor { .. }
         | Expr::ResourceRef(_)
         | Expr::Cancel(_)
         | Expr::Print(_)
@@ -1918,7 +1918,7 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
         Expr::ResultUnwrap(expr) => is_pure_expr(expr),
-        Expr::HostValueConstructor { input, .. } => is_pure_expr(input),
+        Expr::HostDescriptorConstructor { input, .. } => is_pure_expr(input),
         Expr::BuiltinCall { args, .. } => args.iter().all(is_pure_expr),
         Expr::Field { target, .. } => is_pure_expr(target),
         Expr::Index { target, index } => is_pure_expr(target) && is_pure_expr(index),

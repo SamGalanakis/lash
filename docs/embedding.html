@@ -178,7 +178,7 @@ println!("{assistant_text}");</code></pre>
             <dt><code>PluginStack</code></dt>
             <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>plugins::runtime_plugin_stack()</code>; raw <code>::builder()</code> starts without modes or plugins. All paths still require explicit effect, artifact, and attachment facets before <code>build()</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code>, <code>queued_turn()</code>, <code>await_queued_work_batch(batch_id)</code> (resolve when a batch you enqueued is drained or cancelled — by any handle or process — without claiming it yourself; bound it with <code>tokio::time::timeout</code>), <code>read_view()</code>, and <code>control()</code>.</dd>
+            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code>, <code>queued_turn()</code>, <code>await_queued_work_batch(batch_id)</code> (resolve when a batch you enqueued is drained or cancelled — by any handle or process — without claiming it yourself; bound it with <code>tokio::time::timeout</code>), <code>read_view()</code>, and <code>admin()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn config: cancellation, mode options, typed plugin input, RLM projected bindings. <code>.stream_to(&amp;sink)</code> for live events; <code>.run()</code> for a collected activity log. Durable handlers add <code>.turn_id(...).effects(&amp;controller)</code>.</dd>
           </dl>

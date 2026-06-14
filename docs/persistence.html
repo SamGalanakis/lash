@@ -180,7 +180,7 @@ match session.turn(input).run().await {
     Err(lash::EmbedError::Runtime(err)) if err.code == RuntimeErrorCode::StoreCommitFailed =&gt; {
         // Another writer won the head-revision race: reload and retry.
         let session = core.session(chat_id).open().await?;
-        retry_or_surface(err, session)?;
+        retry_or_report(err, session)?;
     }
     Err(other) =&gt; bail!(other),
 }</code></pre>

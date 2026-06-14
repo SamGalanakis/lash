@@ -10,14 +10,14 @@ pub enum SessionCommand {
     // generation observed at enqueue time may legitimately have advanced by
     // drain time, and the refresh recomputes the surface from live sources
     // regardless — a guard could only fail spuriously.
-    RefreshToolSurface { reason: String },
+    RefreshToolCatalog { reason: String },
     ResetSession { reason: String },
 }
 
 impl SessionCommand {
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::RefreshToolSurface { .. } => "refresh_tool_surface",
+            Self::RefreshToolCatalog { .. } => "refresh_tool_catalog",
             Self::ResetSession { .. } => "reset_session",
         }
     }

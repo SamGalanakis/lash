@@ -44,7 +44,7 @@ fn test_config_with_protocol_turn_options(
     TurnMachineConfig {
         protocol_driver,
         projector: Arc::new(ChatContextProjector),
-        sync_execution_surface: protocol == TestProtocol::Rlm,
+        sync_execution_environment: protocol == TestProtocol::Rlm,
         model: "test-model".to_string(),
         max_context_tokens: None,
         max_turns: None,
@@ -105,11 +105,11 @@ fn user_message(content: &str) -> Message {
 fn drain_effects(machine: &mut TurnMachine) -> Vec<Effect> {
     let mut effects = Vec::new();
     while let Some(effect) = machine.poll_effect() {
-        if let Effect::SyncExecutionSurface { id, .. } = effect {
+        if let Effect::SyncExecutionEnvironment { id, .. } = effect {
             effects.push(effect);
-            machine.handle_response(Response::ExecutionSurfaceSynced {
+            machine.handle_response(Response::ExecutionEnvironmentSynced {
                 id,
-                result: Ok(Some(sansio::ExecutionSurfaceSync {
+                result: Ok(Some(sansio::ExecutionEnvironmentSync {
                     system_prompt: std::sync::Arc::from(""),
                     tool_specs: Arc::new(Vec::new()),
                 })),

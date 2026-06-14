@@ -5,7 +5,7 @@ use lash::persistence::{AttachmentStore, LashlangArtifactStore, SessionStoreFact
 use lash::plugins::{PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin};
 use lash::process::{ProcessRegistry, ProcessWorkDriver};
 use lash::tools::{
-    StaticToolExecute, StaticToolProvider, ToolAgentSurface, ToolCall, ToolDefinition,
+    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
     ToolProvider, ToolResult,
 };
 use lash::{ModeId, ModePreset};
@@ -523,8 +523,8 @@ impl PluginFactory for E2ePluginFactory {
             .with_triggers()
     }
 
-    fn lashlang_resources(&self) -> lash::modes::ResourceCatalog {
-        let mut resources = lash::modes::ResourceCatalog::new();
+    fn lashlang_resources(&self) -> lash::modes::LashlangHostCatalog {
+        let mut resources = lash::modes::LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["ui", "button", "pressed"],
@@ -629,7 +629,7 @@ fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dy
                     "required": ["key", "value", "worker_id"],
                     "additionalProperties": false
                 }),
-                ToolAgentSurface::new(["tools"], "app_lookup"),
+                LashlangToolBinding::new(["tools"], "app_lookup"),
             ),
             e2e_tool_definition(
                 "tool:make_attachment",
@@ -655,7 +655,7 @@ fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dy
                     "required": ["id", "mime", "filename", "byte_len"],
                     "additionalProperties": false
                 }),
-                ToolAgentSurface::new(["tools"], "make_attachment"),
+                LashlangToolBinding::new(["tools"], "make_attachment"),
             ),
             e2e_tool_definition(
                 "tool:crash_once",
@@ -678,7 +678,7 @@ fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dy
                     "required": ["crashed", "worker_id"],
                     "additionalProperties": false
                 }),
-                ToolAgentSurface::new(["tools"], "crash_once"),
+                LashlangToolBinding::new(["tools"], "crash_once"),
             ),
         ],
         E2eTools {
@@ -695,10 +695,10 @@ fn e2e_tool_definition(
     description: &'static str,
     input_schema: serde_json::Value,
     output_schema: serde_json::Value,
-    surface: ToolAgentSurface,
+    surface: LashlangToolBinding,
 ) -> ToolDefinition {
     ToolDefinition::raw(id, name, description, input_schema, output_schema)
-        .with_agent_surface(surface)
+        .with_lashlang_binding(surface)
 }
 
 #[derive(Clone)]

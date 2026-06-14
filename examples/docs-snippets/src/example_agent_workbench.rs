@@ -18,8 +18,8 @@ fn button_trigger_event_type() -> lashlang::NamedDataType {
 }
 
 // docs:start:workbench-resources
-fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn workbench_lashlang_resources() -> lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources
         .add_trigger_source_constructor(
             ["cron", "Schedule"],

@@ -40,7 +40,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     .with_examples(vec![
         r#"await control.continue_as({ task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } })?"#.into(),
     ])
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["control"], "continue_as"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["control"], "continue_as"))
     .with_argument_projection(ToolArgumentProjectionPolicy::preserve_projected_refs_in_field(
         "seed",
     ))
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_as_preserves_process_shaped_seed_without_process_control() {
+    async fn continue_as_preserves_process_shaped_seed_without_processes() {
         let manager = Arc::new(BatonManager {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {

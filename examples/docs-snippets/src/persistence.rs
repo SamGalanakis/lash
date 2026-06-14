@@ -104,10 +104,7 @@ fn persist(_turn: TurnOutput) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn retry_or_surface(
-    _err: lash::runtime::RuntimeError,
-    _session: LashSession,
-) -> anyhow::Result<()> {
+fn retry_or_report(_err: lash::runtime::RuntimeError, _session: LashSession) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -125,7 +122,7 @@ async fn commit_conflict_retry(
         Err(lash::EmbedError::Runtime(err)) if err.code == RuntimeErrorCode::StoreCommitFailed => {
             // Another writer won the head-revision race: reload and retry.
             let session = core.session(chat_id).open().await?;
-            retry_or_surface(err, session)?;
+            retry_or_report(err, session)?;
         }
         Err(other) => bail!(other),
     }

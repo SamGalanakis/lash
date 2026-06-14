@@ -17,7 +17,7 @@ impl<'run> ProcessRunContext<'run> {
     ) -> ProcessRunContextBuilder<'_, 'run> {
         ProcessRunContextBuilder {
             services,
-            surface: None,
+            tool_catalog: None,
             scoped_effect_controller: None,
             causal_invocation: None,
             dispatch_parent_invocation: None,
@@ -38,7 +38,7 @@ impl<'run> ProcessRunContext<'run> {
 
 pub(in crate::runtime::session_manager::process_runners) struct ProcessRunContextBuilder<'a, 'run> {
     services: &'a RuntimeSessionServices,
-    surface: Option<Arc<crate::ToolSurface>>,
+    tool_catalog: Option<Arc<crate::ToolCatalog>>,
     scoped_effect_controller: Option<crate::ScopedEffectController<'run>>,
     causal_invocation: Option<crate::RuntimeInvocation>,
     dispatch_parent_invocation: Option<crate::RuntimeInvocation>,
@@ -54,11 +54,11 @@ pub(in crate::runtime::session_manager::process_runners) struct ProcessToolCallR
 }
 
 impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
-    pub(in crate::runtime::session_manager::process_runners) fn surface(
+    pub(in crate::runtime::session_manager::process_runners) fn tool_catalog(
         mut self,
-        surface: Arc<crate::ToolSurface>,
+        tool_catalog: Arc<crate::ToolCatalog>,
     ) -> Self {
-        self.surface = Some(surface);
+        self.tool_catalog = Some(tool_catalog);
         self
     }
 
@@ -89,8 +89,8 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
     pub(in crate::runtime::session_manager::process_runners) fn build(
         self,
     ) -> Result<ProcessRunContext<'run>, crate::PluginError> {
-        let surface = self.surface.ok_or_else(|| {
-            crate::PluginError::Session("process run context requires a tool surface".to_string())
+        let tool_catalog = self.tool_catalog.ok_or_else(|| {
+            crate::PluginError::Session("process run context requires a tool catalog".to_string())
         })?;
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
         let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
@@ -113,7 +113,7 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
         let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
             plugins: Arc::clone(&self.services.current.plugins),
             tools: self.services.current.plugins.tools(),
-            surface,
+            tool_catalog,
             sessions: services.state_service(),
             session_lifecycle: services.lifecycle_service(),
             session_graph: services.graph_service(),
@@ -232,7 +232,7 @@ mod tests {
         program: ::lashlang::Program,
         args: serde_json::Map<String, serde_json::Value>,
     ) -> Result<crate::ProcessRegistration, ::lashlang::LinkError> {
-        let mut resources = ::lashlang::ResourceCatalog::new();
+        let mut resources = ::lashlang::LashlangHostCatalog::new();
         resources.add_module_operation(
             ["tools"],
             "Tools",
@@ -248,7 +248,7 @@ mod tests {
         process_id: &str,
         program: ::lashlang::Program,
         args: serde_json::Map<String, serde_json::Value>,
-        resources: ::lashlang::ResourceCatalog,
+        resources: ::lashlang::LashlangHostCatalog,
     ) -> Result<crate::ProcessRegistration, ::lashlang::LinkError> {
         let module = if program.process("main").is_some() {
             program
@@ -269,7 +269,7 @@ mod tests {
         };
         let linked_module = ::lashlang::LinkedModule::link(
             module,
-            ::lashlang::LashlangSurface::new(
+            ::lashlang::LashlangHostEnvironment::new(
                 resources,
                 ::lashlang::LashlangAbilities::default()
                     .with_processes()
@@ -297,7 +297,7 @@ mod tests {
             crate::ProcessInput::LashlangProcess {
                 module_ref: linked_module.module_ref,
                 process_ref,
-                required_surface_ref: linked_module.required_surface_ref,
+                host_requirements_ref: linked_module.host_requirements_ref,
                 process_name: "main".to_string(),
                 args,
             },
@@ -601,7 +601,7 @@ mod tests {
 
         assert!(json.contains("module_ref"));
         assert!(json.contains("process_ref"));
-        assert!(json.contains("required_surface_ref"));
+        assert!(json.contains("host_requirements_ref"));
         assert!(!json.contains("linked_module"));
         assert!(!json.contains("canonical_ir"));
     }
@@ -1182,10 +1182,10 @@ mod tests {
             .await
             .expect("load lashlang module artifact")
             .expect("lashlang module artifact exists");
-        let requirements = ::lashlang::surface_requirements_for_program(&artifact.canonical_ir);
+        let requirements = ::lashlang::host_requirements_for_program(&artifact.canonical_ir);
         let relink_without_process_abilities = ::lashlang::LinkedModule::link(
             artifact.canonical_ir.clone(),
-            ::lashlang::LashlangSurface::new(
+            ::lashlang::LashlangHostEnvironment::new(
                 requirements.resources,
                 ::lashlang::LashlangAbilities::default(),
             ),
@@ -1531,10 +1531,10 @@ mod tests {
             .await
             .expect("load lashlang module artifact")
             .expect("lashlang module artifact exists");
-        let requirements = ::lashlang::surface_requirements_for_program(&artifact.canonical_ir);
+        let requirements = ::lashlang::host_requirements_for_program(&artifact.canonical_ir);
         let relink = ::lashlang::LinkedModule::link(
             artifact.canonical_ir.clone(),
-            ::lashlang::LashlangSurface::new(
+            ::lashlang::LashlangHostEnvironment::new(
                 requirements.resources,
                 manager.current.plugins.lashlang_abilities(),
             ),
@@ -2167,7 +2167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_control_fails_loudly_when_process_registry_is_unavailable() {
+    async fn processes_fails_loudly_when_process_registry_is_unavailable() {
         let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
         runtime.host.process_registry = None;
         let manager =

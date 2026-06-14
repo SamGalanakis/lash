@@ -11,39 +11,39 @@ pub type ToolContractResolver =
     Arc<dyn Fn(&str) -> Option<Arc<ToolContract>> + Send + Sync + 'static>;
 
 #[derive(Clone)]
-pub struct ToolSurfaceBuildInput {
+pub struct ToolCatalogBuildInput {
     pub tools: Vec<ToolManifest>,
     pub resolve_contract: Option<ToolContractResolver>,
-    pub contributions: Vec<ToolSurfaceContribution>,
+    pub contributions: Vec<ToolCatalogContribution>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct ToolSurfaceContribution {
-    pub overrides: Vec<ToolSurfaceOverride>,
+pub struct ToolCatalogContribution {
+    pub overrides: Vec<ToolCatalogOverride>,
     pub tool_list_notes: Vec<String>,
 }
 
-impl ToolSurfaceContribution {
+impl ToolCatalogContribution {
     pub fn is_empty(&self) -> bool {
         self.overrides.is_empty() && self.tool_list_notes.is_empty()
     }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct ToolSurfaceOverride {
+pub struct ToolCatalogOverride {
     pub tool_name: String,
     pub availability: Option<ToolAvailability>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ToolSurfaceEntry {
+pub struct ToolCatalogEntry {
     pub manifest: ToolManifest,
     pub availability: ToolAvailability,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct ToolSurface {
-    pub tools: Vec<ToolSurfaceEntry>,
+pub struct ToolCatalog {
+    pub tools: Vec<ToolCatalogEntry>,
     pub tool_list_notes: Vec<String>,
     #[serde(skip)]
     resolve_contract: Option<ToolContractResolver>,
@@ -57,7 +57,7 @@ pub struct ToolSurface {
     tool_names_fingerprint: OnceLock<PromptFingerprint>,
 }
 
-impl Clone for ToolSurface {
+impl Clone for ToolCatalog {
     fn clone(&self) -> Self {
         let clone = Self {
             tools: self.tools.clone(),
@@ -84,16 +84,16 @@ impl Clone for ToolSurface {
     }
 }
 
-impl std::fmt::Debug for ToolSurface {
+impl std::fmt::Debug for ToolCatalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolSurface")
+        f.debug_struct("ToolCatalog")
             .field("tools", &self.tools)
             .field("tool_list_notes", &self.tool_list_notes)
             .finish_non_exhaustive()
     }
 }
 
-impl Default for ToolSurface {
+impl Default for ToolCatalog {
     fn default() -> Self {
         Self {
             tools: Vec::new(),
@@ -107,7 +107,7 @@ impl Default for ToolSurface {
     }
 }
 
-impl ToolSurface {
+impl ToolCatalog {
     pub fn from_tool_definitions(tools: Vec<ToolDefinition>) -> Self {
         let contracts = tools
             .iter()
@@ -137,7 +137,7 @@ impl ToolSurface {
         Self {
             tools: tools
                 .into_iter()
-                .map(|manifest| ToolSurfaceEntry {
+                .map(|manifest| ToolCatalogEntry {
                     availability: manifest.effective_availability(),
                     manifest,
                 })
@@ -173,13 +173,13 @@ impl ToolSurface {
         self.showcased_tools_iter().cloned().collect()
     }
 
-    pub fn searchable_tools_iter(&self) -> impl Iterator<Item = &ToolSurfaceEntry> {
+    pub fn searchable_tools_iter(&self) -> impl Iterator<Item = &ToolCatalogEntry> {
         self.tools
             .iter()
             .filter(|tool| tool.availability.is_searchable())
     }
 
-    pub fn omitted_tools_iter(&self) -> impl Iterator<Item = &ToolSurfaceEntry> {
+    pub fn omitted_tools_iter(&self) -> impl Iterator<Item = &ToolCatalogEntry> {
         self.searchable_tools_iter()
             .filter(|tool| !tool.availability.is_showcased())
     }
@@ -299,16 +299,16 @@ impl ToolSurface {
     }
 }
 
-pub fn build_tool_surface(input: ToolSurfaceBuildInput) -> ToolSurface {
-    let mut surface = ToolSurface::from_tool_manifests(input.tools, input.resolve_contract);
+pub fn build_tool_catalog(input: ToolCatalogBuildInput) -> ToolCatalog {
+    let mut surface = ToolCatalog::from_tool_manifests(input.tools, input.resolve_contract);
     for contribution in input.contributions {
         apply_contribution(&mut surface, contribution);
     }
-    validate_agent_surface(&surface.tools);
+    validate_lashlang_binding(&surface.tools);
     surface
 }
 
-fn apply_contribution(surface: &mut ToolSurface, contribution: ToolSurfaceContribution) {
+fn apply_contribution(surface: &mut ToolCatalog, contribution: ToolCatalogContribution) {
     for override_ in contribution.overrides {
         if let Some(tool) = surface
             .tools
@@ -329,12 +329,12 @@ fn apply_contribution(surface: &mut ToolSurface, contribution: ToolSurfaceContri
     );
 }
 
-fn validate_agent_surface(tools: &[ToolSurfaceEntry]) {
+fn validate_lashlang_binding(tools: &[ToolCatalogEntry]) {
     let mut seen = BTreeSet::new();
     for tool in tools.iter().filter(|tool| tool.availability.is_callable()) {
         let identity = tool
             .manifest
-            .agent_surface
+            .lashlang_binding
             .executable_for(&tool.manifest.name);
         validate_module_segments(&identity.module_path, &tool.manifest.name);
         validate_module_segment(&identity.operation, &tool.manifest.name, "operation");
@@ -398,13 +398,13 @@ mod tests {
 
     fn build_input(
         tools: Vec<ToolDefinition>,
-        contributions: Vec<ToolSurfaceContribution>,
-    ) -> ToolSurfaceBuildInput {
+        contributions: Vec<ToolCatalogContribution>,
+    ) -> ToolCatalogBuildInput {
         let contracts = tools
             .iter()
             .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect::<BTreeMap<_, _>>();
-        ToolSurfaceBuildInput {
+        ToolCatalogBuildInput {
             tools: tools.into_iter().map(|tool| tool.manifest()).collect(),
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             contributions,
@@ -412,8 +412,8 @@ mod tests {
     }
 
     #[test]
-    fn surface_splits_callable_and_showcased_tools() {
-        let surface = build_tool_surface(build_input(
+    fn catalog_splits_callable_and_showcased_tools() {
+        let surface = build_tool_catalog(build_input(
             vec![
                 tool("search_tools", ToolAvailability::Showcased),
                 tool("read_file", ToolAvailability::Showcased),
@@ -431,10 +431,10 @@ mod tests {
 
     #[test]
     fn explicit_contributions_override_availability() {
-        let surface = build_tool_surface(build_input(
+        let surface = build_tool_catalog(build_input(
             vec![tool("read_file", ToolAvailability::Showcased)],
-            vec![ToolSurfaceContribution {
-                overrides: vec![ToolSurfaceOverride {
+            vec![ToolCatalogContribution {
+                overrides: vec![ToolCatalogOverride {
                     tool_name: "read_file".to_string(),
                     availability: Some(ToolAvailability::Off),
                 }],
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn prompt_gate_requires_matching_tool_availability() {
-        let surface = build_tool_surface(build_input(
+        let surface = build_tool_catalog(build_input(
             vec![tool("search_tools", ToolAvailability::Showcased)],
             Vec::new(),
         ));
@@ -486,12 +486,12 @@ mod tests {
     }
 
     #[test]
-    fn rlm_surface_does_not_resolve_searchable_only_contracts() {
+    fn rlm_catalog_does_not_resolve_searchable_only_contracts() {
         let contract_resolutions = Arc::new(AtomicUsize::new(0));
         let searchable = tool("large_schema", ToolAvailability::Searchable);
         let showcased = tool("search_tools", ToolAvailability::Showcased);
         let resolver_count = Arc::clone(&contract_resolutions);
-        let surface = build_tool_surface(ToolSurfaceBuildInput {
+        let surface = build_tool_catalog(ToolCatalogBuildInput {
             tools: vec![searchable.manifest(), showcased.manifest()],
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
@@ -514,11 +514,11 @@ mod tests {
     }
 
     #[test]
-    fn callable_only_surface_resolves_model_specs_lazily() {
+    fn callable_only_catalog_resolves_model_specs_lazily() {
         let contract_resolutions = Arc::new(AtomicUsize::new(0));
         let callable = tool("large_callable", ToolAvailability::Callable);
         let resolver_count = Arc::clone(&contract_resolutions);
-        let surface = build_tool_surface(ToolSurfaceBuildInput {
+        let surface = build_tool_catalog(ToolCatalogBuildInput {
             tools: vec![callable.manifest()],
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
@@ -537,11 +537,11 @@ mod tests {
     }
 
     #[test]
-    fn standard_surface_resolves_model_specs_lazily() {
+    fn standard_catalog_resolves_model_specs_lazily() {
         let contract_resolutions = Arc::new(AtomicUsize::new(0));
         let callable = tool("read_file", ToolAvailability::Callable);
         let resolver_count = Arc::clone(&contract_resolutions);
-        let surface = build_tool_surface(ToolSurfaceBuildInput {
+        let surface = build_tool_catalog(ToolCatalogBuildInput {
             tools: vec![callable.manifest()],
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn tool_names_fingerprint_matches_prompt_hash() {
-        let surface = build_tool_surface(build_input(
+        let surface = build_tool_catalog(build_input(
             vec![
                 tool("read_file", ToolAvailability::Callable),
                 tool("search_tools", ToolAvailability::Showcased),

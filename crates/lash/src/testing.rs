@@ -157,8 +157,8 @@ submit "registered"
             rebuild_abilities()
         }
 
-        fn lashlang_resources(&self) -> crate::modes::ResourceCatalog {
-            let mut resources = crate::modes::ResourceCatalog::new();
+        fn lashlang_resources(&self) -> crate::modes::LashlangHostCatalog {
+            let mut resources = crate::modes::LashlangHostCatalog::new();
             resources
                 .add_trigger_source_constructor(
                     ["clock", "Alarm"],

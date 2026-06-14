@@ -158,7 +158,7 @@ let output = session
       <div class="listing">
         <div class="listing__row"><div class="listing__label">1. prompt</div><div class="listing__body"><p>The runtime renders the system prompt, projects history, appends the iteration tail, and calls the provider.</p></div></div>
         <div class="listing__row"><div class="listing__label">2. code</div><div class="listing__body"><p>The model emits prose plus one closed <code>lashlang</code> block. Stream masking keeps raw code out of normal assistant-prose UI.</p></div></div>
-        <div class="listing__row"><div class="listing__label">3. execute</div><div class="listing__body"><p>The executor resolves host values, links against the active <code>LashlangSurface</code>, and runs the code in the current VM state.</p></div></div>
+        <div class="listing__row"><div class="listing__label">3. execute</div><div class="listing__body"><p>The executor resolves host descriptors, links against the active <code>LashlangHostEnvironment</code>, and runs the code in the current VM state.</p></div></div>
         <div class="listing__row"><div class="listing__label">4. observe</div><div class="listing__body"><p><code>print</code> output, operation results, diagnostics, and images become the next iteration's history context.</p></div></div>
         <div class="listing__row"><div class="listing__label">5. finish</div><div class="listing__body"><p><code>submit</code> finishes as <code>TurnFinish::SubmittedValue</code>; prose can finish as <code>TurnFinish::AssistantMessage</code> when the mode's final-answer policy allows it.</p></div></div>
       </div>

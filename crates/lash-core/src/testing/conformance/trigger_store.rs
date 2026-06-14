@@ -52,7 +52,7 @@ fn sample_trigger_subscription_draft(
             optional: false,
         }]),
         module_ref: lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
-        required_surface_ref: lashlang::RequiredSurfaceRef::new(&lashlang::ContentHash::new(
+        host_requirements_ref: lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new(
             "surface",
         )),
         process_ref: lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),

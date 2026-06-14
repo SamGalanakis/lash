@@ -227,7 +227,7 @@ fn spawn_schema_is_strict_and_nameless() {
 }
 
 #[test]
-fn subagents_source_does_not_reintroduce_retired_lifecycle_surface() {
+fn subagents_source_does_not_reintroduce_retired_lifecycle_api() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let source_files = [
         "src/lib.rs",
@@ -254,7 +254,7 @@ fn subagents_source_does_not_reintroduce_retired_lifecycle_surface() {
         for needle in &banned {
             assert!(
                 !text.contains(needle),
-                "{relative} reintroduced retired subagent surface `{needle}`"
+                "{relative} reintroduced retired sublashlang binding `{needle}`"
             );
         }
     }
@@ -935,8 +935,8 @@ fn dummy_tool(name: &str) -> ToolDefinition {
 }
 
 #[test]
-fn subagent_surface_reports_authority_notes() {
-    use lash_core::plugin::ToolSurfaceContext;
+fn sublashlang_binding_reports_authority_notes() {
+    use lash_core::plugin::ToolCatalogContext;
 
     let tools = vec![
         dummy_tool("read_file"),
@@ -956,7 +956,7 @@ fn subagent_surface_reports_authority_notes() {
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let ctx = ToolSurfaceContext {
+    let ctx = ToolCatalogContext {
         session_id: "child".to_string(),
         tools: tools.into_iter().map(|tool| tool.manifest()).collect(),
         resolve_contract: Some(std::sync::Arc::new(move |name| {
@@ -973,7 +973,7 @@ fn subagent_surface_reports_authority_notes() {
     };
 
     let contribution =
-        rlm_support::subagent_surface_contribution(ctx).expect("surface contribution");
+        rlm_support::sublashlang_binding_contribution(ctx).expect("catalog contribution");
     assert!(contribution.overrides.is_empty());
     assert_eq!(
         contribution.tool_list_notes,

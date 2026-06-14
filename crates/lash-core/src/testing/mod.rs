@@ -302,13 +302,13 @@ pub fn code_execution_context_with_lashlang_abilities(
 ) -> crate::RuntimeExecutionContext<'static> {
     code_execution_context_with_lashlang_abilities_and_resources(
         abilities,
-        lashlang::ResourceCatalog::new(),
+        lashlang::LashlangHostCatalog::new(),
     )
 }
 
 pub fn code_execution_context_with_lashlang_abilities_and_resources(
     abilities: lashlang::LashlangAbilities,
-    resources: lashlang::ResourceCatalog,
+    resources: lashlang::LashlangHostCatalog,
 ) -> crate::RuntimeExecutionContext<'static> {
     let session_id = "test-session".to_string();
     let plugin_host = crate::PluginHost::new(test_rlm_protocol_factories());
@@ -329,7 +329,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
     let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
         plugins,
         tools: Arc::new(EmptyCodeExecutionTools),
-        surface: Arc::new(crate::ToolSurface::from_tools(
+        tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
             Vec::new(),
             std::collections::BTreeMap::new(),
         )),
@@ -947,8 +947,8 @@ mod test_protocol_fakes {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_agent_surface(
-            crate::ToolAgentSurface::new(["tools"], "batch").with_aliases(["parallel_tools"]),
+        .with_lashlang_binding(
+            crate::LashlangToolBinding::new(["tools"], "batch").with_aliases(["parallel_tools"]),
         )
         .with_scheduling(crate::ToolScheduling::Parallel)
     }
@@ -1075,15 +1075,15 @@ mod test_protocol_fakes {
 
     impl ProtocolDriverPlugin for TestProtocolDriver {
         fn build_preamble(&self, input: ProtocolBuildInput) -> TurnDriverPreamble {
-            let tool_names = input.tool_surface.tool_names();
-            let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
+            let tool_names = input.tool_catalog.tool_names();
+            let tool_names_fingerprint = input.tool_catalog.tool_names_fingerprint();
             TurnDriverPreamble {
                 config: TurnDriverConfig::chat(
                     Arc::new(TestDriver),
                     false,
                     Arc::new(test_turn_limit_final_message),
                 ),
-                tool_specs: input.tool_surface.model_tool_specs(),
+                tool_specs: input.tool_catalog.model_tool_specs(),
                 tool_names,
                 tool_names_fingerprint,
                 omitted_tool_count: 0,

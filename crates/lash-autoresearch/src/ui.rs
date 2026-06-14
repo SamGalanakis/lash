@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash::TurnEvent;
-use lash::control::PluginAction;
+use lash::admin::PluginAction;
 use lash_tui::{
     Axis, Color, Column, ColumnWidth, Constraint, Frame, InputEvent, KeyCode as InputKeyCode,
     KeyEventKind, Layout, Line, Modifier, Rect, Span, Style, Table, TableCell, TableRow,

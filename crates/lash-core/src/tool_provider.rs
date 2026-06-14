@@ -16,13 +16,13 @@ pub(crate) mod process_events;
 mod session;
 mod triggers;
 
-pub use attachments::ToolAttachmentControl;
-pub use direct_completion::ToolDirectCompletionControl;
-pub use dispatch::ToolDispatchControl;
-pub use process::ToolProcessControl;
-pub use process_events::ToolProcessEventControl;
-pub use session::{ToolSessionControl, ToolSessionModel};
-pub use triggers::ToolTriggerControl;
+pub use attachments::ToolAttachmentClient;
+pub use direct_completion::ToolDirectCompletionClient;
+pub use dispatch::ToolDispatchClient;
+pub use process::ToolSessionProcessAdmin;
+pub use process_events::ToolProcessEventClient;
+pub use session::{ToolSessionAdmin, ToolSessionModel};
+pub use triggers::ToolTriggerClient;
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -305,8 +305,8 @@ impl<'run> ToolContext<'run> {
         &self.agent_frame_id
     }
 
-    pub fn sessions(&self) -> ToolSessionControl<'run> {
-        ToolSessionControl {
+    pub fn sessions(&self) -> ToolSessionAdmin<'run> {
+        ToolSessionAdmin {
             session_id: self.session_id.clone(),
             sessions: Arc::clone(&self.sessions),
             session_lifecycle: Arc::clone(&self.session_lifecycle),
@@ -314,20 +314,20 @@ impl<'run> ToolContext<'run> {
         }
     }
 
-    pub fn dispatch(&self) -> ToolDispatchControl<'run> {
-        ToolDispatchControl {
+    pub fn dispatch(&self) -> ToolDispatchClient<'run> {
+        ToolDispatchClient {
             context: self.clone(),
         }
     }
 
-    pub fn triggers(&self) -> ToolTriggerControl<'run> {
-        ToolTriggerControl {
+    pub fn triggers(&self) -> ToolTriggerClient<'run> {
+        ToolTriggerClient {
             context: self.clone(),
         }
     }
 
-    pub fn processes(&self) -> ToolProcessControl<'run> {
-        ToolProcessControl {
+    pub fn processes(&self) -> ToolSessionProcessAdmin<'run> {
+        ToolSessionProcessAdmin {
             session_id: self.session_id.clone(),
             agent_frame_id: self.agent_frame_id.clone(),
             processes: Arc::clone(&self.processes),
@@ -394,22 +394,22 @@ impl<'run> ToolContext<'run> {
         );
     }
 
-    pub fn direct_completions(&self) -> ToolDirectCompletionControl<'run> {
-        ToolDirectCompletionControl {
+    pub fn direct_completions(&self) -> ToolDirectCompletionClient<'run> {
+        ToolDirectCompletionClient {
             session_id: self.session_id.clone(),
             tool_call_id: self.tool_call_id.clone(),
             direct_completions: self.direct_completions.clone(),
         }
     }
 
-    pub fn attachments(&self) -> ToolAttachmentControl {
-        ToolAttachmentControl {
+    pub fn attachments(&self) -> ToolAttachmentClient {
+        ToolAttachmentClient {
             store: Arc::clone(&self.attachment_store),
         }
     }
 
-    pub fn process_events(&self) -> ToolProcessEventControl {
-        ToolProcessEventControl {
+    pub fn process_events(&self) -> ToolProcessEventClient {
+        ToolProcessEventClient {
             context: self.process_events.clone(),
         }
     }

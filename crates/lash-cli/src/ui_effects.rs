@@ -118,7 +118,7 @@ pub(crate) async fn collect_ui_snapshot(
 ) -> crate::event::UiSnapshotResult {
     let started = std::time::Instant::now();
     let mut diagnostics = Vec::new();
-    let processes = match session.process_control().list().await {
+    let processes = match session.processes().list().await {
         Ok(tasks) => Some(tasks),
         Err(err) => {
             diagnostics.push(format!("process snapshot failed: {err}"));

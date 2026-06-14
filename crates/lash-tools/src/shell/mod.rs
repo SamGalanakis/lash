@@ -1,4 +1,4 @@
-//! Built-in shell tool surface (`shell.exec` / `shell.start` /
+//! Built-in shell tool catalog (`shell.exec` / `shell.start` /
 //! `shell.write`).
 //!
 //! This module is the *surface* layer: tool definitions, argument parsing,
@@ -533,7 +533,7 @@ impl StandardShell {
                 r#"await shell.exec({ cmd: "cargo test -p lash-protocol-rlm", timeout_ms: 600000 })?"#.into(),
                 r#"await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?"#.into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["shell"],
                 "exec",
                 &["shell", "bash"],
@@ -549,7 +549,7 @@ impl StandardShell {
             .with_examples(vec![
                 r#"await shell.start({ cmd: "python -m http.server 8000" })?"#.into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["shell"],
                 "start",
                 &["long_running_command", "pty"],
@@ -584,7 +584,7 @@ impl StandardShell {
                 r#"await shell.write({ process_id: "call-shell-1", chars: "status\n" })?"#.into(),
                 r#"await shell.write({ process_id: "call-shell-1", chars: "", close_stdin: true })?"#.into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["shell"],
                 "write",
                 &["send_stdin", "poll_command"],
@@ -675,7 +675,7 @@ fn parse_process_id(args: &serde_json::Value) -> Result<String, ToolResult> {
     require_str(args, "process_id").map(str::to_string)
 }
 
-/// PluginFactory for the built-in shell tool surface.
+/// PluginFactory for the built-in shell tool catalog.
 ///
 /// Wires `StandardShell` into the active session with the access-gated
 /// `shell.write` mention in the prompt contribution so the model only

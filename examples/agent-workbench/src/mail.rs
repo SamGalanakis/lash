@@ -1,7 +1,7 @@
 //! Mocked multi-account inbox world for the workbench demo.
 //!
 //! The host owns a small in-memory set of named inboxes. Each is projected into
-//! the RLM Lashlang surface as a typed module authority of type `Inbox` at
+//! the RLM Lashlang host environment as a typed module authority of type `Inbox` at
 //! module path `inbox.<slug>`, exposing three operations:
 //!
 //! - `send({ title, text })` — add a message to that inbox
@@ -15,7 +15,7 @@
 //!
 //! Accounts are added at runtime from the UI. The provider reads the live
 //! account set in [`MockMailProvider::definitions`], and the runtime rebuilds
-//! the tool surface on the next opened turn, so newly added accounts appear as
+//! the tool catalog on the next opened turn, so newly added accounts appear as
 //! authorities without any explicit refresh.
 
 use std::sync::{Arc, RwLock};
@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 use crate::MAIL_RECEIVED_SOURCE_TYPE;
 use async_trait::async_trait;
 use lash::tools::{
-    ToolAgentSurface, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
+    LashlangToolBinding, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
     ToolResult, ToolScheduling,
 };
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
@@ -330,8 +330,8 @@ fn definition_for(slug: &str, display_name: &str, operation: &str) -> ToolDefini
         input_schema,
         json!({ "type": "object" }),
     )
-    .with_agent_surface(
-        ToolAgentSurface::new(["inbox", slug], operation).with_authority_type("Inbox"),
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["inbox", slug], operation).with_authority_type("Inbox"),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -524,7 +524,7 @@ mod tests {
             .into_iter()
             .find(|manifest| manifest.name == "inbox__work__send")
             .expect("work send manifest");
-        let surface = manifest.agent_surface.executable_for(&manifest.name);
+        let surface = manifest.lashlang_binding.executable_for(&manifest.name);
         assert_eq!(surface.call_path(), "inbox.work.send");
         assert_eq!(surface.authority_type, "Inbox");
 

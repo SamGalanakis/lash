@@ -98,7 +98,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
         .run()
         .await?;
     session
-        .control()
+        .admin()
         .config()
         .replace_prompt_slot(
             PromptSlot::Guidance,
@@ -110,7 +110,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
         .await?;
     session.turn(TurnInput::text("second")).run().await?;
     session
-        .control()
+        .admin()
         .config()
         .clear_prompt_slot(PromptSlot::Guidance)
         .await?;
@@ -159,7 +159,7 @@ async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Re
     assert_eq!(assistant_prose(&after_turn.activities), "session");
 
     session
-        .control()
+        .admin()
         .config()
         .update(SessionConfigPatch {
             provider: Some(text_provider(
@@ -236,7 +236,7 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
         .run()
         .await?;
     session
-        .control()
+        .admin()
         .config()
         .update(SessionConfigPatch {
             provider: Some(recording_text_provider(
@@ -386,7 +386,7 @@ async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()>
     );
 
     let err = session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("rlm-child-bad-extras".to_string()),
@@ -400,7 +400,7 @@ async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()>
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options,
             usage_source: None,
         })
@@ -421,7 +421,7 @@ async fn rlm_projection_errors_surface_from_protocol_extensions() -> Result<()> 
         .build()?;
     let session = core.session("rlm").open().await?;
     session
-        .control()
+        .admin()
         .mode()
         .apply_session_extension(lash_protocol_rlm::rlm_session_projection_extension(
             RlmProjectedBindings::new()
@@ -622,7 +622,7 @@ async fn persisted_provider_id_rebinds_to_live_provider_on_open() -> Result<()> 
         .build()?;
 
     let reopened = core.session("provider-rebind").open().await?;
-    let persisted = reopened.control().state().persist_current().await?;
+    let persisted = reopened.admin().state().persist_current().await?;
 
     assert_eq!(persisted.policy.recorded_provider_id(), "embed-test");
     assert!(
@@ -957,13 +957,13 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         "manual input"
     );
     opened
-        .control()
+        .admin()
         .tools()
         .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
-    let mut persisted = opened.control().state().persist_current().await?;
+    let mut persisted = opened.admin().state().persist_current().await?;
     let expected_generation = opened
-        .control()
+        .admin()
         .tools()
         .state()
         .await?
@@ -972,7 +972,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     persisted.tool_state_generation = Some(expected_generation);
     persisted.tool_state_snapshot = Some(
         opened
-            .control()
+            .admin()
             .tools()
             .state()
             .await?
@@ -985,7 +985,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         .store(Arc::clone(&store))
         .open_with_state(persisted)
         .await?;
-    let state = reopened.control().tools().state().await?;
+    let state = reopened.admin().tools().state().await?;
     assert_eq!(state.generation(), expected_generation);
     assert_eq!(
         state
@@ -1007,7 +1007,7 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
     let session = core.session("root-with-child-store").open().await?;
 
     session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("managed-child-store".to_string()),
@@ -1021,7 +1021,7 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
@@ -1052,7 +1052,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
     let session = core.session("root-store").open().await?;
 
     let err = session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("child-needs-own-store".to_string()),
@@ -1066,7 +1066,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
@@ -1096,7 +1096,7 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
         .await?;
 
     session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("explicit-root-child".to_string()),
@@ -1110,7 +1110,7 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })

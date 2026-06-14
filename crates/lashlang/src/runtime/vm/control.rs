@@ -45,10 +45,10 @@ impl<H: ExecutionHost> Vm<'_, H> {
             VmOutcome::Continued => Ok(ExecutionOutcome::Continued),
             VmOutcome::Finished(value) => Ok(ExecutionOutcome::Finished(value)),
             VmOutcome::ProcessFinished(_) => {
-                Err(RuntimeError::ProcessControlOutsideProcess { keyword: "finish" })
+                Err(RuntimeError::SessionProcessAdminOutsideProcess { keyword: "finish" })
             }
             VmOutcome::ProcessFailed(_) => {
-                Err(RuntimeError::ProcessControlOutsideProcess { keyword: "fail" })
+                Err(RuntimeError::SessionProcessAdminOutsideProcess { keyword: "fail" })
             }
         }
     }
@@ -77,11 +77,11 @@ impl<H: ExecutionHost> Vm<'_, H> {
             VmOutcome::Continued => Ok(ExecutionOutcome::Continued),
             VmOutcome::Finished(value) => Ok(ExecutionOutcome::Finished(value)),
             VmOutcome::ProcessFinished(_) => Err(RuntimeFailure {
-                error: RuntimeError::ProcessControlOutsideProcess { keyword: "finish" },
+                error: RuntimeError::SessionProcessAdminOutsideProcess { keyword: "finish" },
                 span: None,
             }),
             VmOutcome::ProcessFailed(_) => Err(RuntimeFailure {
-                error: RuntimeError::ProcessControlOutsideProcess { keyword: "fail" },
+                error: RuntimeError::SessionProcessAdminOutsideProcess { keyword: "fail" },
                 span: None,
             }),
         }

@@ -16,8 +16,8 @@ mod stream_mask;
 pub use control_tools::continue_as_tool_definition;
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use lashlang::{
-    LashlangAbilities, LashlangLanguageFeatures, LashlangSurface, NamedDataType, ResourceCatalog,
-    TypeExpr, TypeField, format_type_expr,
+    LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment, LashlangLanguageFeatures,
+    NamedDataType, TypeExpr, TypeField, format_type_expr,
 };
 pub use plugin::{RLM_PROTOCOL_PLUGIN_ID, RlmProtocolPluginConfig, RlmProtocolPluginFactory};
 pub use projection::{
@@ -30,6 +30,7 @@ pub use projection::{
     rlm_protocol_event, rlm_seed_initial_nodes,
 };
 pub use protocol::{
-    RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section_for_surface,
+    RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence,
+    rlm_execution_section_for_host_environment,
 };
 pub use rlm_support::format_budget_suffix;

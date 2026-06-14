@@ -289,16 +289,16 @@ fn remote_turn_result_maps_core_semantics() {
 }
 
 #[test]
-fn remote_tool_grants_validate_explicit_surfaces_and_duplicates() {
+fn remote_tool_grants_validate_explicit_bindings_and_duplicates() {
     let grant = demo_grant("one", "tools", "search");
     grant.validate().expect("valid grant");
     assert_eq!(grant.call_path().unwrap(), "tools.search");
 
-    let mut missing_surface = grant.clone();
-    missing_surface.agent_surface = None;
+    let mut missing_binding = grant.clone();
+    missing_binding.lashlang_binding = None;
     assert!(matches!(
-        missing_surface.validate(),
-        Err(RemoteProtocolError::MissingToolSurface { .. })
+        missing_binding.validate(),
+        Err(RemoteProtocolError::MissingLashlangToolBinding { .. })
     ));
 
     let duplicate = demo_grant("two", "tools", "search");
@@ -495,6 +495,6 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         argument_projection: None,
         scheduling: None,
         retry_policy: None,
-        agent_surface: Some(RemoteToolAgentSurface::new([module], operation)),
+        lashlang_binding: Some(RemoteLashlangToolBinding::new([module], operation)),
     }
 }

@@ -13,8 +13,8 @@ use lash_core::plugin::{
     StaticPluginFactory,
 };
 use lash_core::{
-    ToolAgentSurface, ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolProvider, ToolResult,
-    ToolScheduling,
+    LashlangToolBinding, ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
@@ -23,11 +23,11 @@ use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 /// Declares its provider through a [`PluginSpec`] driven by
 /// [`StaticPluginFactory`], so it does not hand-roll the `SessionPlugin` +
 /// `register` ceremony.
-pub struct ProcessControlsPluginFactory {
+pub struct SessionProcessAdminPluginFactory {
     inner: StaticPluginFactory,
 }
 
-impl ProcessControlsPluginFactory {
+impl SessionProcessAdminPluginFactory {
     pub fn new() -> Self {
         Self::with_cancel_process(true)
     }
@@ -38,26 +38,26 @@ impl ProcessControlsPluginFactory {
 
     fn with_cancel_process(include_cancel_process: bool) -> Self {
         let provider = StaticToolProvider::new(
-            process_control_tool_definitions(include_cancel_process),
-            ProcessControlsTools {
+            processes_tool_definitions(include_cancel_process),
+            SessionProcessAdminTools {
                 include_cancel_process,
             },
         );
         let spec =
             PluginSpec::new().with_tool_provider(Arc::new(provider) as Arc<dyn ToolProvider>);
         Self {
-            inner: StaticPluginFactory::new("process_controls", spec),
+            inner: StaticPluginFactory::new("processess", spec),
         }
     }
 }
 
-impl Default for ProcessControlsPluginFactory {
+impl Default for SessionProcessAdminPluginFactory {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PluginFactory for ProcessControlsPluginFactory {
+impl PluginFactory for SessionProcessAdminPluginFactory {
     fn id(&self) -> &'static str {
         self.inner.id()
     }
@@ -67,12 +67,12 @@ impl PluginFactory for ProcessControlsPluginFactory {
     }
 }
 
-struct ProcessControlsTools {
+struct SessionProcessAdminTools {
     include_cancel_process: bool,
 }
 
 #[async_trait::async_trait]
-impl StaticToolExecute for ProcessControlsTools {
+impl StaticToolExecute for SessionProcessAdminTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "list_process_handles" => execute_process_list_tool_call(call.context, call.args).await,
@@ -111,12 +111,12 @@ pub fn process_list_tool_definition() -> ToolDefinition {
         r#"await processes.list({ status: "any" })?"#.into(),
         "await processes.list({ definition: on_button })?".into(),
     ])
-    .with_agent_surface(ToolAgentSurface::new(["processes"], "list"))
+    .with_lashlang_binding(LashlangToolBinding::new(["processes"], "list"))
     .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }
 
-fn process_control_tool_definitions(include_cancel_process: bool) -> Vec<ToolDefinition> {
+fn processes_tool_definitions(include_cancel_process: bool) -> Vec<ToolDefinition> {
     let mut definitions = vec![process_list_tool_definition()];
     if include_cancel_process {
         definitions.push(process_cancel_tool_definition());
@@ -157,7 +157,7 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
         r#"await processes.cancel({ process_id: "tool:call-01JZK7G4QP9Q4J7W3Q2E1H6M9C" })?"#.into(),
         r#"await processes.cancel({ process_id: "subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C" })?"#.into(),
     ])
-    .with_agent_surface(ToolAgentSurface::new(["processes"], "cancel"))
+    .with_lashlang_binding(LashlangToolBinding::new(["processes"], "cancel"))
     .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -296,8 +296,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_expose_process_control_tools() {
-        let names = process_control_tool_definitions(true)
+    fn tool_definitions_expose_processes_tools() {
+        let names = processes_tool_definitions(true)
             .into_iter()
             .map(|tool| tool.name().to_string())
             .collect::<Vec<_>>();
@@ -339,26 +339,25 @@ mod tests {
 
     #[test]
     fn plugin_registers_cancel_when_configured_and_omits_it_otherwise() {
-        let standard_session =
-            lash_core::PluginHost::new(
-                std::iter::once(
-                    Arc::new(ProcessControlsPluginFactory::new()) as Arc<dyn PluginFactory>
-                )
-                .chain(lash_core::testing::test_standard_protocol_factories())
-                .collect(),
+        let standard_session = lash_core::PluginHost::new(
+            std::iter::once(
+                Arc::new(SessionProcessAdminPluginFactory::new()) as Arc<dyn PluginFactory>
             )
-            .build_session("standard", None)
-            .expect("standard session");
+            .chain(lash_core::testing::test_standard_protocol_factories())
+            .collect(),
+        )
+        .build_session("standard", None)
+        .expect("standard session");
         let standard_names = standard_session
-            .tool_surface("standard")
-            .expect("standard surface")
+            .resolved_tool_catalog("standard")
+            .expect("standard tool catalog")
             .tool_names()
             .as_ref()
             .clone();
 
         let rlm_session = lash_core::PluginHost::new(
             std::iter::once(
-                Arc::new(ProcessControlsPluginFactory::without_cancel_process())
+                Arc::new(SessionProcessAdminPluginFactory::without_cancel_process())
                     as Arc<dyn PluginFactory>,
             )
             .chain(lash_core::testing::test_rlm_protocol_factories())
@@ -367,8 +366,8 @@ mod tests {
         .build_session("rlm", None)
         .expect("rlm session");
         let rlm_names = rlm_session
-            .tool_surface("rlm")
-            .expect("rlm surface")
+            .resolved_tool_catalog("rlm")
+            .expect("rlm tool catalog")
             .tool_names()
             .as_ref()
             .clone();

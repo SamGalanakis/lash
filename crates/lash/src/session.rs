@@ -271,7 +271,7 @@ impl SessionBuilder {
         // Lazily spawn the default process work runner (Decision 3: deferred to
         // the first open so a tokio runtime is guaranteed; idempotent via the
         // shared once-guard) and thread its poke onto this session's host so the
-        // process control seam can wake the runner after a successful start.
+        // process admin seam can wake the runner after a successful start.
         env.process_work_poke = self.core.process_work_runner.poke().await;
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
         let handle = RuntimeHandle::with_live_replay_store(
@@ -422,35 +422,35 @@ impl LashSession {
         self.turn_cancels.cancel_all()
     }
 
-    pub fn control(&self) -> SessionControl {
-        SessionControl {
+    pub fn admin(&self) -> SessionAdmin {
+        SessionAdmin {
             runtime: self.runtime.clone(),
         }
     }
 
     pub async fn configure(&self, patch: SessionConfigPatch) -> Result<()> {
-        self.control().config().update(patch).await
+        self.admin().config().update(patch).await
     }
 
-    pub fn tools(&self) -> ToolsControl {
-        ToolsControl::new(self.control())
+    pub fn tools(&self) -> ToolAdmin {
+        ToolAdmin::new(self.admin())
     }
 
-    pub fn commands(&self) -> SessionCommandsControl {
-        self.control().commands()
+    pub fn commands(&self) -> SessionCommandAdmin {
+        self.admin().commands()
     }
 
-    pub fn triggers(&self) -> TriggersControl {
-        self.control().triggers()
+    pub fn triggers(&self) -> SessionTriggerAdmin {
+        self.admin().triggers()
     }
 
-    pub fn process_control(&self) -> ProcessControl {
-        ProcessControl::new(self.control())
+    pub fn processes(&self) -> SessionProcessAdmin {
+        SessionProcessAdmin::new(self.admin())
     }
 
     pub fn plugin_actions(&self) -> PluginActions {
         PluginActions {
-            control: self.control(),
+            control: self.admin(),
         }
     }
 

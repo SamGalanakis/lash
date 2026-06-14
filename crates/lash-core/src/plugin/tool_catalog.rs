@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use super::*;
 
 #[derive(Clone)]
-pub struct ToolSurfaceContext {
+pub struct ToolCatalogContext {
     pub session_id: String,
     pub tools: Vec<ToolManifest>,
     pub resolve_contract: Option<lash_sansio::ToolContractResolver>,

@@ -158,7 +158,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
             .effect_controller
             .execute_effect(
                 envelope,
-                crate::RuntimeEffectLocalExecutor::process_control(Arc::clone(&self.registry)),
+                crate::RuntimeEffectLocalExecutor::processes(Arc::clone(&self.registry)),
             )
             .await?;
         if is_start && let Some(poke) = self.current.host.process_work_poke.as_ref() {

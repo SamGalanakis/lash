@@ -567,7 +567,7 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
 
     entered_rx.await.expect("provider entered first call");
     session
-        .control()
+        .admin()
         .injection()
         .inject_turn_input(
             Some("queue-1".to_string()),
@@ -1364,13 +1364,13 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
 }
 
 #[test]
-fn process_control_lists_started_lashlang_process_until_awaited() -> Result<()> {
+fn processes_lists_started_lashlang_process_until_awaited() -> Result<()> {
     run_async_test_on_stack_budget("process-control-lashlang-process-test", || {
-        process_control_lists_started_lashlang_process_until_awaited_inner()
+        processes_lists_started_lashlang_process_until_awaited_inner()
     })
 }
 
-async fn process_control_lists_started_lashlang_process_until_awaited_inner() -> Result<()> {
+async fn processes_lists_started_lashlang_process_until_awaited_inner() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let core = explicit_ephemeral_facets(LashCore::rlm())
@@ -1409,7 +1409,7 @@ submit value
         .expect("tool process should start")
         .expect("tool provider entered");
 
-    let processes = session.process_control().list().await?;
+    let processes = session.processes().list().await?;
     let running_app_lookup = processes.iter().any(|process| {
         process.descriptor.kind.as_deref() == Some("lashlang")
             && process.descriptor.label.as_deref() == Some("lookup")
@@ -1478,7 +1478,7 @@ submit value
         .expect("tool process should start")
         .expect("tool provider entered");
 
-    let processes = session.process_control().list().await?;
+    let processes = session.processes().list().await?;
     let running = processes
         .iter()
         .find(|process| process.descriptor.label.as_deref() == Some("lookup"))

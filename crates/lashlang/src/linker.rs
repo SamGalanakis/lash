@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::artifact::{
-    ModuleArtifact, SurfaceRequirements, surface_requirements_for_program_with_catalog,
+    HostRequirements, ModuleArtifact, host_requirements_for_program_with_catalog,
 };
 use crate::ast::{
     AssignPathStep, AstString, Declaration, Expr, ProcessDecl, ProcessParam, Program,
@@ -14,7 +14,7 @@ use crate::ast::{
 use crate::lexer::Span;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResourceCatalog {
+pub struct LashlangHostCatalog {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     module_instances: BTreeMap<String, ModuleInstanceCatalog>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -27,7 +27,7 @@ pub struct ResourceCatalog {
     trigger_sources: BTreeMap<String, TriggerSourceBinding>,
 }
 
-impl ResourceCatalog {
+impl LashlangHostCatalog {
     pub fn new() -> Self {
         Self::default()
     }
@@ -52,14 +52,14 @@ impl ResourceCatalog {
         &mut self,
         module_path: impl IntoIterator<Item = impl Into<String>>,
         resource_type: impl Into<String>,
-    ) -> Result<(), ResourceCatalogError> {
+    ) -> Result<(), LashlangHostCatalogError> {
         let path = module_path.into_iter().map(Into::into).collect::<Vec<_>>();
         assert!(!path.is_empty(), "module path must not be empty");
         let resource_type = resource_type.into();
         let key = module_path_key(&path);
         if let Some(existing) = self.module_instances.get(&key) {
             if existing.resource_type != resource_type {
-                return Err(ResourceCatalogError::ConflictingModuleInstance {
+                return Err(LashlangHostCatalogError::ConflictingModuleInstance {
                     alias: key,
                     existing: existing.resource_type.clone(),
                     incoming: resource_type,
@@ -157,7 +157,7 @@ impl ResourceCatalog {
     pub fn add_named_data_type(
         &mut self,
         data_type: NamedDataType,
-    ) -> Result<(), ResourceCatalogError> {
+    ) -> Result<(), LashlangHostCatalogError> {
         self.merge_named_data_type(data_type)
     }
 
@@ -166,7 +166,7 @@ impl ResourceCatalog {
         path: impl IntoIterator<Item = impl Into<String>>,
         input_ty: TypeExpr,
         event_ty: NamedDataType,
-    ) -> Result<(), ResourceCatalogError> {
+    ) -> Result<(), LashlangHostCatalogError> {
         let path = path.into_iter().map(Into::into).collect::<Vec<_>>();
         assert!(!path.is_empty(), "constructor path must not be empty");
         let source_type = module_path_key(&path);
@@ -174,7 +174,7 @@ impl ResourceCatalog {
         if let Some(existing) = self.trigger_sources.get(source_type.as_str())
             && existing.event_type() != &event_ty
         {
-            return Err(ResourceCatalogError::ConflictingTriggerSource {
+            return Err(LashlangHostCatalogError::ConflictingTriggerSource {
                 source_type,
                 existing: existing.event_type().name().to_string(),
                 incoming: event_ty.name().to_string(),
@@ -189,7 +189,7 @@ impl ResourceCatalog {
         &mut self,
         source_ty: impl Into<String>,
         event_ty: NamedDataType,
-    ) -> Result<(), ResourceCatalogError> {
+    ) -> Result<(), LashlangHostCatalogError> {
         self.merge_named_data_type(event_ty.clone())?;
         self.trigger_sources
             .insert(source_ty.into(), TriggerSourceBinding::new(event_ty));
@@ -198,10 +198,10 @@ impl ResourceCatalog {
 
     pub fn extend(&mut self, other: Self) {
         self.try_extend(other)
-            .expect("conflicting resource catalog entries");
+            .expect("conflicting host catalog entries");
     }
 
-    pub fn try_extend(&mut self, other: Self) -> Result<(), ResourceCatalogError> {
+    pub fn try_extend(&mut self, other: Self) -> Result<(), LashlangHostCatalogError> {
         for (resource_type, incoming) in other.resource_types {
             let entry = self.resource_types.entry(resource_type).or_default();
             entry.operations.extend(incoming.operations);
@@ -216,7 +216,7 @@ impl ResourceCatalog {
                     existing.operations.extend(incoming.operations);
                 }
                 Some(existing) => {
-                    return Err(ResourceCatalogError::ConflictingModuleInstance {
+                    return Err(LashlangHostCatalogError::ConflictingModuleInstance {
                         alias,
                         existing: existing.resource_type.clone(),
                         incoming: incoming.resource_type,
@@ -300,17 +300,17 @@ impl ResourceCatalog {
             })
     }
 
-    pub fn decode_host_value_as<T: serde::de::DeserializeOwned>(
+    pub fn decode_host_descriptor_as<T: serde::de::DeserializeOwned>(
         &self,
         source_type: &str,
         value: serde_json::Value,
-    ) -> Result<T, crate::HostValueError> {
+    ) -> Result<T, crate::HostDescriptorError> {
         if !self.is_known_opaque_value_type(source_type) {
-            return Err(crate::HostValueError::UnknownSourceType {
+            return Err(crate::HostDescriptorError::UnknownSourceType {
                 source_type: source_type.to_string(),
             });
         }
-        serde_json::from_value(value).map_err(|err| crate::HostValueError::MalformedPayload {
+        serde_json::from_value(value).map_err(|err| crate::HostDescriptorError::MalformedPayload {
             source_type: source_type.to_string(),
             message: err.to_string(),
         })
@@ -457,11 +457,14 @@ impl ResourceCatalog {
         suggestions
     }
 
-    fn check_named_data_type(&self, data_type: &NamedDataType) -> Result<(), ResourceCatalogError> {
+    fn check_named_data_type(
+        &self,
+        data_type: &NamedDataType,
+    ) -> Result<(), LashlangHostCatalogError> {
         if let Some(existing) = self.named_data_types.get(data_type.name())
             && existing != data_type
         {
-            return Err(ResourceCatalogError::ConflictingNamedDataType {
+            return Err(LashlangHostCatalogError::ConflictingNamedDataType {
                 name: data_type.name().to_string(),
             });
         }
@@ -471,7 +474,7 @@ impl ResourceCatalog {
     fn merge_named_data_type(
         &mut self,
         data_type: NamedDataType,
-    ) -> Result<(), ResourceCatalogError> {
+    ) -> Result<(), LashlangHostCatalogError> {
         self.check_named_data_type(&data_type)?;
         self.named_data_types
             .entry(data_type.name().to_string())
@@ -536,7 +539,7 @@ pub enum NamedDataTypeError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum ResourceCatalogError {
+pub enum LashlangHostCatalogError {
     #[error("conflicting host data type definition `{name}`")]
     ConflictingNamedDataType { name: String },
     #[error(
@@ -683,17 +686,17 @@ impl TriggerSourceBinding {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LashlangSurface {
+pub struct LashlangHostEnvironment {
     #[serde(default)]
-    pub resources: ResourceCatalog,
+    pub resources: LashlangHostCatalog,
     #[serde(default)]
     pub abilities: LashlangAbilities,
     #[serde(default)]
     pub language_features: LashlangLanguageFeatures,
 }
 
-impl LashlangSurface {
-    pub fn new(resources: ResourceCatalog, abilities: LashlangAbilities) -> Self {
+impl LashlangHostEnvironment {
+    pub fn new(resources: LashlangHostCatalog, abilities: LashlangAbilities) -> Self {
         Self {
             resources,
             abilities,
@@ -706,7 +709,7 @@ impl LashlangSurface {
         self
     }
 
-    pub fn satisfies(&self, requirements: &SurfaceRequirements) -> bool {
+    pub fn satisfies(&self, requirements: &HostRequirements) -> bool {
         self.abilities.satisfies(requirements.abilities)
             && self
                 .language_features
@@ -803,7 +806,7 @@ fn module_path_key(path: &[impl AsRef<str>]) -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinkedModule {
     pub module_ref: crate::ModuleRef,
-    pub required_surface_ref: crate::RequiredSurfaceRef,
+    pub host_requirements_ref: crate::HostRequirementsRef,
     pub artifact: ModuleArtifact,
     #[serde(skip)]
     linked_program: Option<Program>,
@@ -812,13 +815,12 @@ pub struct LinkedModule {
 impl LinkedModule {
     pub fn link(
         program: Program,
-        surface: impl Borrow<LashlangSurface>,
+        surface: impl Borrow<LashlangHostEnvironment>,
     ) -> Result<Self, LinkError> {
         let surface = surface.borrow();
         let mut linker = Linker::new(&program, surface);
         let program = linker.link_program()?;
-        let requirements =
-            surface_requirements_for_program_with_catalog(&program, &surface.resources);
+        let requirements = host_requirements_for_program_with_catalog(&program, &surface.resources);
         let artifact =
             ModuleArtifact::from_program_with_requirements(program.clone(), requirements).map_err(
                 |err| LinkError::ModuleHash {
@@ -827,7 +829,7 @@ impl LinkedModule {
             )?;
         Ok(Self {
             module_ref: artifact.module_ref.clone(),
-            required_surface_ref: artifact.required_surface_ref.clone(),
+            host_requirements_ref: artifact.host_requirements_ref.clone(),
             artifact,
             linked_program: Some(program),
         })
@@ -981,8 +983,8 @@ pub enum LinkError {
         keyword: &'static str,
         span: Option<Span>,
     },
-    #[error("cannot access `{access}` on opaque host value `{type_name}`")]
-    OpaqueHostValueAccess {
+    #[error("cannot access `{access}` on opaque host descriptor `{type_name}`")]
+    OpaqueHostDescriptorAccess {
         type_name: String,
         access: String,
         span: Option<Span>,
@@ -1028,7 +1030,7 @@ impl LinkError {
             | Self::IncompatibleProcessArgument { span, .. }
             | Self::FeatureDisabled { span, .. }
             | Self::ProcessLifecycleOutsideProcess { span, .. }
-            | Self::OpaqueHostValueAccess { span, .. } => *span,
+            | Self::OpaqueHostDescriptorAccess { span, .. } => *span,
             Self::ModuleHash { .. } => None,
         }
     }
@@ -1042,7 +1044,7 @@ enum Binding {
 
 struct Linker<'module> {
     program: &'module Program,
-    surface: &'module LashlangSurface,
+    surface: &'module LashlangHostEnvironment,
     process_names: BTreeSet<String>,
     process_types: BTreeMap<String, TypeExpr>,
     type_names: BTreeSet<String>,
@@ -1050,7 +1052,7 @@ struct Linker<'module> {
 }
 
 impl<'module> Linker<'module> {
-    fn new(program: &'module Program, surface: &'module LashlangSurface) -> Self {
+    fn new(program: &'module Program, surface: &'module LashlangHostEnvironment) -> Self {
         Self {
             program,
             surface,
@@ -1691,8 +1693,8 @@ impl<'module> Linker<'module> {
                     Some(Binding::Value(process_ty.clone())),
                 )
             }
-            Expr::HostValueConstructor { type_name, input } => (
-                Expr::HostValueConstructor {
+            Expr::HostDescriptorConstructor { type_name, input } => (
+                Expr::HostDescriptorConstructor {
                     type_name: type_name.clone(),
                     input: Box::new(self.lower_expr(input, scope)?.0),
                 },
@@ -1738,7 +1740,7 @@ impl<'module> Linker<'module> {
                             });
                         }
                         return Ok((
-                            Expr::HostValueConstructor {
+                            Expr::HostDescriptorConstructor {
                                 type_name: constructor.type_name.clone().into(),
                                 input: Box::new(input),
                             },
@@ -2531,7 +2533,7 @@ impl<'module> Linker<'module> {
                     name: process.to_string(),
                     span: scope.span,
                 })?,
-            Expr::HostValueConstructor { type_name, .. } => TypeExpr::Ref(type_name.clone()),
+            Expr::HostDescriptorConstructor { type_name, .. } => TypeExpr::Ref(type_name.clone()),
             Expr::List(items) => TypeExpr::List(Box::new(union_type(
                 items
                     .iter()
@@ -2804,11 +2806,13 @@ fn field_type(
 ) -> Result<TypeExpr, LinkError> {
     match target {
         TypeExpr::Any | TypeExpr::Dict => Ok(TypeExpr::Any),
-        TypeExpr::Ref(name) if is_opaque(name.as_str()) => Err(LinkError::OpaqueHostValueAccess {
-            type_name: name.to_string(),
-            access: format!(".{field}"),
-            span,
-        }),
+        TypeExpr::Ref(name) if is_opaque(name.as_str()) => {
+            Err(LinkError::OpaqueHostDescriptorAccess {
+                type_name: name.to_string(),
+                access: format!(".{field}"),
+                span,
+            })
+        }
         TypeExpr::Ref(_) => Ok(TypeExpr::Any),
         TypeExpr::Object(fields) => Ok(fields
             .iter()
@@ -2833,11 +2837,13 @@ fn index_type(
 ) -> Result<TypeExpr, LinkError> {
     match target {
         TypeExpr::List(item) => Ok(*item.clone()),
-        TypeExpr::Ref(name) if is_opaque(name.as_str()) => Err(LinkError::OpaqueHostValueAccess {
-            type_name: name.to_string(),
-            access: "[]".to_string(),
-            span,
-        }),
+        TypeExpr::Ref(name) if is_opaque(name.as_str()) => {
+            Err(LinkError::OpaqueHostDescriptorAccess {
+                type_name: name.to_string(),
+                access: "[]".to_string(),
+                span,
+            })
+        }
         TypeExpr::Ref(_) => Ok(TypeExpr::Any),
         TypeExpr::Union(items) => {
             let items = items
@@ -2962,8 +2968,8 @@ fn expr_has_label_annotation(expr: &Expr) -> bool {
 mod tests {
     use super::*;
 
-    fn resources() -> ResourceCatalog {
-        let mut catalog = ResourceCatalog::new();
+    fn resources() -> LashlangHostCatalog {
+        let mut catalog = LashlangHostCatalog::new();
         catalog.add_module_operation(
             ["tools"],
             "Tools",
@@ -3014,12 +3020,12 @@ mod tests {
         catalog
     }
 
-    fn full_surface() -> LashlangSurface {
-        LashlangSurface::new(resources(), LashlangAbilities::all())
+    fn full_host_environment() -> LashlangHostEnvironment {
+        LashlangHostEnvironment::new(resources(), LashlangAbilities::all())
     }
 
-    fn full_label_surface() -> LashlangSurface {
-        full_surface()
+    fn full_label_environment() -> LashlangHostEnvironment {
+        full_host_environment()
             .with_language_features(LashlangLanguageFeatures::default().with_label_annotations())
     }
 
@@ -3035,8 +3041,8 @@ mod tests {
         .expect("valid timer tick type")
     }
 
-    fn resources_with_timer_event(event_type: NamedDataType) -> ResourceCatalog {
-        let mut catalog = ResourceCatalog::new();
+    fn resources_with_timer_event(event_type: NamedDataType) -> LashlangHostCatalog {
+        let mut catalog = LashlangHostCatalog::new();
         crate::add_trigger_resource_operations(&mut catalog);
         catalog
             .add_trigger_source_constructor(
@@ -3110,7 +3116,7 @@ mod tests {
 
     #[test]
     fn resource_catalog_rejects_conflicting_named_host_data_type_definitions() {
-        let mut catalog = ResourceCatalog::new();
+        let mut catalog = LashlangHostCatalog::new();
         catalog
             .add_named_data_type(timer_tick_type_with_field("fired_at"))
             .expect("first definition");
@@ -3120,7 +3126,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ResourceCatalogError::ConflictingNamedDataType { .. }
+            LashlangHostCatalogError::ConflictingNamedDataType { .. }
         ));
     }
 
@@ -3154,7 +3160,7 @@ mod tests {
         )
         .expect("parse module");
 
-        let linked = LinkedModule::link(program, full_surface()).expect("link module");
+        let linked = LinkedModule::link(program, full_host_environment()).expect("link module");
 
         assert!(
             linked
@@ -3182,7 +3188,7 @@ mod tests {
         )
         .expect("parse module");
 
-        LinkedModule::link(program, full_surface())
+        LinkedModule::link(program, full_host_environment())
             .expect("trigger registration names and process names occupy different namespaces");
     }
 
@@ -3197,7 +3203,8 @@ mod tests {
             "#,
         )
         .expect("parse direct host data ref");
-        LinkedModule::link(direct_ref, full_surface()).expect("host data ref fields should link");
+        LinkedModule::link(direct_ref, full_host_environment())
+            .expect("host data ref fields should link");
 
         let structural_input = crate::parse(
             r#"
@@ -3213,7 +3220,7 @@ mod tests {
             "#,
         )
         .expect("parse structural target input");
-        LinkedModule::link(structural_input, full_surface())
+        LinkedModule::link(structural_input, full_host_environment())
             .expect("host data shape should be structurally assignable");
     }
 
@@ -3229,7 +3236,7 @@ mod tests {
         )
         .expect("parse unknown host type");
         assert!(matches!(
-            LinkedModule::link(unknown, full_surface()),
+            LinkedModule::link(unknown, full_host_environment()),
             Err(LinkError::UnknownType { name, .. }) if name == "foo.Tick"
         ));
 
@@ -3241,13 +3248,13 @@ mod tests {
         )
         .expect("parse opaque source access");
         assert!(matches!(
-            LinkedModule::link(opaque, full_surface()),
-            Err(LinkError::OpaqueHostValueAccess { type_name, .. }) if type_name == "timer.Schedule"
+            LinkedModule::link(opaque, full_host_environment()),
+            Err(LinkError::OpaqueHostDescriptorAccess { type_name, .. }) if type_name == "timer.Schedule"
         ));
     }
 
     #[test]
-    fn required_surface_ref_tracks_host_named_data_type_shape_changes() {
+    fn host_requirements_ref_tracks_host_named_data_type_shape_changes() {
         let program = crate::parse(
             r#"
             process from_tick(tick: any) {
@@ -3264,7 +3271,7 @@ mod tests {
         .expect("parse trigger registration");
         let first = LinkedModule::link(
             program.clone(),
-            LashlangSurface::new(
+            LashlangHostEnvironment::new(
                 resources_with_timer_event(timer_tick_type_with_field("fired_at")),
                 LashlangAbilities::all(),
             ),
@@ -3272,28 +3279,28 @@ mod tests {
         .expect("link first trigger occurrence shape");
         let second = LinkedModule::link(
             program,
-            LashlangSurface::new(
+            LashlangHostEnvironment::new(
                 resources_with_timer_event(timer_tick_type_with_field("delivered_at")),
                 LashlangAbilities::all(),
             ),
         )
         .expect("link changed trigger occurrence shape");
 
-        assert_ne!(first.required_surface_ref, second.required_surface_ref);
+        assert_ne!(first.host_requirements_ref, second.host_requirements_ref);
     }
 
     #[test]
     fn linked_module_accepts_top_level_sleep() {
         let program = crate::parse("sleep for 1").expect("parse sleep");
 
-        LinkedModule::link(program, full_surface()).expect("top-level sleep should link");
+        LinkedModule::link(program, full_host_environment()).expect("top-level sleep should link");
     }
 
     #[test]
     fn linked_module_rejects_process_lifecycle_outside_process_body() {
         let program = crate::parse("payload = wait_signal(\"ready\")").expect("parse wait_signal");
 
-        let err = LinkedModule::link(program, full_surface())
+        let err = LinkedModule::link(program, full_host_environment())
             .expect_err("top-level process lifecycle should be rejected");
 
         assert!(
@@ -3315,7 +3322,8 @@ mod tests {
         let program =
             crate::parse("signal_run(\"handle\", \"ready\", \"ping\")").expect("parse signal_run");
 
-        LinkedModule::link(program, full_surface()).expect("top-level signal_run should link");
+        LinkedModule::link(program, full_host_environment())
+            .expect("top-level signal_run should link");
     }
 
     #[test]
@@ -3328,7 +3336,7 @@ mod tests {
         )
         .expect("parse missing arg");
         assert!(matches!(
-            LinkedModule::link(missing_arg, full_surface()),
+            LinkedModule::link(missing_arg, full_host_environment()),
             Err(LinkError::MissingProcessArgument { arg, .. }) if arg == "path"
         ));
 
@@ -3341,7 +3349,7 @@ mod tests {
         )
         .expect("parse bad operation");
         assert!(matches!(
-            LinkedModule::link(bad_operation, full_surface()),
+            LinkedModule::link(bad_operation, full_host_environment()),
             Err(LinkError::UnknownResourceOperation { operation, .. }) if operation == "missing"
         ));
     }
@@ -3353,7 +3361,7 @@ mod tests {
         assert!(matches!(
             LinkedModule::link(
                 process,
-                LashlangSurface::new(resources(), LashlangAbilities::default())
+                LashlangHostEnvironment::new(resources(), LashlangAbilities::default())
             ),
             Err(LinkError::FeatureDisabled {
                 feature: "processes",
@@ -3365,7 +3373,7 @@ mod tests {
         assert!(matches!(
             LinkedModule::link(
                 start,
-                LashlangSurface::new(resources(), LashlangAbilities::default())
+                LashlangHostEnvironment::new(resources(), LashlangAbilities::default())
             ),
             Err(LinkError::FeatureDisabled {
                 feature: "processes",
@@ -3377,7 +3385,7 @@ mod tests {
         assert!(matches!(
             LinkedModule::link(
                 sleep,
-                LashlangSurface::new(resources(), LashlangAbilities::default())
+                LashlangHostEnvironment::new(resources(), LashlangAbilities::default())
             ),
             Err(LinkError::FeatureDisabled {
                 feature: "sleep",
@@ -3392,7 +3400,10 @@ mod tests {
         assert!(matches!(
             LinkedModule::link(
                 signal,
-                LashlangSurface::new(resources(), LashlangAbilities::default().with_processes())
+                LashlangHostEnvironment::new(
+                    resources(),
+                    LashlangAbilities::default().with_processes()
+                )
             ),
             Err(LinkError::FeatureDisabled {
                 feature: "process signals",
@@ -3415,7 +3426,10 @@ mod tests {
         assert!(matches!(
             LinkedModule::link(
                 trigger,
-                LashlangSurface::new(resources(), LashlangAbilities::default().with_processes())
+                LashlangHostEnvironment::new(
+                    resources(),
+                    LashlangAbilities::default().with_processes()
+                )
             ),
             Err(LinkError::FeatureDisabled {
                 feature: "triggers",
@@ -3444,7 +3458,7 @@ mod tests {
             "#,
         )
         .expect("parse trigger registry program");
-        assert!(LinkedModule::link(program, full_surface()).is_ok());
+        assert!(LinkedModule::link(program, full_host_environment()).is_ok());
     }
 
     #[test]
@@ -3463,7 +3477,7 @@ mod tests {
             "#,
         )
         .expect("parse repeated event mapping");
-        LinkedModule::link(repeated_event, full_surface())
+        LinkedModule::link(repeated_event, full_host_environment())
             .expect("event payload should map to multiple assignable params");
 
         let fixed_authority = crate::parse(
@@ -3481,7 +3495,7 @@ mod tests {
             "#,
         )
         .expect("parse fixed authority mapping");
-        LinkedModule::link(fixed_authority, full_surface())
+        LinkedModule::link(fixed_authority, full_host_environment())
             .expect("fixed resource inputs should satisfy process authority params");
     }
 
@@ -3502,7 +3516,7 @@ mod tests {
             "#,
         )
         .expect("parse captured authority process");
-        let linked = LinkedModule::link(program, full_surface())
+        let linked = LinkedModule::link(program, full_host_environment())
             .expect("process body should capture concrete host resources");
         let process = linked
             .artifact
@@ -3537,7 +3551,7 @@ mod tests {
         )
         .expect("parse foreground variable capture");
         assert!(matches!(
-            LinkedModule::link(shadowed, full_surface()),
+            LinkedModule::link(shadowed, full_host_environment()),
             Err(LinkError::UnknownName { name, .. }) if name == "tool"
         ));
     }
@@ -3595,7 +3609,7 @@ mod tests {
 
         LinkedModule::link(
             program,
-            LashlangSurface::new(resources, LashlangAbilities::all()),
+            LashlangHostEnvironment::new(resources, LashlangAbilities::all()),
         )
         .expect("button trigger source should link");
     }
@@ -3611,7 +3625,7 @@ mod tests {
         )
         .expect("parse missing source");
         assert!(matches!(
-            LinkedModule::link(missing, full_surface()),
+            LinkedModule::link(missing, full_host_environment()),
             Err(LinkError::InvalidTriggerRegistration { .. })
         ));
 
@@ -3624,7 +3638,7 @@ mod tests {
         )
         .expect("parse missing inputs");
         assert!(matches!(
-            LinkedModule::link(missing_inputs, full_surface()),
+            LinkedModule::link(missing_inputs, full_host_environment()),
             Err(LinkError::InvalidTriggerRegistration { .. })
         ));
 
@@ -3640,7 +3654,7 @@ mod tests {
         )
         .expect("parse wrong source");
         assert!(matches!(
-            LinkedModule::link(wrong_source, full_surface()),
+            LinkedModule::link(wrong_source, full_host_environment()),
             Err(LinkError::UnknownTriggerEventType { .. })
         ));
 
@@ -3657,7 +3671,7 @@ mod tests {
         )
         .expect("parse payload mismatch");
         assert!(matches!(
-            LinkedModule::link(payload_mismatch, full_surface()),
+            LinkedModule::link(payload_mismatch, full_host_environment()),
             Err(LinkError::TriggerEventMismatch { .. })
         ));
 
@@ -3674,7 +3688,7 @@ mod tests {
         )
         .expect("parse unknown input");
         assert!(matches!(
-            LinkedModule::link(unknown_input, full_surface()),
+            LinkedModule::link(unknown_input, full_host_environment()),
             Err(LinkError::UnknownTriggerInput { input, .. }) if input == "extra"
         ));
 
@@ -3691,7 +3705,7 @@ mod tests {
         )
         .expect("parse duplicate input");
         assert!(matches!(
-            LinkedModule::link(duplicate_input, full_surface()),
+            LinkedModule::link(duplicate_input, full_host_environment()),
             Err(LinkError::DuplicateTriggerInput { input, .. }) if input == "tick"
         ));
 
@@ -3708,7 +3722,7 @@ mod tests {
         )
         .expect("parse no event input");
         assert!(matches!(
-            LinkedModule::link(no_event_input, full_surface()),
+            LinkedModule::link(no_event_input, full_host_environment()),
             Err(LinkError::MissingTriggerEventInput { .. })
         ));
 
@@ -3725,7 +3739,7 @@ mod tests {
         )
         .expect("parse event projection");
         assert!(matches!(
-            LinkedModule::link(event_projection, full_surface()),
+            LinkedModule::link(event_projection, full_host_environment()),
             Err(LinkError::TriggerEventProjection { .. })
         ));
 
@@ -3737,7 +3751,7 @@ mod tests {
         )
         .expect("parse event outside inputs");
         assert!(matches!(
-            LinkedModule::link(event_outside_inputs, full_surface()),
+            LinkedModule::link(event_outside_inputs, full_host_environment()),
             Err(LinkError::TriggerEventOutsideInputs { .. })
         ));
 
@@ -3754,7 +3768,7 @@ mod tests {
         )
         .expect("parse multi-input target");
         assert!(matches!(
-            LinkedModule::link(multi_input, full_surface()),
+            LinkedModule::link(multi_input, full_host_environment()),
             Err(LinkError::MissingTriggerInput { input, .. }) if input == "extra"
         ));
 
@@ -3771,7 +3785,7 @@ mod tests {
         )
         .expect("parse non-process target");
         assert!(matches!(
-            LinkedModule::link(target_is_not_process, full_surface()),
+            LinkedModule::link(target_is_not_process, full_host_environment()),
             Err(LinkError::InvalidTriggerTarget { .. })
         ));
 
@@ -3782,7 +3796,7 @@ mod tests {
             "#,
         )
         .expect("parse trigger list without filters");
-        assert!(LinkedModule::link(list_without_filters, full_surface()).is_ok());
+        assert!(LinkedModule::link(list_without_filters, full_host_environment()).is_ok());
 
         let list_with_filters = crate::parse(
             r#"
@@ -3796,7 +3810,7 @@ mod tests {
             "#,
         )
         .expect("parse trigger list filters");
-        assert!(LinkedModule::link(list_with_filters, full_surface()).is_ok());
+        assert!(LinkedModule::link(list_with_filters, full_host_environment()).is_ok());
 
         let list_target_is_not_process = crate::parse(
             r#"
@@ -3807,7 +3821,7 @@ mod tests {
         )
         .expect("parse trigger list non-process target");
         assert!(matches!(
-            LinkedModule::link(list_target_is_not_process, full_surface()),
+            LinkedModule::link(list_target_is_not_process, full_host_environment()),
             Err(LinkError::InvalidTriggerTarget { .. })
                 | Err(LinkError::IncompatibleOperationInput { .. })
         ));
@@ -3820,7 +3834,7 @@ mod tests {
         )
         .expect("parse constructor mismatch");
         assert!(matches!(
-            LinkedModule::link(constructor_mismatch, full_surface()),
+            LinkedModule::link(constructor_mismatch, full_host_environment()),
             Err(LinkError::IncompatibleConstructorInput { .. })
         ));
 
@@ -3831,7 +3845,7 @@ mod tests {
         )
         .expect("parse operation mismatch");
         assert!(matches!(
-            LinkedModule::link(operation_mismatch, full_surface()),
+            LinkedModule::link(operation_mismatch, full_host_environment()),
             Err(LinkError::IncompatibleOperationInput { .. })
         ));
     }
@@ -3852,7 +3866,7 @@ mod tests {
             "#,
         )
         .expect("parse inferred output");
-        assert!(LinkedModule::link(inferred, full_surface()).is_ok());
+        assert!(LinkedModule::link(inferred, full_host_environment()).is_ok());
 
         let union_mismatch = crate::parse(
             r#"
@@ -3866,7 +3880,7 @@ mod tests {
         )
         .expect("parse union mismatch");
         assert!(matches!(
-            LinkedModule::link(union_mismatch, full_surface()),
+            LinkedModule::link(union_mismatch, full_host_environment()),
             Err(LinkError::IncompatibleProcessReturn { .. })
         ));
     }
@@ -3876,17 +3890,23 @@ mod tests {
         let program = crate::parse("submit 1").expect("parse");
         let minimal = LinkedModule::link(
             program.clone(),
-            LashlangSurface::new(resources(), LashlangAbilities::default()),
+            LashlangHostEnvironment::new(resources(), LashlangAbilities::default()),
         )
         .expect("link minimal");
         let processes = LinkedModule::link(
             program,
-            LashlangSurface::new(resources(), LashlangAbilities::default().with_processes()),
+            LashlangHostEnvironment::new(
+                resources(),
+                LashlangAbilities::default().with_processes(),
+            ),
         )
         .expect("link process ability");
 
         assert_eq!(minimal.module_ref, processes.module_ref);
-        assert_eq!(minimal.required_surface_ref, processes.required_surface_ref);
+        assert_eq!(
+            minimal.host_requirements_ref,
+            processes.host_requirements_ref
+        );
     }
 
     #[test]
@@ -3903,7 +3923,7 @@ mod tests {
         )
         .expect("parse annotated process");
 
-        let err = LinkedModule::link(program.clone(), full_surface())
+        let err = LinkedModule::link(program.clone(), full_host_environment())
             .expect_err("default surface should reject label annotations");
         assert!(matches!(
             err,
@@ -3913,12 +3933,12 @@ mod tests {
             }
         ));
 
-        let linked =
-            LinkedModule::link(program, full_label_surface()).expect("enabled surface should link");
+        let linked = LinkedModule::link(program, full_label_environment())
+            .expect("enabled surface should link");
         assert!(
             linked
                 .artifact
-                .required_surface
+                .host_requirements
                 .language_features
                 .label_annotations
         );
@@ -3934,14 +3954,14 @@ mod tests {
         let linked = LinkedModule::link(
             crate::parse(r####"submit r'''@label(title: "Plain text")'''"####)
                 .expect("parse string"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("disabled label annotations should not reject string text");
 
         assert!(
             !linked
                 .artifact
-                .required_surface
+                .host_requirements
                 .language_features
                 .label_annotations
         );
@@ -3962,7 +3982,7 @@ mod tests {
                 "#,
             )
             .expect("parse first"),
-            full_label_surface(),
+            full_label_environment(),
         )
         .expect("link first");
         let changed = LinkedModule::link(
@@ -3978,7 +3998,7 @@ mod tests {
                 "#,
             )
             .expect("parse changed"),
-            full_label_surface(),
+            full_label_environment(),
         )
         .expect("link changed");
 
@@ -3999,7 +4019,7 @@ mod tests {
     fn module_ref_ignores_spans_and_formatting() {
         let compact = LinkedModule::link(
             crate::parse("process scan(root: str) { finish root }").expect("parse compact"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link compact");
         let formatted = LinkedModule::link(
@@ -4011,7 +4031,7 @@ mod tests {
                 "#,
             )
             .expect("parse formatted"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link formatted");
 
@@ -4023,25 +4043,25 @@ mod tests {
         let original = LinkedModule::link(
             crate::parse("process scan(root: str) { value = root\nfinish value }")
                 .expect("parse original"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link original");
         let renamed_local = LinkedModule::link(
             crate::parse("process scan(root: str) { renamed = root\nfinish renamed }")
                 .expect("parse renamed local"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link renamed local");
         let renamed_param = LinkedModule::link(
             crate::parse("process scan(path: str) { value = path\nfinish value }")
                 .expect("parse renamed param"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link renamed param");
         let changed_body = LinkedModule::link(
             crate::parse("process scan(root: str) { value = root\nfinish { value: value } }")
                 .expect("parse changed body"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link changed body");
 
@@ -4060,7 +4080,7 @@ mod tests {
     }
 
     #[test]
-    fn required_surface_ref_tracks_resource_requirements_not_unrelated_tools() {
+    fn host_requirements_ref_tracks_resource_requirements_not_unrelated_tools() {
         let mut with_extra = resources();
         with_extra.add_module_operation(
             ["tools"],
@@ -4075,10 +4095,10 @@ mod tests {
         )
         .expect("parse process");
 
-        let base = LinkedModule::link(program.clone(), full_surface()).expect("link base");
+        let base = LinkedModule::link(program.clone(), full_host_environment()).expect("link base");
         let extra = LinkedModule::link(
             program.clone(),
-            LashlangSurface::new(with_extra, LashlangAbilities::all()),
+            LashlangHostEnvironment::new(with_extra, LashlangAbilities::all()),
         )
         .expect("link extra");
         let changed_requirement = LinkedModule::link(
@@ -4086,21 +4106,21 @@ mod tests {
                 "process scan(tool: Tools) { finish (await tool.echo({ value: \".\" }))? }",
             )
             .expect("parse changed resource"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link changed requirement");
 
         assert_eq!(base.module_ref, extra.module_ref);
-        assert_eq!(base.required_surface_ref, extra.required_surface_ref);
+        assert_eq!(base.host_requirements_ref, extra.host_requirements_ref);
         assert_ne!(
-            base.required_surface_ref,
-            changed_requirement.required_surface_ref
+            base.host_requirements_ref,
+            changed_requirement.host_requirements_ref
         );
     }
 
     #[test]
     fn module_aliases_sharing_resource_type_route_to_distinct_host_operations() {
-        let mut catalog = ResourceCatalog::new();
+        let mut catalog = LashlangHostCatalog::new();
         catalog.add_module_operation(
             ["inbox", "work"],
             "Inbox",
@@ -4134,14 +4154,14 @@ mod tests {
 
     #[test]
     fn reusing_module_alias_for_different_resource_type_fails() {
-        let mut catalog = ResourceCatalog::new();
+        let mut catalog = LashlangHostCatalog::new();
         catalog
             .add_module_instance(["tools"], "Tools")
             .expect("initial module instance");
 
         assert!(matches!(
             catalog.add_module_instance(["tools"], "Inbox"),
-            Err(ResourceCatalogError::ConflictingModuleInstance {
+            Err(LashlangHostCatalogError::ConflictingModuleInstance {
                 alias,
                 existing,
                 incoming,
@@ -4156,7 +4176,7 @@ mod tests {
     // fold into one walk stays behaviour-preserving.
 
     #[test]
-    fn declaration_errors_surface_before_main_errors() {
+    fn declaration_errors_report_before_main_errors() {
         // The process body references an unknown name AND the main block
         // references a different unknown name. The declaration error must win.
         let program = crate::parse(
@@ -4166,7 +4186,7 @@ mod tests {
             "#,
         )
         .expect("parse");
-        let err = LinkedModule::link(program, full_surface())
+        let err = LinkedModule::link(program, full_host_environment())
             .expect_err("both bodies reference unknowns");
         assert!(
             matches!(&err, LinkError::UnknownName { name, .. } if name == "missing_in_body"),
@@ -4177,7 +4197,7 @@ mod tests {
     #[test]
     fn unknown_name_in_process_body_carries_declaration_span() {
         let program = crate::parse("process scan() { finish missing }").expect("parse");
-        let err = LinkedModule::link(program, full_surface()).expect_err("unknown name");
+        let err = LinkedModule::link(program, full_host_environment()).expect_err("unknown name");
         let LinkError::UnknownName { name, span } = &err else {
             panic!("expected UnknownName, got {err:?}");
         };
@@ -4226,7 +4246,7 @@ mod tests {
         for (source, predicate) in cases {
             let program =
                 crate::parse(source).unwrap_or_else(|err| panic!("parse {source:?}: {err}"));
-            let err = LinkedModule::link(program, full_surface())
+            let err = LinkedModule::link(program, full_host_environment())
                 .err()
                 .unwrap_or_else(|| panic!("{source:?} should fail to link"));
             assert!(predicate(&err), "unexpected error for {source:?}: {err:?}");
@@ -4241,7 +4261,8 @@ mod tests {
             "#,
         )
         .expect("parse");
-        let err = LinkedModule::link(program, full_surface()).expect_err("operation missing");
+        let err =
+            LinkedModule::link(program, full_host_environment()).expect_err("operation missing");
         assert!(
             matches!(&err, LinkError::UnknownResourceOperation { operation, .. } if operation == "does_not_exist"),
             "{err:?}"
@@ -4254,7 +4275,7 @@ mod tests {
 
         let linked = LinkedModule::link(
             crate::parse("process scan() { finish 1 }").expect("parse module"),
-            full_surface(),
+            full_host_environment(),
         )
         .expect("link module");
         let store = crate::InMemoryLashlangArtifactStore::new();

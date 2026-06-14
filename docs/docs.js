@@ -152,7 +152,7 @@
     },
     {
       label: "Extend lash",
-      summary: "Add host tools, plugins, prompt hooks, runtime hooks, providers, and tool-surface policies.",
+      summary: "Add host tools, plugins, prompt hooks, runtime hooks, providers, and tool-catalog policies.",
       href: "plugins.html",
       items: [
         {
@@ -164,7 +164,7 @@
         {
           title: "Tool plugins",
           href: "plugins-tools.html",
-          summary: "Advertise manifests, resolve contracts, validate args, execute tools, and expose tool surfaces.",
+          summary: "Advertise manifests, resolve contracts, validate args, execute tools, and expose tool catalogs.",
           kind: "guide",
         },
         {

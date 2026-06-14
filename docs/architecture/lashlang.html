@@ -33,28 +33,28 @@
           </div>
           <dl class="def-list">
             <dt>Values</dt>
-            <dd><code>null</code>, booleans, numbers, strings, lists, records, projected host values, result wrappers, and immutable <code>Image</code> handles. Resource handles and process handles appear only when the linked host surface exposes those abilities. Lists and records are value-shaped and copy-on-write at mutation roots.</dd>
+            <dd><code>null</code>, booleans, numbers, strings, lists, records, projected host descriptors, result wrappers, and immutable <code>Image</code> handles. Resource handles and process handles appear only when the linked host surface exposes those abilities. Lists and records are value-shaped and copy-on-write at mutation roots.</dd>
             <dt>Program form</dt>
             <dd>A program is a module with optional <code>type</code> and <code>process</code> declarations plus a foreground main block. Removed declarative <code>trigger</code> syntax is rejected by the parser with a diagnostic that points agents at the trigger registry. Disabled abilities remain syntax-valid where applicable but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>while</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are expression nodes; assignment and loops evaluate to <code>null</code>.</dd>
             <dt>Expressions</dt>
             <dd>Literals, variables, builtin calls, receiver operations, named process starts, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
             <dt>Effects</dt>
-            <dd>All external work crosses <code>ExecutionHost</code>. Receiver operations return wrapper records when resource operations are enabled, background process starts return handles when process support is enabled, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations. Linked modules are content-addressed <code>ModuleArtifact</code> records in the host/profile artifact store; durable Lashlang process input stores only <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and JSON args. Nested process starts reload the artifact by ref and verify the required host surface before execution.</dd>
+            <dd>All external work crosses <code>ExecutionHost</code>. Receiver operations return wrapper records when resource operations are enabled, background process starts return handles when process support is enabled, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations. Linked modules are content-addressed <code>ModuleArtifact</code> records in the host/profile artifact store; durable Lashlang process input stores only <code>module_ref</code>, <code>process_ref</code>, <code>host_requirements_ref</code>, display name, and JSON args. Nested process starts reload the artifact by ref and verify the required host surface before execution.</dd>
           </dl>
         </div>
 
         <div class="section" id="host-surface">
           <div class="section-header">
             <h2>Host Surface</h2>
-            <p>The authored language is stable, but the available modules and optional syntax are host-provided. Each turn links against a <code>LashlangSurface</code>: a <code>ResourceCatalog</code>, <code>LashlangAbilities</code>, and <code>LashlangLanguageFeatures</code>. Core derives callable tool operations from the current <code>ToolSurface</code>, then merges plugin-provided Lashlang resources such as value constructors and trigger source metadata. The prompt renderer uses that same effective surface, so the model sees only operations, constructors, lifecycle forms, and annotations that will link.</p>
+            <p>The authored language is stable, but the available modules and optional syntax are host-provided. Each turn links against a <code>LashlangHostEnvironment</code>: a <code>LashlangHostCatalog</code>, <code>LashlangAbilities</code>, and <code>LashlangLanguageFeatures</code>. Core derives callable tool operations from the current <code>ToolCatalog</code>, then merges plugin-provided Lashlang resources such as value constructors and trigger source metadata. The prompt renderer uses that same effective surface, so the model sees only operations, constructors, lifecycle forms, and annotations that will link.</p>
           </div>
           <dl class="def-list">
             <dt>Tool operations</dt>
-            <dd>Callable tools become lowercase receiver operations through <code>ToolAgentSurface</code>. A tool declared with <code>ToolAgentSurface::new(["board"], "play")</code> appears to Lashlang as <code>await board.play({ cell: 4 })?</code>, while the host still dispatches the underlying tool name such as <code>play_move</code>. A tool with no explicit agent surface defaults to the <code>tools</code> module and its manifest name as the operation.</dd>
+            <dd>Callable tools become lowercase receiver operations through <code>LashlangToolBinding</code>. A tool declared with <code>LashlangToolBinding::new(["board"], "play")</code> appears to Lashlang as <code>await board.play({ cell: 4 })?</code>, while the host still dispatches the underlying tool name such as <code>play_move</code>. A tool with no explicit lashlang binding defaults to the <code>tools</code> module and its manifest name as the operation.</dd>
             <dt>Module authorities</dt>
             <dd>A module path resolves to a typed authority value such as <code>Board</code>, <code>Web</code>, or <code>Agents</code>. Named processes receive those authorities explicitly: <code>process notify(mail: Gmail) { await mail.send({ body: body })? finish true }</code>, then <code>start notify(mail: gmail.work)</code>. This keeps process authority visible in the process signature instead of hidden in globals.</dd>
             <dt>Value constructors</dt>
-            <dd>Plugins can add pure constructors with <code>ResourceCatalog::add_value_constructor</code> or <code>add_trigger_source_constructor</code>. Trigger-source constructors require a validated named object payload type such as <code>cron.Tick</code>, while the constructed source value such as <code>cron.Schedule</code> remains opaque. Constructors are ordinary expressions, not awaited effects: <code>source = cron.Schedule({ expr: "0 8 * * *", tz: "UTC" })</code>.</dd>
+            <dd>Plugins can add pure constructors with <code>LashlangHostCatalog::add_value_constructor</code> or <code>add_trigger_source_constructor</code>. Trigger-source constructors require a validated named object payload type such as <code>cron.Tick</code>, while the constructed source value such as <code>cron.Schedule</code> remains opaque. Constructors are ordinary expressions, not awaited effects: <code>source = cron.Schedule({ expr: "0 8 * * *", tz: "UTC" })</code>.</dd>
             <dt>Ability gates</dt>
             <dd><code>LashlangAbilities</code> gates processes, sleep, process signals, and triggers. Disabled features are not shown to the model and fail during linking before an <code>ExecutionHost</code> operation can run.</dd>
             <dt>Language features</dt>
@@ -62,7 +62,7 @@
           </dl>
           <pre><code>// Host/tool declaration.
 ToolDefinition::raw("tool:play_move", "play_move", "...", input, output)
-  .with_agent_surface(ToolAgentSurface::new(["board"], "play"));
+  .with_lashlang_binding(LashlangToolBinding::new(["board"], "play"));
 
 // Lashlang authored by the model.
 board = await board.read({})?

@@ -48,8 +48,8 @@ sequenceDiagram
   Host->>Runtime: session.turn(TurnInput).stream_to(&sink)
   Runtime->>Runtime: normalize InputItem text/image refs
   Runtime->>Plugins: prepare_turn + context transforms
-  Runtime->>Plugins: build TurnDriverPreamble from ProtocolBuildInput(ToolSurface + LashlangSurface)
-  Runtime->>Machine: build_turn(TurnDriverPreamble, ToolSurface, PromptTemplate)
+  Runtime->>Plugins: build TurnDriverPreamble from ProtocolBuildInput(ToolCatalog + LashlangHostEnvironment)
+  Runtime->>Machine: build_turn(TurnDriverPreamble, ToolCatalog, PromptTemplate)
   loop poll effect
     Machine-->>Runtime: Effect
     alt LlmCall
@@ -153,7 +153,7 @@ flowchart LR
             <div class="mermaid">
 flowchart TD
   Host["Host application"] --> Runtime["LashRuntime"]
-  Runtime --> Surface["tools and mode controls<br/>llm_query, spawn_agent, continue_as, process controls"]
+  Runtime --> Surface["tools and mode controls<br/>llm_query, spawn_agent, continue_as, process admins"]
   Surface --> Submit["submit JSON schema validation"]
   Runtime --> Usage["SessionUsageReport<br/>ledger by source + model"]
   Usage --> Deltas["usage deltas<br/>host reports"]
@@ -180,7 +180,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Runtime satisfies effects; sans-IO applies responses.</h3>
-                <p>Provider calls, direct completions, tools, process control, checkpoints, sleeps, execution-surface sync, and code execution cross <code>RuntimeEffectController</code> before responses return to <code>TurnMachine</code>.</p>
+                <p>Provider calls, direct completions, tools, process admin, checkpoints, sleeps, execution-surface sync, and code execution cross <code>RuntimeEffectController</code> before responses return to <code>TurnMachine</code>.</p>
               </div>
             </li>
             <li>

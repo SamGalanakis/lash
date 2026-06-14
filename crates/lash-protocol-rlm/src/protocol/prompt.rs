@@ -118,9 +118,9 @@ impl Default for RlmPromptFeatures {
     }
 }
 
-pub fn rlm_execution_section_for_surface(
+pub fn rlm_execution_section_for_host_environment(
     features: RlmPromptFeatures,
-    surface: &lashlang::LashlangSurface,
+    surface: &lashlang::LashlangHostEnvironment,
 ) -> String {
     let has_operations = surface.resources.has_operations();
     let mut sections = Vec::new();
@@ -131,7 +131,7 @@ pub fn rlm_execution_section_for_surface(
         &surface.abilities,
         &surface.language_features,
     ));
-    if let Some(section) = render_host_surface_section(surface) {
+    if let Some(section) = render_host_environment_section(surface) {
         sections.push(section);
     }
     sections.push(if features.images {
@@ -154,7 +154,7 @@ pub fn rlm_execution_section_for_surface(
     sections.join("\n\n")
 }
 
-fn render_host_surface_section(surface: &lashlang::LashlangSurface) -> Option<String> {
+fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) -> Option<String> {
     let mut operation_lines = Vec::new();
     for (_, module) in surface.resources.module_instances() {
         if let Some(resource_type) =

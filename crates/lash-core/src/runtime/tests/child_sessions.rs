@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn session_manager_create_session_accepts_custom_context_surface() {
+async fn session_manager_create_session_accepts_custom_context_overlay() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_state_service().expect("session manager");
     let lifecycle = runtime
@@ -15,7 +15,7 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
             )
             .with_session_id("memory-child")
             .with_plugin_source(crate::SessionPluginSource::CurrentHostFresh)
-            .with_context_surface(crate::SessionContextSurface {
+            .with_context_overlay(crate::SessionContextOverlay {
                 include_base_tools: false,
                 tool_providers: vec![Arc::new(MemoryProbeTool)],
                 prompt_contributions: vec![crate::PromptContribution::guidance(

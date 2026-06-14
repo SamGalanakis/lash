@@ -456,7 +456,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             .await
             .map_err(|err| anyhow::anyhow!("failed to apply autonomous tool policy: {err}"))?;
     }
-    let active_tool_definitions = session.control().tools().active_manifests().await?;
+    let active_tool_definitions = session.admin().tools().active_manifests().await?;
     let toolset_hash =
         hash12(&serde_json::to_vec(&active_tool_definitions).unwrap_or_else(|_| b"[]".to_vec()));
     let initial_policy = session.policy_snapshot();
@@ -465,9 +465,9 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let session_name = opened_session.bootstrap.session_name();
     let mut logger = opened_session.logger;
     session
-        .control()
+        .admin()
         .commands()
-        .refresh_tool_surface("bootstrap", "bootstrap-refresh-tool-surface")
+        .refresh_tool_catalog("bootstrap", "bootstrap-refresh-tool-catalog")
         .await?;
     if rlm_projected_bindings.is_some() && args.print_prompt.is_none() {
         return Err(anyhow::anyhow!(

@@ -48,11 +48,11 @@
                 <tr><td><code>DirectCompletion</code></td><td>Ref-only direct helper request, normalized request, selected model, and usage source</td><td><code>DirectCompletion</code> result for plugin/helper LLM use</td></tr>
                 <tr><td><code>DirectLlmCompletion</code></td><td>Ref-only core <code>LlmRequestSpec</code> and usage source</td><td><code>DirectLlmCompletion</code> result for direct LLM clients</td></tr>
                 <tr><td><code>ToolCall</code></td><td>One <code>PendingToolCall</code> from a sans-IO tool-call batch</td><td>One <code>CompletedToolCall</code>; the runtime reassembles <code>ToolResults</code> for <code>TurnMachine</code></td></tr>
-                <tr><td><code>Process</code></td><td><code>ProcessCommand::{Start,List,Transfer,DeleteSession,Await,Cancel,Signal}</code> against the explicit process control plane</td><td><code>ProcessEffectOutcome</code> with process records, visible handle grants, transfer completion, session-delete report, await output, cancellation records, or appended signal events</td></tr>
+                <tr><td><code>Process</code></td><td><code>ProcessCommand::{Start,List,Transfer,DeleteSession,Await,Cancel,Signal}</code> against the explicit process admin plane</td><td><code>ProcessEffectOutcome</code> with process records, visible handle grants, transfer completion, session-delete report, await output, cancellation records, or appended signal events</td></tr>
                 <tr><td><code>ExecCode</code></td><td><code>code: String</code></td><td><code>ExecResult</code> with <code>Result&lt;ExecResponse, String&gt;</code></td></tr>
                 <tr><td><code>Checkpoint</code></td><td><code>checkpoint: CheckpointKind</code></td><td><code>Checkpoint</code> with plugin-injected messages</td></tr>
                 <tr><td><code>Sleep</code></td><td><code>duration_ms: u64</code></td><td><code>Sleep</code></td></tr>
-                <tr><td><code>SyncExecutionSurface</code></td><td><code>update_machine_config</code> flag</td><td><code>ExecutionSurfaceSynced</code> with refreshed prompt + tool specs</td></tr>
+                <tr><td><code>SyncExecutionEnvironment</code></td><td><code>update_machine_config</code> flag</td><td><code>ExecutionEnvironmentSynced</code> with refreshed prompt + tool specs</td></tr>
               </tbody>
             </table>
           </div>
@@ -82,8 +82,8 @@
               <p><code>effect_id</code>, the <code>CheckpointKind</code> being run, and an <code>on_empty</code> resume action — whether to prepare another protocol iteration or finish the turn if the checkpoint plugin contributes no messages.</p>
             </article>
             <article class="panel">
-              <h3><code>WaitingExecutionSurface</code></h3>
-              <p><code>effect_id</code> plus <code>update_machine_config</code> flag. The least state-bearing of the waiting variants — restore simply re-asks the host for the live tool surface.</p>
+              <h3><code>WaitingExecutionEnvironment</code></h3>
+              <p><code>effect_id</code> plus <code>update_machine_config</code> flag. The least state-bearing of the waiting variants — restore simply re-asks the host for the live tool catalog.</p>
             </article>
             <article class="panel">
               <h3>Non-waiting</h3>
@@ -121,11 +121,11 @@
             <li><code>pending_effects: Vec&lt;Effect&lt;M&gt;&gt;</code> — fire-and-forget effects queued but not yet drained (<code>Emit</code>, <code>Log</code>, <code>Progress</code>).</li>
             <li><code>next_effect_id: u64</code> — counter, preserves id determinism.</li>
             <li><code>messages: Vec&lt;Message&gt;</code> — prompt history committed so far.</li>
-            <li><code>events: Vec&lt;SessionEventRecord&lt;M::Event&gt;&gt;</code> — semantic event log committed so far.</li>
+            <li><code>events</code> — semantic event log committed so far.</li>
             <li><code>protocol_iteration</code>, <code>protocol_run_offset</code> — turn position.</li>
             <li><code>cumulative_usage: TokenUsage</code> — running token totals for this turn.</li>
             <li><code>termination: TurnTerminationPolicyState</code> — max-turns / forced-final state.</li>
-            <li><code>synced_protocol_iteration: Option&lt;usize&gt;</code> — last iteration the execution surface was synced.</li>
+            <li><code>synced_protocol_iteration: Option&lt;usize&gt;</code> — last iteration the execution environment was synced.</li>
           </ul>
           <p><code>restore_from_checkpoint</code> remains a sans-IO machine primitive for tests and protocol work. Runtime crash recovery does not persist or reload in-flight machine payloads from the store. Local/inline runs reopen the last committed session state; durable workflow integrations replay the host handler and effect history, then Lash retries the final commit.</p>
         </div>
@@ -195,7 +195,7 @@ flowchart LR
               <thead><tr><th><code>ProcessInput</code></th><th>Started by</th></tr></thead>
               <tbody>
                 <tr><td><code>ToolCall</code></td><td>Generic <code>start &lt;tool&gt;</code> wraps a prepared foreground tool call and grants a tool-labeled handle. Foreground tool calls run normally and cannot self-register durable processes.</td></tr>
-                <tr><td><code>LashlangProcess</code></td><td>A named Lashlang <code>process</code> launched with <code>start name(...)</code>. The row stores only <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and JSON args. The module artifact is loaded from the host/profile store before compilation; missing artifacts or incompatible surfaces fail before execution.</td></tr>
+                <tr><td><code>LashlangProcess</code></td><td>A named Lashlang <code>process</code> launched with <code>start name(...)</code>. The row stores only <code>module_ref</code>, <code>process_ref</code>, <code>host_requirements_ref</code>, display name, and JSON args. The module artifact is loaded from the host/profile store before compilation; missing artifacts or incompatible surfaces fail before execution.</td></tr>
                 <tr><td><code>SessionTurn</code></td><td>A managed session turn run as a process — the subagent (<code>spawn_agent</code>) path.</td></tr>
                 <tr><td><code>External</code></td><td>Background work accepted from outside the local process, carrying opaque backend metadata.</td></tr>
               </tbody>
@@ -268,7 +268,7 @@ flowchart LR
                 <tr><td><code>turn_effect_envelope_does_not_carry_checkpoint_payload</code></td><td>Runtime effect envelopes carry stable invocation identity and replay keys without embedding store-owned in-flight payloads.</td></tr>
                 <tr><td><code>in_turn_direct_completion_uses_effect_controller_without_out_of_band_commit</code></td><td>Direct completions cross the active scoped controller and do not commit state through a hidden side channel.</td></tr>
                 <tr><td><code>scoped_transfer_and_cleanup_use_process_effect_controller_metadata</code></td><td>Process handle transfer and unreferenced-handle cleanup route through <code>ProcessOpScope</code>, carrying the active process effect metadata and controller.</td></tr>
-                <tr><td><code>process_control_fails_loudly_when_process_registry_is_unavailable</code></td><td>Process validation, non-empty transfer, and cleanup fail clearly without an installed <code>ProcessRegistry</code>, while empty transfer remains an explicit no-op.</td></tr>
+                <tr><td><code>processes_fails_loudly_when_process_registry_is_unavailable</code></td><td>Process validation, non-empty transfer, and cleanup fail clearly without an installed <code>ProcessRegistry</code>, while empty transfer remains an explicit no-op.</td></tr>
                 <tr><td><code>lashlang_process_uses_artifact_refs_for_nested_starts</code></td><td>A durable Lashlang process with ref-only input can reload its <code>ModuleArtifact</code>, compile the selected <code>process_ref</code>, and run nested <code>start</code>/<code>await</code> without storing a full module snapshot on the process row.</td></tr>
                 <tr><td><code>executor_reports_disabled_lashlang_abilities_at_link_time</code></td><td>Disabled process declarations, starts, process sleep/signals, and triggers parse but fail during link with <code>lashlang feature `...` is disabled by this host</code>, producing no runtime tool calls or observations.</td></tr>
                 <tr><td><code>queue_completion_and_turn_commit_stamp_are_atomic</code></td><td>A rejected queue completion does not record the final turn stamp; a valid commit records the stamp and identical retries return the recorded result.</td></tr>
@@ -277,7 +277,7 @@ flowchart LR
                 <tr><td><code>restate_controller_executes_non_sleep_effect_inside_run</code></td><td>The Restate adapter wraps reply-producing Lash effects in a named <code>ctx.run(...)</code> call instead of executing them directly in the workflow handler.</td></tr>
                 <tr><td><code>restate_controller_routes_sleep_only_through_timer</code></td><td>Runtime sleep effects map to Restate's durable timer path without using a journaled run closure.</td></tr>
                 <tr><td><code>restate_controller_schedules_process_workflow_without_running_executor</code></td><td>Restate process starts register a process record, create the requested handle grant, write <code>external_ref.backend == "restate"</code> / <code>LashProcessWorkflow/{process_id}</code> metadata, and do not run the local executor.</td></tr>
-                <tr><td><code>restate_controller_schedules_lashlang_process_with_serializable_input</code></td><td>Lashlang process registrations cross the Restate workflow start boundary with module/process/surface refs, JSON args, display label, and execution context data intact.</td></tr>
+                <tr><td><code>restate_controller_schedules_lashlang_process_with_serializable_input</code></td><td>Lashlang process registrations cross the Restate workflow start boundary with module/process/host requirements refs, JSON args, display label, and execution context data intact.</td></tr>
                 <tr><td><code>restate_controller_cancel_requests_call_workflow_cancel</code></td><td>Process cancellation is routed to the workflow's shared <code>cancel</code> handler while terminal state remains event-sourced from process events.</td></tr>
                 <tr><td><code>process_workflow_endpoint_smoke_schedules_runs_and_cancels_process</code></td><td>An in-process endpoint smoke drives controller process start, endpoint-served workflow run, and shared cancel through a recording runner without an external Restate daemon.</td></tr>
                 <tr><td><code>sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel</code></td><td>A Restate process start runs through <code>RestateCoreProcessRunner</code> against a SQLite registry/session-store pair, then reopens the registry to list grants, await terminal output, drain and ack wake inbox rows, and route cancel through a rebuilt worker.</td></tr>

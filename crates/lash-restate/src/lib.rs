@@ -1216,7 +1216,9 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
         | RuntimeEffectCommand::ToolCall { .. }
         | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
-        | RuntimeEffectCommand::SyncExecutionSurface { .. } => RestateEffectExecution::JournaledRun,
+        | RuntimeEffectCommand::SyncExecutionEnvironment { .. } => {
+            RestateEffectExecution::JournaledRun
+        }
     }
 }
 

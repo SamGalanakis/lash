@@ -2016,19 +2016,20 @@ impl From<RemotePromptContributionGate> for lash_core::PromptContributionGate {
     }
 }
 
-impl From<&RemoteToolAgentSurface> for lash_core::ToolAgentSurface {
-    fn from(value: &RemoteToolAgentSurface) -> Self {
-        let RemoteToolAgentSurface {
+impl From<&RemoteLashlangToolBinding> for lash_core::LashlangToolBinding {
+    fn from(value: &RemoteLashlangToolBinding) -> Self {
+        let RemoteLashlangToolBinding {
             module_path,
             operation,
             authority_type,
             aliases,
         } = value;
-        let mut surface = lash_core::ToolAgentSurface::new(module_path.clone(), operation.clone());
+        let mut binding =
+            lash_core::LashlangToolBinding::new(module_path.clone(), operation.clone());
         if let Some(authority_type) = authority_type.as_ref() {
-            surface = surface.with_authority_type(authority_type.clone());
+            binding = binding.with_authority_type(authority_type.clone());
         }
-        surface.with_aliases(aliases.clone())
+        binding.with_aliases(aliases.clone())
     }
 }
 
@@ -2161,7 +2162,7 @@ impl TryFrom<&RemoteToolGrant> for ToolDefinition {
             argument_projection,
             scheduling,
             retry_policy,
-            agent_surface,
+            lashlang_binding,
         } = value;
         let mut definition = ToolDefinition::raw_with_id(
             id.clone()
@@ -2171,10 +2172,10 @@ impl TryFrom<&RemoteToolGrant> for ToolDefinition {
             input_schema.clone(),
             output_schema.clone(),
         )
-        .with_agent_surface(
-            agent_surface
+        .with_lashlang_binding(
+            lashlang_binding
                 .as_ref()
-                .expect("validated agent surface")
+                .expect("validated lashlang binding")
                 .into(),
         )
         .with_examples(examples.clone())
@@ -2282,12 +2283,10 @@ impl<T: RemoteToolTransport> RemoteToolProvider<T> {
         for grant in grants {
             let definition = ToolDefinition::try_from(&grant)?;
             let manifest = definition.manifest();
-            let executable =
-                lash_core::ToolAgentSurface::required_for_remote(&manifest).map_err(|message| {
-                    RemoteProtocolError::InvalidToolGrant {
-                        tool_name: manifest.name.clone(),
-                        message,
-                    }
+            let executable = lash_core::LashlangToolBinding::required_for_remote(&manifest)
+                .map_err(|message| RemoteProtocolError::InvalidToolGrant {
+                    tool_name: manifest.name.clone(),
+                    message,
                 })?;
             contracts.insert(manifest.name.clone(), Arc::new(definition.contract()));
             call_paths.insert(manifest.name.clone(), executable.call_path());

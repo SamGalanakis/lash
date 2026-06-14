@@ -95,13 +95,13 @@ in-flight provider call, and the turn commits as
 The Lashlang graph panel is backed by `TraceLashlangGraphStore`, a public
 trace-derived observation store for foreground blocks, durable process runs,
 and child execution links; command operations still go through the session's
-`ProcessControl` facade.
+`SessionProcessAdmin` facade.
 
 The **accounts** tab is a mocked multi-account inbox world you control live.
 Type a name (for example `Work`) and press **add account** to connect one;
 **delete** disconnects it. Each account card has a compose form that delivers a
 message into its inbox and shows that inbox inline, with a per-message delete.
-Each account is projected into the RLM Lashlang surface as a typed module
+Each account is projected into the RLM Lashlang host environment as a typed module
 authority of type `Inbox` at `inbox.<slug>`, exposing three operations — a
 message is just a title and text, with no recipient address:
 
@@ -127,7 +127,7 @@ personal = start triage(box: inbox.personal)
 results = await { work: work, personal: personal }
 ```
 
-Adding or removing an account enqueues a durable tool-surface refresh that a
+Adding or removing an account enqueues a durable tool-catalog refresh that a
 Restate workflow drains and commits — nothing executes in the HTTP handler.
 The next opened turn picks up the new `inbox.<slug>` authority automatically.
 Inbox tools resolve by parsing the tool name rather than scanning live
@@ -274,8 +274,8 @@ fn button_trigger_event_type() -> lashlang::NamedDataType {
     .expect("valid button event type")
 }
 
-fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn workbench_lashlang_resources() -> lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources.add_trigger_source_constructor(
         ["cron", "Schedule"],
         schedule_config_type(),

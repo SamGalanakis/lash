@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
-    BenchmarkEchoTool, BenchmarkLargeToolSurface, benchmark_provider, benchmark_stream_profile,
+    BenchmarkEchoTool, BenchmarkLargeToolCatalog, benchmark_provider, benchmark_stream_profile,
 };
 use super::scenarios::RuntimePerfScenario;
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
@@ -180,7 +180,7 @@ impl BenchmarkRuntime {
         self.session
             .as_ref()
             .expect("benchmark session")
-            .process_control()
+            .processes()
             .await_all()
             .await?;
         Ok(())
@@ -190,7 +190,7 @@ impl BenchmarkRuntime {
         self.session
             .as_ref()
             .expect("benchmark session")
-            .control()
+            .admin()
             .state()
             .export()
             .await
@@ -464,11 +464,11 @@ pub(crate) async fn build_runtime_with_store(
     }
     if matches!(
         scenario,
-        RuntimePerfScenario::RlmLargeToolSurface | RuntimePerfScenario::ToolDiscoverySearch
+        RuntimePerfScenario::RlmLargeToolCatalog | RuntimePerfScenario::ToolDiscoverySearch
     ) {
         plugin_stack.push(Arc::new(StaticPluginFactory::new(
-            "runtime_perf_large_tool_surface",
-            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface::default())),
+            "runtime_perf_large_tool_catalog",
+            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolCatalog::default())),
         )));
     }
     let mut builder = explicit_ephemeral_facets(LashCore::builder())
@@ -486,7 +486,7 @@ pub(crate) async fn build_runtime_with_store(
         }
         builder = builder.trace_level(config.trace_level);
     }
-    // RlmGlobals carries per-turn host values that are intentionally live-only.
+    // RlmGlobals carries per-turn host descriptors that are intentionally live-only.
     // Store-backed turns reject those extensions because they cannot be
     // checkpointed/resumed, and this scenario does not exercise process handles,
     // so leave the durable process registry absent as well.
@@ -497,7 +497,7 @@ pub(crate) async fn build_runtime_with_store(
     if scenario.execution_mode() == ModeId::rlm() {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
-    // RlmGlobals carries per-turn host values that are intentionally live-only.
+    // RlmGlobals carries per-turn host descriptors that are intentionally live-only.
     // Store-backed turns reject those extensions because they cannot be
     // checkpointed/resumed.
     if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
@@ -630,7 +630,7 @@ pub(crate) async fn seed_runtime_state(
         .session
         .as_ref()
         .expect("benchmark session")
-        .control()
+        .admin()
         .state()
         .append_messages(messages)
         .await
@@ -658,7 +658,7 @@ pub(crate) async fn seed_runtime_state(
             .session
             .as_ref()
             .expect("benchmark session")
-            .control()
+            .admin()
             .state()
             .append_plugin_body(
                 OM_ACTIVE_STATE_PLUGIN_TYPE,
@@ -757,8 +757,8 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
-        RuntimePerfScenario::RlmLargeToolSurface => format!(
-            "Turn {} in RLM mode with a Gmail-sized callable tool surface. Do not call a Gmail tool; reply with exactly: {}",
+        RuntimePerfScenario::RlmLargeToolCatalog => format!(
+            "Turn {} in RLM mode with a Gmail-sized callable tool catalog. Do not call a Gmail tool; reply with exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

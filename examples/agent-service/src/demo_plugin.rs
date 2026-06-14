@@ -6,7 +6,7 @@ use lash::{
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
     tools::{
-        StaticToolExecute, StaticToolProvider, ToolAgentSurface, ToolCall, ToolDefinition,
+        LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
         ToolResult,
     },
 };
@@ -126,7 +126,7 @@ fn read_board_tool() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
-    .with_agent_surface(ToolAgentSurface::new(["board"], "read"))
+    .with_lashlang_binding(LashlangToolBinding::new(["board"], "read"))
 }
 
 fn play_move_tool() -> ToolDefinition {
@@ -142,7 +142,7 @@ fn play_move_tool() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
-    .with_agent_surface(ToolAgentSurface::new(["board"], "play"))
+    .with_lashlang_binding(LashlangToolBinding::new(["board"], "play"))
 }
 
 fn load_chat_board_for_plugin(

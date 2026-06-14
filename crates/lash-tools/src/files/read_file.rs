@@ -105,7 +105,7 @@ fn read_file_tool_definition() -> ToolDefinition {
                 r#"await files.read({ path: "Cargo.toml" })?"#.into(),
                 r#"await files.read({ path: "src/main.rs", offset: 1, limit: 120 })?"#.into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["files"],
                 "read",
                 &["cat", "view_file"],

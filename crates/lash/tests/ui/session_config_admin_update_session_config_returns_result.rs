@@ -5,7 +5,7 @@ async fn update_session_config_result_is_awaitable(
     prompt: Option<lash::prompt::PromptLayer>,
 ) -> lash::Result<()> {
     session
-        .control()
+        .admin()
         .config()
         .update_session_config(provider, model, prompt)
         .await?;

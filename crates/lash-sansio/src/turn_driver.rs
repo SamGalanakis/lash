@@ -25,20 +25,20 @@ pub type TurnLimitFinalMessage =
 pub struct TurnDriverConfig<M: TurnProtocol = UnitTurnProtocol> {
     pub protocol: Arc<dyn ProtocolDriverHandle<M>>,
     pub projector: Arc<dyn ContextProjector<M>>,
-    pub sync_execution_surface: bool,
+    pub sync_execution_environment: bool,
     pub turn_limit_final_message: TurnLimitFinalMessage,
 }
 
 impl<M: TurnProtocol> TurnDriverConfig<M> {
     pub fn chat(
         protocol: Arc<dyn ProtocolDriverHandle<M>>,
-        sync_execution_surface: bool,
+        sync_execution_environment: bool,
         turn_limit_final_message: TurnLimitFinalMessage,
     ) -> Self {
         Self {
             protocol,
             projector: Arc::new(ChatContextProjector),
-            sync_execution_surface,
+            sync_execution_environment,
             turn_limit_final_message,
         }
     }

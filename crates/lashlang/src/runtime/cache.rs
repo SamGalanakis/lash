@@ -1,6 +1,6 @@
 use crate::{
-    LASHLANG_COMPILER_VERSION, LASHLANG_VM_ABI_VERSION, LashlangSurface, LinkError, LinkedModule,
-    ModuleArtifact, ProcessRef, RequiredSurfaceRef,
+    HostRequirementsRef, LASHLANG_COMPILER_VERSION, LASHLANG_VM_ABI_VERSION,
+    LashlangHostEnvironment, LinkError, LinkedModule, ModuleArtifact, ProcessRef,
 };
 
 use super::entry_points::{
@@ -32,16 +32,16 @@ const DEFAULT_COMPILED_PROCESS_CACHE_CAPACITY: usize = 64;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CompiledProcessCacheKey {
     pub process_ref: ProcessRef,
-    pub required_surface_ref: RequiredSurfaceRef,
+    pub host_requirements_ref: HostRequirementsRef,
     pub compiler_version: &'static str,
     pub vm_abi_version: &'static str,
 }
 
 impl CompiledProcessCacheKey {
-    pub fn new(process_ref: ProcessRef, required_surface_ref: RequiredSurfaceRef) -> Self {
+    pub fn new(process_ref: ProcessRef, host_requirements_ref: HostRequirementsRef) -> Self {
         Self {
             process_ref,
-            required_surface_ref,
+            host_requirements_ref,
             compiler_version: LASHLANG_COMPILER_VERSION,
             vm_abi_version: LASHLANG_VM_ABI_VERSION,
         }
@@ -81,9 +81,9 @@ impl CompiledProcessCache {
         &mut self,
         artifact: &ModuleArtifact,
         process_ref: &ProcessRef,
-        required_surface_ref: &RequiredSurfaceRef,
+        host_requirements_ref: &HostRequirementsRef,
     ) -> Result<Arc<CompiledProgram>, crate::RuntimeError> {
-        let key = CompiledProcessCacheKey::new(process_ref.clone(), required_surface_ref.clone());
+        let key = CompiledProcessCacheKey::new(process_ref.clone(), host_requirements_ref.clone());
         if let Some(entry) = self.entries.back()
             && entry.key == key
         {
@@ -198,7 +198,7 @@ impl LinkedProgramCache {
     pub fn get_or_compile(
         &mut self,
         source: &str,
-        surface: impl Borrow<LashlangSurface>,
+        surface: impl Borrow<LashlangHostEnvironment>,
     ) -> Result<Arc<CompiledLinkedProgram>, LinkedProgramCacheError> {
         let source_hash = program_source_hash(source);
         let surface = surface.borrow();
@@ -380,14 +380,14 @@ fn linked_program_matches(
     entry: &CachedLinkedProgram,
     source_hash: u64,
     source: &str,
-    surface: &LashlangSurface,
+    surface: &LashlangHostEnvironment,
 ) -> bool {
     source_matches(
         entry.source_hash,
         entry.source.as_ref(),
         source_hash,
         source,
-    ) && surface.satisfies(&entry.program.linked.artifact.required_surface)
+    ) && surface.satisfies(&entry.program.linked.artifact.host_requirements)
 }
 
 fn source_matches(cached_hash: u64, cached_source: &str, source_hash: u64, source: &str) -> bool {

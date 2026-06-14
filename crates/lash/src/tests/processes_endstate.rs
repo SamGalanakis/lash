@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 struct LinkedTestProcess {
     module_ref: lashlang::ModuleRef,
-    required_surface_ref: lashlang::RequiredSurfaceRef,
+    host_requirements_ref: lashlang::HostRequirementsRef,
     process_ref: lashlang::ProcessRef,
     process_name: String,
     signal_event_types: Vec<lash_core::ProcessEventType>,
@@ -18,8 +18,8 @@ impl LinkedTestProcess {
     ) -> Self {
         let linked = lashlang::LinkedModule::link(
             lashlang::parse(source).expect("parse lashlang process"),
-            lashlang::LashlangSurface::new(
-                lashlang::ResourceCatalog::new(),
+            lashlang::LashlangHostEnvironment::new(
+                lashlang::LashlangHostCatalog::new(),
                 lashlang::LashlangAbilities::default()
                     .with_processes()
                     .with_sleep()
@@ -44,7 +44,7 @@ impl LinkedTestProcess {
             .unwrap_or_default();
         Self {
             module_ref: linked.module_ref,
-            required_surface_ref: linked.required_surface_ref,
+            host_requirements_ref: linked.host_requirements_ref,
             process_ref,
             process_name: process_name.to_string(),
             signal_event_types,
@@ -57,7 +57,7 @@ impl LinkedTestProcess {
             lash_core::ProcessInput::LashlangProcess {
                 module_ref: self.module_ref.clone(),
                 process_ref: self.process_ref.clone(),
-                required_surface_ref: self.required_surface_ref.clone(),
+                host_requirements_ref: self.host_requirements_ref.clone(),
                 process_name: self.process_name.clone(),
                 args: serde_json::Map::new(),
             },
@@ -87,7 +87,7 @@ impl LinkedTestProcess {
             source: serde_json::json!({}),
             event_ty: lashlang::TypeExpr::Any,
             module_ref: self.module_ref.clone(),
-            required_surface_ref: self.required_surface_ref.clone(),
+            host_requirements_ref: self.host_requirements_ref.clone(),
             process_ref: self.process_ref.clone(),
             process_name: self.process_name.clone(),
             input_template: lashlang::TriggerInputTemplate::new(BTreeMap::new()),
@@ -609,7 +609,7 @@ async fn process_children_inherit_session_chain_provenance() -> Result<()> {
     .await;
     let session = core.session(session_id).open().await?;
     session
-        .process_control()
+        .processes()
         .start(
             {
                 let mut request = process.start_request(process_id);
@@ -699,7 +699,7 @@ async fn process_outlives_deleted_session_and_resumes_from_host_signal() -> Resu
     .await;
     let session = core.session(session_id).open().await?;
     session
-        .process_control()
+        .processes()
         .start(
             process
                 .start_request(process_id)

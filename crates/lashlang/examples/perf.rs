@@ -1,7 +1,7 @@
 mod bench_support;
 
 use bench_support::{
-    BenchHost, Scenario, benchmark_program, benchmark_surface, linked_benchmark_program,
+    BenchHost, Scenario, benchmark_host_environment, benchmark_program, linked_benchmark_program,
     projected_bindings, seeded_state_for,
 };
 use lashlang::{
@@ -173,7 +173,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
         Mode::LinkArtifact => {
             for _ in 0..iterations {
                 let linked = linked_benchmark_program(std::hint::black_box(source.as_str()));
-                std::hint::black_box((&linked.module_ref, &linked.required_surface_ref));
+                std::hint::black_box((&linked.module_ref, &linked.host_requirements_ref));
             }
         }
         Mode::CompiledExecute => {
@@ -230,7 +230,11 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             let mut cache = CompiledProcessCache::new();
             for _ in 0..iterations {
                 let compiled = cache
-                    .get_or_compile(&linked.artifact, &process_ref, &linked.required_surface_ref)
+                    .get_or_compile(
+                        &linked.artifact,
+                        &process_ref,
+                        &linked.host_requirements_ref,
+                    )
                     .expect("process cache compile should succeed");
                 std::hint::black_box(compiled.compile_stats());
             }
@@ -248,7 +252,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
         }
         Mode::LinkedProgramCache => {
             let mut cache = LinkedProgramCache::new();
-            let surface = benchmark_surface();
+            let surface = benchmark_host_environment();
             for _ in 0..iterations {
                 let compiled = cache
                     .get_or_compile(std::hint::black_box(source.as_str()), surface)

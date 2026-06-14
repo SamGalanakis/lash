@@ -214,7 +214,7 @@ fn is_default_tool_activation(activation: &ToolActivation) -> bool {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ToolAgentSurface {
+pub struct LashlangToolBinding {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub module_path: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,7 +225,7 @@ pub struct ToolAgentSurface {
     pub aliases: Vec<String>,
 }
 
-impl ToolAgentSurface {
+impl LashlangToolBinding {
     pub fn new(
         module_path: impl IntoIterator<Item = impl Into<String>>,
         operation: impl Into<String>,
@@ -248,7 +248,7 @@ impl ToolAgentSurface {
         self
     }
 
-    pub fn executable_for(&self, tool_name: &str) -> ToolAgentExecutableSurface {
+    pub fn executable_for(&self, tool_name: &str) -> ResolvedLashlangToolBinding {
         let module_path = if self.module_path.is_empty() {
             vec!["tools".to_string()]
         } else {
@@ -266,7 +266,7 @@ impl ToolAgentSurface {
             .filter(|authority_type| !authority_type.trim().is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| default_authority_type(&module_path));
-        ToolAgentExecutableSurface {
+        ResolvedLashlangToolBinding {
             module_path,
             operation,
             authority_type,
@@ -283,16 +283,16 @@ impl ToolAgentSurface {
     /// falls back to the flat tool name.
     pub fn required_for_remote(
         manifest: &ToolManifest,
-    ) -> Result<ToolAgentExecutableSurface, String> {
+    ) -> Result<ResolvedLashlangToolBinding, String> {
         manifest
-            .agent_surface
+            .lashlang_binding
             .required_executable_for_remote(&manifest.name)
     }
 
     pub fn required_executable_for_remote(
         &self,
         tool_name: &str,
-    ) -> Result<ToolAgentExecutableSurface, String> {
+    ) -> Result<ResolvedLashlangToolBinding, String> {
         if self.module_path.is_empty() {
             return Err(format!(
                 "tool `{tool_name}` is missing an explicit remote module path"
@@ -319,7 +319,7 @@ impl ToolAgentSurface {
             .filter(|authority_type| !authority_type.trim().is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| default_authority_type(&self.module_path));
-        Ok(ToolAgentExecutableSurface {
+        Ok(ResolvedLashlangToolBinding {
             module_path: self.module_path.clone(),
             operation: operation.to_string(),
             authority_type,
@@ -336,14 +336,14 @@ impl ToolAgentSurface {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolAgentExecutableSurface {
+pub struct ResolvedLashlangToolBinding {
     pub module_path: Vec<String>,
     pub operation: String,
     pub authority_type: String,
     pub aliases: Vec<String>,
 }
 
-impl ToolAgentExecutableSurface {
+impl ResolvedLashlangToolBinding {
     pub fn module_path_string(&self) -> String {
         self.module_path.join(".")
     }
@@ -540,8 +540,8 @@ pub struct ToolManifest {
     pub activation: ToolActivation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_override: Option<ToolAvailability>,
-    #[serde(default, skip_serializing_if = "ToolAgentSurface::is_empty")]
-    pub agent_surface: ToolAgentSurface,
+    #[serde(default, skip_serializing_if = "LashlangToolBinding::is_empty")]
+    pub lashlang_binding: LashlangToolBinding,
     #[serde(
         default,
         skip_serializing_if = "is_default_tool_argument_projection_policy"
@@ -614,9 +614,9 @@ impl ToolContract {
         manifest: &ToolManifest,
         example_limit: usize,
     ) -> CompactToolContract {
-        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
+        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
         CompactToolContract {
-            name: agent_surface.call_path(),
+            name: lashlang_binding.call_path(),
             signature: self.input_signature(manifest),
             returns: self.output_summary(),
             parameters: self.parameter_metadata(),
@@ -627,7 +627,7 @@ impl ToolContract {
     }
 
     pub fn input_signature(&self, manifest: &ToolManifest) -> String {
-        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
+        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
         let params = self
             .parameter_docs()
             .into_iter()
@@ -640,7 +640,7 @@ impl ToolContract {
         };
         format!(
             "await {}{}({})?",
-            agent_surface.call_path(),
+            lashlang_binding.call_path(),
             self.output_contract
                 .type_parameter_suffix()
                 .unwrap_or_default(),
@@ -888,8 +888,8 @@ impl ToolDefinition {
         self
     }
 
-    pub fn with_agent_surface(mut self, agent_surface: ToolAgentSurface) -> Self {
-        self.manifest.agent_surface = agent_surface;
+    pub fn with_lashlang_binding(mut self, lashlang_binding: LashlangToolBinding) -> Self {
+        self.manifest.lashlang_binding = lashlang_binding;
         self
     }
 
@@ -1490,7 +1490,7 @@ mod tests {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_agent_surface(ToolAgentSurface::new(["agents"], "spawn"))
+        .with_lashlang_binding(LashlangToolBinding::new(["agents"], "spawn"))
         .with_output_from_input_schema("output", None);
 
         let contract = tool.compact_contract();
@@ -1523,7 +1523,7 @@ mod tests {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_agent_surface(ToolAgentSurface::new(["llm"], "query"))
+        .with_lashlang_binding(LashlangToolBinding::new(["llm"], "query"))
         .with_output_from_input_schema("output", Some(serde_json::json!({ "type": "string" })));
 
         let contract = tool.compact_contract();
@@ -2001,18 +2001,18 @@ mod tests {
     }
 
     #[test]
-    fn tool_agent_surface_serde_defaults_are_empty() {
+    fn tool_lashlang_binding_serde_defaults_are_empty() {
         let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
             "id": "tool:read_file",
             "name": "read_file",
             "description": "Read a file"
         }))
         .unwrap();
-        assert!(tool.manifest.agent_surface.is_empty());
+        assert!(tool.manifest.lashlang_binding.is_empty());
     }
 
     #[test]
-    fn tool_agent_surface_controls_prompt_call_form() {
+    fn tool_lashlang_binding_controls_prompt_call_form() {
         let mut with_metadata = ToolDefinition::raw_with_id(
             "tool:read_file",
             "read_file",
@@ -2020,8 +2020,8 @@ mod tests {
             ToolDefinition::default_input_schema(),
             serde_json::json!({"type": "string"}),
         );
-        with_metadata.manifest.agent_surface =
-            ToolAgentSurface::new(["fs"], "read").with_aliases(["cat"]);
+        with_metadata.manifest.lashlang_binding =
+            LashlangToolBinding::new(["fs"], "read").with_aliases(["cat"]);
 
         assert!(
             ToolDefinition::format_tool_docs(&[with_metadata])

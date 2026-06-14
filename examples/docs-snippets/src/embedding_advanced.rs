@@ -88,7 +88,7 @@ async fn active_path_residency(
 
 async fn await_all_processes(session: &LashSession) -> anyhow::Result<()> {
     // docs:start:await-all-processes
-    session.process_control().await_all().await?;
+    session.processes().await_all().await?;
     // docs:end:await-all-processes
     Ok(())
 }

@@ -403,7 +403,7 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
             RestateEffectExecution::JournaledRun,
         ),
         (
-            RuntimeEffectCommand::SyncExecutionSurface {
+            RuntimeEffectCommand::SyncExecutionEnvironment {
                 update_machine_config: true,
             },
             RestateEffectExecution::JournaledRun,
@@ -903,7 +903,7 @@ async fn restate_controller_schedules_process_workflow_without_running_executor(
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("start");
@@ -974,10 +974,10 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     let registry = process_registry();
     let module = lashlang::parse("process scan(root: str) { finish root }")
         .expect("lashlang process module");
-    let catalog = lashlang::ResourceCatalog::new();
+    let catalog = lashlang::LashlangHostCatalog::new();
     let linked_module = lashlang::LinkedModule::link(
         module.clone(),
-        lashlang::LashlangSurface::new(catalog, lashlang::LashlangAbilities::all()),
+        lashlang::LashlangHostEnvironment::new(catalog, lashlang::LashlangAbilities::all()),
     )
     .expect("link lashlang module");
     let process_ref = linked_module
@@ -992,7 +992,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
         ProcessInput::LashlangProcess {
             module_ref: linked_module.module_ref.clone(),
             process_ref: process_ref.clone(),
-            required_surface_ref: linked_module.required_surface_ref.clone(),
+            host_requirements_ref: linked_module.host_requirements_ref.clone(),
             process_name: "scan".to_string(),
             args: args.clone(),
         },
@@ -1017,7 +1017,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("start");
@@ -1050,7 +1050,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     let ProcessInput::LashlangProcess {
         module_ref,
         process_ref: sent_process_ref,
-        required_surface_ref,
+        host_requirements_ref,
         process_name,
         args: sent_args,
         ..
@@ -1060,7 +1060,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     };
     assert_eq!(module_ref, &linked_module.module_ref);
     assert_eq!(sent_process_ref, &process_ref);
-    assert_eq!(required_surface_ref, &linked_module.required_surface_ref);
+    assert_eq!(host_requirements_ref, &linked_module.host_requirements_ref);
     assert_eq!(process_name, "scan");
     assert_eq!(sent_args, &args);
     assert_eq!(
@@ -1109,7 +1109,7 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
                     mode: lash_core::ProcessListMode::Live,
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("list");
@@ -1132,7 +1132,7 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
                     process_ids: vec!["task-list".to_string()],
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("transfer");
@@ -1196,7 +1196,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     process_id: "task-await-signal".to_string(),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("await");
@@ -1229,7 +1229,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     .with_replay_key("signal:notify"),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("signal");
@@ -1274,7 +1274,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     .with_replay_key("signal:notify-2"),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("second signal");
@@ -1313,7 +1313,7 @@ async fn restate_controller_cancel_requests_call_workflow_cancel() {
                     reason: Some("user requested".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry),
+            RuntimeEffectLocalExecutor::processes(registry),
         )
         .await
         .expect("cancel");
@@ -1421,7 +1421,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
                     execution_context: Box::new(execution_context),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("start through endpoint smoke");
@@ -1484,7 +1484,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
                     reason: Some("stop-smoke".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry),
+            RuntimeEffectLocalExecutor::processes(registry),
         )
         .await
         .expect("cancel through endpoint smoke");
@@ -1695,7 +1695,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_a)),
+            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_a)),
         )
         .await
         .expect("schedule and run process through Restate endpoint");
@@ -1769,7 +1769,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                     reason: Some("post-rebuild cancel probe".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_b)),
+            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_b)),
         )
         .await
         .expect("cancel through reopened process workflow");
@@ -1798,8 +1798,8 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
             .expect("lashlang trigger module");
     let linked_module = lashlang::LinkedModule::link(
         module,
-        lashlang::LashlangSurface::new(
-            lashlang::ResourceCatalog::new(),
+        lashlang::LashlangHostEnvironment::new(
+            lashlang::LashlangHostCatalog::new(),
             lashlang::LashlangAbilities::all(),
         ),
     )
@@ -1823,7 +1823,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
         ProcessInput::LashlangProcess {
             module_ref: linked_module.module_ref,
             process_ref,
-            required_surface_ref: linked_module.required_surface_ref,
+            host_requirements_ref: linked_module.host_requirements_ref,
             process_name: "notify".to_string(),
             args,
         },

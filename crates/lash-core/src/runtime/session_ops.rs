@@ -17,7 +17,7 @@ impl LashRuntime {
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
             session.invalidate_runtime_caches();
-            // Restore the persisted tool surface so the live registry matches the
+            // Restore the persisted tool catalog so the live registry matches the
             // state being installed (mirrors `from_host_state`). Without this the
             // registry keeps its prior generation/tools and silently diverges from
             // `state`. `restore_state` adopts the snapshot's generation, so a

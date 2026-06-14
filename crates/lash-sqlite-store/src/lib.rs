@@ -605,8 +605,8 @@ mod tests {
             lashlang::parse("process scan(root: str) { finish root }").expect("parse module");
         let linked = lashlang::LinkedModule::link(
             module,
-            lashlang::LashlangSurface::new(
-                lashlang::ResourceCatalog::new(),
+            lashlang::LashlangHostEnvironment::new(
+                lashlang::LashlangHostCatalog::new(),
                 lashlang::LashlangAbilities::all(),
             ),
         )

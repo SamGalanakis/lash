@@ -8,7 +8,7 @@ use crate::llm::types::{
     LlmToolChoice, LlmToolSpec,
 };
 use crate::runtime::ProcessHandleGrantEntry;
-use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
+use crate::sansio::{CompletedToolCall, ExecutionEnvironmentSync, LlmCallError};
 use crate::tool_dispatch::ToolTriggerEffectOutcome;
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
@@ -29,7 +29,7 @@ pub enum RuntimeEffectKind {
     Process,
     ExecCode,
     Checkpoint,
-    SyncExecutionSurface,
+    SyncExecutionEnvironment,
     Sleep,
     AwaitEvent,
 }
@@ -43,7 +43,7 @@ impl RuntimeEffectKind {
             Self::Process => "process",
             Self::ExecCode => "exec_code",
             Self::Checkpoint => "checkpoint",
-            Self::SyncExecutionSurface => "sync_execution_surface",
+            Self::SyncExecutionEnvironment => "sync_execution_environment",
             Self::Sleep => "sleep",
             Self::AwaitEvent => "await_event",
         }
@@ -294,7 +294,7 @@ pub enum RuntimeEffectCommand {
     Checkpoint {
         checkpoint: CheckpointKind,
     },
-    SyncExecutionSurface {
+    SyncExecutionEnvironment {
         update_machine_config: bool,
     },
     Sleep {
@@ -320,14 +320,14 @@ impl RuntimeEffectCommand {
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
-            Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
+            Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep { .. } => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }
     }
 }
 
-/// Serializable operation against the process control plane.
+/// Serializable operation against the process admin plane.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ProcessCommand {
@@ -470,8 +470,8 @@ pub enum RuntimeEffectOutcome {
     Checkpoint {
         result: CheckpointOutcome,
     },
-    SyncExecutionSurface {
-        result: Result<Option<ExecutionSurfaceSync>, String>,
+    SyncExecutionEnvironment {
+        result: Result<Option<ExecutionEnvironmentSync>, String>,
     },
     Sleep,
     AwaitEvent {
@@ -692,13 +692,14 @@ impl RuntimeEffectOutcome {
         }
     }
 
-    pub fn into_sync_execution_surface(
+    pub fn into_sync_execution_environment(
         self,
-    ) -> Result<Result<Option<ExecutionSurfaceSync>, String>, RuntimeEffectControllerError> {
+    ) -> Result<Result<Option<ExecutionEnvironmentSync>, String>, RuntimeEffectControllerError>
+    {
         match self {
-            Self::SyncExecutionSurface { result } => Ok(result),
+            Self::SyncExecutionEnvironment { result } => Ok(result),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
-                RuntimeEffectKind::SyncExecutionSurface,
+                RuntimeEffectKind::SyncExecutionEnvironment,
                 other.kind(),
             )),
         }
@@ -722,7 +723,7 @@ impl RuntimeEffectOutcome {
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
-            Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
+            Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }

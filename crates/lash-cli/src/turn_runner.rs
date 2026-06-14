@@ -150,7 +150,7 @@ async fn return_turn_result(
 
 async fn runtime_error_turn_result(session: &LashSession, message: String) -> lash::TurnResult {
     let state = session
-        .control()
+        .admin()
         .state()
         .persist_current()
         .await

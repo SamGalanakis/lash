@@ -1,4 +1,4 @@
-//! Autoresearch tool surface: tool provider, definitions, and shell execution.
+//! Autoresearch tool catalog: tool provider, definitions, and shell execution.
 
 use super::*;
 

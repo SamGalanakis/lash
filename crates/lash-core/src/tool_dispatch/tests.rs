@@ -300,11 +300,13 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::new(StrictMcpTools { executed }));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -347,11 +349,13 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::new(MockTools));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -401,11 +405,13 @@ fn projection_policy_dispatch_context(
     .build_session("root", None)
     .expect("plugin session");
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -558,14 +564,14 @@ fn lazy_contract_dispatch_context(
         executed,
     });
     let tools = Arc::clone(&provider);
-    let surface = Arc::new(crate::ToolSurface::from_tools(
+    let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
         provider.tool_manifests(),
         BTreeMap::new(),
     ));
     ToolDispatchContext {
         plugins: test_plugins(provider),
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -597,11 +603,13 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::clone(&provider));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -659,11 +667,13 @@ fn parallel_dispatch_context(
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -739,7 +749,7 @@ async fn before_tool_hook_receives_resolved_argument_projection_policy() {
 }
 
 #[tokio::test]
-async fn dispatch_exact_resolves_missing_surface_tool_and_executes_owner() {
+async fn dispatch_exact_resolves_missing_environment_tool_and_executes_owner() {
     let contracts_resolved = Arc::new(AtomicUsize::new(0));
     let executed = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
@@ -1292,11 +1302,13 @@ fn serial_dispatch_context(
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -1446,11 +1458,13 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(provider);
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     let context = Arc::new(ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
@@ -1586,11 +1600,13 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
     });
     let plugins = test_plugins(provider);
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     let context = Arc::new(ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),

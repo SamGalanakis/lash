@@ -375,7 +375,7 @@ mod tests {
             .build_session("root", None)
             .expect("plugin session");
         let tools = Arc::clone(&provider);
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -384,7 +384,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
@@ -477,7 +477,7 @@ mod tests {
         let plugins = PluginHost::empty()
             .build_session("root", None)
             .expect("plugin session");
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -507,7 +507,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: provider,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
@@ -583,7 +583,7 @@ mod tests {
         let plugins = PluginHost::empty()
             .build_session("root", None)
             .expect("plugin session");
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -602,7 +602,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: provider,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
@@ -677,7 +677,7 @@ mod tests {
         let plugins = PluginHost::empty()
             .build_session("root", None)
             .expect("plugin session");
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -687,7 +687,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: provider,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host,

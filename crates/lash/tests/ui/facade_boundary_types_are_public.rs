@@ -16,12 +16,12 @@ use lash::persistence::{
 use lash::plugins::{
     AfterToolCallHook, BeforeToolCallHook, CompactionContext, ContextCompaction,
     ContextCompactor, ContextError, PluginDirective, PluginHost, PluginSpec, PluginSpecBuilder,
-    PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContribution,
-    ToolSurfaceOverride,
+    PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolCatalogContribution,
+    ToolCatalogOverride,
 };
 use lash::provider::{ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy};
 use lash::runtime::AdvancedLashCoreBuilder;
-use lash::tools::{ToolActivation, ToolAgentSurface, ToolCallRecord, ToolOutputContract};
+use lash::tools::{ToolActivation, LashlangToolBinding, ToolCallRecord, ToolOutputContract};
 use lash::turn::{AssistantOutput, TurnIssue};
 use lash::{ModelLimits, ModelSpec};
 
@@ -176,14 +176,14 @@ fn tool_contract_types_are_nameable(
     activation: ToolActivation,
     record: ToolCallRecord,
     contract: ToolOutputContract,
-    agent_surface: ToolAgentSurface,
+    lashlang_binding: LashlangToolBinding,
 ) {
-    let _ = (activation, record, contract, agent_surface);
+    let _ = (activation, record, contract, lashlang_binding);
 }
 
-fn tool_surface_types_are_nameable(
-    contribution: ToolSurfaceContribution,
-    override_: ToolSurfaceOverride,
+fn tool_catalog_types_are_nameable(
+    contribution: ToolCatalogContribution,
+    override_: ToolCatalogOverride,
 ) {
     let _ = (contribution, override_);
 }
@@ -267,7 +267,7 @@ fn main() {
     let _ = direct_payload_types_are_nameable;
     let _ = advanced_builder_accepts_runtime_host_config;
     let _ = tool_contract_types_are_nameable;
-    let _ = tool_surface_types_are_nameable;
+    let _ = tool_catalog_types_are_nameable;
     let _ = message_role_type_is_nameable;
     let _ = turn_result_detail_types_are_nameable;
     let _ = provider_reliability_types_are_nameable;

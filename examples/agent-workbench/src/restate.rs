@@ -1002,10 +1002,10 @@ fn cron_request_from_registration(
         return Err(format!("unexpected source type `{source_type}`"));
     }
     let source =
-        lashlang::HostValue::decode(&registration.source).map_err(|err| err.to_string())?;
+        lashlang::HostDescriptor::decode(&registration.source).map_err(|err| err.to_string())?;
     if source.source_type != source_type {
         return Err(format!(
-            "registration source type `{source_type}` does not match host value `{}`",
+            "registration source type `{source_type}` does not match host descriptor `{}`",
             source.source_type
         ));
     }

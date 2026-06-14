@@ -15,7 +15,7 @@ use super::{
     PluginActionDef, PluginActionHandler, PluginError, PluginHost, PluginLifecycleEventHook,
     PluginRegistrar, PluginSnapshotMeta, PromptContributor, SessionConfigMutator,
     SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
-    ToolDiscoveryContributor, ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
+    ToolCatalogContributor, ToolDiscoveryContributor, ToolResultProjector, TurnContextTransform,
 };
 use crate::{PluginOptions, ToolProvider};
 
@@ -24,7 +24,7 @@ pub struct PluginSpec {
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub triggers: Vec<crate::TriggerEvent>,
     pub prompt_contributors: Vec<PromptContributor>,
-    pub tool_surface_contributors: Vec<ToolSurfaceContributor>,
+    pub tool_catalog_contributors: Vec<ToolCatalogContributor>,
     pub tool_discovery_contributors: Vec<ToolDiscoveryContributor>,
     pub before_turn_hooks: Vec<BeforeTurnHook>,
     pub before_tool_call_hooks: Vec<BeforeToolCallHook>,
@@ -61,8 +61,8 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_tool_surface_contributor(mut self, contributor: ToolSurfaceContributor) -> Self {
-        self.tool_surface_contributors.push(contributor);
+    pub fn with_tool_catalog_contributor(mut self, contributor: ToolCatalogContributor) -> Self {
+        self.tool_catalog_contributors.push(contributor);
         self
     }
 
@@ -339,11 +339,11 @@ pub trait PluginFactory: Send + Sync {
 
     /// Host-owned Lashlang catalog entries that code may link against.
     ///
-    /// This only affects the execution surface. It is intentionally not
+    /// This only affects the execution environment. It is intentionally not
     /// rendered into prompts automatically; hosts remain responsible for
     /// describing their resources through prompt contributions.
-    fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
-        lashlang::ResourceCatalog::new()
+    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
+        lashlang::LashlangHostCatalog::new()
     }
 
     /// Produce a session-scoped plugin. **Must be cheap** — see the
@@ -422,8 +422,8 @@ impl SessionPlugin for SpecPlugin {
         for contributor in &self.spec.prompt_contributors {
             reg.prompt().contribute(Arc::clone(contributor));
         }
-        for contributor in &self.spec.tool_surface_contributors {
-            reg.surface().contribute(Arc::clone(contributor));
+        for contributor in &self.spec.tool_catalog_contributors {
+            reg.tool_catalog().contribute(Arc::clone(contributor));
         }
         for contributor in &self.spec.tool_discovery_contributors {
             reg.discovery().contribute(Arc::clone(contributor));

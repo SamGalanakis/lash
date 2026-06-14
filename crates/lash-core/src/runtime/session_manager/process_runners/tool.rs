@@ -32,10 +32,10 @@ impl RuntimeSessionServices {
             cancellation,
         } = run;
         let run_context = ProcessRunContext::builder(self)
-            .surface(
+            .tool_catalog(
                 self.current
                     .plugins
-                    .tool_surface(&self.current.session_id)?,
+                    .resolved_tool_catalog(&self.current.session_id)?,
             )
             .scoped_effect_controller(scoped_effect_controller)
             .causal_invocation(parent_invocation.clone())

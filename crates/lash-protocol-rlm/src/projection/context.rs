@@ -7,7 +7,7 @@ use lash_rlm_types::{
     RlmTrajectoryEntry,
 };
 use lashlang::{
-    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+    ProjectedBindings, ProjectedFuture, ProjectedHostDescriptor, ProjectedReadRequest,
     ProjectedReadResponse, ProjectedValue, State as FlowState, Value as FlowValue,
 };
 
@@ -148,7 +148,7 @@ struct HistoryProjectedValue {
     projection: Arc<RlmHistoryProjection>,
 }
 
-impl ProjectedHostValue for HistoryProjectedValue {
+impl ProjectedHostDescriptor for HistoryProjectedValue {
     fn type_name(&self) -> &str {
         "list"
     }

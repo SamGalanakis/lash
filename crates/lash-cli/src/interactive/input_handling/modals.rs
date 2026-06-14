@@ -52,7 +52,7 @@ pub(super) async fn cancel_selected_process(app: &mut App, runtime: &Option<Lash
         );
         return;
     };
-    let process_control = session.control().processes();
+    let processes = session.admin().processes();
     let effect_host = session.effect_host();
     let scoped_effect_controller =
         match effect_host.scoped(EffectScope::process(process.process_id.clone())) {
@@ -62,7 +62,7 @@ pub(super) async fn cancel_selected_process(app: &mut App, runtime: &Option<Lash
                 return;
             }
         };
-    match process_control
+    match processes
         .cancel(&process.process_id, scoped_effect_controller)
         .await
     {
@@ -75,7 +75,7 @@ pub(super) async fn cancel_selected_process(app: &mut App, runtime: &Option<Lash
                     summary.status.label()
                 ),
             );
-            match process_control.list().await {
+            match processes.list().await {
                 Ok(processes) => app.update_processes(processes),
                 Err(err) => {
                     push_system_message(app, format!("Failed to refresh process list: {err}"));

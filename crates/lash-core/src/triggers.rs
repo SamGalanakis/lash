@@ -270,7 +270,7 @@ pub struct TriggerSubscriptionDraft {
     pub source: serde_json::Value,
     pub event_ty: lashlang::TypeExpr,
     pub module_ref: lashlang::ModuleRef,
-    pub required_surface_ref: lashlang::RequiredSurfaceRef,
+    pub host_requirements_ref: lashlang::HostRequirementsRef,
     pub process_ref: lashlang::ProcessRef,
     pub process_name: String,
     pub input_template: lashlang::TriggerInputTemplate,
@@ -291,7 +291,7 @@ pub struct TriggerSubscriptionRecord {
     pub source: serde_json::Value,
     pub event_ty: lashlang::TypeExpr,
     pub module_ref: lashlang::ModuleRef,
-    pub required_surface_ref: lashlang::RequiredSurfaceRef,
+    pub host_requirements_ref: lashlang::HostRequirementsRef,
     pub process_ref: lashlang::ProcessRef,
     pub process_name: String,
     pub input_template: lashlang::TriggerInputTemplate,
@@ -388,7 +388,7 @@ impl TriggerSubscriptionFilter {
             && self.target.as_ref().is_none_or(|target| {
                 target.matches(
                     &record.module_ref,
-                    &record.required_surface_ref,
+                    &record.host_requirements_ref,
                     &record.process_ref,
                     &record.process_name,
                 )
@@ -487,7 +487,7 @@ impl TriggerStore for InMemoryTriggerStore {
             source: draft.source,
             event_ty: draft.event_ty,
             module_ref: draft.module_ref,
-            required_surface_ref: draft.required_surface_ref,
+            host_requirements_ref: draft.host_requirements_ref,
             process_ref: draft.process_ref,
             process_name: draft.process_name,
             input_template: draft.input_template,
@@ -809,7 +809,7 @@ impl TriggerRouter {
             crate::ProcessInput::LashlangProcess {
                 module_ref: subscription.module_ref.clone(),
                 process_ref: subscription.process_ref.clone(),
-                required_surface_ref: subscription.required_surface_ref.clone(),
+                host_requirements_ref: subscription.host_requirements_ref.clone(),
                 process_name: subscription.process_name.clone(),
                 args,
             },
@@ -863,7 +863,7 @@ impl TriggerRouter {
                     invocation,
                     crate::RuntimeEffectCommand::process(command),
                 ),
-                crate::RuntimeEffectLocalExecutor::process_control(process_registry),
+                crate::RuntimeEffectLocalExecutor::processes(process_registry),
             )
             .await?;
         match outcome {

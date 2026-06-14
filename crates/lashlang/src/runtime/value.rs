@@ -1,6 +1,6 @@
 //! Value types: the dynamically-typed `Value` enum, its projection wrapper,
 //! the `ImageValue` attachment descriptor, and the public projection traits
-//! (`ProjectedHostValue`, `ProjectedReadRequest`, `ProjectedFuture`).
+//! (`ProjectedHostDescriptor`, `ProjectedReadRequest`, `ProjectedFuture`).
 //!
 //! The `Value` enum is the universal currency of the lashlang runtime: every
 //! load, every binary op, every host-tool argument, every JSON round-trip
@@ -31,13 +31,13 @@ use super::{
 /// consumer can tell a Type value apart from a plain record. The inner value
 /// is the JSON-Schema representation of the type.
 pub const LASH_TYPE_KEY: &str = "$lash_type";
-pub const LASH_HOST_VALUE_TYPE_KEY: &str = "$lash_host_value_type";
-pub const LASH_HOST_VALUE_KEY: &str = "value";
+pub const LASH_HOST_DESCRIPTOR_TYPE_KEY: &str = "$lash_host_descriptor_type";
+pub const LASH_HOST_DESCRIPTOR_VALUE_KEY: &str = "$lash_host_descriptor_value";
 pub const LASH_PROCESS_VALUE_KEY: &str = "$lash_process";
 pub const LASH_PROCESS_NAME_KEY: &str = "process_name";
 pub const LASH_MODULE_REF_KEY: &str = "module_ref";
 pub const LASH_PROCESS_REF_KEY: &str = "process_ref";
-pub const LASH_REQUIRED_SURFACE_REF_KEY: &str = "required_surface_ref";
+pub const LASH_HOST_REQUIREMENTS_REF_KEY: &str = "host_requirements_ref";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListValue {
@@ -310,7 +310,7 @@ pub struct ProjectedValue {
 #[derive(Clone)]
 enum ProjectedKind {
     Scalar(Arc<Value>),
-    Custom(Arc<dyn ProjectedHostValue>),
+    Custom(Arc<dyn ProjectedHostDescriptor>),
 }
 
 pub type ProjectedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -358,7 +358,7 @@ pub enum ProjectedReadResponse {
     Keys(Vec<String>),
 }
 
-pub trait ProjectedHostValue: Send + Sync {
+pub trait ProjectedHostDescriptor: Send + Sync {
     fn type_name(&self) -> &str;
 
     fn read_one(
@@ -391,13 +391,13 @@ impl ProjectedValue {
         }
     }
 
-    pub fn custom(name: impl Into<Arc<str>>, value: Arc<dyn ProjectedHostValue>) -> Self {
+    pub fn custom(name: impl Into<Arc<str>>, value: Arc<dyn ProjectedHostDescriptor>) -> Self {
         Self::custom_inner(name, value, None)
     }
 
     pub fn custom_with_projection_ref(
         name: impl Into<Arc<str>>,
-        value: Arc<dyn ProjectedHostValue>,
+        value: Arc<dyn ProjectedHostDescriptor>,
         projection_ref: serde_json::Value,
     ) -> Self {
         Self::custom_inner(name, value, Some(projection_ref))
@@ -405,7 +405,7 @@ impl ProjectedValue {
 
     fn custom_inner(
         name: impl Into<Arc<str>>,
-        value: Arc<dyn ProjectedHostValue>,
+        value: Arc<dyn ProjectedHostDescriptor>,
         projection_ref: Option<serde_json::Value>,
     ) -> Self {
         Self {
@@ -735,13 +735,13 @@ impl UnavailableProjectedValue {
 
     fn message(&self) -> String {
         format!(
-            "projected host value `{}` ({}) is unavailable after snapshot restore; rerun the producing tool to recreate it",
+            "projected host descriptor `{}` ({}) is unavailable after snapshot restore; rerun the producing tool to recreate it",
             self.name, self.type_name
         )
     }
 }
 
-impl ProjectedHostValue for UnavailableProjectedValue {
+impl ProjectedHostDescriptor for UnavailableProjectedValue {
     fn type_name(&self) -> &str {
         &self.type_name
     }

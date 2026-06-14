@@ -3,15 +3,15 @@ use std::num::NonZeroUsize;
 use lash_sansio::{PreparedPrompt, PromptCache, PromptContributionSet, PromptLayer};
 
 use super::*;
-use crate::{PluginError, ToolSurface, TurnDriverPreamble};
+use crate::{PluginError, ToolCatalog, TurnDriverPreamble};
 
-struct PreparedExecutionSurface {
-    tool_surface: Arc<ToolSurface>,
+struct PreparedExecutionEnvironment {
+    tool_catalog: Arc<ToolCatalog>,
     turn_driver_preamble: Arc<TurnDriverPreamble>,
     prompt: PromptLayer,
 }
 
-impl PreparedExecutionSurface {
+impl PreparedExecutionEnvironment {
     fn build_prompt(
         &self,
         core_prompt: &PromptLayer,
@@ -36,7 +36,7 @@ impl PreparedExecutionSurface {
             turn_prompt,
         ]);
         let prompt_contributions = self
-            .tool_surface
+            .tool_catalog
             .filter_prompt_contributions(resolved.contributions);
         let contributions = PromptContributionSet::new(prompt_contributions);
         lash_sansio::build_prompt_cached(
@@ -89,8 +89,8 @@ impl RuntimeTurnDriver<'_> {
                 return Err((messages.clone(), run_offset));
             }
         };
-        let execution_surface = match self
-            .prepare_execution_surface(&session_policy, self.turn_index, messages.clone())
+        let execution_environment = match self
+            .prepare_execution_environment(&session_policy, self.turn_index, messages.clone())
             .await
         {
             Ok(surface) => surface,
@@ -106,7 +106,7 @@ impl RuntimeTurnDriver<'_> {
             }
         };
         self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
-        let prepared_prompt = execution_surface.build_prompt(
+        let prepared_prompt = execution_environment.build_prompt(
             &self.host.core.prompt.prompt,
             &session_policy.prompt,
             self.turn_context.prompt_layer(),
@@ -122,7 +122,7 @@ impl RuntimeTurnDriver<'_> {
             events: self.turn_pipeline.active_events(),
             turn_causes: self.turn_causes.clone(),
             protocol_run_offset: run_offset,
-            turn_driver_preamble: execution_surface.turn_driver_preamble,
+            turn_driver_preamble: execution_environment.turn_driver_preamble,
             prepared_prompt,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model.variant.clone(),
@@ -155,40 +155,43 @@ impl RuntimeTurnDriver<'_> {
         Ok(prepared.machine)
     }
 
-    pub(in crate::runtime) async fn refresh_execution_surface(
+    pub(in crate::runtime) async fn refresh_execution_environment(
         &mut self,
         machine: &crate::TurnMachine,
         update_machine_config: bool,
-    ) -> Result<Option<crate::sansio::ExecutionSurfaceSync>, crate::SessionError> {
+    ) -> Result<Option<crate::sansio::ExecutionEnvironmentSync>, crate::SessionError> {
         if !update_machine_config {
             return Ok(None);
         }
 
         let policy = self.policy.policy.clone();
-        let execution_surface = self
-            .prepare_execution_surface(&policy, self.turn_index, machine.message_sequence())
+        let execution_environment = self
+            .prepare_execution_environment(&policy, self.turn_index, machine.message_sequence())
             .await
             .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
-        let prepared_prompt = execution_surface.build_prompt(
+        let prepared_prompt = execution_environment.build_prompt(
             &self.host.core.prompt.prompt,
             &policy.prompt,
             self.turn_context.prompt_layer(),
             Some(self.session.prompt_cache()),
         );
 
-        Ok(Some(crate::sansio::ExecutionSurfaceSync {
+        Ok(Some(crate::sansio::ExecutionEnvironmentSync {
             system_prompt: prepared_prompt.system_prompt,
-            tool_specs: execution_surface.turn_driver_preamble.tool_specs.clone(),
+            tool_specs: execution_environment
+                .turn_driver_preamble
+                .tool_specs
+                .clone(),
         }))
     }
 
-    async fn prepare_execution_surface(
+    async fn prepare_execution_environment(
         &mut self,
         session_policy: &SessionPolicy,
         turn_index: usize,
         messages: crate::MessageSequence,
-    ) -> Result<PreparedExecutionSurface, PluginError> {
-        let tool_surface = self.session.tool_surface(&self.session_id)?;
+    ) -> Result<PreparedExecutionEnvironment, PluginError> {
+        let tool_catalog = self.session.resolved_tool_catalog(&self.session_id)?;
         let turn_driver_preamble = self.session.turn_driver_preamble(&self.session_id)?;
         let plugin_prompt_contributions = self
             .session
@@ -218,8 +221,8 @@ impl RuntimeTurnDriver<'_> {
                 prompt.add_contribution(contribution);
             }
         }
-        Ok(PreparedExecutionSurface {
-            tool_surface,
+        Ok(PreparedExecutionEnvironment {
+            tool_catalog,
             turn_driver_preamble,
             prompt,
         })

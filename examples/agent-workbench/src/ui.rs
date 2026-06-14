@@ -958,7 +958,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       border-left: 1px solid var(--line);
       background: var(--form);
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(0, 1fr);
       min-height: 0;
     }
 
@@ -979,6 +979,35 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     .rail-title { font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; }
     .rail-count { font-family: var(--font-ui); font-size: 0.75rem; color: var(--ash-text); white-space: nowrap; }
     .rail-count.stale { color: var(--error); cursor: pointer; }
+
+    .work-filters {
+      display: flex;
+      gap: var(--space-2xs);
+      padding: var(--space-xs) var(--space-lg);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .work-filter {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-3xs);
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+      color: var(--ash-text);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.2rem 0.6rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .work-filter:has(input:checked) {
+      color: var(--sodium-soft);
+      border-color: var(--line-strong);
+      background: var(--sodium-tint);
+    }
+
+    .work-filter input { accent-color: var(--sodium); margin: 0; }
 
     .work-list {
       min-width: 0;
@@ -1299,6 +1328,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       stroke-width: 2;
     }
 
+    .diagram-edge.same { stroke-width: 1.5; opacity: 0.85; }
+    .diagram-edge.back {
+      stroke: var(--ash);
+      stroke-width: 1.5;
+      stroke-dasharray: 6 6;
+      opacity: 0.6;
+    }
+
     .diagram-edge.selected {
       stroke: var(--sodium);
       stroke-width: 3;
@@ -1359,7 +1396,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     .diagram-node.subagent-bridge { background: var(--form); }
 
     .diagram-node.unobserved {
-      opacity: 0.68;
+      opacity: 0.42;
       background: var(--form);
     }
 
@@ -1787,6 +1824,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         <div class="rail-title">work</div>
         <div id="workCount" class="rail-count">0 executions</div>
       </div>
+      <div class="work-filters" role="group" aria-label="Filter work by kind">
+        <label class="work-filter">
+          <input type="checkbox" id="filterProcess" checked /> processes
+        </label>
+        <label class="work-filter">
+          <input type="checkbox" id="filterForeground" /> foreground
+        </label>
+      </div>
       <div id="workList" class="work-list"></div>
     </aside>
 
@@ -1818,6 +1863,20 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     const timelineEmpty = document.getElementById("timelineEmpty");
     const workList = document.getElementById("workList");
     const workCount = document.getElementById("workCount");
+    const workFilterProcess = document.getElementById("filterProcess");
+    const workFilterForeground = document.getElementById("filterForeground");
+    // Processes are the durable, interesting work; foreground Lashlang is every
+    // turn's inline code and floods the rail, so it starts hidden.
+    const workFilters = { process: true, foreground: false };
+    let lastWorkItems = [];
+    workFilterProcess.addEventListener("change", () => {
+      workFilters.process = workFilterProcess.checked;
+      renderWork(lastWorkItems);
+    });
+    workFilterForeground.addEventListener("change", () => {
+      workFilters.foreground = workFilterForeground.checked;
+      renderWork(lastWorkItems);
+    });
     const executionExplorer = document.getElementById("executionExplorer");
     const executionTitle = document.getElementById("executionTitle");
     const executionStatus = document.getElementById("executionStatus");
@@ -2974,17 +3033,21 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     function renderWork(items) {
-      const rows = executionRows(items, graphIndex.graphs || []);
+      lastWorkItems = items;
+      const allRows = executionRows(items, graphIndex.graphs || []);
+      const rows = allRows.filter(row => workFilters[row.category] !== false);
+      const hidden = allRows.length - rows.length;
       workList.innerHTML = "";
       workStale = false;
       workCount.classList.remove("stale");
-      workCount.title = "";
-      workCount.textContent = rows.length + (rows.length === 1 ? " execution" : " executions");
+      workCount.title = hidden ? hidden + " hidden by filter" : "";
+      workCount.textContent = rows.length + (rows.length === 1 ? " execution" : " executions")
+        + (hidden ? " · " + hidden + " hidden" : "");
       if (!rows.length) {
         selectedWorkKey = null;
         const empty = document.createElement("div");
         empty.className = "empty";
-        empty.textContent = "no visible executions";
+        empty.textContent = allRows.length ? "no executions match the filters" : "no visible executions";
         workList.appendChild(empty);
         return;
       }
@@ -3049,6 +3112,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         rows.push({
           key: graph.graph_key,
           graph_key: graph.graph_key,
+          category: graph.kind === "process" || String(graph.graph_key).startsWith("process:") ? "process" : "foreground",
           title: graph.title || graph.entry_name || shortId(graph.graph_key),
           status: graph.status || "observed",
           meta: [
@@ -3068,6 +3132,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         rows.push({
           key: graphKey,
           graph_key: graphKey,
+          category: "process",
           title: item.label || process.label || shortId(process.process_id),
           status: process.status_label || process.lifecycle,
           meta: [
@@ -3273,8 +3338,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     function layoutDiagram(nodes, edges) {
       const nodeWidth = 280;
       const nodeHeight = 112;
-      const columnGap = 128;
-      const rowGap = 40;
+      const columnGap = 112;
+      const rowGap = 34;
       const padX = 56;
       const padY = 56;
       const byId = new Map(nodes.map(node => [node.id, node]));
@@ -3286,8 +3351,12 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         incoming.get(edge.to).push(edge);
       }
 
-      let roots = nodes.filter(node => node.kind === "process");
-      if (!roots.length) roots = nodes.filter(node => incoming.get(node.id).length === 0);
+      // Roots are the true sources (no incoming edges) so the entry point —
+      // `main` for a foreground graph — anchors the leftmost column. Picking
+      // `process` nodes here used to treat spawned children as roots, leaving
+      // the real entry chain unreachable and collapsing it into one tall column.
+      let roots = nodes.filter(node => incoming.get(node.id).length === 0);
+      if (!roots.length) roots = nodes.filter(node => node.kind === "process" || node.kind === "main");
       if (!roots.length && nodes[0]) roots = [nodes[0]];
 
       const depth = new Map();
@@ -3315,26 +3384,54 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         if (!columns.has(column)) columns.set(column, []);
         columns.get(column).push(node);
       }
+      const orderedColumns = Array.from(columns.keys()).sort((a, b) => a - b);
       for (const columnNodes of columns.values()) columnNodes.sort(compareDiagramNodes);
 
-      const orderedColumns = Array.from(columns.keys()).sort((a, b) => a - b);
+      // Order each column by the mean rank of its neighbours (barycenter
+      // sweeps, down then up) so connected nodes line up across columns and
+      // edges stop crossing each other. compareDiagramNodes is the tiebreak.
+      const rank = new Map();
+      const refreshRanks = () => {
+        for (const column of orderedColumns) {
+          columns.get(column).forEach((node, index) => rank.set(node.id, index));
+        }
+      };
+      refreshRanks();
+      for (let sweep = 0; sweep < 12; sweep++) {
+        const downward = sweep % 2 === 0;
+        const sequence = downward ? orderedColumns : [...orderedColumns].reverse();
+        for (const column of sequence) {
+          const columnNodes = columns.get(column);
+          const barycenter = node => {
+            const neighbours = downward ? incoming.get(node.id) : outgoing.get(node.id);
+            const ranks = neighbours
+              .map(edge => rank.get(downward ? edge.from : edge.to))
+              .filter(value => value !== undefined);
+            if (!ranks.length) return rank.get(node.id);
+            return ranks.reduce((sum, value) => sum + value, 0) / ranks.length;
+          };
+          columnNodes.sort((a, b) => (barycenter(a) - barycenter(b)) || compareDiagramNodes(a, b));
+          columnNodes.forEach((node, index) => rank.set(node.id, index));
+        }
+      }
+
       const maxRows = Math.max(1, ...orderedColumns.map(column => columns.get(column).length));
       const maxColumnHeight = maxRows * nodeHeight + (maxRows - 1) * rowGap;
       const positions = new Map();
 
-      for (const column of orderedColumns) {
+      orderedColumns.forEach((column, columnIndex) => {
         const columnNodes = columns.get(column);
         const columnHeight = columnNodes.length * nodeHeight + Math.max(0, columnNodes.length - 1) * rowGap;
         const yStart = padY + Math.max(0, (maxColumnHeight - columnHeight) / 2);
         columnNodes.forEach((node, index) => {
           positions.set(node.id, {
-            x: padX + column * (nodeWidth + columnGap),
+            x: padX + columnIndex * (nodeWidth + columnGap),
             y: yStart + index * (nodeHeight + rowGap),
             width: nodeWidth,
             height: nodeHeight,
           });
         });
-      }
+      });
 
       const columnCount = Math.max(1, orderedColumns.length);
       return {
@@ -3350,28 +3447,70 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         || String(a.label || a.id).localeCompare(String(b.label || b.id));
     }
 
+    // Shared edge geometry so the live canvas and the SVG/PNG export route
+    // identically. Forward edges flow port-to-port left to right; same-column
+    // edges bow out to the right of the band; backward edges drop below and
+    // loop, so neither slices straight through stacked node boxes.
+    function diagramEdgeGeometry(from, to) {
+      if (to.x > from.x + 10) {
+        const x1 = from.x + from.width;
+        const y1 = from.y + from.height / 2;
+        const x2 = to.x;
+        const y2 = to.y + to.height / 2;
+        const curve = Math.max(48, (x2 - x1) * 0.45);
+        return {
+          kind: "forward",
+          d: `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}`,
+          labelX: (x1 + x2) / 2,
+          labelY: (y1 + y2) / 2,
+        };
+      }
+      if (Math.abs(to.x - from.x) <= 10) {
+        const x1 = from.x + from.width;
+        const y1 = from.y + from.height / 2;
+        const x2 = to.x + to.width;
+        const y2 = to.y + to.height / 2;
+        const bow = Math.max(48, Math.abs(y2 - y1) * 0.3 + 32);
+        const xm = Math.max(x1, x2) + bow;
+        return {
+          kind: "same",
+          d: `M ${x1} ${y1} C ${xm} ${y1}, ${xm} ${y2}, ${x2} ${y2}`,
+          labelX: xm,
+          labelY: (y1 + y2) / 2,
+        };
+      }
+      const x1 = from.x + from.width / 2;
+      const y1 = from.y + from.height;
+      const x2 = to.x + to.width / 2;
+      const y2 = to.y + to.height;
+      const baseline = Math.max(y1, y2) + Math.max(44, 44 + Math.abs(x1 - x2) * 0.06);
+      return {
+        kind: "back",
+        d: `M ${x1} ${y1} C ${x1} ${baseline}, ${x2} ${baseline}, ${x2} ${y2}`,
+        labelX: (x1 + x2) / 2,
+        labelY: baseline,
+      };
+    }
+
     function renderDiagramEdge(stage, svg, edge, positions) {
       const from = positions.get(edge.from);
       const to = positions.get(edge.to);
       if (!from || !to) return;
-      const x1 = from.x + from.width;
-      const y1 = from.y + from.height / 2;
-      const x2 = to.x;
-      const y2 = to.y + to.height / 2;
-      const curve = Math.max(48, Math.abs(x2 - x1) * 0.45);
+      const geometry = diagramEdgeGeometry(from, to);
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.classList.add("diagram-edge");
+      if (geometry.kind !== "forward") path.classList.add(geometry.kind);
       const edgeClass = diagramEdgeClass(edge);
       if (edgeClass) path.classList.add(edgeClass);
-      path.setAttribute("d", `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}`);
+      path.setAttribute("d", geometry.d);
       svg.appendChild(path);
 
       if (edge.label) {
         const label = document.createElement("div");
         label.className = "diagram-edge-label" + (edgeClass ? " " + edgeClass : "");
         label.textContent = edge.label;
-        label.style.left = ((x1 + x2) / 2) + "px";
-        label.style.top = ((y1 + y2) / 2) + "px";
+        label.style.left = geometry.labelX + "px";
+        label.style.top = geometry.labelY + "px";
         stage.appendChild(label);
       }
     }
@@ -3715,24 +3854,21 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       const from = positions.get(edge.from);
       const to = positions.get(edge.to);
       if (!from || !to) return "";
-      const x1 = from.x + from.width;
-      const y1 = from.y + from.height / 2;
-      const x2 = to.x;
-      const y2 = to.y + to.height / 2;
-      const curve = Math.max(48, Math.abs(x2 - x1) * 0.45);
+      const geometry = diagramEdgeGeometry(from, to);
       const edgeClass = diagramEdgeClass(edge);
       const selected = edgeClass === "selected";
       const dimmed = edgeClass === "dimmed";
+      const back = geometry.kind === "back";
       const stroke = selected ? colors.sodium : colors.ash;
-      const strokeWidth = selected ? 3 : 2;
-      const dash = dimmed ? ` stroke-dasharray="7 7"` : "";
-      const opacity = dimmed ? ` opacity="0.35"` : "";
-      const parts = [`<path d="M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}"${dash}${opacity}/>`];
+      const strokeWidth = selected ? 3 : (geometry.kind === "forward" ? 2 : 1.5);
+      const dash = (dimmed || (back && !selected)) ? ` stroke-dasharray="6 6"` : "";
+      const opacity = dimmed ? ` opacity="0.35"` : (back && !selected ? ` opacity="0.6"` : "");
+      const parts = [`<path d="${geometry.d}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}"${dash}${opacity}/>`];
       if (edge.label) {
         const label = String(edge.label);
         const width = Math.min(132, Math.max(42, label.length * 7 + 22));
-        const cx = (x1 + x2) / 2;
-        const cy = (y1 + y2) / 2;
+        const cx = geometry.labelX;
+        const cy = geometry.labelY;
         parts.push(`<rect x="${cx - width / 2}" y="${cy - 13}" width="${width}" height="26" rx="13" fill="${colors.form}" stroke="${selected ? colors.lineStrong : colors.line}"${opacity}/>`);
         parts.push(`<text x="${cx}" y="${cy + 4}" text-anchor="middle" fill="${selected ? colors.sodiumSoft : colors.ashText}" font-family="Chivo Mono, ui-monospace, monospace" font-size="11"${opacity}>${escapeXml(label)}</text>`);
       }
@@ -3749,7 +3885,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       const titleLines = wrapExportText(title, 26, 1);
       const descriptionLines = wrapExportText(description, 44, 2);
       const meta = truncateExportText(diagramNodeMeta(node), 42);
-      const opacity = unobserved ? ` opacity="0.68"` : "";
+      const opacity = unobserved ? ` opacity="0.42"` : "";
       const out = [];
       out.push(`<g${opacity}>`);
       out.push(`<rect x="${position.x}" y="${position.y}" width="${position.width}" height="${position.height}" rx="6" fill="${unobserved ? colors.form : colors.raised}" stroke="${border}" stroke-width="1"/>`);

@@ -112,14 +112,14 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     let usage = session.usage_report();
     assert_eq!(usage.usage.output_tokens, 2);
     session
-        .control()
+        .admin()
         .commands()
-        .refresh_tool_surface("control admin test", "control-admin-refresh")
+        .refresh_tool_catalog("control admin test", "control-admin-refresh")
         .await?;
-    session.process_control().await_all().await?;
-    assert!(session.process_control().list().await?.is_empty());
+    session.processes().await_all().await?;
+    assert!(session.processes().list().await?.is_empty());
     let err = session
-        .control()
+        .admin()
         .state()
         .snapshot_execution()
         .await
@@ -129,7 +129,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
         EmbedError::Session(SessionError::CodeExecutionUnavailable)
     ));
     let err = session
-        .control()
+        .admin()
         .state()
         .restore_execution(&[1, 2, 3])
         .await
@@ -156,7 +156,7 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
         .turn(TurnInput::text("old durable request"))
         .run()
         .await?;
-    let before = session.control().state().persist_current().await?;
+    let before = session.admin().state().persist_current().await?;
     let previous_frame_id = before.current_agent_frame_id.clone();
     let observation_cursor = session.observe().current_observation().cursor;
     assert!(
@@ -170,7 +170,7 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
     );
 
     let compacted = session
-        .control()
+        .admin()
         .state()
         .compact_context(
             Some("focus on durable summary".to_string()),
@@ -205,7 +205,7 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
         "expected AgentFrameSwitched immediately followed by Committed, got {events:?}"
     );
 
-    let after = session.control().state().persist_current().await?;
+    let after = session.admin().state().persist_current().await?;
     let current = after
         .agent_frames
         .iter()
@@ -261,17 +261,17 @@ async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
 
     let first = session
         .commands()
-        .refresh_tool_surface("test refresh", "same-refresh")
+        .refresh_tool_catalog("test refresh", "same-refresh")
         .await?;
     let second = session
         .commands()
-        .refresh_tool_surface("test refresh", "same-refresh")
+        .refresh_tool_catalog("test refresh", "same-refresh")
         .await?;
 
     assert_eq!(first.batch_id, second.batch_id);
     assert_eq!(
         first.source_key,
-        "command:refresh_tool_surface:same-refresh"
+        "command:refresh_tool_catalog:same-refresh"
     );
     let queued = session.queued_work().await?;
     assert_eq!(queued.len(), 1);
@@ -332,7 +332,7 @@ async fn process_start_and_cancel_emit_typed_observation_events() -> Result<()> 
     let process_id = "observed-process";
 
     session
-        .process_control()
+        .processes()
         .start(
             lash_core::ProcessStartRequest::external(
                 process_id,
@@ -350,7 +350,7 @@ async fn process_start_and_cancel_emit_typed_observation_events() -> Result<()> 
         )
         .await?;
     session
-        .process_control()
+        .processes()
         .cancel(
             process_id,
             inline_scope(lash_core::EffectScope::process(process_id)),
@@ -396,7 +396,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .build()?;
     let session = core.session("command-trigger").open().await?;
-    let before = session.control().state().persist_current().await?;
+    let before = session.admin().state().persist_current().await?;
 
     let source_key = lash_core::empty_trigger_source_key("ui.button.pressed")?;
     let scoped_effect_controller = lash_core::ScopedEffectController::shared(
@@ -420,7 +420,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
     assert!(report.started_process_ids.is_empty());
 
     assert!(session.queued_work().await?.is_empty());
-    let persisted = session.control().state().persist_current().await?;
+    let persisted = session.admin().state().persist_current().await?;
     assert_eq!(
         persisted.session_graph.leaf_node_id,
         before.session_graph.leaf_node_id
@@ -467,9 +467,9 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         let _ = session.policy_snapshot();
         let _ = session.read_view();
         let _ = session.usage_report();
-        let _ = session.control().tools().state().await?;
-        let _ = session.control().tools().active_manifests().await?;
-        let _ = session.process_control().list().await?;
+        let _ = session.admin().tools().state().await?;
+        let _ = session.admin().tools().active_manifests().await?;
+        let _ = session.processes().list().await?;
         Result::<()>::Ok(())
     })
     .await
@@ -482,7 +482,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
 }
 
 #[tokio::test]
-async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
+async fn processes_cancel_uses_host_cancel_ability() -> Result<()> {
     let ability = Arc::new(DenyCancelAbility::default());
     let runtime_host = RuntimeHostConfig::in_memory().with_process_cancel_ability(ability.clone());
     let core = explicit_ephemeral_facets(LashCore::standard())
@@ -495,7 +495,7 @@ async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
         .build()?;
     let session = core.session("host-cancel").open().await?;
     session
-        .process_control()
+        .processes()
         .start(
             lash_core::ProcessStartRequest::external(
                 "host-process",
@@ -514,7 +514,7 @@ async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
         .await?;
 
     let err = session
-        .process_control()
+        .processes()
         .cancel(
             "host-process",
             inline_scope(lash_core::EffectScope::process("host-process")),
@@ -537,7 +537,7 @@ async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
 }
 
 #[tokio::test]
-async fn process_control_cancel_all_uses_host_cancel_ability() -> Result<()> {
+async fn processes_cancel_all_uses_host_cancel_ability() -> Result<()> {
     let ability = Arc::new(RecordingCancelAbility::default());
     let runtime_host = RuntimeHostConfig::in_memory().with_process_cancel_ability(ability.clone());
     let registry =
@@ -555,7 +555,7 @@ async fn process_control_cancel_all_uses_host_cancel_ability() -> Result<()> {
     let session = core.session("host-cancel-all").open().await?;
     for process_id in ["host-process-a", "host-process-b"] {
         session
-            .process_control()
+            .processes()
             .start(
                 lash_core::ProcessStartRequest::external(
                     process_id,
@@ -575,7 +575,7 @@ async fn process_control_cancel_all_uses_host_cancel_ability() -> Result<()> {
     }
 
     let mut summaries = session
-        .process_control()
+        .processes()
         .cancel_all(runtime_operation_scope("host-cancel-all"))
         .await?;
     summaries.sort_by(|left, right| left.process_id.cmp(&right.process_id));
@@ -635,7 +635,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
     let session = core.session("observation-mutations").open().await?;
 
     session
-        .control()
+        .admin()
         .config()
         .set_prompt_template(PromptTemplate::new(vec![
             lash_core::PromptTemplateSection::untitled(vec![lash_core::PromptTemplateEntry::text(
@@ -646,7 +646,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
     assert!(session.policy_snapshot().prompt.template.is_some());
 
     session
-        .control()
+        .admin()
         .tools()
         .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
@@ -667,7 +667,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
 async fn session_control_manages_child_session_lifecycle() -> Result<()> {
     let core = standard_core();
     let session = core.session("parent-control").open().await?;
-    let children = session.control().children();
+    let children = session.admin().children();
     let child = children
         .create_session(SessionCreateRequest {
             session_id: Some("child-control".to_string()),
@@ -681,7 +681,7 @@ async fn session_control_manages_child_session_lifecycle() -> Result<()> {
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })

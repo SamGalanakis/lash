@@ -14,7 +14,7 @@ from typing import Any
 
 DEFAULT_STACK_SCENARIOS = [
     "rlm_globals",
-    "rlm_large_tool_surface",
+    "rlm_large_tool_catalog",
     "rlm_process_handles",
     "tool_discovery_search",
     "turn_checkpoint",

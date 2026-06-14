@@ -45,7 +45,7 @@ pub async fn switch_to_tree_selection(
     }
 
     let state = session
-        .control()
+        .admin()
         .state()
         .branch_to_node(target_leaf)
         .await

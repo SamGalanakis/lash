@@ -61,7 +61,7 @@ pub enum Residency {
 /// Cloning is cheap — every field is either `Arc`-wrapped or small.
 /// Default values build an embedded runtime without process lifecycle
 /// support. Hosts that want long-running tools, async handles, subagents,
-/// or process controls must provide a process registry explicitly.
+/// or process admins must provide a process registry explicitly.
 #[derive(Clone)]
 pub struct RuntimeEnvironment {
     // Shared plugin infrastructure. Created once; every session's
@@ -186,7 +186,7 @@ impl RuntimeEnvironmentBuilder {
 
     /// Set the poke handle that wakes the host's `ProcessWorkRunner`. Every
     /// `RuntimeHost` built from this environment carries the poke, so the
-    /// process control seam can make consumption prompt after a start.
+    /// process admin seam can make consumption prompt after a start.
     pub fn with_process_work_poke(mut self, poke: super::ProcessWorkPoke) -> Self {
         self.env.process_work_poke = Some(poke);
         self

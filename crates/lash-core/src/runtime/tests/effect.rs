@@ -182,8 +182,8 @@ impl RuntimeEffectController for RecordingEffectController {
             RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
                 result: Ok(crate::CheckpointDelivery::default()),
             }),
-            RuntimeEffectCommand::SyncExecutionSurface { .. } => {
-                Ok(RuntimeEffectOutcome::SyncExecutionSurface { result: Ok(None) })
+            RuntimeEffectCommand::SyncExecutionEnvironment { .. } => {
+                Ok(RuntimeEffectOutcome::SyncExecutionEnvironment { result: Ok(None) })
             }
             RuntimeEffectCommand::ExecCode { .. } => Ok(RuntimeEffectOutcome::ExecCode {
                 result: Ok(crate::ExecResponse {
@@ -1305,7 +1305,7 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
 }
 
 #[tokio::test]
-async fn exec_and_execution_surface_effects_cross_controller_once() {
+async fn exec_and_execution_environment_effects_cross_controller_once() {
     let recorder = RecordingEffectController::default();
     let policy = SessionPolicy {
         provider_id: "mock".to_string(),
@@ -1348,7 +1348,7 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     assert_eq!(
-        recorder.count_kind(RuntimeEffectKind::SyncExecutionSurface),
+        recorder.count_kind(RuntimeEffectKind::SyncExecutionEnvironment),
         1
     );
     assert_eq!(recorder.count_kind(RuntimeEffectKind::ExecCode), 1);
@@ -1878,9 +1878,9 @@ impl ProtocolDriverPlugin for EffectControllerTestProtocolDriver {
                 true,
                 Arc::new(effect_controller_turn_limit_final_message),
             ),
-            tool_specs: input.tool_surface.model_tool_specs(),
-            tool_names: input.tool_surface.tool_names(),
-            tool_names_fingerprint: input.tool_surface.tool_names_fingerprint(),
+            tool_specs: input.tool_catalog.model_tool_specs(),
+            tool_names: input.tool_catalog.tool_names(),
+            tool_names_fingerprint: input.tool_catalog.tool_names_fingerprint(),
             omitted_tool_count: 0,
             execution_prompt: Arc::from(""),
             prompt_contributions: input.extra_prompt_contributions,

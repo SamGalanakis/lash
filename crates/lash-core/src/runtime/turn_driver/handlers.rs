@@ -87,7 +87,7 @@ impl RuntimeTurnDriver<'_> {
         Ok(())
     }
 
-    pub(super) async fn handle_execution_surface_sync_effect(
+    pub(super) async fn handle_execution_environment_sync_effect(
         &mut self,
         machine: &mut TurnMachine,
         id: crate::sansio::EffectId,
@@ -96,7 +96,7 @@ impl RuntimeTurnDriver<'_> {
         cancel: &CancellationToken,
     ) -> Result<(), RuntimeError> {
         let result = match self
-            .invoke_turn_execution_surface_sync_effect(
+            .invoke_turn_execution_environment_sync_effect(
                 machine,
                 id,
                 update_machine_config,
@@ -111,7 +111,7 @@ impl RuntimeTurnDriver<'_> {
                 return Ok(());
             }
         };
-        machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
+        machine.handle_response(Response::ExecutionEnvironmentSynced { id, result });
         Ok(())
     }
 

@@ -11,14 +11,14 @@ pub struct ToolSessionModel {
 }
 
 #[derive(Clone)]
-pub struct ToolSessionControl<'run> {
+pub struct ToolSessionAdmin<'run> {
     pub(super) session_id: String,
     pub(super) sessions: Arc<dyn SessionStateService>,
     pub(super) session_lifecycle: Arc<dyn SessionLifecycleService>,
     pub(super) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
 }
 
-impl<'run> ToolSessionControl<'run> {
+impl<'run> ToolSessionAdmin<'run> {
     pub async fn model(&self) -> Result<ToolSessionModel, PluginError> {
         let snapshot = self.snapshot_current().await?;
         Ok(ToolSessionModel {

@@ -119,7 +119,7 @@ async fn exec_outcome(source: &str) -> Result<ExecutionOutcome, RuntimeError> {
 fn compile_source(source: &str) -> Result<CompiledProgram, crate::ParseError> {
     let program = crate::parse(source)?;
     if source.contains("tools.")
-        && let Ok(linked) = crate::LinkedModule::link(program.clone(), runtime_test_surface())
+        && let Ok(linked) = crate::LinkedModule::link(program.clone(), runtime_test_environment())
     {
         Ok(crate::compile_linked(&linked))
     } else {
@@ -129,7 +129,7 @@ fn compile_source(source: &str) -> Result<CompiledProgram, crate::ParseError> {
 
 fn compile_labeled_source(source: &str) -> CompiledProgram {
     let program = crate::parse(source).expect("program should parse");
-    let surface = runtime_test_surface().with_language_features(
+    let surface = runtime_test_environment().with_language_features(
         crate::LashlangLanguageFeatures::default().with_label_annotations(),
     );
     let linked = crate::LinkedModule::link(program, surface).expect("program should link");
@@ -138,7 +138,7 @@ fn compile_labeled_source(source: &str) -> CompiledProgram {
 
 fn compile_labeled_process_source(source: &str, process_name: &str) -> CompiledProgram {
     let program = crate::parse(source).expect("program should parse");
-    let surface = runtime_test_surface().with_language_features(
+    let surface = runtime_test_environment().with_language_features(
         crate::LashlangLanguageFeatures::default().with_label_annotations(),
     );
     let linked = crate::LinkedModule::link(program, surface).expect("program should link");
@@ -181,8 +181,8 @@ fn compile_program(program: &Program) -> CompiledProgram {
     super::entry_points::compile_program_internal(program)
 }
 
-fn runtime_test_surface() -> crate::LashlangSurface {
-    let mut resources = crate::ResourceCatalog::new();
+fn runtime_test_environment() -> crate::LashlangHostEnvironment {
+    let mut resources = crate::LashlangHostCatalog::new();
     resources.add_module_operation(
         ["tools"],
         "Tools",
@@ -215,7 +215,7 @@ fn runtime_test_surface() -> crate::LashlangSurface {
         crate::TypeExpr::Any,
         crate::TypeExpr::Any,
     );
-    crate::LashlangSurface::new(resources, crate::LashlangAbilities::all())
+    crate::LashlangHostEnvironment::new(resources, crate::LashlangAbilities::all())
 }
 
 async fn execute_program<H: ExecutionHost>(
@@ -223,7 +223,7 @@ async fn execute_program<H: ExecutionHost>(
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, RuntimeError> {
-    if let Ok(linked) = crate::LinkedModule::link(program.clone(), runtime_test_surface()) {
+    if let Ok(linked) = crate::LinkedModule::link(program.clone(), runtime_test_environment()) {
         let compiled = crate::compile_linked(&linked);
         return super::execute(&compiled, state, host).await;
     }
@@ -331,7 +331,7 @@ submit validate(
 "#;
 
 #[test]
-fn golden_parser_ast_contract_covers_lashlang_surface() {
+fn golden_parser_ast_contract_covers_lashlang_host_environment() {
     let program = crate::parse(GOLDEN_CONTRACT_SOURCE).expect("program should parse");
     insta::assert_snapshot!(
         "lashlang_parser_ast_contract",
@@ -340,7 +340,7 @@ fn golden_parser_ast_contract_covers_lashlang_surface() {
 }
 
 #[test]
-fn golden_compiled_bytecode_contract_covers_lashlang_surface() {
+fn golden_compiled_bytecode_contract_covers_lashlang_host_environment() {
     insta::assert_snapshot!(
         "lashlang_compiled_bytecode_contract",
         compiled_program_snapshot(GOLDEN_CONTRACT_SOURCE)
@@ -689,8 +689,8 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             format!("resolve_type_ref {slot}:{}", slot_name(chunk, slot))
         }
         Instruction::WrapTypeLiteral => "wrap_type_literal".to_string(),
-        Instruction::WrapHostValue(type_name) => {
-            format!("wrap_host_value {}", name_text(chunk, type_name))
+        Instruction::WrapHostDescriptor(type_name) => {
+            format!("wrap_host_descriptor {}", name_text(chunk, type_name))
         }
     }
 }
@@ -991,7 +991,7 @@ fn label_on_await_assignment_attaches_to_await_instruction() {
         "#,
     )
     .expect("program should parse");
-    let surface = runtime_test_surface().with_language_features(
+    let surface = runtime_test_environment().with_language_features(
         crate::LashlangLanguageFeatures::default().with_label_annotations(),
     );
     let linked = crate::LinkedModule::link(program, surface).expect("program should link");
@@ -1035,7 +1035,7 @@ fn labeled_process_resource_operation_site_matches_static_graph_node() {
         "#,
     )
     .expect("program should parse");
-    let surface = runtime_test_surface().with_language_features(
+    let surface = runtime_test_environment().with_language_features(
         crate::LashlangLanguageFeatures::default().with_label_annotations(),
     );
     let linked = crate::LinkedModule::link(program, surface).expect("program should link");
@@ -2360,7 +2360,7 @@ impl SearchProjectedText {
     }
 }
 
-impl ProjectedHostValue for SnapshotGuardProjectedValue {
+impl ProjectedHostDescriptor for SnapshotGuardProjectedValue {
     fn type_name(&self) -> &str {
         "string"
     }
@@ -2385,7 +2385,7 @@ impl ProjectedHostValue for SnapshotGuardProjectedValue {
     }
 }
 
-impl ProjectedHostValue for SearchProjectedText {
+impl ProjectedHostDescriptor for SearchProjectedText {
     fn type_name(&self) -> &str {
         "string"
     }
@@ -2418,7 +2418,7 @@ impl ProjectedHostValue for SearchProjectedText {
     }
 }
 
-impl ProjectedHostValue for TestProjectedValue {
+impl ProjectedHostDescriptor for TestProjectedValue {
     fn type_name(&self) -> &str {
         "list"
     }
@@ -2618,7 +2618,7 @@ fn projected_response_from_value(
     }
 }
 
-impl ProjectedHostValue for ProjectedFixture {
+impl ProjectedHostDescriptor for ProjectedFixture {
     fn type_name(&self) -> &str {
         value_type_name(&self.value)
     }
@@ -2642,7 +2642,10 @@ fn projected_value_binding(name: &str, value: Value) -> ProjectedBindings {
     projected
 }
 
-fn projected_custom_binding(name: &str, value: Arc<dyn ProjectedHostValue>) -> ProjectedBindings {
+fn projected_custom_binding(
+    name: &str,
+    value: Arc<dyn ProjectedHostDescriptor>,
+) -> ProjectedBindings {
     let mut projected = ProjectedBindings::new();
     projected.insert(name, ProjectedValue::custom(name.to_string(), value));
     projected
@@ -3032,7 +3035,7 @@ impl OverrideProjectedValue {
     }
 }
 
-impl ProjectedHostValue for OverrideProjectedValue {
+impl ProjectedHostDescriptor for OverrideProjectedValue {
     fn type_name(&self) -> &str {
         value_type_name(&self.value)
     }
@@ -3226,7 +3229,10 @@ async fn assert_override_uses_hook(
     let mut projected = ProjectedBindings::new();
     projected.insert(
         name,
-        ProjectedValue::custom(name, projected_value.clone() as Arc<dyn ProjectedHostValue>),
+        ProjectedValue::custom(
+            name,
+            projected_value.clone() as Arc<dyn ProjectedHostDescriptor>,
+        ),
     );
     exec_with_projected(source, &projected)
         .await
@@ -3243,7 +3249,7 @@ async fn assert_override_uses_hook(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn projected_host_values_can_override_all_lazy_receiver_operations() {
+async fn projected_host_descriptors_can_override_all_lazy_receiver_operations() {
     let record = from_json(serde_json::json!({ "a": 1, "b": 2 }));
     let list = from_json(serde_json::json!(["a", "b", "c"]));
 
@@ -3571,8 +3577,8 @@ impl ExecutionHost for AsyncHost {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn linked_value_constructor_wraps_host_value() {
-    let mut resources = crate::ResourceCatalog::new();
+async fn linked_value_constructor_wraps_host_descriptor() {
+    let mut resources = crate::LashlangHostCatalog::new();
     resources.add_value_constructor(
         ["timer", "Schedule"],
         crate::TypeExpr::Object(vec![crate::TypeField {
@@ -3582,7 +3588,7 @@ async fn linked_value_constructor_wraps_host_value() {
         }]),
         crate::TypeExpr::Ref("timer.Schedule".into()),
     );
-    let surface = crate::LashlangSurface::new(resources, crate::LashlangAbilities::all());
+    let surface = crate::LashlangHostEnvironment::new(resources, crate::LashlangAbilities::all());
     let program = crate::parse(
         r#"
         source = timer.Schedule({ expr: "0 8 * * *" })
@@ -3597,13 +3603,13 @@ async fn linked_value_constructor_wraps_host_value() {
         .await
         .expect("program should run");
     let ExecutionOutcome::Finished(Value::Record(record)) = outcome else {
-        panic!("expected host value record, got {outcome:?}");
+        panic!("expected host descriptor record, got {outcome:?}");
     };
     assert_eq!(
-        record.get(LASH_HOST_VALUE_TYPE_KEY),
+        record.get(LASH_HOST_DESCRIPTOR_TYPE_KEY),
         Some(&Value::String("timer.Schedule".into()))
     );
-    let Some(Value::Record(source)) = record.get(LASH_HOST_VALUE_KEY) else {
+    let Some(Value::Record(source)) = record.get(LASH_HOST_DESCRIPTOR_VALUE_KEY) else {
         panic!("expected wrapped source record");
     };
     assert_eq!(source.get("expr"), Some(&Value::String("0 8 * * *".into())));
@@ -3687,10 +3693,10 @@ async fn unlinked_compiled_program_rejects_process_starts() {
 }
 
 #[test]
-fn compiled_process_cache_reuses_process_ref_and_surface_ref() {
+fn compiled_process_cache_reuses_process_ref_and_host_requirements_ref() {
     let linked = crate::LinkedModule::link(
         crate::parse("process scan() { finish 1 }").expect("parse module"),
-        runtime_test_surface(),
+        runtime_test_environment(),
     )
     .expect("link module");
     let process_ref = linked
@@ -3701,10 +3707,18 @@ fn compiled_process_cache_reuses_process_ref_and_surface_ref() {
     let mut cache = CompiledProcessCache::with_capacity(2);
 
     let first = cache
-        .get_or_compile(&linked.artifact, &process_ref, &linked.required_surface_ref)
+        .get_or_compile(
+            &linked.artifact,
+            &process_ref,
+            &linked.host_requirements_ref,
+        )
         .expect("compile first");
     let second = cache
-        .get_or_compile(&linked.artifact, &process_ref, &linked.required_surface_ref)
+        .get_or_compile(
+            &linked.artifact,
+            &process_ref,
+            &linked.host_requirements_ref,
+        )
         .expect("compile second");
 
     assert!(Arc::ptr_eq(&first, &second));
@@ -3730,7 +3744,7 @@ async fn receiver_module_operation_errors_are_sanitized() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn process_controls_emit_events_and_terminal_outcomes() {
+async fn processess_emit_events_and_terminal_outcomes() {
     let host = RecordingProcessHost::default();
     let program = Program::block(vec![
         Expr::Yield(Box::new(Expr::String("checkpoint".into()))),
@@ -3741,7 +3755,7 @@ async fn process_controls_emit_events_and_terminal_outcomes() {
     let compiled = compile_program(&program);
     let outcome = execute_compiled_process(&compiled, &mut state, &host)
         .await
-        .expect("process controls should run");
+        .expect("process admins should run");
     assert_eq!(
         outcome,
         ExecutionOutcome::Finished(Value::String("done".into()))
@@ -3875,7 +3889,7 @@ async fn process_mode_falling_off_end_finishes_null() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn foreground_rejects_programmatic_process_controls() {
+async fn foreground_rejects_programmatic_processess() {
     // `signal_run` (sending) is intentionally NOT in this list: it is allowed
     // from the foreground turn, like `await` / `cancel`. Only the receiving
     // side, `wait_signal`, plus the run-completion controls, are process-only.
@@ -3899,8 +3913,11 @@ async fn foreground_rejects_programmatic_process_controls() {
         let host = RecordingProcessHost::default();
         let err = execute_program(&program, &mut state, &host)
             .await
-            .expect_err("foreground mode should reject process controls");
-        assert_eq!(err, RuntimeError::ProcessControlOutsideProcess { keyword });
+            .expect_err("foreground mode should reject process admins");
+        assert_eq!(
+            err,
+            RuntimeError::SessionProcessAdminOutsideProcess { keyword }
+        );
     }
 }
 
@@ -4044,7 +4061,7 @@ async fn profiled_tool_effect_keeps_sync_instruction_counts() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn await_unknown_handle_surfaces_runtime_error() {
+async fn await_unknown_handle_reports_runtime_error() {
     let program = crate::parse(
         r#"
         result = await 1
@@ -4423,7 +4440,7 @@ async fn compile_stats_count_const_folded_and_dynamic_literals() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn profile_report_surfaces_resolve_type_ref_counts() {
+async fn profile_report_shows_resolve_type_ref_counts() {
     let src = r#"
         Inner = await tools.echo({ value: Type { n: int } })?
         Outer = Type { nested: Inner }

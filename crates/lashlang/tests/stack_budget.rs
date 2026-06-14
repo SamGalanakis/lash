@@ -1,6 +1,7 @@
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ExecutionOutcome,
-    LashlangAbilities, LashlangSurface, Record, State, Value, compile_linked, execute, parse,
+    LashlangAbilities, LashlangHostEnvironment, Record, State, Value, compile_linked, execute,
+    parse,
 };
 use std::sync::Arc;
 
@@ -28,8 +29,10 @@ submit {
 "#,
             )
             .expect("program parses");
-            let surface =
-                LashlangSurface::new(lashlang::ResourceCatalog::new(), LashlangAbilities::all());
+            let surface = LashlangHostEnvironment::new(
+                lashlang::LashlangHostCatalog::new(),
+                LashlangAbilities::all(),
+            );
             let linked = lashlang::LinkedModule::link(program, surface).expect("program links");
             let compiled = compile_linked(&linked);
             let mut state = State::new();

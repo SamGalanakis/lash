@@ -3,11 +3,11 @@ use crate::support::*;
 pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
-pub struct CoreTriggersControl {
+pub struct CoreTriggerAdmin {
     pub(crate) core: LashCore,
 }
 
-impl CoreTriggersControl {
+impl CoreTriggerAdmin {
     pub async fn emit(
         &self,
         request: lash_core::TriggerOccurrenceRequest,
@@ -96,7 +96,7 @@ impl Processes {
                     invocation,
                     lash_core::RuntimeEffectCommand::process(command),
                 ),
-                lash_core::RuntimeEffectLocalExecutor::process_control(registry),
+                lash_core::RuntimeEffectLocalExecutor::processes(registry),
             )
             .await
             .map_err(|err| EmbedError::Plugin(lash_core::PluginError::Session(err.to_string())))?;
@@ -234,61 +234,61 @@ impl Processes {
 }
 
 #[derive(Clone)]
-pub struct SessionControl {
+pub struct SessionAdmin {
     pub(crate) runtime: RuntimeHandle,
 }
 
-impl SessionControl {
-    pub fn config(&self) -> ConfigControl {
-        ConfigControl {
+impl SessionAdmin {
+    pub fn config(&self) -> SessionConfigAdmin {
+        SessionConfigAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn tools(&self) -> ToolsControl {
-        ToolsControl {
+    pub fn tools(&self) -> ToolAdmin {
+        ToolAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn commands(&self) -> SessionCommandsControl {
-        SessionCommandsControl {
+    pub fn commands(&self) -> SessionCommandAdmin {
+        SessionCommandAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn triggers(&self) -> TriggersControl {
-        TriggersControl {
+    pub fn triggers(&self) -> SessionTriggerAdmin {
+        SessionTriggerAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn state(&self) -> StateControl {
-        StateControl {
+    pub fn state(&self) -> SessionStateAdmin {
+        SessionStateAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn children(&self) -> ChildrenControl {
-        ChildrenControl {
+    pub fn children(&self) -> ChildSessionAdmin {
+        ChildSessionAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn injection(&self) -> InjectionControl {
-        InjectionControl {
+    pub fn injection(&self) -> InjectionAdmin {
+        InjectionAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn mode(&self) -> ModeControl {
-        ModeControl {
+    pub fn mode(&self) -> ModeAdmin {
+        ModeAdmin {
             control: self.clone(),
         }
     }
 
-    pub fn processes(&self) -> ProcessControl {
-        ProcessControl {
+    pub fn processes(&self) -> SessionProcessAdmin {
+        SessionProcessAdmin {
             control: self.clone(),
         }
     }
@@ -450,10 +450,10 @@ impl SessionControl {
         .await
     }
 
-    async fn refresh_tool_surface(&self) -> Result<()> {
+    async fn refresh_tool_catalog(&self) -> Result<()> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
-                .refresh_session_tool_surface()
+                .refresh_session_tool_catalog()
                 .await
                 .map_err(Into::into)
         })
@@ -752,7 +752,7 @@ impl SessionControl {
         let handle = tool_registry
             .add_tool_provider(provider)
             .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
-        self.refresh_tool_surface().await?;
+        self.refresh_tool_catalog().await?;
         Ok(handle)
     }
 
@@ -761,7 +761,7 @@ impl SessionControl {
         let generation = tool_registry
             .remove_source(handle)
             .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
-        self.refresh_tool_surface().await?;
+        self.refresh_tool_catalog().await?;
         Ok(generation)
     }
 
@@ -846,11 +846,11 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
 }
 
 #[derive(Clone)]
-pub struct ConfigControl {
-    control: SessionControl,
+pub struct SessionConfigAdmin {
+    control: SessionAdmin,
 }
 
-impl ConfigControl {
+impl SessionConfigAdmin {
     pub async fn update(&self, patch: SessionConfigPatch) -> Result<()> {
         self.control.update_config(patch).await
     }
@@ -892,23 +892,23 @@ impl ConfigControl {
 }
 
 #[derive(Clone)]
-pub struct ToolsControl {
-    control: SessionControl,
+pub struct ToolAdmin {
+    control: SessionAdmin,
 }
 
-impl ToolsControl {
-    pub(crate) fn new(control: SessionControl) -> Self {
+impl ToolAdmin {
+    pub(crate) fn new(control: SessionAdmin) -> Self {
         Self { control }
     }
 }
 
-impl ToolsControl {
+impl ToolAdmin {
     pub async fn state(&self) -> Result<ToolState> {
         self.control.tool_state().await
     }
 
-    pub fn advanced(&self) -> AdvancedToolsControl {
-        AdvancedToolsControl {
+    pub fn advanced(&self) -> AdvancedToolAdmin {
+        AdvancedToolAdmin {
             control: self.control.clone(),
         }
     }
@@ -950,15 +950,15 @@ impl ToolsControl {
 }
 
 #[derive(Clone)]
-pub struct AdvancedToolsControl {
-    control: SessionControl,
+pub struct AdvancedToolAdmin {
+    control: SessionAdmin,
 }
 
-impl AdvancedToolsControl {
+impl AdvancedToolAdmin {
     /// Replace the entire tool-state snapshot.
     ///
     /// This is a generation-checked escape hatch for hosts that intentionally
-    /// edit the full snapshot. Prefer `ToolsControl` availability methods for
+    /// edit the full snapshot. Prefer `ToolAdmin` availability methods for
     /// ordinary tool policy changes.
     pub async fn apply_state(&self, state: ToolState) -> Result<u64> {
         self.control.apply_tool_state(state).await
@@ -982,23 +982,23 @@ impl AdvancedToolsControl {
 }
 
 #[derive(Clone)]
-pub struct SessionCommandsControl {
-    control: SessionControl,
+pub struct SessionCommandAdmin {
+    control: SessionAdmin,
 }
 
-impl SessionCommandsControl {
-    /// Enqueue an unconditional tool-surface refresh. The command drains
+impl SessionCommandAdmin {
+    /// Enqueue an unconditional tool-catalog refresh. The command drains
     /// asynchronously and recomputes the surface from live sources, so it
     /// takes no generation guard — any generation observed at enqueue time
     /// could legitimately have advanced by drain time.
-    pub async fn refresh_tool_surface(
+    pub async fn refresh_tool_catalog(
         &self,
         reason: impl Into<String>,
         idempotency_key: impl Into<String>,
     ) -> Result<lash_core::SessionCommandReceipt> {
         self.control
             .submit_session_command(
-                lash_core::SessionCommand::RefreshToolSurface {
+                lash_core::SessionCommand::RefreshToolCatalog {
                     reason: reason.into(),
                 },
                 idempotency_key,
@@ -1024,11 +1024,11 @@ impl SessionCommandsControl {
 
 /// Session-scoped read controls for Lashlang trigger registrations.
 #[derive(Clone)]
-pub struct TriggersControl {
-    control: SessionControl,
+pub struct SessionTriggerAdmin {
+    control: SessionAdmin,
 }
 
-impl TriggersControl {
+impl SessionTriggerAdmin {
     /// Return every trigger registration in the session.
     ///
     /// This is an admin/introspection view. Source owners should prefer
@@ -1038,7 +1038,7 @@ impl TriggersControl {
         self.control.list_lashlang_trigger_registrations().await
     }
 
-    /// Return registrations whose source value has the given host value type.
+    /// Return registrations whose source value has the given host descriptor type.
     ///
     /// This is the source-owner API: a timer, UI, webhook, or other host-owned
     /// source uses it to inspect registrations for keys it may schedule and emit.
@@ -1053,12 +1053,12 @@ impl TriggersControl {
 }
 
 #[derive(Clone)]
-pub struct ProcessControl {
-    control: SessionControl,
+pub struct SessionProcessAdmin {
+    control: SessionAdmin,
 }
 
-impl ProcessControl {
-    pub(crate) fn new(control: SessionControl) -> Self {
+impl SessionProcessAdmin {
+    pub(crate) fn new(control: SessionAdmin) -> Self {
         Self { control }
     }
 
@@ -1105,11 +1105,11 @@ impl ProcessControl {
 }
 
 #[derive(Clone)]
-pub struct StateControl {
-    control: SessionControl,
+pub struct SessionStateAdmin {
+    control: SessionAdmin,
 }
 
-impl StateControl {
+impl SessionStateAdmin {
     pub async fn export(&self) -> lash_core::SessionSnapshot {
         self.control.export_state().await
     }
@@ -1166,7 +1166,7 @@ impl StateControl {
 
 #[derive(Clone)]
 pub struct PluginActions {
-    pub(crate) control: SessionControl,
+    pub(crate) control: SessionAdmin,
 }
 
 impl PluginActions {
@@ -1176,11 +1176,11 @@ impl PluginActions {
 }
 
 #[derive(Clone)]
-pub struct ChildrenControl {
-    control: SessionControl,
+pub struct ChildSessionAdmin {
+    control: SessionAdmin,
 }
 
-impl ChildrenControl {
+impl ChildSessionAdmin {
     pub async fn create_session(&self, request: SessionCreateRequest) -> Result<SessionHandle> {
         self.control.create_child_session(request).await
     }
@@ -1195,11 +1195,11 @@ impl ChildrenControl {
 }
 
 #[derive(Clone)]
-pub struct InjectionControl {
-    control: SessionControl,
+pub struct InjectionAdmin {
+    control: SessionAdmin,
 }
 
-impl InjectionControl {
+impl InjectionAdmin {
     pub async fn inject_turn_input(
         &self,
         id: Option<String>,
@@ -1217,11 +1217,11 @@ impl InjectionControl {
 }
 
 #[derive(Clone)]
-pub struct ModeControl {
-    control: SessionControl,
+pub struct ModeAdmin {
+    control: SessionAdmin,
 }
 
-impl ModeControl {
+impl ModeAdmin {
     pub async fn apply_session_extension(
         &self,
         extension: lash_core::ProtocolSessionExtensionHandle,

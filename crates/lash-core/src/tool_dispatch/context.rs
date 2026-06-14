@@ -6,8 +6,8 @@ use crate::plugin::{
     PluginSession, SessionGraphService, SessionLifecycleService, SessionStateService,
 };
 use crate::{
-    PreparedToolCall, SessionEvent, ToolCallRecord, ToolFailure, ToolFailureClass, ToolProvider,
-    ToolResult, ToolSurface,
+    PreparedToolCall, SessionEvent, ToolCallRecord, ToolCatalog, ToolFailure, ToolFailureClass,
+    ToolProvider, ToolResult,
 };
 
 #[derive(Clone, Default)]
@@ -75,7 +75,7 @@ impl ToolTriggerOutcomeBuffer {
 pub struct ToolDispatchContext<'run> {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
-    pub surface: Arc<ToolSurface>,
+    pub tool_catalog: Arc<ToolCatalog>,
     pub sessions: Arc<dyn SessionStateService>,
     pub session_lifecycle: Arc<dyn SessionLifecycleService>,
     pub session_graph: Arc<dyn SessionGraphService>,

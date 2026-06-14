@@ -747,7 +747,7 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::Break
         | Expr::Continue
         | Expr::ProcessRef { .. }
-        | Expr::HostValueConstructor { .. }
+        | Expr::HostDescriptorConstructor { .. }
         | Expr::ResourceRef(_)
         | Expr::Cancel(_)
         | Expr::Print(_)
@@ -784,7 +784,7 @@ mod tests {
     use super::*;
 
     fn linked(source: &str) -> crate::LinkedModule {
-        let mut resources = crate::ResourceCatalog::new();
+        let mut resources = crate::LashlangHostCatalog::new();
         resources.add_module_operation(
             ["tools"],
             "Tools",
@@ -795,7 +795,7 @@ mod tests {
         );
         crate::LinkedModule::link(
             crate::parse(source).expect("parse module"),
-            crate::LashlangSurface::new(resources, crate::LashlangAbilities::all())
+            crate::LashlangHostEnvironment::new(resources, crate::LashlangAbilities::all())
                 .with_language_features(
                     crate::LashlangLanguageFeatures::default().with_label_annotations(),
                 ),

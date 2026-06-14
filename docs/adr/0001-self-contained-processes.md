@@ -3,7 +3,7 @@
 A Runtime Process is a standalone durable entity — id, input, captured execution
 environment, event log, status, leases. It never holds a live reference to the session
 that created it: the execution environment (plugin options, policy, lashlang
-module/surface refs) is captured at creation as immutable content-addressed references,
+module/host requirements refs) is captured at creation as immutable content-addressed references,
 and the durable worker always executes against an ephemeral runtime instantiated from
 that capture — it never rebuilds the originating session. Session relationships are
 explicit, orthogonal, optional edges (originator and caused_by as pure provenance, a

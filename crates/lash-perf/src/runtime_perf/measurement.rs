@@ -2503,7 +2503,7 @@ fn checkpoint_config(
     TurnMachineConfig {
         protocol_driver,
         projector: Arc::new(ChatContextProjector),
-        sync_execution_surface: false,
+        sync_execution_environment: false,
         model: "mock-model".to_string(),
         max_context_tokens: None,
         max_turns: Some(8),

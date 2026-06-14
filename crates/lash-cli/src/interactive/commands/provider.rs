@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::LashConfig;
-use lash::control::SessionConfigPatch;
+use lash::admin::SessionConfigPatch;
 use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_tui::Terminal;
 
@@ -109,7 +109,7 @@ pub(super) async fn handle_model(
     };
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
-            .control()
+            .admin()
             .config()
             .update(SessionConfigPatch {
                 model: Some(model_spec),
@@ -173,7 +173,7 @@ pub(super) async fn handle_variant(
         let mut model_spec = rt.policy_snapshot().model;
         model_spec.variant = variant.clone();
         let _ = rt
-            .control()
+            .admin()
             .config()
             .update(SessionConfigPatch {
                 model: Some(model_spec),
@@ -421,7 +421,7 @@ pub(super) async fn handle_change_provider(
             };
             if let Some(rt) = runtime.as_mut() {
                 let _ = rt
-                    .control()
+                    .admin()
                     .config()
                     .update(SessionConfigPatch {
                         provider: Some(provider.clone()),

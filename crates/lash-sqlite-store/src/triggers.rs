@@ -92,7 +92,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         source: draft.source,
                         event_ty: draft.event_ty,
                         module_ref: draft.module_ref,
-                        required_surface_ref: draft.required_surface_ref,
+                        host_requirements_ref: draft.host_requirements_ref,
                         process_ref: draft.process_ref,
                         process_name: draft.process_name,
                         input_template: draft.input_template,

@@ -165,7 +165,7 @@ fn glob_tool_definition() -> ToolDefinition {
                 r#"await files.glob({ pattern: "**/*.rs", path: "crates/lash/src", limit: 50 })?"#.into(),
                 r#"await files.glob({ pattern: "**/Cargo.toml", path: "." })?"#.into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["files"],
                 "glob",
                 &["find_files"],

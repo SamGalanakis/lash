@@ -37,7 +37,7 @@ pub(crate) use lash_core::{TurnActivity, TurnInput};
 #[cfg(test)]
 pub(crate) use lash_core::{TurnActivityId, TurnEvent};
 
-pub(crate) use crate::control::*;
+pub(crate) use crate::admin::*;
 pub(crate) use crate::core::*;
 pub(crate) use crate::error::*;
 pub(crate) use crate::mode::{ModeId, ModePreset};

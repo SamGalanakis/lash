@@ -65,11 +65,11 @@ pub(crate) async fn enqueue_wake_delivery(
 }
 
 #[derive(Clone)]
-pub struct ToolProcessEventControl {
+pub struct ToolProcessEventClient {
     pub(super) context: Option<ToolProcessEventContext>,
 }
 
-impl ToolProcessEventControl {
+impl ToolProcessEventClient {
     pub async fn wait_event_after(
         &self,
         event_type: &str,

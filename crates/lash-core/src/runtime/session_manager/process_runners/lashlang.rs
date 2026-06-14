@@ -18,7 +18,7 @@ impl RuntimeSessionServices {
         registry: Arc<dyn crate::ProcessRegistry>,
         module_ref: ::lashlang::ModuleRef,
         process_ref: ::lashlang::ProcessRef,
-        required_surface_ref: ::lashlang::RequiredSurfaceRef,
+        host_requirements_ref: ::lashlang::HostRequirementsRef,
         process_name: String,
         args: serde_json::Map<String, serde_json::Value>,
         execution_context: crate::ProcessExecutionContext,
@@ -50,12 +50,12 @@ impl RuntimeSessionServices {
                 );
             }
         };
-        if artifact.required_surface_ref != required_surface_ref {
+        if artifact.host_requirements_ref != host_requirements_ref {
             return process_lashlang_failure(
-                "process_required_surface_mismatch",
+                "process_host_requirements_mismatch",
                 format!(
                     "lashlang process `{process_name}` requested surface {}, artifact has {}",
-                    required_surface_ref, artifact.required_surface_ref
+                    host_requirements_ref, artifact.host_requirements_ref
                 ),
                 None,
             );
@@ -70,11 +70,15 @@ impl RuntimeSessionServices {
                 None,
             );
         }
-        let tool_surface = match self.current.plugins.tool_surface(&self.current.session_id) {
-            Ok(surface) => surface,
+        let tool_catalog = match self
+            .current
+            .plugins
+            .resolved_tool_catalog(&self.current.session_id)
+        {
+            Ok(tool_catalog) => tool_catalog,
             Err(err) => {
                 return process_lashlang_failure(
-                    "process_tool_surface_failed",
+                    "process_tool_catalog_failed",
                     err.to_string(),
                     None,
                 );
@@ -84,17 +88,18 @@ impl RuntimeSessionServices {
             self.current.plugins.lashlang_abilities(),
             self.current.host.process_registry.is_some(),
         );
-        let current_surface = crate::session::lashlang_surface_from_tool_surface(
-            &tool_surface,
+        let current_environment = crate::session::lashlang_host_environment_from_tool_catalog(
+            &tool_catalog,
             lashlang_abilities,
             self.current.plugins.lashlang_language_features(),
             self.current.plugins.lashlang_resources(),
         );
-        if let Err(err) =
-            lashlang_surface_satisfies_requirements(&artifact.required_surface, &current_surface)
-        {
+        if let Err(err) = lashlang_host_environment_satisfies_requirements(
+            &artifact.host_requirements,
+            &current_environment,
+        ) {
             return process_lashlang_failure(
-                "process_surface_incompatible",
+                "process_host_environment_incompatible",
                 format!(
                     "lashlang process `{process_name}` is incompatible with this host surface: {err}"
                 ),
@@ -109,7 +114,7 @@ impl RuntimeSessionServices {
             .lashlang_process_cache
             .lock()
         {
-            Ok(mut cache) => cache.get_or_compile(&artifact, &process_ref, &required_surface_ref),
+            Ok(mut cache) => cache.get_or_compile(&artifact, &process_ref, &host_requirements_ref),
             Err(_) => Err(::lashlang::RuntimeError::ValueError {
                 message: "lashlang compiled process cache lock poisoned".to_string(),
             }),
@@ -151,7 +156,7 @@ impl RuntimeSessionServices {
         let mut state = ::lashlang::State::from_snapshot(::lashlang::Snapshot { globals });
 
         let run_context = ProcessRunContext::builder(self)
-            .surface(tool_surface)
+            .tool_catalog(tool_catalog)
             .scoped_effect_controller(scoped_effect_controller)
             .causal_invocation(execution_context.causal_invocation.clone())
             .build()
@@ -966,9 +971,9 @@ fn process_id_from_lashlang_handle(
         })
 }
 
-fn lashlang_surface_satisfies_requirements(
-    required: &::lashlang::SurfaceRequirements,
-    current: &::lashlang::LashlangSurface,
+fn lashlang_host_environment_satisfies_requirements(
+    required: &::lashlang::HostRequirements,
+    current: &::lashlang::LashlangHostEnvironment,
 ) -> Result<(), String> {
     let abilities = required.abilities;
     let current_abilities = current.abilities;

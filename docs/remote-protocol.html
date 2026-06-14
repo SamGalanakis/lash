@@ -121,12 +121,12 @@ request.validate()?;</code></pre>
   <div class="section" id="remote-tools">
     <div class="section-header">
       <h2>Remote Tools</h2>
-      <p>Remote tool grants expose callable host operations through Lash's normal tool surface while execution happens elsewhere.</p>
+      <p>Remote tool grants expose callable host operations through Lash's normal tool catalog while execution happens elsewhere.</p>
     </div>
     <div class="listing">
       <div class="listing__row">
         <div class="listing__label">grant</div>
-        <div class="listing__body"><p><code>RemoteToolGrant</code> defines the advertised name, schemas, projection overrides, output contract, examples, availability, activation, scheduling, retry policy, and required agent surface. Host-owned bindings decide how granted tools execute.</p></div>
+        <div class="listing__body"><p><code>RemoteToolGrant</code> defines the advertised name, schemas, projection overrides, output contract, examples, availability, activation, scheduling, retry policy, and required lashlang binding. Host-owned bindings decide how granted tools execute.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">executor</div>
@@ -134,7 +134,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">call path</div>
-        <div class="listing__body"><p>The grant's <code>agent_surface.module_path</code> plus <code>operation</code> forms the remote call path. Duplicate call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div>
+        <div class="listing__body"><p>The grant's <code>lashlang_binding.module_path</code> plus <code>operation</code> forms the remote call path. Duplicate call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">provider helper</div>

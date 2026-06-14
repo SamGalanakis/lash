@@ -184,14 +184,14 @@ pub enum LogEvent {
 #[derive(Debug, Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
-    /// Sync the live execution surface before the turn proceeds.
+    /// Sync the live execution environment before the turn proceeds.
     ///
     /// `update_machine_config` is only needed after the turn has
     /// already advanced at least once and the host may need to swap in
     /// a refreshed system prompt or tool schema for the next
     /// protocol iteration. Initial syncs are host-only because the machine was
-    /// already constructed from a fresh execution surface.
-    SyncExecutionSurface {
+    /// already constructed from a fresh execution environment.
+    SyncExecutionEnvironment {
         id: EffectId,
         update_machine_config: bool,
     },
@@ -239,10 +239,10 @@ pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
 impl<M: TurnProtocol> Clone for Effect<M> {
     fn clone(&self) -> Self {
         match self {
-            Self::SyncExecutionSurface {
+            Self::SyncExecutionEnvironment {
                 id,
                 update_machine_config,
-            } => Self::SyncExecutionSurface {
+            } => Self::SyncExecutionEnvironment {
                 id: *id,
                 update_machine_config: *update_machine_config,
             },
@@ -292,7 +292,7 @@ impl<M: TurnProtocol> Clone for Effect<M> {
 impl<M: TurnProtocol> Effect<M> {
     fn id(&self) -> Option<EffectId> {
         match self {
-            Self::SyncExecutionSurface { id, .. }
+            Self::SyncExecutionEnvironment { id, .. }
             | Self::LlmCall { id, .. }
             | Self::CancelLlm { id }
             | Self::ToolCalls { id, .. }
@@ -316,10 +316,10 @@ pub struct LlmCallError {
 
 /// A response to a previously emitted effect.
 pub enum Response {
-    /// Live execution surface sync completed.
-    ExecutionSurfaceSynced {
+    /// Live execution environment sync completed.
+    ExecutionEnvironmentSynced {
         id: EffectId,
-        result: Result<Option<ExecutionSurfaceSync>, String>,
+        result: Result<Option<ExecutionEnvironmentSync>, String>,
     },
     /// Full LLM response.
     LlmComplete {
@@ -347,7 +347,7 @@ pub enum Response {
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
-pub struct ExecutionSurfaceSync {
+pub struct ExecutionEnvironmentSync {
     pub system_prompt: Arc<str>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
 }
@@ -582,7 +582,7 @@ pub trait ProtocolDriverHandle<M: TurnProtocol = UnitTurnProtocol>: Send + Sync 
 pub struct TurnMachineConfig<M: TurnProtocol = UnitTurnProtocol> {
     pub protocol_driver: Arc<dyn ProtocolDriverHandle<M>>,
     pub projector: Arc<dyn ContextProjector<M>>,
-    pub sync_execution_surface: bool,
+    pub sync_execution_environment: bool,
     pub model: String,
     /// Model context-window size in tokens, if known. Lets the kernel
     /// reclassify a zero-output `OutputLimit` terminal reason as
@@ -607,7 +607,7 @@ pub struct TurnMachineConfig<M: TurnProtocol = UnitTurnProtocol> {
 #[derive(Debug, Serialize, serde::Deserialize)]
 enum MachineState<M: TurnProtocol = UnitTurnProtocol> {
     PreparingProtocol,
-    WaitingExecutionSurface {
+    WaitingExecutionEnvironment {
         effect_id: EffectId,
         update_machine_config: bool,
     },
@@ -658,10 +658,10 @@ impl<M: TurnProtocol> Clone for MachineState<M> {
     fn clone(&self) -> Self {
         match self {
             Self::PreparingProtocol => Self::PreparingProtocol,
-            Self::WaitingExecutionSurface {
+            Self::WaitingExecutionEnvironment {
                 effect_id,
                 update_machine_config,
-            } => Self::WaitingExecutionSurface {
+            } => Self::WaitingExecutionEnvironment {
                 effect_id: *effect_id,
                 update_machine_config: *update_machine_config,
             },
@@ -705,7 +705,7 @@ impl<M: TurnProtocol> Clone for MachineState<M> {
 impl<M: TurnProtocol> MachineState<M> {
     fn outstanding_effect_id(&self) -> Option<EffectId> {
         match self {
-            Self::WaitingExecutionSurface { effect_id, .. }
+            Self::WaitingExecutionEnvironment { effect_id, .. }
             | Self::WaitingLlm { effect_id, .. }
             | Self::WaitingTools { effect_id, .. }
             | Self::WaitingExec { effect_id, .. }
@@ -716,10 +716,10 @@ impl<M: TurnProtocol> MachineState<M> {
 
     fn outstanding_effect(&self) -> Option<Effect<M>> {
         match self {
-            Self::WaitingExecutionSurface {
+            Self::WaitingExecutionEnvironment {
                 effect_id,
                 update_machine_config,
-            } => Some(Effect::SyncExecutionSurface {
+            } => Some(Effect::SyncExecutionEnvironment {
                 id: *effect_id,
                 update_machine_config: *update_machine_config,
             }),
@@ -1003,14 +1003,14 @@ impl<M: TurnProtocol> TurnMachine<M> {
     // ─── State transitions ───
 
     fn prepare_protocol(&mut self) {
-        if self.config.sync_execution_surface {
+        if self.config.sync_execution_environment {
             let id = self.next_id();
-            self.state = MachineState::WaitingExecutionSurface {
+            self.state = MachineState::WaitingExecutionEnvironment {
                 effect_id: id,
                 update_machine_config: false,
             };
             self.pending_effects
-                .push_back(Effect::SyncExecutionSurface {
+                .push_back(Effect::SyncExecutionEnvironment {
                     id,
                     update_machine_config: false,
                 });
@@ -1021,16 +1021,16 @@ impl<M: TurnProtocol> TurnMachine<M> {
     }
 
     fn prepare_protocol_iteration(&mut self) {
-        if self.config.sync_execution_surface
+        if self.config.sync_execution_environment
             && self.synced_protocol_iteration != Some(self.protocol_iteration)
         {
             let id = self.next_id();
-            self.state = MachineState::WaitingExecutionSurface {
+            self.state = MachineState::WaitingExecutionEnvironment {
                 effect_id: id,
                 update_machine_config: true,
             };
             self.pending_effects
-                .push_back(Effect::SyncExecutionSurface {
+                .push_back(Effect::SyncExecutionEnvironment {
                     id,
                     update_machine_config: true,
                 });
@@ -1192,8 +1192,8 @@ impl<M: TurnProtocol> TurnMachine<M> {
     pub fn handle_response(&mut self, response: Response) {
         self.active_effect_redelivery = false;
         match response {
-            Response::ExecutionSurfaceSynced { id, result } => {
-                self.handle_execution_surface_synced(id, result)
+            Response::ExecutionEnvironmentSynced { id, result } => {
+                self.handle_execution_environment_synced(id, result)
             }
             Response::LlmComplete {
                 id,
@@ -1217,14 +1217,14 @@ impl<M: TurnProtocol> TurnMachine<M> {
             .push_back(Effect::Checkpoint { id, checkpoint });
     }
 
-    fn handle_execution_surface_synced(
+    fn handle_execution_environment_synced(
         &mut self,
         id: EffectId,
-        result: Result<Option<ExecutionSurfaceSync>, String>,
+        result: Result<Option<ExecutionEnvironmentSync>, String>,
     ) {
         let (waiting_id, waiting_update_machine_config) =
             match std::mem::replace(&mut self.state, MachineState::Finished) {
-                MachineState::WaitingExecutionSurface {
+                MachineState::WaitingExecutionEnvironment {
                     effect_id,
                     update_machine_config,
                 } => (effect_id, update_machine_config),
@@ -1234,7 +1234,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
                 }
             };
         if waiting_id != id {
-            self.state = MachineState::WaitingExecutionSurface {
+            self.state = MachineState::WaitingExecutionEnvironment {
                 effect_id: waiting_id,
                 update_machine_config: waiting_update_machine_config,
             };
@@ -1252,9 +1252,9 @@ impl<M: TurnProtocol> TurnMachine<M> {
             }
             Err(error) => {
                 self.fail_turn(make_error_event(
-                    "execution_surface",
+                    "execution_environment",
                     Some("reconfigure_failed"),
-                    format!("Failed to refresh execution surface: {error}"),
+                    format!("Failed to refresh execution environment: {error}"),
                     Some(error),
                 ));
             }

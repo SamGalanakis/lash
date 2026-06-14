@@ -87,7 +87,7 @@ pub(crate) struct PluginContributions {
     pub(crate) tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub(crate) triggers: Vec<crate::TriggerEvent>,
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
-    pub(crate) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
+    pub(crate) tool_catalog_contributors: Vec<RegisteredHook<ToolCatalogContributor>>,
     pub(crate) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
     pub(crate) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     pub(crate) before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
@@ -145,13 +145,13 @@ impl PromptRegistrations<'_> {
     }
 }
 
-pub struct SurfaceRegistrations<'a> {
+pub struct ToolCatalogRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
-impl SurfaceRegistrations<'_> {
-    pub fn contribute(self, contributor: ToolSurfaceContributor) {
-        self.reg.add_tool_surface_contributor(contributor);
+impl ToolCatalogRegistrations<'_> {
+    pub fn contribute(self, contributor: ToolCatalogContributor) {
+        self.reg.add_tool_catalog_contributor(contributor);
     }
 }
 
@@ -370,8 +370,8 @@ impl PluginRegistrar {
         PromptRegistrations { reg: self }
     }
 
-    pub fn surface(&mut self) -> SurfaceRegistrations<'_> {
-        SurfaceRegistrations { reg: self }
+    pub fn tool_catalog(&mut self) -> ToolCatalogRegistrations<'_> {
+        ToolCatalogRegistrations { reg: self }
     }
 
     pub fn discovery(&mut self) -> DiscoveryRegistrations<'_> {
@@ -451,9 +451,9 @@ impl PluginRegistrar {
         );
     }
 
-    fn add_tool_surface_contributor(&mut self, contributor: ToolSurfaceContributor) {
+    fn add_tool_catalog_contributor(&mut self, contributor: ToolCatalogContributor) {
         push_registered_hook(
-            &mut self.contributions.tool_surface_contributors,
+            &mut self.contributions.tool_catalog_contributors,
             &self.registering_plugin_id,
             contributor,
         );

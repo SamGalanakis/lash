@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn soft_budget_warning_emits_surface_event_not_user_message() {
+    fn soft_budget_warning_emits_plugin_event_not_user_message() {
         let session = test_session(RlmProtocolPluginConfig {
             continue_as_soft_warn_tokens: Some(100_000),
             ..Default::default()

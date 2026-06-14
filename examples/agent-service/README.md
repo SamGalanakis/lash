@@ -126,7 +126,7 @@ already visible through assistant prose deltas.
 
 In lashlang, the model calls the demo tools through their host-declared module
 surface. `DemoPlugin` maps the underlying `read_board` tool to `board.read`
-and `play_move` to `board.play` with `ToolAgentSurface`:
+and `play_move` to `board.play` with `LashlangToolBinding`:
 
 ```lashlang
 board = await board.read({})?

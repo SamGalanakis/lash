@@ -12,7 +12,7 @@ pub(crate) enum RuntimePerfScenario {
     RlmProcessHandles,
     RlmLlmQuery,
     RlmGlobals,
-    RlmLargeToolSurface,
+    RlmLargeToolCatalog,
     ObservationalMemory,
     ObservationalMemoryMaintenance,
     OpenAiCompatStream,
@@ -41,7 +41,7 @@ impl RuntimePerfScenario {
         Self::RlmProcessHandles,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
-        Self::RlmLargeToolSurface,
+        Self::RlmLargeToolCatalog,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
@@ -68,7 +68,7 @@ impl RuntimePerfScenario {
         Self::RlmProcessHandles,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
-        Self::RlmLargeToolSurface,
+        Self::RlmLargeToolCatalog,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
@@ -97,7 +97,7 @@ impl RuntimePerfScenario {
             "rlm_process_handles" => Some(Self::RlmProcessHandles),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
             "rlm_globals" => Some(Self::RlmGlobals),
-            "rlm_large_tool_surface" => Some(Self::RlmLargeToolSurface),
+            "rlm_large_tool_catalog" => Some(Self::RlmLargeToolCatalog),
             "observational_memory" => Some(Self::ObservationalMemory),
             "observational_memory_maintenance" => Some(Self::ObservationalMemoryMaintenance),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
@@ -128,7 +128,7 @@ impl RuntimePerfScenario {
             Self::RlmProcessHandles => "rlm_process_handles",
             Self::RlmLlmQuery => "rlm_llm_query",
             Self::RlmGlobals => "rlm_globals",
-            Self::RlmLargeToolSurface => "rlm_large_tool_surface",
+            Self::RlmLargeToolCatalog => "rlm_large_tool_catalog",
             Self::ObservationalMemory => "observational_memory",
             Self::ObservationalMemoryMaintenance => "observational_memory_maintenance",
             Self::OpenAiCompatStream => "openai_compat_stream",
@@ -173,7 +173,7 @@ impl RuntimePerfScenario {
             | Self::RlmProcessHandles
             | Self::RlmLlmQuery
             | Self::RlmGlobals
-            | Self::RlmLargeToolSurface
+            | Self::RlmLargeToolCatalog
             | Self::EmbedRlm
             | Self::TraceJsonlExtended => ModeId::rlm(),
         }

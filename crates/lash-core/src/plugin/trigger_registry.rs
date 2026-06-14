@@ -11,8 +11,8 @@ impl PluginFactory for TriggerResourcePluginFactory {
         TRIGGER_RESOURCE_PLUGIN_ID
     }
 
-    fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
-        let mut resources = lashlang::ResourceCatalog::new();
+    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
+        let mut resources = lashlang::LashlangHostCatalog::new();
         lashlang::add_trigger_resource_operations(&mut resources);
         resources
     }

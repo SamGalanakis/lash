@@ -1,10 +1,10 @@
 use compact_str::ToCompactString;
 use lashlang::{
-    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, HostValue, ImageValue,
-    LASH_PROCESS_NAME_KEY, LashlangAbilities, LashlangSurface, LinkedModule, ListValue,
-    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
-    ProjectedReadResponse, ProjectedValue, Record, ResourceCatalog, State, TypeExpr, TypeField,
-    Value, from_json,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, HostDescriptor, ImageValue,
+    LASH_PROCESS_NAME_KEY, LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment,
+    LinkedModule, ListValue, ProjectedBindings, ProjectedFuture, ProjectedHostDescriptor,
+    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, State, TypeExpr,
+    TypeField, Value, from_json,
 };
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 #[derive(Clone, Copy, Debug)]
 pub enum Scenario {
     Baseline,
-    LanguageSurface,
+    LanguageHostEnvironment,
     AsyncAwait,
     DirectUnwrap,
     GeneralFanout,
@@ -24,20 +24,20 @@ pub enum Scenario {
     ProjectedOperations,
     TypeSystemStress,
     WrappedErrorPaths,
-    ToolControlSurface,
+    ToolControlHostEnvironment,
     SnapshotProjectedState,
-    ContinueAsSeedSurface,
-    TriggerRegistrySurface,
-    SyntaxTextSurface,
-    IntegerRangeSurface,
-    FanoutExpressionSurface,
-    ImageSurface,
+    ContinueAsSeedHostEnvironment,
+    TriggerRegistryHostEnvironment,
+    SyntaxTextHostEnvironment,
+    IntegerRangeHostEnvironment,
+    FanoutExpressionHostEnvironment,
+    ImageHostEnvironment,
 }
 
 impl Scenario {
     pub const ALL: &'static [Self] = &[
         Self::Baseline,
-        Self::LanguageSurface,
+        Self::LanguageHostEnvironment,
         Self::AsyncAwait,
         Self::DirectUnwrap,
         Self::GeneralFanout,
@@ -49,21 +49,21 @@ impl Scenario {
         Self::ProjectedOperations,
         Self::TypeSystemStress,
         Self::WrappedErrorPaths,
-        Self::ToolControlSurface,
+        Self::ToolControlHostEnvironment,
         Self::SnapshotProjectedState,
-        Self::ContinueAsSeedSurface,
-        Self::TriggerRegistrySurface,
-        Self::SyntaxTextSurface,
-        Self::IntegerRangeSurface,
-        Self::FanoutExpressionSurface,
-        Self::ImageSurface,
+        Self::ContinueAsSeedHostEnvironment,
+        Self::TriggerRegistryHostEnvironment,
+        Self::SyntaxTextHostEnvironment,
+        Self::IntegerRangeHostEnvironment,
+        Self::FanoutExpressionHostEnvironment,
+        Self::ImageHostEnvironment,
     ];
 
     #[allow(dead_code)]
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "baseline" => Self::Baseline,
-            "language_surface" => Self::LanguageSurface,
+            "language_host_environment" => Self::LanguageHostEnvironment,
             "async_await" => Self::AsyncAwait,
             "direct_unwrap" => Self::DirectUnwrap,
             "general_fanout" => Self::GeneralFanout,
@@ -75,21 +75,21 @@ impl Scenario {
             "projected_operations" => Self::ProjectedOperations,
             "type_system_stress" => Self::TypeSystemStress,
             "wrapped_error_paths" => Self::WrappedErrorPaths,
-            "tool_control_surface" => Self::ToolControlSurface,
+            "tool_control_host_environment" => Self::ToolControlHostEnvironment,
             "snapshot_projected_state" => Self::SnapshotProjectedState,
-            "continue_as_seed_surface" => Self::ContinueAsSeedSurface,
-            "trigger_registry_surface" => Self::TriggerRegistrySurface,
-            "syntax_text_surface" => Self::SyntaxTextSurface,
-            "integer_range_surface" => Self::IntegerRangeSurface,
-            "fanout_expression_surface" => Self::FanoutExpressionSurface,
-            "image_surface" => Self::ImageSurface,
+            "continue_as_seed_host_environment" => Self::ContinueAsSeedHostEnvironment,
+            "trigger_registry_host_environment" => Self::TriggerRegistryHostEnvironment,
+            "syntax_text_host_environment" => Self::SyntaxTextHostEnvironment,
+            "integer_range_host_environment" => Self::IntegerRangeHostEnvironment,
+            "fanout_expression_host_environment" => Self::FanoutExpressionHostEnvironment,
+            "image_host_environment" => Self::ImageHostEnvironment,
             _ => return None,
         })
     }
 
     #[allow(dead_code)]
     pub fn expected_values() -> &'static str {
-        "baseline, language_surface, async_await, direct_unwrap, general_fanout, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, trigger_registry_surface, syntax_text_surface, integer_range_surface, fanout_expression_surface, image_surface, or all"
+        "baseline, language_host_environment, async_await, direct_unwrap, general_fanout, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_host_environment, snapshot_projected_state, continue_as_seed_host_environment, trigger_registry_host_environment, syntax_text_host_environment, integer_range_host_environment, fanout_expression_host_environment, image_host_environment, or all"
     }
 }
 
@@ -97,7 +97,7 @@ impl fmt::Display for Scenario {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Baseline => "baseline",
-            Self::LanguageSurface => "language_surface",
+            Self::LanguageHostEnvironment => "language_host_environment",
             Self::AsyncAwait => "async_await",
             Self::DirectUnwrap => "direct_unwrap",
             Self::GeneralFanout => "general_fanout",
@@ -109,14 +109,14 @@ impl fmt::Display for Scenario {
             Self::ProjectedOperations => "projected_operations",
             Self::TypeSystemStress => "type_system_stress",
             Self::WrappedErrorPaths => "wrapped_error_paths",
-            Self::ToolControlSurface => "tool_control_surface",
+            Self::ToolControlHostEnvironment => "tool_control_host_environment",
             Self::SnapshotProjectedState => "snapshot_projected_state",
-            Self::ContinueAsSeedSurface => "continue_as_seed_surface",
-            Self::TriggerRegistrySurface => "trigger_registry_surface",
-            Self::SyntaxTextSurface => "syntax_text_surface",
-            Self::IntegerRangeSurface => "integer_range_surface",
-            Self::FanoutExpressionSurface => "fanout_expression_surface",
-            Self::ImageSurface => "image_surface",
+            Self::ContinueAsSeedHostEnvironment => "continue_as_seed_host_environment",
+            Self::TriggerRegistryHostEnvironment => "trigger_registry_host_environment",
+            Self::SyntaxTextHostEnvironment => "syntax_text_host_environment",
+            Self::IntegerRangeHostEnvironment => "integer_range_host_environment",
+            Self::FanoutExpressionHostEnvironment => "fanout_expression_host_environment",
+            Self::ImageHostEnvironment => "image_host_environment",
         })
     }
 }
@@ -151,7 +151,7 @@ pub fn seeded_state_for(scenario: Scenario) -> State {
     if matches!(scenario, Scenario::SnapshotProjectedState) {
         globals.insert("snap".to_string(), snapshot_projected_record());
     }
-    if matches!(scenario, Scenario::ImageSurface) {
+    if matches!(scenario, Scenario::ImageHostEnvironment) {
         globals.insert(
             "img".to_string(),
             Value::Image(ImageValue::new(
@@ -217,7 +217,7 @@ summary = format(
 submit summary
 "#
         }
-        Scenario::LanguageSurface => {
+        Scenario::LanguageHostEnvironment => {
             r#"
 source = join(history, ",")
 tokens = split(source, ",")
@@ -589,7 +589,7 @@ submit {
 }
 "#
         }
-        Scenario::ToolControlSurface => {
+        Scenario::ToolControlHostEnvironment => {
             r#"
 first = start spawn_child(task: "inspect auth", capability: "explore")
 second = start spawn_child(task: "inspect api", capability: "explore")
@@ -629,7 +629,7 @@ submit {
 }
 "#
         }
-        Scenario::ContinueAsSeedSurface => {
+        Scenario::ContinueAsSeedHostEnvironment => {
             r#"
 agent = start spawn_child(task: "inspect carry-forward", capability: "explore")
 handles = await processes.list({})?
@@ -652,7 +652,7 @@ submit {
 }
 "#
         }
-        Scenario::TriggerRegistrySurface => {
+        Scenario::TriggerRegistryHostEnvironment => {
             r#"
 process daily_digest(tick: cron.Tick) {
   finish { kind: "daily_digest", fired_at: tick.fired_at }
@@ -686,7 +686,7 @@ submit {
 }
 "#
         }
-        Scenario::SyntaxTextSurface => {
+        Scenario::SyntaxTextHostEnvironment => {
             r####"
 // Exercise parser-heavy string forms, comments, semicolon recovery, and text builtins.
 patch = r"""*** Begin Patch
@@ -720,7 +720,7 @@ submit {
 }
 "####
         }
-        Scenario::IntegerRangeSurface => {
+        Scenario::IntegerRangeHostEnvironment => {
             r#"
 items = range(-8, 9)
 forward = range(0, 10, 3)
@@ -754,7 +754,7 @@ submit {
 }
 "#
         }
-        Scenario::FanoutExpressionSurface => {
+        Scenario::FanoutExpressionHostEnvironment => {
             r#"
 left = await tools.echo({ value: "left" })
 right = await tools.echo({ value: "right" })
@@ -776,7 +776,7 @@ submit {
 }
 "#
         }
-        Scenario::ImageSurface => {
+        Scenario::ImageHostEnvironment => {
             r#"
 descriptor = to_string(img)
 metadata = {
@@ -801,13 +801,13 @@ submit {
     format!("{BENCH_PROCESS_DECLS}\n{main}")
 }
 
-pub fn benchmark_surface() -> &'static LashlangSurface {
-    static SURFACE: OnceLock<LashlangSurface> = OnceLock::new();
-    SURFACE.get_or_init(build_benchmark_surface)
+pub fn benchmark_host_environment() -> &'static LashlangHostEnvironment {
+    static SURFACE: OnceLock<LashlangHostEnvironment> = OnceLock::new();
+    SURFACE.get_or_init(build_benchmark_host_environment)
 }
 
-fn build_benchmark_surface() -> LashlangSurface {
-    let mut resources = ResourceCatalog::tool_default(["echo", "boom", "missing_tool"]);
+fn build_benchmark_host_environment() -> LashlangHostEnvironment {
+    let mut resources = LashlangHostCatalog::tool_default(["echo", "boom", "missing_tool"]);
     lashlang::add_trigger_resource_operations(&mut resources);
     resources
         .add_trigger_source_constructor(
@@ -905,13 +905,13 @@ fn build_benchmark_surface() -> LashlangSurface {
         TypeExpr::Any,
         TypeExpr::Any,
     );
-    LashlangSurface::new(resources, LashlangAbilities::all())
+    LashlangHostEnvironment::new(resources, LashlangAbilities::all())
 }
 
 pub fn linked_benchmark_program(source: &str) -> LinkedModule {
     LinkedModule::link(
         lashlang::parse(source).expect("benchmark program should parse"),
-        benchmark_surface(),
+        benchmark_host_environment(),
     )
     .expect("benchmark program should link")
 }
@@ -920,7 +920,9 @@ pub fn projected_bindings(scenario: Scenario) -> ProjectedBindings {
     let mut bindings = ProjectedBindings::new();
     if !matches!(
         scenario,
-        Scenario::ProjectedValues | Scenario::ProjectedOperations | Scenario::ContinueAsSeedSurface
+        Scenario::ProjectedValues
+            | Scenario::ProjectedOperations
+            | Scenario::ContinueAsSeedHostEnvironment
     ) {
         return bindings;
     }
@@ -935,7 +937,7 @@ pub fn projected_bindings(scenario: Scenario) -> ProjectedBindings {
                 ProjectedValue::scalar("docs", projected_docs_record()),
             );
         }
-        Scenario::ProjectedOperations | Scenario::ContinueAsSeedSurface => {
+        Scenario::ProjectedOperations | Scenario::ContinueAsSeedHostEnvironment => {
             bindings.insert(
                 "proj",
                 ProjectedValue::scalar("proj", projected_operations_record()),
@@ -1118,7 +1120,7 @@ fn slice_string(text: &str, start: Option<isize>, end: Option<isize>) -> String 
     chars[start..end].iter().collect()
 }
 
-impl ProjectedHostValue for ProjectedList {
+impl ProjectedHostDescriptor for ProjectedList {
     fn type_name(&self) -> &str {
         "list"
     }
@@ -1218,7 +1220,7 @@ impl ProjectedText {
     }
 }
 
-impl ProjectedHostValue for ProjectedText {
+impl ProjectedHostDescriptor for ProjectedText {
     fn type_name(&self) -> &str {
         "string"
     }
@@ -1421,7 +1423,7 @@ fn bench_resource_call(
     args: &Record,
 ) -> Result<Value, ExecutionHostError> {
     let host_operation = match &operation.receiver {
-        Value::Resource(receiver) => benchmark_surface()
+        Value::Resource(receiver) => benchmark_host_environment()
             .resources
             .resolve_module_operation(
                 &receiver.resource_type,
@@ -1505,7 +1507,7 @@ fn trigger_register_record(args: &Record) -> Value {
         .get("source")
         .cloned()
         .and_then(|source| serde_json::to_value(source).ok())
-        .and_then(|source| HostValue::decode(&source).ok())
+        .and_then(|source| HostDescriptor::decode(&source).ok())
         .map(|source| source.source_type)
         .unwrap_or_else(|| "unknown.Source".to_string());
     let process_name = args
@@ -1576,7 +1578,7 @@ fn trigger_inputs_value(input_name: &str) -> Value {
 }
 
 fn trigger_source_value(source_type: &str) -> Value {
-    let encoded = HostValue::encode(source_type, serde_json::json!({}))
+    let encoded = HostDescriptor::encode(source_type, serde_json::json!({}))
         .expect("benchmark trigger source should encode");
     from_json(encoded)
 }

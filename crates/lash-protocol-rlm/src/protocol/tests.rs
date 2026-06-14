@@ -6,7 +6,7 @@ fn rlm_execution_section_default_prompt_is_golden() {
     insta::with_settings!({ snapshot_path => "../snapshots" }, {
         insta::assert_snapshot!(
             "rlm_execution_section_default",
-            rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface())
+            rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &full_prompt_host_environment())
         );
     });
 }
@@ -16,34 +16,35 @@ fn rlm_execution_section_no_images_prompt_is_golden() {
     insta::with_settings!({ snapshot_path => "../snapshots" }, {
         insta::assert_snapshot!(
             "rlm_execution_section_no_images",
-            rlm_execution_section_for_surface(
+            rlm_execution_section_for_host_environment(
                 RlmPromptFeatures {
                     images: false,
                     ..RlmPromptFeatures::default()
                 },
-                &full_prompt_surface()
+                &full_prompt_host_environment()
             )
         );
     });
 }
 
-fn prompt_surface(
-    resources: lashlang::ResourceCatalog,
+fn prompt_host_environment(
+    resources: lashlang::LashlangHostCatalog,
     abilities: lashlang::LashlangAbilities,
-) -> lashlang::LashlangSurface {
-    lashlang::LashlangSurface::new(resources, abilities)
+) -> lashlang::LashlangHostEnvironment {
+    lashlang::LashlangHostEnvironment::new(resources, abilities)
 }
 
-fn prompt_surface_with_features(
-    resources: lashlang::ResourceCatalog,
+fn prompt_host_environment_with_features(
+    resources: lashlang::LashlangHostCatalog,
     abilities: lashlang::LashlangAbilities,
     language_features: lashlang::LashlangLanguageFeatures,
-) -> lashlang::LashlangSurface {
-    lashlang::LashlangSurface::new(resources, abilities).with_language_features(language_features)
+) -> lashlang::LashlangHostEnvironment {
+    lashlang::LashlangHostEnvironment::new(resources, abilities)
+        .with_language_features(language_features)
 }
 
-fn tool_resources() -> lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn tool_resources() -> lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources.add_module_operation(
         ["web"],
         "Web",
@@ -71,14 +72,15 @@ fn tool_resources() -> lashlang::ResourceCatalog {
     resources
 }
 
-fn full_prompt_surface() -> lashlang::LashlangSurface {
-    prompt_surface(tool_resources(), lashlang::LashlangAbilities::all())
+fn full_prompt_host_environment() -> lashlang::LashlangHostEnvironment {
+    prompt_host_environment(tool_resources(), lashlang::LashlangAbilities::all())
 }
 
 #[test]
 fn execution_section_hides_processes_when_disabled() {
-    let surface = prompt_surface(tool_resources(), lashlang::LashlangAbilities::default());
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let surface = prompt_host_environment(tool_resources(), lashlang::LashlangAbilities::default());
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("process name"));
     assert!(!section.contains("start name"));
@@ -89,20 +91,23 @@ fn execution_section_hides_processes_when_disabled() {
 
 #[test]
 fn execution_section_hides_label_annotations_when_disabled() {
-    let section =
-        rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
+    let section = rlm_execution_section_for_host_environment(
+        RlmPromptFeatures::default(),
+        &full_prompt_host_environment(),
+    );
 
     assert!(!section.contains("@label"));
 }
 
 #[test]
 fn execution_section_documents_static_label_annotations_when_enabled() {
-    let surface = prompt_surface_with_features(
+    let surface = prompt_host_environment_with_features(
         tool_resources(),
         lashlang::LashlangAbilities::all(),
         lashlang::LashlangLanguageFeatures::default().with_label_annotations(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(section.contains("@label(title: \"Label\")"));
     assert!(section.contains("@label(title: \"Label\", description: \"Details\")"));
@@ -117,11 +122,12 @@ fn execution_section_documents_static_label_annotations_when_enabled() {
 
 #[test]
 fn execution_section_hides_sleep_and_signals_independently() {
-    let surface = prompt_surface(
+    let surface = prompt_host_environment(
         tool_resources(),
         lashlang::LashlangAbilities::default().with_processes(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(section.contains("process name"));
     assert!(!section.contains("sleep for"));
@@ -131,13 +137,14 @@ fn execution_section_hides_sleep_and_signals_independently() {
 
 #[test]
 fn execution_section_documents_foreground_signal_run_when_enabled() {
-    let surface = prompt_surface(
+    let surface = prompt_host_environment(
         tool_resources(),
         lashlang::LashlangAbilities::default()
             .with_processes()
             .with_process_signals(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     // Sending (`signal_run`) is documented as foreground-legal; receiving
     // (`wait_signal`) stays process-only.
@@ -149,11 +156,12 @@ fn execution_section_documents_foreground_signal_run_when_enabled() {
 
 #[test]
 fn execution_section_documents_unwrapped_process_await_for_finished_values() {
-    let surface = prompt_surface(
+    let surface = prompt_host_environment(
         tool_resources(),
         lashlang::LashlangAbilities::default().with_processes(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(section.contains("`await handle` waits and returns a result wrapper"));
     assert!(section.contains("`result = (await handle)?`"));
@@ -163,11 +171,12 @@ fn execution_section_documents_unwrapped_process_await_for_finished_values() {
 
 #[test]
 fn execution_section_shows_sleep_without_processes() {
-    let surface = prompt_surface(
+    let surface = prompt_host_environment(
         tool_resources(),
         lashlang::LashlangAbilities::default().with_sleep(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(section.contains("sleep for"));
     assert!(!section.contains("process name"));
@@ -175,14 +184,15 @@ fn execution_section_shows_sleep_without_processes() {
 
 #[test]
 fn execution_section_hides_trigger_registry_language_when_disabled() {
-    let surface = prompt_surface(
+    let surface = prompt_host_environment(
         tool_resources(),
         lashlang::LashlangAbilities::default()
             .with_processes()
             .with_sleep()
             .with_process_signals(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("Trigger registry"));
     assert!(!section.contains("matching trigger occurrences"));
@@ -190,11 +200,12 @@ fn execution_section_hides_trigger_registry_language_when_disabled() {
 
 #[test]
 fn execution_section_hides_trigger_registry_language_without_processes() {
-    let surface = prompt_surface(
+    let surface = prompt_host_environment(
         tool_resources(),
         lashlang::LashlangAbilities::default().with_triggers(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("Trigger registry"));
     assert!(!section.contains("triggers.register"));
@@ -202,7 +213,7 @@ fn execution_section_hides_trigger_registry_language_without_processes() {
 
 #[test]
 fn execution_section_lists_typed_operations_constructors_and_trigger_sources() {
-    let mut resources = lashlang::ResourceCatalog::new();
+    let mut resources = lashlang::LashlangHostCatalog::new();
     lashlang::add_trigger_resource_operations(&mut resources);
     resources
         .add_trigger_source_constructor(
@@ -230,14 +241,15 @@ fn execution_section_lists_typed_operations_constructors_and_trigger_sources() {
             .expect("valid timer tick type"),
         )
         .expect("valid timer trigger source");
-    let surface = prompt_surface(
+    let surface = prompt_host_environment(
         resources,
         lashlang::LashlangAbilities::default()
             .with_processes()
             .with_triggers(),
     );
 
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(section.contains("### Host Surface"));
     assert!(section.contains("`await triggers.register("));
@@ -256,11 +268,12 @@ fn execution_section_lists_typed_operations_constructors_and_trigger_sources() {
 
 #[test]
 fn execution_section_hides_module_examples_without_module_operations() {
-    let surface = prompt_surface(
-        lashlang::ResourceCatalog::new(),
+    let surface = prompt_host_environment(
+        lashlang::LashlangHostCatalog::new(),
         lashlang::LashlangAbilities::default(),
     );
-    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+    let section =
+        rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("await tools."));
     assert!(!section.contains("Showcased Tools"));
@@ -270,8 +283,10 @@ fn execution_section_hides_module_examples_without_module_operations() {
 
 #[test]
 fn execution_section_does_not_advertise_unregistered_peer_capability() {
-    let section =
-        rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
+    let section = rlm_execution_section_for_host_environment(
+        RlmPromptFeatures::default(),
+        &full_prompt_host_environment(),
+    );
 
     assert!(!section.contains("capability: \"peer\""));
     assert!(!section.contains("`peer`"));
@@ -279,8 +294,10 @@ fn execution_section_does_not_advertise_unregistered_peer_capability() {
 
 #[test]
 fn execution_section_keeps_tool_specific_examples_out_of_core_prompt() {
-    let section =
-        rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
+    let section = rlm_execution_section_for_host_environment(
+        RlmPromptFeatures::default(),
+        &full_prompt_host_environment(),
+    );
 
     for tool_name in [
         "read_file",
@@ -300,12 +317,12 @@ fn execution_section_keeps_tool_specific_examples_out_of_core_prompt() {
 
 #[test]
 fn execution_section_can_disable_image_guidance() {
-    let section = rlm_execution_section_for_surface(
+    let section = rlm_execution_section_for_host_environment(
         RlmPromptFeatures {
             images: false,
             ..RlmPromptFeatures::default()
         },
-        &full_prompt_surface(),
+        &full_prompt_host_environment(),
     );
 
     assert!(!section.contains("Image"));
@@ -318,8 +335,10 @@ fn execution_section_can_disable_image_guidance() {
 
 #[test]
 fn execution_section_mentions_while_and_bounded_loop_guidance() {
-    let section =
-        rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
+    let section = rlm_execution_section_for_host_environment(
+        RlmPromptFeatures::default(),
+        &full_prompt_host_environment(),
+    );
 
     assert!(section.contains("statement `if`/`for`/`while`"));
     assert!(section.contains("Prefer bounded `while` loops where possible"));

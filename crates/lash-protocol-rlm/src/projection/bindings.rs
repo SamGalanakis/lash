@@ -9,7 +9,7 @@ use lash_core::{
 
 pub(crate) const RLM_TURN_INPUT_PLUGIN_ID: &str = "rlm";
 use lashlang::{
-    ProjectedBindingError, ProjectedBindings, ProjectedHostValue, ProjectedValue,
+    ProjectedBindingError, ProjectedBindings, ProjectedHostDescriptor, ProjectedValue,
     Value as FlowValue,
 };
 
@@ -63,12 +63,12 @@ pub trait ProjectionResolver: Send + Sync {
     async fn resolve_projection(
         &self,
         reference: &ProjectionRef,
-    ) -> Result<Arc<dyn ProjectedHostValue>, ProjectionResolveError>;
+    ) -> Result<Arc<dyn ProjectedHostDescriptor>, ProjectionResolveError>;
 }
 
 #[derive(Clone, Default)]
 pub struct ProjectionRegistry {
-    memory: Arc<std::sync::RwLock<BTreeMap<String, Arc<dyn ProjectedHostValue>>>>,
+    memory: Arc<std::sync::RwLock<BTreeMap<String, Arc<dyn ProjectedHostDescriptor>>>>,
 }
 
 impl ProjectionRegistry {
@@ -76,7 +76,7 @@ impl ProjectionRegistry {
         Self::default()
     }
 
-    pub fn register_memory(&self, value: Arc<dyn ProjectedHostValue>) -> ProjectionRef {
+    pub fn register_memory(&self, value: Arc<dyn ProjectedHostDescriptor>) -> ProjectionRef {
         let key = uuid::Uuid::new_v4().to_string();
         self.memory
             .write()
@@ -91,7 +91,7 @@ impl ProjectionResolver for ProjectionRegistry {
     async fn resolve_projection(
         &self,
         reference: &ProjectionRef,
-    ) -> Result<Arc<dyn ProjectedHostValue>, ProjectionResolveError> {
+    ) -> Result<Arc<dyn ProjectedHostDescriptor>, ProjectionResolveError> {
         if reference.kind != "memory" {
             return Err(ProjectionResolveError::unavailable(reference));
         }
@@ -413,7 +413,7 @@ mod tests {
 
     struct TestProjectedValue;
 
-    impl ProjectedHostValue for TestProjectedValue {
+    impl ProjectedHostDescriptor for TestProjectedValue {
         fn type_name(&self) -> &str {
             "string"
         }

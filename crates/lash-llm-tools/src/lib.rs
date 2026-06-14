@@ -149,7 +149,7 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
         ],
         ToolScheduling::Parallel,
     )
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["llm"], "query"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["llm"], "query"))
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
 }
 

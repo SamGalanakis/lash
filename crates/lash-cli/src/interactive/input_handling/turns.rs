@@ -498,7 +498,7 @@ async fn handle_enter_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
             return Ok(false);
         };
         match session
-            .control()
+            .admin()
             .injection()
             .inject_turn_inputs(vec![injection])
             .await

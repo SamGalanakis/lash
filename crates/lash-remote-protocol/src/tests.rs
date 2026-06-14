@@ -434,7 +434,7 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         argument_projection: None,
         scheduling: None,
         retry_policy: None,
-        agent_surface: Some(RemoteToolAgentSurface::new([module], operation)),
+        lashlang_binding: Some(RemoteLashlangToolBinding::new([module], operation)),
     }
 }
 

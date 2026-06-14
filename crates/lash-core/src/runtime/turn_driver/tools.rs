@@ -72,7 +72,7 @@ impl RuntimeTurnDriver<'_> {
                 Arc::new(crate::ChronologicalProjection::default()),
             )
             .map_err(|err| {
-                RuntimeEffectControllerError::new("tool_surface_resolution_failed", err.to_string())
+                RuntimeEffectControllerError::new("tool_catalog_resolution_failed", err.to_string())
             })?;
         let mut results = Vec::with_capacity(calls.len());
         for (index, call) in calls.into_iter().enumerate() {
@@ -153,7 +153,7 @@ impl RuntimeTurnDriver<'_> {
                 let _ = tool_event_forwarder.await;
                 let _ = turn_event_forwarder.await;
                 return Err(crate::RuntimeEffectControllerError::new(
-                    "tool_surface_resolution_failed",
+                    "tool_catalog_resolution_failed",
                     err.to_string(),
                 ));
             }

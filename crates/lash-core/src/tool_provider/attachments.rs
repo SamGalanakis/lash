@@ -3,11 +3,11 @@ use std::sync::Arc;
 use crate::{AttachmentCreateMeta, AttachmentRef, AttachmentStore, AttachmentStoreError};
 
 #[derive(Clone)]
-pub struct ToolAttachmentControl {
+pub struct ToolAttachmentClient {
     pub(super) store: Arc<dyn AttachmentStore>,
 }
 
-impl ToolAttachmentControl {
+impl ToolAttachmentClient {
     pub async fn put(
         &self,
         data: Vec<u8>,

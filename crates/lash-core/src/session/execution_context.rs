@@ -6,38 +6,39 @@ use tokio_util::sync::CancellationToken;
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{TurnActivity, TurnActivityId, TurnEvent};
 
-pub(crate) fn lashlang_surface_from_tool_surface(
-    surface: &crate::ToolSurface,
+pub(crate) fn lashlang_host_environment_from_tool_catalog(
+    catalog: &crate::ToolCatalog,
     abilities: lashlang::LashlangAbilities,
     language_features: lashlang::LashlangLanguageFeatures,
-    host_resources: lashlang::ResourceCatalog,
-) -> lashlang::LashlangSurface {
-    let mut resources = lashlang_resources_from_tool_surface(surface);
+    host_resources: lashlang::LashlangHostCatalog,
+) -> lashlang::LashlangHostEnvironment {
+    let mut resources = lashlang_resources_from_tool_catalog(catalog);
     resources.extend(host_resources);
-    lashlang::LashlangSurface::new(resources, abilities).with_language_features(language_features)
+    lashlang::LashlangHostEnvironment::new(resources, abilities)
+        .with_language_features(language_features)
 }
 
-pub(crate) fn lashlang_resources_from_tool_surface(
-    surface: &crate::ToolSurface,
-) -> lashlang::ResourceCatalog {
-    let mut catalog = lashlang::ResourceCatalog::new();
-    for entry in surface.tools.iter() {
+pub(crate) fn lashlang_resources_from_tool_catalog(
+    catalog: &crate::ToolCatalog,
+) -> lashlang::LashlangHostCatalog {
+    let mut host_catalog = lashlang::LashlangHostCatalog::new();
+    for entry in catalog.tools.iter() {
         if entry.availability.is_callable() {
-            let agent_surface = entry
+            let lashlang_binding = entry
                 .manifest
-                .agent_surface
+                .lashlang_binding
                 .executable_for(&entry.manifest.name);
-            catalog.add_module_operation(
-                agent_surface.module_path.iter().map(String::as_str),
-                agent_surface.authority_type.clone(),
-                agent_surface.operation.clone(),
+            host_catalog.add_module_operation(
+                lashlang_binding.module_path.iter().map(String::as_str),
+                lashlang_binding.authority_type.clone(),
+                lashlang_binding.operation.clone(),
                 entry.manifest.name.clone(),
                 lashlang::TypeExpr::Any,
                 lashlang::TypeExpr::Any,
             );
         }
     }
-    catalog
+    host_catalog
 }
 
 #[derive(Clone)]
@@ -46,7 +47,7 @@ pub struct RuntimeExecutionContext<'run> {
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
     lashlang_abilities: lashlang::LashlangAbilities,
     lashlang_language_features: lashlang::LashlangLanguageFeatures,
-    lashlang_surface: lashlang::LashlangSurface,
+    lashlang_host_environment: lashlang::LashlangHostEnvironment,
     lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
@@ -103,8 +104,8 @@ impl<'run> RuntimeExecutionContext<'run> {
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
     ) -> Self {
-        let lashlang_surface = lashlang_surface_from_tool_surface(
-            &dispatch.surface,
+        let lashlang_host_environment = lashlang_host_environment_from_tool_catalog(
+            &dispatch.tool_catalog,
             lashlang_abilities,
             lashlang_language_features,
             dispatch.plugins.lashlang_resources(),
@@ -114,7 +115,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             dispatch,
             lashlang_abilities,
             lashlang_language_features,
-            lashlang_surface,
+            lashlang_host_environment,
             lashlang_artifact_store,
             attachment_store,
             chronological_projection,
@@ -313,7 +314,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         receiver: &lashlang::ResourceHandle,
         operation: &str,
     ) -> Result<String, String> {
-        self.lashlang_surface
+        self.lashlang_host_environment
             .resources
             .resolve_module_operation(&receiver.resource_type, &receiver.alias, operation)
             .map(|binding| binding.host_operation.clone())
@@ -341,10 +342,10 @@ impl<'run> RuntimeExecutionContext<'run> {
                     start.module_ref, start.process_name
                 )
             })?;
-        if artifact.required_surface_ref != start.required_surface_ref {
+        if artifact.host_requirements_ref != start.host_requirements_ref {
             return Err(format!(
-                "lashlang module artifact `{}` required surface mismatch: process requested {}, artifact has {}",
-                start.module_ref, start.required_surface_ref, artifact.required_surface_ref
+                "lashlang module artifact `{}` host requirements mismatch: process requested {}, artifact has {}",
+                start.module_ref, start.host_requirements_ref, artifact.host_requirements_ref
             ));
         }
         if artifact.process_ref(&start.process_name) != Some(&start.process_ref) {
@@ -370,7 +371,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             crate::ProcessInput::LashlangProcess {
                 module_ref: start.module_ref,
                 process_ref: start.process_ref,
-                required_surface_ref: start.required_surface_ref,
+                host_requirements_ref: start.host_requirements_ref,
                 process_name: start.process_name,
                 args,
             },
@@ -383,8 +384,8 @@ impl<'run> RuntimeExecutionContext<'run> {
         Ok((registration, display_name))
     }
 
-    pub fn lashlang_surface(&self) -> &lashlang::LashlangSurface {
-        &self.lashlang_surface
+    pub fn lashlang_host_environment(&self) -> &lashlang::LashlangHostEnvironment {
+        &self.lashlang_host_environment
     }
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
@@ -399,7 +400,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self,
         program: lashlang::Program,
     ) -> Result<lashlang::LinkedModule, String> {
-        lashlang::LinkedModule::link(program, self.lashlang_surface())
+        lashlang::LinkedModule::link(program, self.lashlang_host_environment())
             .map_err(|err| err.to_string())
     }
 
@@ -484,7 +485,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 source,
                 event_ty: validation.event_ty,
                 module_ref: request.target.module_ref,
-                required_surface_ref: request.target.required_surface_ref,
+                host_requirements_ref: request.target.host_requirements_ref,
                 process_ref: request.target.process_ref,
                 process_name: request.target.process_name,
                 input_template: validation.inputs,
@@ -688,7 +689,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                     invocation,
                     crate::RuntimeEffectCommand::process(command),
                 ),
-                crate::RuntimeEffectLocalExecutor::process_control(registry),
+                crate::RuntimeEffectLocalExecutor::processes(registry),
             )
             .await?;
         match outcome.into_process()? {
@@ -725,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_argument_projection_policy_resolves_from_active_surface_and_defaults_unknown() {
+    fn tool_argument_projection_policy_resolves_from_active_catalog_and_defaults_unknown() {
         let tool = crate::ToolDefinition::raw(
             "tool:seedy",
             "seedy",
@@ -743,7 +744,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: Arc::new(NoopTools),
-            surface: Arc::new(crate::ToolSurface::from_tools(
+            tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
                 vec![tool.manifest()],
                 std::collections::BTreeMap::new(),
             )),
@@ -810,7 +811,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: Arc::new(NoopTools),
-            surface: Arc::new(crate::ToolSurface::from_tools(
+            tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
                 vec![tool.manifest()],
                 std::collections::BTreeMap::new(),
             )),
@@ -869,7 +870,7 @@ mod tests {
             .prepare_lashlang_process_start(lashlang::ProcessStart {
                 module_ref: linked.module_ref.clone(),
                 process_ref,
-                required_surface_ref: linked.required_surface_ref.clone(),
+                host_requirements_ref: linked.host_requirements_ref.clone(),
                 process_name: "scan".to_string(),
                 args: input,
             })
@@ -894,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn lashlang_surface_reflects_host_abilities() {
+    fn lashlang_host_environment_reflects_host_abilities() {
         let tool = crate::ToolDefinition::raw(
             "tool:alpha",
             "alpha",
@@ -909,7 +910,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: Arc::new(NoopTools),
-            surface: Arc::new(crate::ToolSurface::from_tools(
+            tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
                 vec![tool.manifest()],
                 std::collections::BTreeMap::new(),
             )),
@@ -953,15 +954,15 @@ mod tests {
             crate::TurnContext::default(),
         );
 
-        let surface = ctx.lashlang_surface();
+        let environment = ctx.lashlang_host_environment();
 
-        assert!(std::ptr::eq(surface, ctx.lashlang_surface()));
-        assert!(surface.abilities.processes);
-        assert!(surface.abilities.sleep);
-        assert!(surface.abilities.process_signals);
-        assert!(!surface.abilities.triggers);
+        assert!(std::ptr::eq(environment, ctx.lashlang_host_environment()));
+        assert!(environment.abilities.processes);
+        assert!(environment.abilities.sleep);
+        assert!(environment.abilities.process_signals);
+        assert!(!environment.abilities.triggers);
         assert!(
-            surface
+            environment
                 .resources
                 .resolve_operation("Tools", "alpha")
                 .is_some()
@@ -969,8 +970,8 @@ mod tests {
     }
 
     #[test]
-    fn lashlang_surface_reflects_host_resource_contributions() {
-        let mut resources = lashlang::ResourceCatalog::new();
+    fn lashlang_host_environment_reflects_host_resource_contributions() {
+        let mut resources = lashlang::LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["clock", "Alarm"],
@@ -1001,7 +1002,7 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: Arc::new(NoopTools),
-            surface: Arc::new(crate::ToolSurface::from_tools(
+            tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
                 Vec::new(),
                 std::collections::BTreeMap::new(),
             )),
@@ -1044,16 +1045,16 @@ mod tests {
             crate::TurnContext::default(),
         );
 
-        let surface = ctx.lashlang_surface();
+        let host_environment = ctx.lashlang_host_environment();
 
         assert!(
-            surface
+            host_environment
                 .resources
                 .resolve_value_constructor(&["clock", "Alarm"])
                 .is_some()
         );
         assert!(
-            surface
+            host_environment
                 .resources
                 .resolve_trigger_source("clock.Alarm")
                 .is_some()
@@ -1074,7 +1075,7 @@ mod tests {
                 "#,
             )
             .expect("parse trigger registry module"),
-            surface,
+            host_environment,
         )
         .expect("host resource contribution should be linkable");
     }

@@ -3,12 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::artifact::{ModuleArtifact, ModuleRef, ProcessRef, RequiredSurfaceRef};
+use crate::artifact::{HostRequirementsRef, ModuleArtifact, ModuleRef, ProcessRef};
 use crate::ast::{AstString, Expr, TypeExpr, TypeField, format_type_expr};
-use crate::linker::{NamedDataType, ResourceCatalog};
+use crate::linker::{LashlangHostCatalog, NamedDataType};
 use crate::runtime::{
-    LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY, LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY,
-    LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_REQUIRED_SURFACE_REF_KEY,
+    LASH_HOST_DESCRIPTOR_TYPE_KEY, LASH_HOST_DESCRIPTOR_VALUE_KEY, LASH_HOST_REQUIREMENTS_REF_KEY,
+    LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY,
 };
 
 const TRIGGERS_RESOURCE_TYPE: &str = "Triggers";
@@ -100,7 +100,7 @@ pub fn is_trigger_resource_type(resource_type: &str) -> bool {
     resource_type == TRIGGERS_RESOURCE_TYPE
 }
 
-pub fn add_trigger_resource_operations(catalog: &mut ResourceCatalog) {
+pub fn add_trigger_resource_operations(catalog: &mut LashlangHostCatalog) {
     for operation in [
         TriggerHostOperation::Register,
         TriggerHostOperation::List,
@@ -200,7 +200,7 @@ pub enum TriggerCallShapeError {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerRegistrationRequest {
-    pub source: HostValue,
+    pub source: HostDescriptor,
     pub target: TriggerTargetIdentity,
     pub inputs: TriggerInputTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,7 +211,7 @@ impl TriggerRegistrationRequest {
     pub fn decode(request: &serde_json::Value) -> Result<Self, TriggerRequestDecodeError> {
         let operation = TriggerHostOperation::Register;
         Ok(Self {
-            source: HostValue::decode(required_json_field(request, "source", operation)?)
+            source: HostDescriptor::decode(required_json_field(request, "source", operation)?)
                 .map_err(TriggerRequestDecodeError::from)?,
             target: TriggerTargetIdentity::decode(
                 required_json_field(request, "target", operation)?,
@@ -423,12 +423,12 @@ impl TriggerCancelRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HostValue {
+pub struct HostDescriptor {
     pub source_type: String,
     pub value: serde_json::Value,
 }
 
-impl HostValue {
+impl HostDescriptor {
     pub fn new(source_type: impl Into<String>, value: serde_json::Value) -> Self {
         Self {
             source_type: source_type.into(),
@@ -436,26 +436,26 @@ impl HostValue {
         }
     }
 
-    pub fn decode(source: &serde_json::Value) -> Result<Self, HostValueError> {
+    pub fn decode(source: &serde_json::Value) -> Result<Self, HostDescriptorError> {
         let source_type = source
-            .get(LASH_HOST_VALUE_TYPE_KEY)
+            .get(LASH_HOST_DESCRIPTOR_TYPE_KEY)
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned)
-            .ok_or(HostValueError::InvalidHostValue)?;
+            .ok_or(HostDescriptorError::InvalidHostDescriptor)?;
         let value = source
-            .get(LASH_HOST_VALUE_KEY)
+            .get(LASH_HOST_DESCRIPTOR_VALUE_KEY)
             .cloned()
-            .ok_or(HostValueError::InvalidHostValue)?;
+            .ok_or(HostDescriptorError::InvalidHostDescriptor)?;
         Ok(Self { source_type, value })
     }
 
     pub fn encode(
         source_type: impl Into<String>,
         value: impl Serialize,
-    ) -> Result<serde_json::Value, HostValueError> {
+    ) -> Result<serde_json::Value, HostDescriptorError> {
         let source_type = source_type.into();
         let value =
-            serde_json::to_value(value).map_err(|err| HostValueError::MalformedPayload {
+            serde_json::to_value(value).map_err(|err| HostDescriptorError::MalformedPayload {
                 source_type: source_type.clone(),
                 message: err.to_string(),
             })?;
@@ -464,26 +464,26 @@ impl HostValue {
 
     pub fn decode_as<T: serde::de::DeserializeOwned>(
         &self,
-        resources: &ResourceCatalog,
-    ) -> Result<T, HostValueError> {
-        resources.decode_host_value_as(&self.source_type, self.value.clone())
+        resources: &LashlangHostCatalog,
+    ) -> Result<T, HostDescriptorError> {
+        resources.decode_host_descriptor_as(&self.source_type, self.value.clone())
     }
 
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
-            LASH_HOST_VALUE_TYPE_KEY: self.source_type,
-            LASH_HOST_VALUE_KEY: self.value,
+            LASH_HOST_DESCRIPTOR_TYPE_KEY: self.source_type,
+            LASH_HOST_DESCRIPTOR_VALUE_KEY: self.value,
         })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum HostValueError {
-    #[error("host value must be a host value constructor result")]
-    InvalidHostValue,
-    #[error("host value `{source_type}` is not declared in the resource catalog")]
+pub enum HostDescriptorError {
+    #[error("host descriptor must be a host descriptor constructor result")]
+    InvalidHostDescriptor,
+    #[error("host descriptor `{source_type}` is not declared in the host catalog")]
     UnknownSourceType { source_type: String },
-    #[error("host value `{source_type}` payload is invalid: {message}")]
+    #[error("host descriptor `{source_type}` payload is invalid: {message}")]
     MalformedPayload {
         source_type: String,
         message: String,
@@ -493,7 +493,7 @@ pub enum HostValueError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerTargetIdentity {
     pub module_ref: ModuleRef,
-    pub required_surface_ref: RequiredSurfaceRef,
+    pub host_requirements_ref: HostRequirementsRef,
     pub process_ref: ProcessRef,
     pub process_name: String,
 }
@@ -515,7 +515,7 @@ impl TriggerTargetIdentity {
         }
         Ok(Self {
             module_ref: decode_json_field(value, LASH_MODULE_REF_KEY, label)?,
-            required_surface_ref: decode_json_field(value, LASH_REQUIRED_SURFACE_REF_KEY, label)?,
+            host_requirements_ref: decode_json_field(value, LASH_HOST_REQUIREMENTS_REF_KEY, label)?,
             process_ref: decode_json_field(value, LASH_PROCESS_REF_KEY, label)?,
             process_name: value
                 .get(LASH_PROCESS_NAME_KEY)
@@ -531,19 +531,19 @@ impl TriggerTargetIdentity {
     pub fn matches(
         &self,
         module_ref: &ModuleRef,
-        required_surface_ref: &RequiredSurfaceRef,
+        host_requirements_ref: &HostRequirementsRef,
         process_ref: &ProcessRef,
         process_name: &str,
     ) -> bool {
         self.module_ref == *module_ref
-            && self.required_surface_ref == *required_surface_ref
+            && self.host_requirements_ref == *host_requirements_ref
             && self.process_ref == *process_ref
             && self.process_name == process_name
     }
 }
 
 pub fn event_type_for_source(
-    resources: &ResourceCatalog,
+    resources: &LashlangHostCatalog,
     source_type: &str,
 ) -> Result<NamedDataType, TriggerRequestDecodeError> {
     resources
@@ -567,25 +567,25 @@ pub enum TriggerRequestDecodeError {
         field: &'static str,
         message: String,
     },
-    #[error("trigger source must be a host value constructor result")]
+    #[error("trigger source must be a host descriptor constructor result")]
     InvalidSource,
     #[error("{label} {message}")]
     InvalidTarget {
         label: &'static str,
         message: String,
     },
-    #[error("host value `{source_type}` is not registered as a trigger source")]
+    #[error("host descriptor `{source_type}` is not registered as a trigger source")]
     UnknownSourceType { source_type: String },
 }
 
-impl From<HostValueError> for TriggerRequestDecodeError {
-    fn from(err: HostValueError) -> Self {
+impl From<HostDescriptorError> for TriggerRequestDecodeError {
+    fn from(err: HostDescriptorError) -> Self {
         match err {
-            HostValueError::InvalidHostValue => Self::InvalidSource,
-            HostValueError::UnknownSourceType { source_type } => {
+            HostDescriptorError::InvalidHostDescriptor => Self::InvalidSource,
+            HostDescriptorError::UnknownSourceType { source_type } => {
                 Self::UnknownSourceType { source_type }
             }
-            HostValueError::MalformedPayload { message, .. } => Self::InvalidField {
+            HostDescriptorError::MalformedPayload { message, .. } => Self::InvalidField {
                 operation: TriggerHostOperation::Register.host_operation(),
                 field: "source",
                 message,
@@ -636,11 +636,11 @@ pub fn validate_trigger_target(
     inputs: &TriggerInputTemplate,
     artifact: &ModuleArtifact,
 ) -> Result<TriggerTargetValidation, TriggerTargetValidationError> {
-    if artifact.required_surface_ref != target.required_surface_ref {
-        return Err(TriggerTargetValidationError::RequiredSurfaceMismatch {
+    if artifact.host_requirements_ref != target.host_requirements_ref {
+        return Err(TriggerTargetValidationError::HostRequirementsMismatch {
             process_name: target.process_name.clone(),
-            target_surface: target.required_surface_ref.to_string(),
-            artifact_surface: artifact.required_surface_ref.to_string(),
+            target_host_requirements: target.host_requirements_ref.to_string(),
+            artifact_host_requirements: artifact.host_requirements_ref.to_string(),
         });
     }
     let Some(exported_process_name) = artifact.process_name_for_ref(&target.process_ref) else {
@@ -685,7 +685,7 @@ pub fn validate_trigger_target(
     let event_ty = resolve_type_refs(
         &event_ty.to_ref_ty(),
         &aliases,
-        &artifact.required_surface.resources,
+        &artifact.host_requirements.resources,
     );
     for param in &process.params {
         let Some(input) = inputs.get(param.name.as_str()) else {
@@ -694,7 +694,8 @@ pub fn validate_trigger_target(
                 input: param.name.to_string(),
             });
         };
-        let input_ty = resolve_type_refs(&param.ty, &aliases, &artifact.required_surface.resources);
+        let input_ty =
+            resolve_type_refs(&param.ty, &aliases, &artifact.host_requirements.resources);
         match input {
             TriggerInputBinding::Event => {
                 if !is_resolved_type_assignable(&event_ty, &input_ty) {
@@ -710,7 +711,7 @@ pub fn validate_trigger_target(
                 validate_fixed_input_value(
                     value,
                     &input_ty,
-                    &artifact.required_surface.resources,
+                    &artifact.host_requirements.resources,
                     target.process_name.as_str(),
                     param.name.as_str(),
                 )?;
@@ -726,7 +727,7 @@ pub fn validate_trigger_target(
 fn validate_fixed_input_value(
     value: &serde_json::Value,
     input_ty: &TypeExpr,
-    resources: &ResourceCatalog,
+    resources: &LashlangHostCatalog,
     process_name: &str,
     input_name: &str,
 ) -> Result<(), TriggerTargetValidationError> {
@@ -756,12 +757,12 @@ fn validate_fixed_input_value(
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum TriggerTargetValidationError {
     #[error(
-        "trigger target `{process_name}` required surface mismatch: target has {target_surface}, artifact has {artifact_surface}"
+        "trigger target `{process_name}` host requirements mismatch: target has {target_host_requirements}, artifact has {artifact_host_requirements}"
     )]
-    RequiredSurfaceMismatch {
+    HostRequirementsMismatch {
         process_name: String,
-        target_surface: String,
-        artifact_surface: String,
+        target_host_requirements: String,
+        artifact_host_requirements: String,
     },
     #[error(
         "trigger target artifact `{module_ref}` does not export process `{process_name}` as requested ref {process_ref}"
@@ -805,7 +806,7 @@ pub enum TriggerTargetValidationError {
 fn resolve_type_refs(
     ty: &TypeExpr,
     aliases: &BTreeMap<String, TypeExpr>,
-    resources: &ResourceCatalog,
+    resources: &LashlangHostCatalog,
 ) -> TypeExpr {
     resolve_type_refs_inner(ty, aliases, Some(resources), &mut BTreeSet::new())
 }
@@ -813,7 +814,7 @@ fn resolve_type_refs(
 fn resolve_type_refs_inner(
     ty: &TypeExpr,
     aliases: &BTreeMap<String, TypeExpr>,
-    resources: Option<&ResourceCatalog>,
+    resources: Option<&LashlangHostCatalog>,
     seen: &mut BTreeSet<String>,
 ) -> TypeExpr {
     match ty {
@@ -955,8 +956,8 @@ mod tests {
         tz: Option<String>,
     }
 
-    fn resources() -> ResourceCatalog {
-        let mut resources = ResourceCatalog::new();
+    fn resources() -> LashlangHostCatalog {
+        let mut resources = LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["cron", "Schedule"],
@@ -987,16 +988,17 @@ mod tests {
     }
 
     #[test]
-    fn host_value_encode_decode_and_typed_decode_round_trip() {
+    fn host_descriptor_encode_decode_and_typed_decode_round_trip() {
         let value = serde_json::json!({
             "expr": "*/10 * * * * *",
             "tz": "UTC",
         });
-        let encoded = HostValue::encode("cron.Schedule", value).expect("host value encode");
-        let decoded = HostValue::decode(&encoded).expect("host value decode");
+        let encoded =
+            HostDescriptor::encode("cron.Schedule", value).expect("host descriptor encode");
+        let decoded = HostDescriptor::decode(&encoded).expect("host descriptor decode");
         let payload: ScheduleSource = decoded
             .decode_as(&resources())
-            .expect("typed host value payload");
+            .expect("typed host descriptor payload");
 
         assert_eq!(
             payload,
@@ -1008,26 +1010,26 @@ mod tests {
     }
 
     #[test]
-    fn host_value_typed_decode_rejects_unknown_source_type() {
-        let decoded = HostValue::new("missing.Source", serde_json::json!({ "expr": "*" }));
+    fn host_descriptor_typed_decode_rejects_unknown_source_type() {
+        let decoded = HostDescriptor::new("missing.Source", serde_json::json!({ "expr": "*" }));
         let err = decoded
             .decode_as::<ScheduleSource>(&resources())
             .expect_err("unknown source type should fail");
 
         assert!(
-            matches!(err, HostValueError::UnknownSourceType { source_type } if source_type == "missing.Source")
+            matches!(err, HostDescriptorError::UnknownSourceType { source_type } if source_type == "missing.Source")
         );
     }
 
     #[test]
-    fn host_value_typed_decode_reports_malformed_payload() {
-        let decoded = HostValue::new("cron.Schedule", serde_json::json!({ "expr": 1 }));
+    fn host_descriptor_typed_decode_reports_malformed_payload() {
+        let decoded = HostDescriptor::new("cron.Schedule", serde_json::json!({ "expr": 1 }));
         let err = decoded
             .decode_as::<ScheduleSource>(&resources())
             .expect_err("malformed source payload should fail");
 
         assert!(
-            matches!(err, HostValueError::MalformedPayload { source_type, .. } if source_type == "cron.Schedule")
+            matches!(err, HostDescriptorError::MalformedPayload { source_type, .. } if source_type == "cron.Schedule")
         );
     }
 }

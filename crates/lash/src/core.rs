@@ -16,7 +16,7 @@ pub struct LashCore {
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) live_replay_store: Arc<dyn LiveReplayStore>,
     /// Shared resolution of the process work runner. The poke it yields is
-    /// threaded onto every session's host so the process control seam can wake
+    /// threaded onto every session's host so the process admin seam can wake
     /// the runner after a successful start. Shared across `LashCore` clones so
     /// the default inline runner is spawned at most once (Decision 3).
     pub(crate) process_work_runner: Arc<ProcessWorkRunnerSlot>,
@@ -153,12 +153,12 @@ impl LashCore {
         }
     }
 
-    pub fn triggers(&self) -> crate::control::CoreTriggersControl {
-        crate::control::CoreTriggersControl { core: self.clone() }
+    pub fn triggers(&self) -> crate::admin::CoreTriggerAdmin {
+        crate::admin::CoreTriggerAdmin { core: self.clone() }
     }
 
-    pub fn processes(&self) -> crate::control::Processes {
-        crate::control::Processes { core: self.clone() }
+    pub fn processes(&self) -> crate::admin::Processes {
+        crate::admin::Processes { core: self.clone() }
     }
 
     pub fn effect_host(&self) -> Arc<dyn EffectHost> {
@@ -190,7 +190,7 @@ impl LashCore {
                             session_id: session_id.clone(),
                         }),
                     ),
-                    RuntimeEffectLocalExecutor::process_control(Arc::clone(process_registry)),
+                    RuntimeEffectLocalExecutor::processes(Arc::clone(process_registry)),
                 )
                 .await
                 .map_err(|err| EmbedError::SessionDeleteProcess {

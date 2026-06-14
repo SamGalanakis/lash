@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use lash_core::PreparedContext;
 use lash_core::plugin::{
     CompactionContext, ContextCompaction, ContextCompactor, ContextError, PluginError,
-    PluginFactory, PluginOptions, PluginRegistrar, PluginSessionContext, SessionContextSurface,
+    PluginFactory, PluginOptions, PluginRegistrar, PluginSessionContext, SessionContextOverlay,
     SessionCreateRequest, SessionPlugin, SessionStartPoint, TurnContextTransform,
     TurnTransformContext,
 };
@@ -251,7 +251,7 @@ async fn summarize_compaction_prefix(
         PluginOptions::default(),
         "compaction",
     )
-    .with_context_surface(SessionContextSurface {
+    .with_context_overlay(SessionContextOverlay {
         include_base_tools: false,
         tool_providers: Vec::new(),
         prompt_contributions: Vec::new(),

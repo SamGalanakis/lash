@@ -24,7 +24,7 @@ impl RuntimeTurnDriver<'_> {
         .map_err(RuntimeEffectControllerError::into_runtime_error)
     }
 
-    pub(super) async fn invoke_turn_execution_surface_sync_effect(
+    pub(super) async fn invoke_turn_execution_environment_sync_effect(
         &mut self,
         machine: &mut TurnMachine,
         id: crate::sansio::EffectId,
@@ -32,22 +32,22 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<
-        Result<Option<crate::sansio::ExecutionSurfaceSync>, String>,
+        Result<Option<crate::sansio::ExecutionEnvironmentSync>, String>,
         RuntimeEffectControllerError,
     > {
         let invocation =
-            self.turn_effect_invocation(machine, id, RuntimeEffectKind::SyncExecutionSurface)?;
+            self.turn_effect_invocation(machine, id, RuntimeEffectKind::SyncExecutionEnvironment)?;
         self.execute_typed_turn_effect(
             machine,
             event_tx,
             cancel,
             RuntimeEffectEnvelope::new(
                 invocation,
-                RuntimeEffectCommand::SyncExecutionSurface {
+                RuntimeEffectCommand::SyncExecutionEnvironment {
                     update_machine_config,
                 },
             ),
-            RuntimeEffectOutcome::into_sync_execution_surface,
+            RuntimeEffectOutcome::into_sync_execution_environment,
         )
         .await
     }

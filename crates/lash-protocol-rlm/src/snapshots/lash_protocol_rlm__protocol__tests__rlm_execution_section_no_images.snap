@@ -1,6 +1,6 @@
 ---
 source: crates/lash-protocol-rlm/src/protocol/tests.rs
-expression: "rlm_execution_section_for_surface(RlmPromptFeatures\n{ images: false, ..RlmPromptFeatures::default() }, &full_prompt_surface())"
+expression: "rlm_execution_section_for_host_environment(RlmPromptFeatures\n{ images: false, ..RlmPromptFeatures::default() }, &full_prompt_host_environment())"
 ---
 **All actions go through `lashlang`.** Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a fenced `lashlang` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.
 

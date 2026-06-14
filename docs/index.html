@@ -322,7 +322,7 @@ start notify(mail: gmail.work, finding: finding)</code></pre>
           <dt>completed turns</dt>
           <dd>The turn is the unit a host observes. It settles as one atomic commit: the session graph, head revision, and usage applied together. How the turn was executed stays out of this contract, so the settled state is coherent no matter what ran underneath.</dd>
           <dt>in-flight effects</dt>
-          <dd>A durable effect host handles the narrower question: what if the host crashes while one nondeterministic effect is in flight? Each named effect (an LLM call, a tool call, process control, a retry sleep) crosses a scoped controller so a workflow host such as Restate can replay it from host history.</dd>
+          <dd>A durable effect host handles the narrower question: what if the host crashes while one nondeterministic effect is in flight? Each named effect (an LLM call, a tool call, process admin, a retry sleep) crosses a scoped controller so a workflow host such as Restate can replay it from host history.</dd>
         </dl>
         <p>In-flight replay lives in host wiring. The inline host is local and reopens only the last committed state after a crash. Durable workflow engines like Restate own effect replay and timers, while Lash retries the same final commit through the store's turn-commit stamp.</p>
       </div>

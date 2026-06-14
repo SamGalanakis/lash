@@ -70,7 +70,7 @@ impl crate::PluginFactory for TriggerRouteTestFactory {
             .with_triggers()
     }
 
-    fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
         trigger_test_resources()
     }
 
@@ -94,8 +94,8 @@ impl crate::SessionPlugin for TriggerRouteTestPlugin {
     }
 }
 
-fn trigger_test_resources() -> lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn trigger_test_resources() -> lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources
         .add_trigger_source_constructor(
             ["test", "Schedule"],
@@ -145,8 +145,8 @@ impl crate::PluginFactory for ClockTriggerFactory {
             .with_triggers()
     }
 
-    fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
-        let mut resources = lashlang::ResourceCatalog::new();
+    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
+        let mut resources = lashlang::LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["clock", "Alarm"],
@@ -210,8 +210,8 @@ impl crate::PluginFactory for ButtonTriggerFactory {
             .with_triggers()
     }
 
-    fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
-        let mut resources = lashlang::ResourceCatalog::new();
+    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
+        let mut resources = lashlang::LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["ui", "button", "pressed"],
@@ -381,7 +381,7 @@ fn clock_trigger_test_source() -> &'static str {
 
 struct TriggerRegistrationHost {
     session_id: String,
-    resources: lashlang::ResourceCatalog,
+    resources: lashlang::LashlangHostCatalog,
     store: Arc<dyn crate::TriggerStore>,
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
 }
@@ -464,7 +464,7 @@ impl TriggerRegistrationHost {
                 source,
                 event_ty: validation.event_ty,
                 module_ref: request.target.module_ref,
-                required_surface_ref: request.target.required_surface_ref,
+                host_requirements_ref: request.target.host_requirements_ref,
                 process_ref: request.target.process_ref,
                 process_name: request.target.process_name,
                 input_template: validation.inputs,
@@ -538,7 +538,7 @@ fn resource_operation_payload(
 
 async fn execute_trigger_registration(runtime: &mut LashRuntime, source: &str) -> lashlang::Value {
     let session = runtime.session.as_ref().expect("session");
-    let surface = lashlang::LashlangSurface::new(
+    let surface = lashlang::LashlangHostEnvironment::new(
         session.plugins().lashlang_resources(),
         session.plugins().lashlang_abilities(),
     );
@@ -1049,10 +1049,17 @@ async fn registering_schedule_source_stores_source_key_and_occurrence_reuses_art
         json!("event")
     );
     assert_eq!(registration["source_type"], json!("test.Schedule"));
-    assert_eq!(registration["source"]["value"]["expr"], json!("0 8 * * *"));
+    assert_eq!(
+        registration["source"][lashlang::LASH_HOST_DESCRIPTOR_VALUE_KEY]["expr"],
+        json!("0 8 * * *")
+    );
     assert!(registration.get("event_type").is_none());
     assert!(registration["target"].get("module_ref").is_none());
-    assert!(registration["target"].get("required_surface_ref").is_none());
+    assert!(
+        registration["target"]
+            .get("host_requirements_ref")
+            .is_none()
+    );
 
     let snapshot = runtime
         .session

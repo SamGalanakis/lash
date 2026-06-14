@@ -21,7 +21,7 @@ pub enum ParseError {
     #[error("`{keyword}` can only be used inside a loop")]
     LoopControlOutsideLoop { keyword: &'static str, span: Span },
     #[error("`{keyword}` can only be used inside a `process` body")]
-    ProcessControlOutsideBlock { keyword: &'static str, span: Span },
+    SessionProcessAdminOutsideBlock { keyword: &'static str, span: Span },
     #[error("`{keyword}` can't be used inside a `process` body")]
     ForegroundControlInsideProcess { keyword: &'static str, span: Span },
     #[error(
@@ -45,7 +45,7 @@ impl ParseError {
             Self::Expected { span, .. }
             | Self::Unexpected { span, .. }
             | Self::LoopControlOutsideLoop { span, .. }
-            | Self::ProcessControlOutsideBlock { span, .. }
+            | Self::SessionProcessAdminOutsideBlock { span, .. }
             | Self::ForegroundControlInsideProcess { span, .. }
             | Self::DeclarativeTriggerRemoved { span }
             | Self::InvalidLabelAnnotation { span, .. }
@@ -279,7 +279,7 @@ impl Parser {
                 if matches!(name.as_str(), "yield" | "wake" | "finish" | "fail")
                     && !self.peek_assignment_target() =>
             {
-                self.parse_process_control()
+                self.parse_processes()
             }
             TokenKind::Ident(name) if name == "break" && !self.peek_assignment_target() => {
                 self.parse_loop_control("break")
@@ -418,20 +418,20 @@ impl Parser {
         Ok(Expr::Print(Box::new(self.parse_expr()?)))
     }
 
-    fn parse_process_control(&mut self) -> Result<Expr, ParseError> {
+    fn parse_processes(&mut self) -> Result<Expr, ParseError> {
         let token = self.bump().clone();
         let TokenKind::Ident(keyword) = token.kind else {
-            unreachable!("process controls are contextual identifiers");
+            unreachable!("process admins are contextual identifiers");
         };
         let keyword_static = match keyword.as_str() {
             "yield" => "yield",
             "wake" => "wake",
             "finish" => "finish",
             "fail" => "fail",
-            _ => unreachable!("unknown process control keyword"),
+            _ => unreachable!("unknown process admin keyword"),
         };
         if self.process_depth == 0 {
-            return Err(ParseError::ProcessControlOutsideBlock {
+            return Err(ParseError::SessionProcessAdminOutsideBlock {
                 keyword: keyword_static,
                 span: token.span,
             });
@@ -448,7 +448,7 @@ impl Parser {
                 Expr::Finish(expr.map(Box::new))
             }
             "fail" => Expr::Fail(Box::new(self.parse_expr()?)),
-            _ => unreachable!("unknown process control keyword"),
+            _ => unreachable!("unknown process admin keyword"),
         };
         Ok(stmt)
     }

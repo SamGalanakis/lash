@@ -90,8 +90,8 @@ impl PluginFactory for SubagentsPluginFactory {
             "subagents",
             Arc::new(move |_ctx| {
                 Ok(PluginSpec::new()
-                    .with_tool_surface_contributor(Arc::new(move |ctx| {
-                        rlm_support::subagent_surface_contribution(ctx)
+                    .with_tool_catalog_contributor(Arc::new(move |ctx| {
+                        rlm_support::sublashlang_binding_contribution(ctx)
                     }))
                     .with_tool_provider(Arc::clone(&provider)))
             }),

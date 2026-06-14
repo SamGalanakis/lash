@@ -5,11 +5,11 @@ use crate::{ToolInvocation, ToolInvocationReply};
 use super::ToolContext;
 
 #[derive(Clone)]
-pub struct ToolDispatchControl<'run> {
+pub struct ToolDispatchClient<'run> {
     pub(super) context: ToolContext<'run>,
 }
 
-impl<'run> ToolDispatchControl<'run> {
+impl<'run> ToolDispatchClient<'run> {
     pub async fn batch(&self, calls: Vec<ToolInvocation>) -> Vec<ToolInvocationReply> {
         let Some(dispatch) = self.context.runtime_dispatch.clone() else {
             return calls

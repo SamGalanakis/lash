@@ -219,8 +219,8 @@ pub(crate) async fn run_autonomous(
     let outcome = run_autonomous_turn(session.clone(), turn_input, &mut renderer, 1).await?;
     let (mut done, cancel) = (outcome.done, outcome.cancel);
     if persistence.await_background_work {
-        session.process_control().await_all().await?;
-        let state = session.control().state().persist_current().await?;
+        session.processes().await_all().await?;
+        let state = session.admin().state().persist_current().await?;
         done.result.state = state.to_snapshot();
     }
     let cumulative_usage = session.usage_report();

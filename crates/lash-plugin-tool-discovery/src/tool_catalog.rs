@@ -1,26 +1,26 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use lash_core::plugin::{PluginError, ToolSurfaceContext};
-use lash_core::{ToolAvailability, ToolSurfaceContribution, ToolSurfaceOverride};
+use lash_core::plugin::{PluginError, ToolCatalogContext};
+use lash_core::{ToolAvailability, ToolCatalogContribution, ToolCatalogOverride};
 
-pub(crate) fn rlm_tool_surface(
-    ctx: ToolSurfaceContext,
-) -> Result<ToolSurfaceContribution, PluginError> {
+pub(crate) fn rlm_tool_catalog(
+    ctx: ToolCatalogContext,
+) -> Result<ToolCatalogContribution, PluginError> {
     let has_catalogued_tools = has_catalogued_tools(&ctx);
     let overrides = ctx
         .tools
         .iter()
         .filter_map(|tool| {
             if tool.name == "search_tools" && !has_catalogued_tools {
-                return Some(ToolSurfaceOverride {
+                return Some(ToolCatalogOverride {
                     tool_name: tool.name.clone(),
                     availability: Some(ToolAvailability::Off),
                 });
             }
             let availability = tool.effective_availability();
             if availability == ToolAvailability::Searchable {
-                Some(ToolSurfaceOverride {
+                Some(ToolCatalogOverride {
                     tool_name: tool.name.clone(),
                     availability: Some(ToolAvailability::Callable),
                 })
@@ -30,13 +30,13 @@ pub(crate) fn rlm_tool_surface(
         })
         .collect();
 
-    Ok(ToolSurfaceContribution {
+    Ok(ToolCatalogContribution {
         overrides,
         tool_list_notes: catalogue_notes(&ctx, has_catalogued_tools),
     })
 }
 
-fn has_catalogued_tools(ctx: &ToolSurfaceContext) -> bool {
+fn has_catalogued_tools(ctx: &ToolCatalogContext) -> bool {
     ctx.tools.iter().any(|tool| {
         tool.name != "search_tools"
             && tool.effective_availability().is_searchable()
@@ -47,7 +47,7 @@ fn has_catalogued_tools(ctx: &ToolSurfaceContext) -> bool {
 const CATALOGUE_MODULE_LIMIT: usize = 100;
 const CATALOGUE_TOOL_NAME_LIMIT: usize = 50;
 
-fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<String> {
+fn catalogue_notes(ctx: &ToolCatalogContext, has_catalogued_tools: bool) -> Vec<String> {
     if !has_catalogued_tools {
         return Vec::new();
     }
@@ -63,12 +63,12 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
             continue;
         }
         omitted_tool_count += 1;
-        let agent_surface = tool.agent_surface.executable_for(&tool.name);
-        let module = agent_surface.module_path.join(".");
+        let lashlang_binding = tool.lashlang_binding.executable_for(&tool.name);
+        let module = lashlang_binding.module_path.join(".");
         by_module
             .entry(module)
             .or_default()
-            .push(agent_surface.call_path());
+            .push(lashlang_binding.call_path());
     }
     for names in by_module.values_mut() {
         names.sort_unstable();
@@ -112,14 +112,14 @@ mod tests {
     use super::*;
     use crate::definitions::search_tools_definition;
     use lash_core::{
-        ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolScheduling,
-        ToolSurfaceBuildInput, build_tool_surface,
+        ToolAvailabilityConfig, ToolCatalogBuildInput, ToolContract, ToolDefinition,
+        ToolScheduling, build_tool_catalog,
     };
     use serde_json::json;
     use std::sync::Arc;
 
     #[test]
-    fn rlm_surface_promotes_searchable_tools() {
+    fn rlm_catalog_promotes_searchable_tools() {
         let tools = [
             search_tools_definition(),
             ToolDefinition::raw_named(
@@ -136,7 +136,7 @@ mod tests {
             .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
         let manifests = tools.iter().map(|tool| tool.manifest()).collect::<Vec<_>>();
-        let contribution = rlm_tool_surface(ToolSurfaceContext {
+        let contribution = rlm_tool_catalog(ToolCatalogContext {
             session_id: "session".to_string(),
             tools: manifests.clone(),
             resolve_contract: Some(Arc::new({
@@ -148,7 +148,7 @@ mod tests {
             lashlang_abilities: Default::default(),
         })
         .unwrap();
-        let surface = build_tool_surface(ToolSurfaceBuildInput {
+        let surface = build_tool_catalog(ToolCatalogBuildInput {
             tools: manifests,
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             contributions: vec![contribution],
@@ -163,9 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn rlm_surface_hides_search_when_no_catalogued_tools_exist() {
+    fn rlm_catalog_hides_search_when_no_catalogued_tools_exist() {
         let tool = search_tools_definition();
-        let contribution = rlm_tool_surface(ToolSurfaceContext {
+        let contribution = rlm_tool_catalog(ToolCatalogContext {
             session_id: "session".to_string(),
             tools: vec![tool.manifest()],
             resolve_contract: None,

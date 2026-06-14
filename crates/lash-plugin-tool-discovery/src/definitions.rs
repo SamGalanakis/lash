@@ -1,5 +1,5 @@
 use lash_core::{
-    ToolActivation, ToolAgentSurface, ToolAvailabilityConfig, ToolDefinition, ToolScheduling,
+    LashlangToolBinding, ToolActivation, ToolAvailabilityConfig, ToolDefinition, ToolScheduling,
 };
 use serde_json::{Value, json};
 
@@ -49,8 +49,8 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
         ])
         .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
-        .with_agent_surface(
-            ToolAgentSurface::new(["tools"], "search").with_aliases(["tool_search"]),
+        .with_lashlang_binding(
+            LashlangToolBinding::new(["tools"], "search").with_aliases(["tool_search"]),
         )
         .with_scheduling(ToolScheduling::Serial)
 }

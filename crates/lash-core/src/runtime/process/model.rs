@@ -56,7 +56,7 @@ pub enum ProcessInput {
     LashlangProcess {
         module_ref: lashlang::ModuleRef,
         process_ref: lashlang::ProcessRef,
-        required_surface_ref: lashlang::RequiredSurfaceRef,
+        host_requirements_ref: lashlang::HostRequirementsRef,
         process_name: String,
         #[serde(default)]
         args: serde_json::Map<String, serde_json::Value>,
@@ -79,13 +79,13 @@ impl Clone for ProcessInput {
             Self::LashlangProcess {
                 module_ref,
                 process_ref,
-                required_surface_ref,
+                host_requirements_ref,
                 process_name,
                 args,
             } => Self::LashlangProcess {
                 module_ref: module_ref.clone(),
                 process_ref: process_ref.clone(),
-                required_surface_ref: required_surface_ref.clone(),
+                host_requirements_ref: host_requirements_ref.clone(),
                 process_name: process_name.clone(),
                 args: args.clone(),
             },
@@ -957,7 +957,7 @@ impl ProcessDefinitionSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessDefinitionSelector {
     module_ref: lashlang::ModuleRef,
-    required_surface_ref: lashlang::RequiredSurfaceRef,
+    host_requirements_ref: lashlang::HostRequirementsRef,
     process_ref: lashlang::ProcessRef,
     process_name: String,
 }
@@ -977,9 +977,9 @@ impl ProcessDefinitionSelector {
                 lashlang::LASH_MODULE_REF_KEY,
                 "definition",
             )?,
-            required_surface_ref: decode_process_definition_field(
+            host_requirements_ref: decode_process_definition_field(
                 value,
-                lashlang::LASH_REQUIRED_SURFACE_REF_KEY,
+                lashlang::LASH_HOST_REQUIREMENTS_REF_KEY,
                 "definition",
             )?,
             process_ref: decode_process_definition_field(
@@ -1000,12 +1000,12 @@ impl ProcessDefinitionSelector {
             ProcessInput::LashlangProcess {
                 module_ref,
                 process_ref,
-                required_surface_ref,
+                host_requirements_ref,
                 process_name,
                 ..
             } => {
                 self.module_ref == *module_ref
-                    && self.required_surface_ref == *required_surface_ref
+                    && self.host_requirements_ref == *host_requirements_ref
                     && self.process_ref == *process_ref
                     && self.process_name == *process_name
             }
@@ -1180,7 +1180,7 @@ mod tests {
 
     fn process_value(
         module_ref: &lashlang::ModuleRef,
-        surface_ref: &lashlang::RequiredSurfaceRef,
+        host_requirements_ref: &lashlang::HostRequirementsRef,
         process_ref: &lashlang::ProcessRef,
         name: &str,
     ) -> serde_json::Value {
@@ -1188,8 +1188,8 @@ mod tests {
         value.insert(lashlang::LASH_PROCESS_VALUE_KEY.to_string(), json!(true));
         value.insert(lashlang::LASH_MODULE_REF_KEY.to_string(), json!(module_ref));
         value.insert(
-            lashlang::LASH_REQUIRED_SURFACE_REF_KEY.to_string(),
-            json!(surface_ref),
+            lashlang::LASH_HOST_REQUIREMENTS_REF_KEY.to_string(),
+            json!(host_requirements_ref),
         );
         value.insert(
             lashlang::LASH_PROCESS_REF_KEY.to_string(),
@@ -1202,7 +1202,7 @@ mod tests {
     fn lashlang_entry(
         process_id: &str,
         module_ref: lashlang::ModuleRef,
-        surface_ref: lashlang::RequiredSurfaceRef,
+        host_requirements_ref: lashlang::HostRequirementsRef,
         process_ref: lashlang::ProcessRef,
         process_name: &str,
         status: ProcessStatus,
@@ -1213,7 +1213,7 @@ mod tests {
                 ProcessInput::LashlangProcess {
                     module_ref,
                     process_ref,
-                    required_surface_ref: surface_ref,
+                    host_requirements_ref: host_requirements_ref,
                     process_name: process_name.to_string(),
                     args: serde_json::Map::new(),
                 },
@@ -1237,11 +1237,12 @@ mod tests {
     #[test]
     fn process_list_filter_matches_definition_and_status() {
         let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
-        let surface_ref = lashlang::RequiredSurfaceRef::new(&lashlang::ContentHash::new("surface"));
+        let host_requirements_ref =
+            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("surface"));
         let target_ref = process_ref("target", 0);
         let other_ref = process_ref("other", 1);
         let filter = ProcessListFilter::decode(&json!({
-            "definition": process_value(&module_ref, &surface_ref, &target_ref, "target"),
+            "definition": process_value(&module_ref, &host_requirements_ref, &target_ref, "target"),
             "status": "completed"
         }))
         .expect("decode filter");
@@ -1249,7 +1250,7 @@ mod tests {
         let matching = lashlang_entry(
             "matching",
             module_ref.clone(),
-            surface_ref.clone(),
+            host_requirements_ref.clone(),
             target_ref,
             "target",
             ProcessStatus::Completed {
@@ -1261,7 +1262,7 @@ mod tests {
         let wrong_definition = lashlang_entry(
             "wrong-definition",
             module_ref,
-            surface_ref,
+            host_requirements_ref,
             other_ref,
             "other",
             ProcessStatus::Completed {
@@ -1279,12 +1280,13 @@ mod tests {
     #[test]
     fn process_list_filter_matches_waiting_facet() {
         let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
-        let surface_ref = lashlang::RequiredSurfaceRef::new(&lashlang::ContentHash::new("surface"));
+        let host_requirements_ref =
+            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("surface"));
         let process_ref = process_ref("target", 0);
         let mut waiting_entry = lashlang_entry(
             "waiting",
             module_ref.clone(),
-            surface_ref.clone(),
+            host_requirements_ref.clone(),
             process_ref.clone(),
             "target",
             ProcessStatus::Running,
@@ -1301,7 +1303,7 @@ mod tests {
         let idle_entry = lashlang_entry(
             "idle",
             module_ref,
-            surface_ref,
+            host_requirements_ref,
             process_ref,
             "target",
             ProcessStatus::Running,

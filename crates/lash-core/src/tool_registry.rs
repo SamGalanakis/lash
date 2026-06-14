@@ -394,7 +394,7 @@ enum ToolBinding {
     /// Resolvable through the registered source with this id.
     Bound(String),
     /// Persisted in a session snapshot but not resolvable from any currently
-    /// registered source. Surfaces as `Off`; execution fails loudly; rebinds
+    /// registered source. Appears as `Off`; execution fails loudly; rebinds
     /// when a source re-advertises the same (name, id).
     Orphaned,
 }
@@ -578,7 +578,7 @@ impl ToolRegistry {
     /// registry's base generation, and does **not** bump. This is idempotent: a
     /// snapshot exported at generation `G` restores to generation `G`, so a
     /// re-export round-trips. Cold rebuilds (the durable process worker, session
-    /// resume) restore a session whose tool surface reached generation `G ≥ 2`
+    /// resume) restore a session whose tool catalog reached generation `G ≥ 2`
     /// onto a base registry at generation 1 — `apply_state` would reject that
     /// (`expected G, actual 1`); `restore_state` adopts `G`. Entries are still
     /// rebound to the live sources, so source identity is reconnected.
@@ -629,7 +629,7 @@ impl ToolRegistry {
         Ok(ToolSourceHandle::new(source_id))
     }
 
-    pub(crate) fn compose_session_surface(
+    pub(crate) fn compose_session_catalog(
         &self,
         include_base_tools: bool,
         context_providers: Vec<Arc<dyn ToolProvider>>,
@@ -1785,7 +1785,7 @@ mod tests {
 
     #[test]
     fn restore_state_adopts_generation_at_or_above_three() {
-        // Cold rebuild ratchet: a session whose tool surface advanced to
+        // Cold rebuild ratchet: a session whose tool catalog advanced to
         // generation >= 3 restores onto a fresh base-1 registry. `restore_state`
         // adopts the snapshot's generation verbatim; `apply_state` (a gen-matched
         // delta) rejects it. This is the exact divergence the durable worker /
@@ -2099,7 +2099,7 @@ mod tests {
     }
 
     #[test]
-    fn project_tool_catalog_keeps_searchable_tools_with_surface_metadata() {
+    fn project_tool_catalog_keeps_searchable_tools_with_catalog_metadata() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
             let tool = crate::ToolDefinition::raw_with_id(
                 format!("tool:{name}"),
@@ -2110,20 +2110,20 @@ mod tests {
             );
             match name {
                 "read_file" => {
-                    tool.with_agent_surface(crate::ToolAgentSurface::new(["files"], "read"))
+                    tool.with_lashlang_binding(crate::LashlangToolBinding::new(["files"], "read"))
                 }
                 "search_tools" => {
-                    tool.with_agent_surface(crate::ToolAgentSurface::new(["tools"], "search"))
+                    tool.with_lashlang_binding(crate::LashlangToolBinding::new(["tools"], "search"))
                 }
                 _ => tool,
             }
         }
         let catalog = project_tool_catalog([
-            crate::ToolSurfaceEntry {
+            crate::ToolCatalogEntry {
                 manifest: dummy_tool("read_file").manifest(),
                 availability: crate::ToolAvailability::Showcased,
             },
-            crate::ToolSurfaceEntry {
+            crate::ToolCatalogEntry {
                 manifest: dummy_tool("search_tools").manifest(),
                 availability: crate::ToolAvailability::Callable,
             },
@@ -2148,9 +2148,9 @@ mod tests {
                 crate::ToolDefinition::default_input_schema(),
                 serde_json::json!({}),
             )
-            .with_agent_surface(crate::ToolAgentSurface::new(["llm"], "query"))
+            .with_lashlang_binding(crate::LashlangToolBinding::new(["llm"], "query"))
         }
-        let catalog = project_tool_catalog([crate::ToolSurfaceEntry {
+        let catalog = project_tool_catalog([crate::ToolCatalogEntry {
             manifest: dummy_tool("llm_query")
                 .with_output_from_input_schema(
                     "output",
@@ -2170,7 +2170,7 @@ mod tests {
 
 pub(crate) fn project_tool_catalog<I>(entries: I) -> Vec<serde_json::Value>
 where
-    I: IntoIterator<Item = crate::ToolSurfaceEntry>,
+    I: IntoIterator<Item = crate::ToolCatalogEntry>,
 {
     entries
         .into_iter()
@@ -2178,17 +2178,17 @@ where
         .map(|entry| {
             let manifest = entry.manifest;
             let availability = entry.availability;
-            let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
-            let call = agent_surface.call_path();
+            let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
+            let call = lashlang_binding.call_path();
             let mut projected = serde_json::json!({
                 "id": manifest.id,
                 "name": manifest.name,
-                "module_path": agent_surface.module_path,
-                "operation": agent_surface.operation,
-                "authority_type": agent_surface.authority_type,
+                "module_path": lashlang_binding.module_path,
+                "operation": lashlang_binding.operation,
+                "authority_type": lashlang_binding.authority_type,
                 "call": call,
                 "description": manifest.description,
-                "aliases": agent_surface.aliases,
+                "aliases": lashlang_binding.aliases,
                 "availability": availability,
                 "callable": availability.is_callable(),
                 "showcased": availability.is_showcased(),

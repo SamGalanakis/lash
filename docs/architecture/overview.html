@@ -106,7 +106,7 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Authority Boundaries</h2>
-            <p>The durable source of truth is the session graph. Everything else is either an execution surface, an external transport, or a projection.</p>
+            <p>The durable source of truth is the session graph. Everything else is either an execution environment, an external transport, or a projection.</p>
           </div>
           <ol class="principle-list">
             <li>
@@ -124,7 +124,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Protocol plugins own protocol behavior.</h3>
-                <p><code>ProtocolBuildInput</code>, <code>TurnDriverPreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn. Runtime-owned <code>ProtocolBuildInput</code> carries the effective tool and Lashlang surfaces into the protocol plugin; RLM additionally projects read-only host bindings (e.g., <code>history</code>) into Lashlang scope through the <code>ProjectedBindings</code> seam.</p>
+                <p><code>ProtocolBuildInput</code>, <code>TurnDriverPreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn. Runtime-owned <code>ProtocolBuildInput</code> carries the effective tool and Lashlang host environments into the protocol plugin; RLM additionally projects read-only host bindings (e.g., <code>history</code>) into Lashlang scope through the <code>ProjectedBindings</code> seam.</p>
               </div>
             </li>
             <li>

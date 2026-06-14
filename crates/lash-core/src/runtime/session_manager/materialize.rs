@@ -31,10 +31,10 @@ pub(in crate::runtime::session_manager) async fn materialize_session_create_plan
 
     configure_protocol_runtime(&mut runtime, &plan.protocol_request)?;
     if let Some(session) = runtime.session.as_mut() {
-        session.set_context_surface(
-            plan.context_surface.tool_providers.clone(),
-            plan.context_surface.prompt_contributions.clone(),
-            plan.context_surface.include_base_tools,
+        session.set_context_overlay(
+            plan.context_overlay.tool_providers.clone(),
+            plan.context_overlay.prompt_contributions.clone(),
+            plan.context_overlay.include_base_tools,
         )?;
     }
 

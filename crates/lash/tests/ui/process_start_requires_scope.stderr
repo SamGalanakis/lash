@@ -1,15 +1,15 @@
 error[E0061]: this method takes 2 arguments but 1 argument was supplied
- --> tests/ui/process_start_requires_scope.rs:2:43
+ --> tests/ui/process_start_requires_scope.rs:2:41
   |
-2 |     let _ = session.control().processes().start(request).await;
-  |                                           ^^^^^--------- argument #2 of type `ScopedEffectController<'_>` is missing
+2 |     let _ = session.admin().processes().start(request).await;
+  |                                         ^^^^^--------- argument #2 of type `ScopedEffectController<'_>` is missing
   |
 note: method defined here
- --> src/control.rs
+ --> src/admin.rs
   |
   |     pub async fn start(
   |                  ^^^^^
 help: provide the argument
   |
-2 |     let _ = session.control().processes().start(request, /* ScopedEffectController<'_> */).await;
-  |                                                        ++++++++++++++++++++++++++++++++++
+2 |     let _ = session.admin().processes().start(request, /* ScopedEffectController<'_> */).await;
+  |                                                      ++++++++++++++++++++++++++++++++++

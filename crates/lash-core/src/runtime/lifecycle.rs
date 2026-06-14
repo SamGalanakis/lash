@@ -73,7 +73,7 @@ impl LashRuntime {
         ));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone() {
-            // Cold rebuild restores the exact persisted tool surface, adopting
+            // Cold rebuild restores the exact persisted tool catalog, adopting
             // the snapshot's generation. `apply_state` (a delta-apply that
             // requires `snapshot.generation == base` and bumps) would reject a
             // session whose surface reached generation ≥ 2 onto a fresh base-1
@@ -94,7 +94,7 @@ impl LashRuntime {
                 );
             }
         }
-        session.refresh_tool_surface().await?;
+        session.refresh_tool_catalog().await?;
         if let Some(snapshot) = state.plugin_snapshot.clone() {
             session
                 .plugins()
@@ -183,7 +183,7 @@ impl LashRuntime {
     /// materialization — routes through here so the store/registry wiring and
     /// residency cannot drift between them. That drift previously shipped: the
     /// worker rebuild silently kept the full graph and skipped the persisted
-    /// tool-surface restore that the live path applied.
+    /// tool-catalog restore that the live path applied.
     pub(crate) async fn assemble_runtime(
         policy: SessionPolicy,
         embedded_host: EmbeddedRuntimeHost,
@@ -283,7 +283,7 @@ impl LashRuntime {
         )
         .await?;
         // Thread the host's process-work poke onto this session's host so the
-        // process control seam can wake the runner after a successful start.
+        // process admin seam can wake the runner after a successful start.
         runtime.host.process_work_poke = env.process_work_poke.clone();
         runtime.host.queued_work_poke = env.queued_work_poke.clone();
         Ok(runtime)

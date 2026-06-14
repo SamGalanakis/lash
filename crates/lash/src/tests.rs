@@ -540,7 +540,7 @@ fn app_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "object" }),
     )
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
 }
 
 struct LongTextTools;
@@ -572,7 +572,7 @@ fn long_text_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "string" }),
     )
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
 }
 
 struct SurfacePluginFactory;

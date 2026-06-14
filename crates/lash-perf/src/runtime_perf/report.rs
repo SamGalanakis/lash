@@ -476,7 +476,7 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
 fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
-        RuntimePerfScenario::RlmLargeToolSurface => 1_000_000_000.0,
+        RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 128_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
         | RuntimePerfScenario::DirectLlmClient
@@ -498,7 +498,7 @@ fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
 
 fn wall_clock_budget_ms(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
-        RuntimePerfScenario::ToolDiscoverySearch | RuntimePerfScenario::RlmLargeToolSurface => {
+        RuntimePerfScenario::ToolDiscoverySearch | RuntimePerfScenario::RlmLargeToolCatalog => {
             20_000.0
         }
         RuntimePerfScenario::LiveReplayPressure => 5_000.0,

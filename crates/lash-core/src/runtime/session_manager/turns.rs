@@ -61,7 +61,7 @@ impl ManagedSessionCapability {
             let mut runtime_guard = runtime.runtime.lock().await;
             let result = async {
                 runtime_guard
-                    .refresh_session_tool_surface()
+                    .refresh_session_tool_catalog()
                     .await
                     .map_err(|err| crate::PluginError::Session(err.to_string()))?;
                 let run = runtime_guard

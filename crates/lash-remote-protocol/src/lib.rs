@@ -1180,16 +1180,16 @@ pub struct RemoteToolGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<RemoteToolRetryPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_surface: Option<RemoteToolAgentSurface>,
+    pub lashlang_binding: Option<RemoteLashlangToolBinding>,
 }
 
 impl RemoteToolGrant {
     pub fn call_path(&self) -> Result<String, RemoteProtocolError> {
-        let surface = self.required_surface()?;
+        let binding = self.required_lashlang_binding()?;
         Ok(format!(
             "{}.{}",
-            surface.module_path.join("."),
-            surface.operation
+            binding.module_path.join("."),
+            binding.operation
         ))
     }
 
@@ -1201,7 +1201,7 @@ impl RemoteToolGrant {
                 message: "tool grant name cannot be empty".to_string(),
             });
         }
-        self.required_surface()?;
+        self.required_lashlang_binding()?;
         Ok(())
     }
 
@@ -1217,19 +1217,19 @@ impl RemoteToolGrant {
         Ok(())
     }
 
-    fn required_surface(&self) -> Result<&RemoteToolAgentSurface, RemoteProtocolError> {
-        let Some(surface) = &self.agent_surface else {
-            return Err(RemoteProtocolError::MissingToolSurface {
+    fn required_lashlang_binding(&self) -> Result<&RemoteLashlangToolBinding, RemoteProtocolError> {
+        let Some(binding) = &self.lashlang_binding else {
+            return Err(RemoteProtocolError::MissingLashlangToolBinding {
                 tool_name: self.name.clone(),
             });
         };
-        if surface.module_path.is_empty() {
+        if binding.module_path.is_empty() {
             return Err(RemoteProtocolError::InvalidToolGrant {
                 tool_name: self.name.clone(),
                 message: "remote tool grant requires an explicit module path".to_string(),
             });
         }
-        if surface
+        if binding
             .module_path
             .iter()
             .any(|part| part.trim().is_empty())
@@ -1239,13 +1239,13 @@ impl RemoteToolGrant {
                 message: "remote tool grant module path cannot contain empty segments".to_string(),
             });
         }
-        if surface.operation.trim().is_empty() {
+        if binding.operation.trim().is_empty() {
             return Err(RemoteProtocolError::InvalidToolGrant {
                 tool_name: self.name.clone(),
                 message: "remote tool grant requires an explicit operation".to_string(),
             });
         }
-        Ok(surface)
+        Ok(binding)
     }
 }
 
@@ -1258,7 +1258,7 @@ fn default_input_schema() -> serde_json::Value {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteToolAgentSurface {
+pub struct RemoteLashlangToolBinding {
     pub module_path: Vec<String>,
     pub operation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1267,7 +1267,7 @@ pub struct RemoteToolAgentSurface {
     pub aliases: Vec<String>,
 }
 
-impl RemoteToolAgentSurface {
+impl RemoteLashlangToolBinding {
     pub fn new(
         module_path: impl IntoIterator<Item = impl Into<String>>,
         operation: impl Into<String>,
@@ -1647,8 +1647,8 @@ pub enum RemoteProtocolError {
     InvalidAttachmentRef { id: String, message: String },
     #[error("turn input is not remote-safe: {0}")]
     NonRemoteSafeTurnInput(String),
-    #[error("remote tool grant `{tool_name}` is missing an explicit agent surface")]
-    MissingToolSurface { tool_name: String },
+    #[error("remote tool grant `{tool_name}` is missing an explicit lashlang binding")]
+    MissingLashlangToolBinding { tool_name: String },
     #[error("invalid remote tool grant `{tool_name}`: {message}")]
     InvalidToolGrant { tool_name: String, message: String },
     #[error("duplicate remote tool call path `{call_path}`")]

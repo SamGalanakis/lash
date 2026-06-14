@@ -107,7 +107,7 @@ fn test_host_operation(
     operation: &lashlang::ResourceOperation,
 ) -> Result<String, ExecutionHostError> {
     match &operation.receiver {
-        Value::Resource(receiver) => test_surface()
+        Value::Resource(receiver) => test_host_environment()
             .resources
             .resolve_module_operation(
                 &receiver.resource_type,
@@ -147,15 +147,17 @@ async fn execute<H: ExecutionHost>(
     host: &H,
 ) -> Result<ExecutionOutcome, ExecuteError> {
     let program = parse(source)?;
-    let compiled = if let Ok(linked) = lashlang::LinkedModule::link(program.clone(), test_surface())
+    let compiled = if let Ok(linked) =
+        lashlang::LinkedModule::link(program.clone(), test_host_environment())
     {
         lashlang::compile_linked(&linked)
     } else if program_contains_start_process(&program.main) {
-        let linked = lashlang::LinkedModule::link(program, test_surface()).map_err(|err| {
-            ExecuteError::Runtime(RuntimeError::ValueError {
-                message: err.to_string(),
-            })
-        })?;
+        let linked =
+            lashlang::LinkedModule::link(program, test_host_environment()).map_err(|err| {
+                ExecuteError::Runtime(RuntimeError::ValueError {
+                    message: err.to_string(),
+                })
+            })?;
         lashlang::compile_linked(&linked)
     } else {
         lashlang::compile(source)?
@@ -165,8 +167,8 @@ async fn execute<H: ExecutionHost>(
         .map_err(ExecuteError::Runtime)
 }
 
-fn test_surface() -> lashlang::LashlangSurface {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn test_host_environment() -> lashlang::LashlangHostEnvironment {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources.add_module_operation(
         ["files"],
         "Files",
@@ -191,7 +193,7 @@ fn test_surface() -> lashlang::LashlangSurface {
         TypeExpr::Any,
         TypeExpr::Any,
     );
-    lashlang::LashlangSurface::new(resources, lashlang::LashlangAbilities::all())
+    lashlang::LashlangHostEnvironment::new(resources, lashlang::LashlangAbilities::all())
 }
 
 fn program_contains_start_process(expr: &lashlang::Expr) -> bool {
@@ -2293,7 +2295,7 @@ async fn json_and_record_helpers_work() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parse_errors_are_surface_level_and_precise() {
+async fn parse_errors_are_parse_level_and_precise() {
     let error = parse(
         r#"
         if true {

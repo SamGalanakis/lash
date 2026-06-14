@@ -161,7 +161,7 @@ pub(crate) fn resolve_callable_manifest(
     tool_name: &str,
 ) -> Option<ToolManifest> {
     if let Some(entry) = context
-        .surface
+        .tool_catalog
         .tools
         .iter()
         .find(|tool| tool.manifest.name == tool_name)
@@ -193,7 +193,7 @@ pub(crate) fn resolve_callable_manifest_by_id(
     tool_id: &crate::ToolId,
 ) -> Option<ToolManifest> {
     if let Some(entry) = context
-        .surface
+        .tool_catalog
         .tools
         .iter()
         .find(|tool| tool.manifest.id == *tool_id)
@@ -227,7 +227,7 @@ pub(crate) fn resolve_tool_argument_projection_policy(
     tool_name: &str,
 ) -> crate::ToolArgumentProjectionPolicy {
     context
-        .surface
+        .tool_catalog
         .tools
         .iter()
         .find(|def| def.manifest.name == tool_name)

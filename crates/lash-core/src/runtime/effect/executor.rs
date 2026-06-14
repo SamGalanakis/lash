@@ -462,7 +462,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
-    pub fn process_control(registry: Arc<dyn ProcessRegistry>) -> Self {
+    pub fn processes(registry: Arc<dyn ProcessRegistry>) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution { registry }),
         }
@@ -654,12 +654,12 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                         .map_err(RuntimeEffectControllerError::from),
                 })
             }
-            RuntimeEffectCommand::SyncExecutionSurface {
+            RuntimeEffectCommand::SyncExecutionEnvironment {
                 update_machine_config,
-            } => Ok(RuntimeEffectOutcome::SyncExecutionSurface {
+            } => Ok(RuntimeEffectOutcome::SyncExecutionEnvironment {
                 result: runner
                     .driver
-                    .refresh_execution_surface(runner.machine, update_machine_config)
+                    .refresh_execution_environment(runner.machine, update_machine_config)
                     .await
                     .map_err(|err| err.to_string()),
             }),

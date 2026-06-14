@@ -57,9 +57,9 @@
         <article class="panel"><h3>Subagents</h3><p><code>agents.spawn(...)</code> runs child sessions as background process work, observed through the same registry and graph panel.</p></article>
         <article class="panel"><h3>Web tools</h3><p><code>web.search(...)</code> and <code>web.fetch(...)</code> back onto Tavily, the same web tools the CLI exposes.</p></article>
         <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code>; a registered trigger wakes a process with the validated event payload.</p></article>
-        <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang surface as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
+        <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang host environment as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
         <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
-        <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>ProcessControl</code> facade.</p></article>
+        <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>SessionProcessAdmin</code> facade.</p></article>
       </div>
     </div>
 
@@ -109,8 +109,8 @@ submit { handle: handle, registrations: await triggers.list({ target: daily_dige
         <h2>Host Wiring</h2>
         <p>The host declares the trigger source constructors through the plugin's <code>lashlang_resources()</code> hook, and registers the button's event type through trigger registration. The button payload is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
       </div>
-      <pre data-lang="rust" data-snippet="example_agent_workbench#workbench-resources"><code>fn workbench_lashlang_resources() -&gt; lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+      <pre data-lang="rust" data-snippet="example_agent_workbench#workbench-resources"><code>fn workbench_lashlang_resources() -&gt; lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources
         .add_trigger_source_constructor(
             ["cron", "Schedule"],

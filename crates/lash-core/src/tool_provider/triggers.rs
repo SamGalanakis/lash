@@ -3,11 +3,11 @@ use crate::{PluginError, TriggerEmitReport, TriggerOccurrenceRequest};
 use super::ToolContext;
 
 #[derive(Clone)]
-pub struct ToolTriggerControl<'run> {
+pub struct ToolTriggerClient<'run> {
     pub(super) context: ToolContext<'run>,
 }
 
-impl<'run> ToolTriggerControl<'run> {
+impl<'run> ToolTriggerClient<'run> {
     pub async fn emit(
         &self,
         request: TriggerOccurrenceRequest,

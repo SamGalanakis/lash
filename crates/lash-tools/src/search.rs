@@ -324,7 +324,7 @@ fn grep_tool_definition() -> ToolDefinition {
                 r#"await files.grep({ query: "*.rs apply_patch", path: "." })?"#.into(),
                 r#"await files.grep({ query: "current_query" })?"#.into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["files"],
                 "grep",
                 &["search_files", "ripgrep"],

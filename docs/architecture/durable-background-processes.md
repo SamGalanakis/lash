@@ -32,7 +32,7 @@ deployment, and the asymmetry was silent.
 
 Durability of execution used to be borrowed from the **turn-local effect
 scope**. A turn run through the old scope-taking `stream(&sink, scope)` facade threaded the
-Restate-backed scoped controller into process control via a silent
+Restate-backed scoped controller into process admin via a silent
 `effect_controller.unwrap_or(current.host.core.effect_controller)` fallback, so a
 turn's `start name(...)` scheduled a `LashProcessWorkflow` invocation that
 Restate re-invoked on crash — but trigger emission runs **outside** a turn.
@@ -51,7 +51,7 @@ sweep on another node or after a restart could re-run a process already running
 it. Registry rows — record, events, grants, wake inbox — survived a restart; the
 *execution* was either off-lease or merely eventually-recovered.
 
-The fix removes that silent fallback **and** the off-lease spawn. Process control
+The fix removes that silent fallback **and** the off-lease spawn. Process admin
 now routes through the controller the host **explicitly wired** for the path, and
 a `Start` only *registers* the durable row; the lease-protected
 `DurableProcessWorker` — driven promptly by a `ProcessWorkRunner` — is the single
@@ -62,7 +62,7 @@ holding its `ProcessLease`.
 ## Principle
 
 lash's thesis is that **the runtime is the durable end** for committed session
-state and process control records, while the active effect host owns in-flight
+state and process admin records, while the active effect host owns in-flight
 effect replay. Restate supplies durable handler history and timers for turn
 effects; SQLite supplies the committed session store and process registry.
 Process execution follows that split: **lash owns the process durability logic;
@@ -177,7 +177,7 @@ A generalization of code that already existed for turns — not a new subsystem:
 ## Idempotency
 
 Two layers, both in place. **Start-idempotency**: the registry's `process_id`
-uniqueness is the replay boundary for process control issued outside a turn
+uniqueness is the replay boundary for process admin issued outside a turn
 lease — `ProcessCommandRunner::run` (`process_runners/control.rs`) routes every
 command through the explicitly selected controller and pokes the work runner
 after a successful `Start`, and a duplicate `Start` re-registers the same row

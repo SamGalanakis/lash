@@ -197,7 +197,7 @@ async fn async_main() -> AnyhowResult<()> {
                     .with_mail_world(mail_world.clone()),
             ));
             plugins.push(Arc::new(
-                lash_plugin_process_controls::ProcessControlsPluginFactory::new(),
+                lash_plugin_process_controls::SessionProcessAdminPluginFactory::new(),
             ));
             plugins.push(Arc::new(
                 lash_subagents::SubagentsPluginFactory::new(subagent_registry)
@@ -671,7 +671,7 @@ async fn add_account(
         "api.accounts.add",
         json!({ "slug": summary.slug, "authority": summary.authority }),
     );
-    enqueue_tool_surface_refresh(&state, "account_added").await?;
+    enqueue_tool_catalog_refresh(&state, "account_added").await?;
     state.push_message(
         "event",
         format!("connected mock account `{}`", summary.authority),
@@ -688,7 +688,7 @@ async fn delete_account(
         .remove_account(&slug)
         .map_err(AppError::not_found)?;
     state.trace("api.accounts.remove", json!({ "slug": slug }));
-    enqueue_tool_surface_refresh(&state, "account_removed").await?;
+    enqueue_tool_catalog_refresh(&state, "account_removed").await?;
     state.push_message("event", format!("removed mock account `inbox.{slug}`"));
     Ok(Json(CommandAccepted { accepted: true }))
 }
@@ -716,14 +716,14 @@ async fn account_inbox(
     Ok(Json(inbox))
 }
 
-/// Enqueue a durable tool-surface refresh for the chat session.
+/// Enqueue a durable tool-catalog refresh for the chat session.
 ///
 /// The enqueue pokes the queued-work runner, which submits a Restate workflow
 /// for the batch; that workflow drains it with a durable handler context and
 /// the runtime commits the refreshed surface to the SQLite session store.
 /// Nothing here executes effects in the foreground — the workbench runs
 /// Restate + SQLite only.
-async fn enqueue_tool_surface_refresh(
+async fn enqueue_tool_catalog_refresh(
     state: &AppState,
     reason: &str,
 ) -> Result<lash::SessionCommandReceipt, AppError> {
@@ -737,10 +737,10 @@ async fn enqueue_tool_surface_refresh(
         .map_err(AppError::internal)?;
     let receipt = session
         .commands()
-        .refresh_tool_surface(
+        .refresh_tool_catalog(
             reason,
             format!(
-                "workbench-refresh-tool-surface:{}:{}:{}",
+                "workbench-refresh-tool-catalog:{}:{}:{}",
                 session_id,
                 reason,
                 uuid::Uuid::new_v4()
@@ -750,7 +750,7 @@ async fn enqueue_tool_surface_refresh(
         .map_err(AppError::internal)?;
     session.close().await.map_err(AppError::internal)?;
     state.trace(
-        "mail.tool_surface.refresh_enqueued",
+        "mail.tool_catalog.refresh_enqueued",
         json!({
             "reason": reason,
             "session_id": session_id,
@@ -1492,7 +1492,7 @@ impl PluginFactory for WorkbenchPluginFactory {
         "agent_workbench"
     }
 
-    fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
         workbench_lashlang_resources()
     }
 
@@ -1555,8 +1555,8 @@ impl SessionPlugin for WorkbenchSessionPlugin {
     }
 }
 
-fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn workbench_lashlang_resources() -> lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources
         .add_trigger_source_constructor(
             CRON_SCHEDULE_SOURCE_TYPE.split('.'),
@@ -2218,13 +2218,13 @@ mod tests {
     }
 
     #[test]
-    fn inbox_added_after_session_open_updates_persisted_tool_surface() {
+    fn inbox_added_after_session_open_updates_persisted_tool_catalog() {
         run_async_test_on_stack_budget("workbench-dynamic-inbox-surface-test", || {
-            inbox_added_after_session_open_updates_persisted_tool_surface_inner()
+            inbox_added_after_session_open_updates_persisted_tool_catalog_inner()
         });
     }
 
-    async fn inbox_added_after_session_open_updates_persisted_tool_surface_inner() {
+    async fn inbox_added_after_session_open_updates_persisted_tool_catalog_inner() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-dynamic-inbox-{}",
             uuid::Uuid::new_v4()
@@ -2290,12 +2290,12 @@ mod tests {
             mail_world: mail_world.clone(),
         };
 
-        let receipt = enqueue_tool_surface_refresh(&state, "initial_empty")
+        let receipt = enqueue_tool_catalog_refresh(&state, "initial_empty")
             .await
             .expect("enqueue initial empty refresh");
         drain_refresh_batch(&state, &receipt).await;
         mail_world.add_account("Late Account").expect("add account");
-        let receipt = enqueue_tool_surface_refresh(&state, "account_added")
+        let receipt = enqueue_tool_catalog_refresh(&state, "account_added")
             .await
             .expect("enqueue account refresh");
         drain_refresh_batch(&state, &receipt).await;
@@ -2330,7 +2330,7 @@ mod tests {
         mail_world
             .remove_account("late_account")
             .expect("remove account");
-        let receipt = enqueue_tool_surface_refresh(&state, "account_removed")
+        let receipt = enqueue_tool_catalog_refresh(&state, "account_removed")
             .await
             .expect("enqueue removal refresh");
         drain_refresh_batch(&state, &receipt).await;
@@ -2357,7 +2357,7 @@ mod tests {
         mail_world
             .add_account("Late Account")
             .expect("re-add account");
-        let receipt = enqueue_tool_surface_refresh(&state, "account_readded")
+        let receipt = enqueue_tool_catalog_refresh(&state, "account_readded")
             .await
             .expect("enqueue re-add refresh");
         drain_refresh_batch(&state, &receipt).await;
@@ -2447,11 +2447,7 @@ mod tests {
             .await_process(&report.started_process_ids[0])
             .await
             .expect("trigger process should finish");
-        let handles = session
-            .process_control()
-            .list_all()
-            .await
-            .expect("list handles");
+        let handles = session.processes().list_all().await.expect("list handles");
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0].descriptor.kind.as_deref(), Some("lashlang"));
         assert_eq!(handles[0].descriptor.label.as_deref(), Some("remember"));
@@ -2464,7 +2460,7 @@ mod tests {
             .await
             .expect("reopen session");
         let reopened_handles = reopened
-            .process_control()
+            .processes()
             .list_all()
             .await
             .expect("list handles after reopen");
@@ -2888,7 +2884,7 @@ mod tests {
                 .open()
                 .await
                 .expect("open new session")
-                .process_control()
+                .processes()
                 .list()
                 .await
                 .expect("new work")

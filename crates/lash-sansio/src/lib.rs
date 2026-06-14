@@ -6,9 +6,9 @@ pub mod prompt;
 pub mod sansio;
 pub mod session;
 pub mod session_model;
+pub mod tool_catalog;
 pub mod tool_contract;
 pub mod tool_output;
-pub mod tool_surface;
 pub mod turn;
 pub mod turn_driver;
 
@@ -47,9 +47,13 @@ pub use session_model::{
     SessionEventRecord, TokenUsage, TurnFinish, TurnOutcome, TurnStop, default_prompt_template,
     messages_are_prompt_resume_safe, resolve_prompt_layers, shared_parts,
 };
+pub use tool_catalog::{
+    ToolCatalog, ToolCatalogBuildInput, ToolCatalogContribution, ToolCatalogEntry,
+    ToolCatalogOverride, ToolContractResolver, build_tool_catalog,
+};
 pub use tool_contract::{
-    CompactToolContract, LashSchema, ModelTool, SchemaProjectionOverride, ToolActivation,
-    ToolAgentExecutableSurface, ToolAgentSurface, ToolArgumentProjectionPolicy, ToolAvailability,
+    CompactToolContract, LashSchema, LashlangToolBinding, ModelTool, ResolvedLashlangToolBinding,
+    SchemaProjectionOverride, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
     ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolId, ToolManifest, ToolOutputContract,
     ToolRetryPolicy, ToolScheduling, schema_for, validate_tool_input,
 };
@@ -58,10 +62,6 @@ pub use tool_output::{
     ToolCallStatus, ToolCancellation, ToolControl, ToolFailure, ToolFailureClass,
     ToolFailureSource, ToolRetryDisposition, ToolValue, format_tool_output_content,
     model_parts_from_tool_output,
-};
-pub use tool_surface::{
-    ToolContractResolver, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution,
-    ToolSurfaceEntry, ToolSurfaceOverride, build_tool_surface,
 };
 pub use turn::{PreparedTurnMachine, SansIoTurnInput, build_turn};
 pub use turn_driver::{

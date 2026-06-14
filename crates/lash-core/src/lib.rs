@@ -51,24 +51,24 @@ pub use lash_sansio::llm::types::{
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
     BaseRenderCache, CheckpointDelivery, CheckpointKind, CompactToolContract, EffectId,
-    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LashSchema, LlmCallError, MediaType,
-    Message, MessageOrigin, MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart,
-    Part, PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt, PromptBuildInput,
-    PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
+    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LashSchema, LashlangToolBinding,
+    LlmCallError, MediaType, Message, MessageOrigin, MessageRole, MessageSequence, ModelToolReturn,
+    ModelToolReturnPart, Part, PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt,
+    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
     PromptContributionSet, PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer,
     PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt,
-    ResolvedPromptLayer, Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata,
-    TokenUsage, ToolActivation, ToolAgentExecutableSurface, ToolAgentSurface,
-    ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome,
-    ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolContract, ToolControl,
-    ToolDefinition, ToolFailure, ToolFailureClass, ToolFailureSource, ToolId, ToolManifest,
-    ToolOutputContract, ToolRetryDisposition, ToolRetryPolicy, ToolScheduling, ToolSurface,
-    ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, ToolValue, TurnCause, TurnFinish,
-    TurnLimitFinalMessage, TurnOutcome, TurnStop, append_assistant_text_part, build_prompt,
-    build_tool_surface, build_turn, default_prompt_template, head_tail_truncate,
-    messages_are_prompt_resume_safe, normalized_response_parts, prompt_template_fingerprint,
-    prompt_text_fingerprint, prompt_tool_names_fingerprint, reasoning_part,
-    render_turn_causes_prompt, resolve_prompt_layers, shared_parts, validate_tool_input,
+    ResolvedLashlangToolBinding, ResolvedPromptLayer, Response, SchemaProjectionOverride,
+    SessionEvent, TextProjectionMetadata, TokenUsage, ToolActivation, ToolArgumentProjectionPolicy,
+    ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome, ToolCallOutput, ToolCallRecord,
+    ToolCallStatus, ToolCancellation, ToolCatalog, ToolCatalogBuildInput, ToolCatalogEntry,
+    ToolCatalogOverride, ToolContract, ToolControl, ToolDefinition, ToolFailure, ToolFailureClass,
+    ToolFailureSource, ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition,
+    ToolRetryPolicy, ToolScheduling, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
+    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_catalog,
+    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
+    normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
+    prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
+    resolve_prompt_layers, shared_parts, validate_tool_input,
 };
 pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
@@ -207,14 +207,14 @@ pub use plugin::{
     PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
     PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
     ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices, SessionAppendNode,
-    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionGraphService,
+    SessionConfigChangedContext, SessionContextOverlay, SessionCreateRequest, SessionGraphService,
     SessionHandle, SessionLifecycleService, SessionParam, SessionPlugin, SessionPluginSource,
     SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
     SessionStateChangedContext, SessionStateService, SessionToolAccess, SessionTurnInput,
     SessionTurnRequest, SnapshotReader, SnapshotWriter, SubagentSessionContext,
-    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
-    ToolDiscoveryToolContribution, ToolResultProjectionContext, ToolResultProjector,
-    ToolSurfaceContribution, TriggerEventRegistrations, TurnContextTransform, TurnHookContext,
+    ToolCatalogContribution, ToolDiscoveryContext, ToolDiscoveryContribution,
+    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
+    ToolResultProjector, TriggerEventRegistrations, TurnContextTransform, TurnHookContext,
     TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
@@ -317,7 +317,7 @@ pub use store::{
 pub use tool_provider::{
     PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext,
     ToolLashlangExecutionCallSite, ToolPrepareCall, ToolPrepareContext, ToolProvider,
-    ToolSessionControl, ToolSessionModel, ToolTriggerControl,
+    ToolSessionAdmin, ToolSessionModel, ToolTriggerClient,
 };
 
 #[cfg(test)]
