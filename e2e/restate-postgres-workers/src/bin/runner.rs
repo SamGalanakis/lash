@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use lash::host_events::{HostEventOccurrenceRequest, empty_host_event_source_key};
+use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::{
     EffectScope, InlineRuntimeEffectController, RuntimePersistence, ScopedEffectController,
 };
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     assert_failover(storage.pool()).await?;
     assert_provider_calls(storage.pool()).await?;
     assert_tool_and_turn_telemetry(storage.pool()).await?;
-    assert_host_event_delivery(storage.pool(), &trigger_process_id).await?;
+    assert_trigger_delivery(storage.pool(), &trigger_process_id).await?;
     assert_attachments_round_trip(storage.pool(), &attachment_store, &responses).await?;
     assert_reopened_session_agrees(
         &storage,
@@ -681,15 +681,15 @@ async fn emit_button_event(
         trace_dir,
         fail_once: false,
     })?;
-    let source_key = empty_host_event_source_key(BUTTON_SOURCE_TYPE)?;
+    let source_key = empty_trigger_source_key(BUTTON_SOURCE_TYPE)?;
     let scoped = ScopedEffectController::shared(
         Arc::new(InlineRuntimeEffectController),
-        EffectScope::runtime_operation("e2e-button-host-event"),
+        EffectScope::runtime_operation("e2e-button-trigger"),
     )?;
     let report = core
-        .host_events()
+        .triggers()
         .emit(
-            HostEventOccurrenceRequest::new(
+            TriggerOccurrenceRequest::new(
                 BUTTON_SOURCE_TYPE,
                 source_key,
                 json!({
@@ -707,7 +707,7 @@ async fn emit_button_event(
         .started_process_ids
         .first()
         .cloned()
-        .context("host event did not start a process")
+        .context("trigger occurrence did not start a process")
 }
 
 async fn assert_signal_process_output(pool: &sqlx::PgPool, process_id: &str) -> Result<()> {
@@ -1020,28 +1020,28 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn assert_host_event_delivery(pool: &sqlx::PgPool, trigger_process_id: &str) -> Result<()> {
+async fn assert_trigger_delivery(pool: &sqlx::PgPool, trigger_process_id: &str) -> Result<()> {
     let trigger_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM lash_host_event_trigger_subscriptions
+        "SELECT COUNT(*) FROM lash_trigger_subscriptions
          WHERE source_type = $1 AND enabled = true",
     )
     .bind(BUTTON_SOURCE_TYPE)
     .fetch_one(pool)
     .await
-    .context("count host event trigger subscriptions")?;
+    .context("count trigger subscriptions")?;
     anyhow::ensure!(
         trigger_count == 1,
         "expected one enabled trigger, got {trigger_count}"
     );
     let delivery_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM lash_host_event_deliveries WHERE process_id = $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM lash_trigger_deliveries WHERE process_id = $1")
             .bind(trigger_process_id)
             .fetch_one(pool)
             .await
-            .context("count host event deliveries")?;
+            .context("count trigger occurrence deliveries")?;
     anyhow::ensure!(
         delivery_count == 1,
-        "expected one host event delivery for `{trigger_process_id}`, got {delivery_count}"
+        "expected one trigger delivery for `{trigger_process_id}`, got {delivery_count}"
     );
     Ok(())
 }

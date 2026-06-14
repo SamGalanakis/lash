@@ -3,23 +3,23 @@ use crate::support::*;
 pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
-pub struct HostEventsControl {
+pub struct CoreTriggersControl {
     pub(crate) core: LashCore,
 }
 
-impl HostEventsControl {
+impl CoreTriggersControl {
     pub async fn emit(
         &self,
-        request: lash_core::HostEventOccurrenceRequest,
+        request: lash_core::TriggerOccurrenceRequest,
         scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        let store = self.core.env.host_event_store.as_ref().ok_or_else(|| {
+    ) -> Result<lash_core::TriggerEmitReport> {
+        let store = self.core.env.trigger_store.as_ref().ok_or_else(|| {
             EmbedError::Plugin(lash_core::PluginError::Session(
-                "host event store is unavailable in this runtime".to_string(),
+                "trigger store is unavailable in this runtime".to_string(),
             ))
         })?;
         let process_work_poke = self.core.process_work_runner.poke().await;
-        let router = lash_core::HostEventRouter::new(
+        let router = lash_core::TriggerRouter::new(
             Arc::clone(store),
             Arc::clone(&self.core.env.core.durability.lashlang_artifact_store),
             self.core.env.process_registry.clone(),
@@ -36,9 +36,9 @@ impl HostEventsControl {
         &self,
         filter: lash_core::TriggerSubscriptionFilter,
     ) -> Result<Vec<lash_core::TriggerRegistration>> {
-        let store = self.core.env.host_event_store.as_ref().ok_or_else(|| {
+        let store = self.core.env.trigger_store.as_ref().ok_or_else(|| {
             EmbedError::Plugin(lash_core::PluginError::Session(
-                "host event store is unavailable in this runtime".to_string(),
+                "trigger store is unavailable in this runtime".to_string(),
             ))
         })?;
         let records = store.list_subscriptions(filter).await?;
@@ -489,7 +489,7 @@ impl SessionControl {
 
     async fn lashlang_trigger_registrations_by_source_type(
         &self,
-        source_type: impl Into<lash_core::TriggerSourceType>,
+        source_type: impl Into<lash_core::TriggerEventType>,
     ) -> Result<Vec<lash_core::TriggerRegistration>> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
@@ -1044,7 +1044,7 @@ impl TriggersControl {
     /// source uses it to inspect registrations for keys it may schedule and emit.
     pub async fn by_source_type(
         &self,
-        source_type: impl Into<lash_core::TriggerSourceType>,
+        source_type: impl Into<lash_core::TriggerEventType>,
     ) -> Result<Vec<lash_core::TriggerRegistration>> {
         self.control
             .lashlang_trigger_registrations_by_source_type(source_type)

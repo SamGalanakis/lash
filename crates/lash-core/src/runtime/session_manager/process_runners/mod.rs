@@ -119,7 +119,7 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
             session_graph: services.graph_service(),
             processes: services.process_service(),
             process_cancel_ability: services.process_cancel_ability(),
-            host_event_router: services.host_event_router(),
+            trigger_router: services.trigger_router(),
             effect_controller,
             direct_completions,
             parent_invocation: self.dispatch_parent_invocation,
@@ -128,7 +128,7 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::clone(
                 &self.services.current.host.core.durability.attachment_store,
             ),
@@ -311,6 +311,24 @@ mod tests {
 
     struct ProcessEchoTool;
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedToolContext {
+        tool_call_id: Option<String>,
+        replay_key: Option<String>,
+        runtime_process_id: Option<String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingProcessEchoTool {
+        calls: Arc<std::sync::Mutex<Vec<RecordedToolContext>>>,
+    }
+
+    impl RecordingProcessEchoTool {
+        fn calls(&self) -> Vec<RecordedToolContext> {
+            self.calls.lock().expect("recorded calls").clone()
+        }
+    }
+
     fn process_echo_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
             "tool:process_echo",
@@ -332,6 +350,34 @@ mod tests {
         }
 
         async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            let value = call
+                .args
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            crate::ToolResult::ok(serde_json::json!({ "payload": format!("raw:{value}") }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for RecordingProcessEchoTool {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            vec![process_echo_tool_definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "process_echo").then(|| Arc::new(process_echo_tool_definition().contract()))
+        }
+
+        async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            self.calls
+                .lock()
+                .expect("recorded calls")
+                .push(RecordedToolContext {
+                    tool_call_id: call.context.tool_call_id().map(str::to_string),
+                    replay_key: call.context.replay_key().map(str::to_string),
+                    runtime_process_id: call.context.runtime_process_id().map(str::to_string),
+                });
             let value = call
                 .args
                 .get("value")
@@ -754,7 +800,7 @@ mod tests {
         )
     }
 
-    /// A trigger/host-event-shaped registry row: a tool process written straight to
+    /// A trigger/trigger-shaped registry row: a tool process written straight to
     /// the registry with no turn lease and no manager-driven start.
     async fn counting_registration(process_id: &str) -> crate::ProcessRegistration {
         worker_registration_with_env(crate::ProcessRegistration::session_start_draft(
@@ -775,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn process_work_runner_drives_directly_registered_process_to_terminal_on_poke() {
         // Out-of-turn execution: a process is registered straight into the
-        // registry (the trigger/host-event shape — no turn, no manager) and reaches
+        // registry (the trigger/trigger shape — no turn, no manager) and reaches
         // terminal promptly because the control seam's poke wakes the runner,
         // not because a separate boot-time recovery sweep eventually finds it.
         let registry: Arc<dyn crate::ProcessRegistry> =
@@ -1341,6 +1387,98 @@ mod tests {
             panic!("expected process wake queue payload");
         };
         assert_eq!(wake.input, "raw:seed");
+    }
+
+    #[tokio::test]
+    async fn lashlang_resource_operation_tool_call_ids_are_deterministic_for_call_site() {
+        let registry: Arc<dyn crate::ProcessRegistry> =
+            Arc::new(crate::TestLocalProcessRegistry::default());
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let tool = RecordingProcessEchoTool::default();
+        let worker = process_worker_with_tools(
+            Arc::clone(&registry),
+            factory as Arc<dyn crate::SessionStoreFactory>,
+            {
+                let mut config = crate::RuntimeHostConfig::in_memory();
+                config.profile.host_profile_id = "worker-profile".to_string();
+                config
+            },
+            Arc::new(tool.clone()),
+        );
+        let mut input = serde_json::Map::new();
+        input.insert(
+            "tool".to_string(),
+            serde_json::to_value(::lashlang::Value::Resource(
+                ::lashlang::ResourceHandle::new("Tools", "tools"),
+            ))
+            .expect("resource handle json"),
+        );
+        let program = ::lashlang::parse(
+            r#"
+            process main(tool: Tools) {
+              first = await tool.process_echo({ value: "first" })?
+              second = await tool.process_echo({ value: "second" })?
+              finish { first: first.payload, second: second.payload }
+            }
+            "#,
+        )
+        .expect("lashlang process body");
+        let registration = worker_registration_with_env(
+            lashlang_process_registration("resource-determinism", program, input).await,
+        )
+        .await;
+
+        for _ in 0..2 {
+            let output = worker
+                .run_process(
+                    registration.clone(),
+                    crate::ProcessExecutionContext::default(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("run lashlang process");
+            assert!(matches!(output, crate::ProcessAwaitOutput::Success { .. }));
+        }
+
+        let calls = tool.calls();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].tool_call_id, calls[2].tool_call_id);
+        assert_eq!(calls[1].tool_call_id, calls[3].tool_call_id);
+        assert_eq!(calls[0].replay_key, calls[2].replay_key);
+        assert_eq!(calls[1].replay_key, calls[3].replay_key);
+        assert_ne!(calls[0].tool_call_id, calls[1].tool_call_id);
+        for call in &calls {
+            let call_id = call.tool_call_id.as_deref().expect("tool call id");
+            assert!(
+                call_id.starts_with("lashlang:resource-determinism:resource:process_echo:"),
+                "unexpected lashlang resource call id: {call_id}"
+            );
+            assert_eq!(
+                call.runtime_process_id.as_deref(),
+                Some("resource-determinism")
+            );
+            assert!(
+                call.replay_key
+                    .as_deref()
+                    .is_some_and(|key| key.contains(call_id)),
+                "replay key should include deterministic call id: {:?}",
+                call.replay_key
+            );
+        }
+    }
+
+    #[test]
+    fn lashlang_process_event_payload_is_stable_without_timestamp() {
+        let value = ::lashlang::Value::String("ready".into());
+
+        let first = crate::lashlang_bridge::process_event_payload(&value).expect("payload");
+        let second = crate::lashlang_bridge::process_event_payload(&value).expect("payload");
+
+        assert_eq!(first, second);
+        assert_eq!(first["value"], serde_json::json!("ready"));
+        assert_eq!(first["text"], serde_json::json!("ready"));
+        assert!(first.get("timestamp").is_none());
     }
 
     #[tokio::test]

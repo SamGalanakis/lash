@@ -72,7 +72,7 @@ async fn postgres_core(database_url: String) -> anyhow::Result<()> {
     let core = LashCore::builder()
         .store_factory(Arc::new(storage.session_store_factory()))
         .process_registry(Arc::new(storage.process_registry()))
-        .host_event_store(Arc::new(storage.host_event_store()))
+        .trigger_store(Arc::new(storage.trigger_store()))
         .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
         .attachment_store(Arc::new(attachments))
         // provider, mode, model, effect host...

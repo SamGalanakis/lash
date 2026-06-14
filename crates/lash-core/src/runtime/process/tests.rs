@@ -69,7 +69,7 @@ fn process_wake_turn_text_frames_process_id_sequence_and_input() {
 fn process_wake_turn_cause_preserves_process_origin() {
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "target".to_string(),
-        node_id: "host-event:button".to_string(),
+        node_id: "trigger:button".to_string(),
     };
     let wake = wake_delivery("process.ready", Some(process_caused_by.clone()));
 
@@ -101,7 +101,7 @@ fn process_wake_turn_cause_preserves_process_origin() {
 fn process_wake_delivery_carries_event_invocation_and_process_cause() {
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "target".to_string(),
-        node_id: "host-event:button".to_string(),
+        node_id: "trigger:button".to_string(),
     };
     let wake = wake_delivery("process.ready", Some(process_caused_by.clone()));
 

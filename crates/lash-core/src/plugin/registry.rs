@@ -22,7 +22,7 @@ use crate::{PluginOptions, ToolProvider};
 #[derive(Clone, Default)]
 pub struct PluginSpec {
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
-    pub host_events: Vec<crate::HostEvent>,
+    pub triggers: Vec<crate::TriggerEvent>,
     pub prompt_contributors: Vec<PromptContributor>,
     pub tool_surface_contributors: Vec<ToolSurfaceContributor>,
     pub tool_discovery_contributors: Vec<ToolDiscoveryContributor>,
@@ -51,8 +51,8 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_host_event(mut self, event: crate::HostEvent) -> Self {
-        self.host_events.push(event);
+    pub fn with_trigger_event(mut self, event: crate::TriggerEvent) -> Self {
+        self.triggers.push(event);
         self
     }
 
@@ -416,8 +416,8 @@ impl SessionPlugin for SpecPlugin {
         for provider in &self.spec.tool_providers {
             reg.tools().provider(Arc::clone(provider))?;
         }
-        for event in &self.spec.host_events {
-            reg.host_events().declare(event.clone())?;
+        for event in &self.spec.triggers {
+            reg.triggers().declare(event.clone())?;
         }
         for contributor in &self.spec.prompt_contributors {
             reg.prompt().contribute(Arc::clone(contributor));

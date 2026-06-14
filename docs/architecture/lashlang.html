@@ -115,6 +115,7 @@ await control.continue_as({
             <dt>Storage</dt>
             <dd>Label metadata is part of the <code>ModuleArtifact</code> identity. Changing a label changes the module ref. Hosts see it through Lashlang execution graphs as execution-map node <code>label_metadata</code>; lifecycle node events continue to reference stable <code>node_id</code> values.</dd>
           </dl>
+          <p>For the static-map versus dynamic-update model, including an example rendered graph, see <a href="../tracing.html#lashlang-graph-updates">Lashlang graph updates</a>.</p>
           <pre><code>process on_button(inbox: Inbox, event: ui.button.Pressed) {
   @label(title: "Create inbox card", description: "Stores the button message")
   result = await inbox.cards.create({ title: event.button })?

@@ -32,9 +32,9 @@ pub struct ReopenableLashlangArtifactStore {
     pub reopen: Arc<dyn crate::LashlangArtifactStore>,
 }
 
-/// A pair of [`HostEventStore`](crate::HostEventStore) handles opened against
+/// A pair of [`TriggerStore`](crate::TriggerStore) handles opened against
 /// the same durable backing store.
-pub struct ReopenableHostEventStore {
-    pub open: Arc<dyn crate::HostEventStore>,
-    pub reopen: Arc<dyn crate::HostEventStore>,
+pub struct ReopenableTriggerStore {
+    pub open: Arc<dyn crate::TriggerStore>,
+    pub reopen: Arc<dyn crate::TriggerStore>,
 }

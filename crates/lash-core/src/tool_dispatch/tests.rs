@@ -310,7 +310,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -326,7 +326,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -357,7 +357,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -373,7 +373,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -411,7 +411,7 @@ fn projection_policy_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -427,7 +427,7 @@ fn projection_policy_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -571,7 +571,7 @@ fn lazy_contract_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -587,7 +587,7 @@ fn lazy_contract_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -607,7 +607,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -623,7 +623,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -669,7 +669,7 @@ fn parallel_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -685,7 +685,7 @@ fn parallel_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -1302,7 +1302,7 @@ fn serial_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1318,7 +1318,7 @@ fn serial_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -1456,7 +1456,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1472,7 +1472,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });
@@ -1596,7 +1596,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1612,7 +1612,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });

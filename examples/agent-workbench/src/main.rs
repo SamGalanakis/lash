@@ -21,12 +21,12 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
-use lash::host_events::HostEvent;
 use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::prompt::PromptContribution;
 use lash::provider::{ProviderHandle, ProviderOptions};
+use lash::triggers::TriggerEvent;
 use lash::{
     LashCore, ModeId, ModePreset, SessionSpec, TurnActivity, TurnActivitySink, TurnEvent,
     TurnResult,
@@ -145,10 +145,10 @@ async fn async_main() -> AnyhowResult<()> {
             .await
             .context("open process registry")?,
     ) as Arc<dyn lash::process::ProcessRegistry>;
-    let host_event_store = Arc::new(
-        lash_sqlite_store::SqliteHostEventStore::open(&data_dir.join("host-events.db"))
+    let trigger_store = Arc::new(
+        lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
             .await
-            .context("open host event store")?,
+            .context("open trigger store")?,
     );
     // Deployment-level Lashlang artifact store (compiled trigger/process
     // modules), shared across the session tree. SQLite keeps installed triggers
@@ -187,7 +187,7 @@ async fn async_main() -> AnyhowResult<()> {
             data_dir.join("attachments"),
         )))
         .lashlang_artifact_store(artifact_store)
-        .host_event_store(host_event_store)
+        .trigger_store(trigger_store)
         .trace_sink(Arc::clone(&trace_sink))
         .lashlang_execution_sink(Arc::clone(&lashlang_execution_sink))
         .trace_level(TraceLevel::Extended)
@@ -960,22 +960,22 @@ impl TurnActivitySink for ChannelTurnEvents {
     }
 }
 
-pub(crate) async fn enqueue_button_host_event_command(
+pub(crate) async fn enqueue_button_trigger_command(
     state: &AppState,
     button: ButtonChoice,
     pressed_at: &str,
     operation_id: &str,
     scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::host_events::HostEventEmitReport> {
+) -> AnyhowResult<lash::triggers::TriggerEmitReport> {
     let payload = json!({
         "pressed_at": pressed_at,
         "button": button.as_str(),
         "message": format!("user pressed the {} button", button.lower()),
     });
-    let source_key = lash::host_events::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
+    let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
         .context("button source key")?;
     state.trace(
-        "host_event.emit",
+        "trigger.emit",
         json!({
             "resource_type": BUTTON_TRIGGER_RESOURCE,
             "alias": BUTTON_TRIGGER_ALIAS,
@@ -987,36 +987,36 @@ pub(crate) async fn enqueue_button_host_event_command(
     );
     state
         .core
-        .host_events()
+        .triggers()
         .emit(
-            lash::host_events::HostEventOccurrenceRequest::new(
+            lash::triggers::TriggerOccurrenceRequest::new(
                 BUTTON_TRIGGER_SOURCE_TYPE,
                 source_key,
                 payload,
-                format!("workbench-button-host-event:{operation_id}"),
+                format!("workbench-button-trigger:{operation_id}"),
             )
             .with_source(json!({})),
             scoped_effect_controller,
         )
         .await
-        .context("emit button host event occurrence")
+        .context("emit button trigger occurrence")
 }
 
-pub(crate) async fn enqueue_mail_received_host_event_command(
+pub(crate) async fn enqueue_mail_received_trigger_command(
     state: &AppState,
     message: &mail::MailDelivery,
     operation_id: &str,
     scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::host_events::HostEventEmitReport> {
+) -> AnyhowResult<lash::triggers::TriggerEmitReport> {
     let payload = json!({
         "account": message.account,
         "title": message.title,
         "text": message.text,
     });
-    let source_key = lash::host_events::empty_host_event_source_key(MAIL_RECEIVED_SOURCE_TYPE)
+    let source_key = lash::triggers::empty_trigger_source_key(MAIL_RECEIVED_SOURCE_TYPE)
         .context("mail source key")?;
     state.trace(
-        "host_event.emit",
+        "trigger.emit",
         json!({
             "resource_type": MAIL_EVENT_RESOURCE,
             "alias": MAIL_EVENT_ALIAS,
@@ -1028,19 +1028,19 @@ pub(crate) async fn enqueue_mail_received_host_event_command(
     );
     state
         .core
-        .host_events()
+        .triggers()
         .emit(
-            lash::host_events::HostEventOccurrenceRequest::new(
+            lash::triggers::TriggerOccurrenceRequest::new(
                 MAIL_RECEIVED_SOURCE_TYPE,
                 source_key,
                 payload,
-                format!("workbench-mail-host-event:{operation_id}"),
+                format!("workbench-mail-trigger:{operation_id}"),
             )
             .with_source(json!({})),
             scoped_effect_controller,
         )
         .await
-        .context("emit mail received host event occurrence")
+        .context("emit mail received trigger occurrence")
 }
 
 fn button_trigger_event_type() -> lashlang::NamedDataType {
@@ -1528,13 +1528,13 @@ impl SessionPlugin for WorkbenchSessionPlugin {
                 )])
             })
         }));
-        reg.host_events().declare(HostEvent::new(
+        reg.triggers().declare(TriggerEvent::new(
             BUTTON_TRIGGER_RESOURCE,
             BUTTON_TRIGGER_ALIAS,
             BUTTON_TRIGGER_EVENT,
             button_trigger_event_type(),
         ))?;
-        reg.host_events().declare(HostEvent::new(
+        reg.triggers().declare(TriggerEvent::new(
             MAIL_EVENT_RESOURCE,
             MAIL_EVENT_ALIAS,
             MAIL_EVENT_EVENT,
@@ -1688,7 +1688,7 @@ registrations = await triggers.list({ name: "button watcher" })?
 submit format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
 ```
 
-- For schedule requests, build `cron.Schedule(...)` values and register a process definition with explicit `inputs`. Use `trigger.event` directly for the `cron.Tick` param, for example `inputs: { tick: trigger.event }`. The workbench syncs enabled `cron.Schedule` registrations to Restate cron objects by stored source key, then emits host-event occurrences with `cron.Tick { fired_at: str }`; use a seconds expression such as `*/10 * * * * *` when the user wants a quick smoke test. Use `await triggers.list({})?` to discover registrations and `await triggers.cancel({ handle: handle })?` to disable future occurrence delivery.
+- For schedule requests, build `cron.Schedule(...)` values and register a process definition with explicit `inputs`. Use `trigger.event` directly for the `cron.Tick` param, for example `inputs: { tick: trigger.event }`. The workbench syncs enabled `cron.Schedule` registrations to Restate cron objects by stored source key, then emits trigger occurrences with `cron.Tick { fired_at: str }`; use a seconds expression such as `*/10 * * * * *` when the user wants a quick smoke test. Use `await triggers.list({})?` to discover registrations and `await triggers.cancel({ handle: handle })?` to disable future occurrence delivery.
 
 - Mock email accounts the user has connected appear as typed `Inbox` authorities at `inbox.<account>` (for example `inbox.work`, `inbox.personal`). Every account exposes the same three operations:
   - `await inbox.work.send({ title: t, text: b })?` adds a message to that inbox and returns `{ account, id }`. There is no recipient address — a message is just a title and text.
@@ -1765,12 +1765,12 @@ mod tests {
                         .expect("open artifact store")
                 }
             })))
-            .host_event_store(Arc::new(sync_await({
-                let path = data_dir.join("host-events.db");
+            .trigger_store(Arc::new(sync_await({
+                let path = data_dir.join("triggers.db");
                 async move {
-                    lash_sqlite_store::SqliteHostEventStore::open(&path)
+                    lash_sqlite_store::SqliteTriggerStore::open(&path)
                         .await
-                        .expect("open host event store")
+                        .expect("open trigger store")
                 }
             })))
     }
@@ -2381,13 +2381,13 @@ mod tests {
     }
 
     #[test]
-    fn button_host_event_occurrence_starts_visible_lashlang_process() {
+    fn button_trigger_occurrence_starts_visible_lashlang_process() {
         run_async_test_on_stack_budget("workbench-button-trigger-test", || {
-            button_host_event_occurrence_starts_visible_lashlang_process_inner()
+            button_trigger_occurrence_starts_visible_lashlang_process_inner()
         });
     }
 
-    async fn button_host_event_occurrence_starts_visible_lashlang_process_inner() {
+    async fn button_trigger_occurrence_starts_visible_lashlang_process_inner() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-processes-{}",
             uuid::Uuid::new_v4()
@@ -2540,13 +2540,13 @@ mod tests {
     }
 
     #[test]
-    fn button_host_event_occurrence_is_submitted_to_restate_workflow() {
+    fn button_trigger_occurrence_is_submitted_to_restate_workflow() {
         run_async_test_on_stack_budget("workbench-trigger-restate-test", || {
-            button_host_event_occurrence_is_submitted_to_restate_workflow_inner()
+            button_trigger_occurrence_is_submitted_to_restate_workflow_inner()
         });
     }
 
-    async fn button_host_event_occurrence_is_submitted_to_restate_workflow_inner() {
+    async fn button_trigger_occurrence_is_submitted_to_restate_workflow_inner() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-queue-runner-{}",
             uuid::Uuid::new_v4()
@@ -2562,10 +2562,10 @@ mod tests {
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
-        let host_event_store = Arc::new(
-            lash_sqlite_store::SqliteHostEventStore::open(&data_dir.join("host-events.db"))
+        let trigger_store = Arc::new(
+            lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
                 .await
-                .expect("open host event store"),
+                .expect("open trigger store"),
         );
         let artifact_store = Arc::new(
             lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
@@ -2595,7 +2595,7 @@ mod tests {
             .store_factory(Arc::clone(&core_store_factory))
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(Arc::clone(&process_registry))
-            .host_event_store(host_event_store)
+            .trigger_store(trigger_store)
             .advanced()
             .runtime_host_config({
                 let mut config = lash::durability::RuntimeHostConfig::in_memory();
@@ -3042,10 +3042,10 @@ mod tests {
                 .await
                 .expect("open process registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
-        let host_event_store = Arc::new(
-            lash_sqlite_store::SqliteHostEventStore::open(&data_dir.join("host-events.db"))
+        let trigger_store = Arc::new(
+            lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
                 .await
-                .expect("open host event store"),
+                .expect("open trigger store"),
         );
         let artifact_store = Arc::new(
             lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
@@ -3112,7 +3112,7 @@ mod tests {
                 data_dir.join("attachments"),
             )))
             .lashlang_artifact_store(artifact_store)
-            .host_event_store(host_event_store)
+            .trigger_store(trigger_store)
             .trace_sink(Arc::clone(&trace_sink))
             .lashlang_execution_sink(lashlang_execution_sink)
             .trace_level(TraceLevel::Extended)
@@ -3290,7 +3290,7 @@ mod tests {
             data_dir.join("lash-sessions"),
         ));
         let process_registry_path = data_dir.join("processes.db");
-        let host_event_store_path = data_dir.join("host-events.db");
+        let trigger_store_path = data_dir.join("triggers.db");
         let artifact_store_path = data_dir.join("artifacts.db");
         let session_id = WorkbenchSessionIds::fresh().current();
 
@@ -3307,15 +3307,15 @@ mod tests {
                     .await
                     .expect("open registry"),
             ) as Arc<dyn lash::process::ProcessRegistry>;
-            let host_event_store = Arc::new(
-                lash_sqlite_store::SqliteHostEventStore::open(&host_event_store_path)
+            let trigger_store = Arc::new(
+                lash_sqlite_store::SqliteTriggerStore::open(&trigger_store_path)
                     .await
-                    .expect("open host event store"),
+                    .expect("open trigger store"),
             );
             let core = test_workbench_core(
                 session_store_factory.clone(),
                 process_registry,
-                host_event_store,
+                trigger_store,
                 artifact_store_for_core,
             );
             let session = core
@@ -3341,15 +3341,15 @@ mod tests {
                 .await
                 .expect("reopen registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
-        let host_event_store = Arc::new(
-            lash_sqlite_store::SqliteHostEventStore::open(&host_event_store_path)
+        let trigger_store = Arc::new(
+            lash_sqlite_store::SqliteTriggerStore::open(&trigger_store_path)
                 .await
-                .expect("reopen host event store"),
+                .expect("reopen trigger store"),
         );
         let core = test_workbench_core(
             session_store_factory,
             Arc::clone(&process_registry),
-            host_event_store,
+            trigger_store,
             artifact_store_for_core,
         );
         let _reopened = core
@@ -3402,7 +3402,7 @@ mod tests {
     fn test_workbench_core(
         session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
         process_registry: Arc<dyn lash::process::ProcessRegistry>,
-        host_event_store: Arc<lash_sqlite_store::SqliteHostEventStore>,
+        trigger_store: Arc<lash_sqlite_store::SqliteTriggerStore>,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> LashCore {
         let provider = trigger_registration_provider();
@@ -3419,7 +3419,7 @@ mod tests {
             .store_factory(session_store_factory)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(process_registry)
-            .host_event_store(host_event_store)
+            .trigger_store(trigger_store)
             .advanced()
             .runtime_host_config({
                 let mut config = lash::durability::RuntimeHostConfig::in_memory();
@@ -3466,22 +3466,22 @@ mod tests {
     async fn emit_test_button_trigger(
         core: &LashCore,
         button: ButtonChoice,
-    ) -> lash::host_events::HostEventEmitReport {
-        let source_key = lash::host_events::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
+    ) -> lash::triggers::TriggerEmitReport {
+        let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
             .expect("source key");
         let idempotency_key = format!(
-            "workbench-test-button-host-event:{}:{}",
+            "workbench-test-button-trigger:{}:{}",
             button.as_str(),
             uuid::Uuid::new_v4()
         );
         let scoped_effect_controller = lash::runtime::ScopedEffectController::shared(
             Arc::new(lash::runtime::InlineRuntimeEffectController),
-            lash::runtime::EffectScope::runtime_operation(format!("host-event:{idempotency_key}")),
+            lash::runtime::EffectScope::runtime_operation(format!("trigger:{idempotency_key}")),
         )
-        .expect("inline host event effect scope");
-        core.host_events()
+        .expect("inline trigger occurrence effect scope");
+        core.triggers()
             .emit(
-                lash::host_events::HostEventOccurrenceRequest::new(
+                lash::triggers::TriggerOccurrenceRequest::new(
                     BUTTON_TRIGGER_SOURCE_TYPE,
                     source_key,
                     json!({

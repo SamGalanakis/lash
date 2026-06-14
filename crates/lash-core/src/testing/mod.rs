@@ -323,7 +323,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
     let attachment_store = Arc::new(crate::InMemoryAttachmentStore::new());
     let artifact_store: Arc<dyn lashlang::LashlangArtifactStore> =
         Arc::new(lashlang::InMemoryLashlangArtifactStore::new());
-    let host_event_store = Arc::new(crate::InMemoryHostEventStore::default());
+    let trigger_store = Arc::new(crate::InMemoryTriggerStore::default());
     let process_registry: Arc<dyn crate::ProcessRegistry> =
         Arc::new(crate::TestLocalProcessRegistry::default());
     let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
@@ -338,8 +338,8 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: Some(crate::HostEventRouter::new(
-            host_event_store,
+        trigger_router: Some(crate::TriggerRouter::new(
+            trigger_store,
             Arc::clone(&artifact_store),
             Some(process_registry),
             None,
@@ -360,7 +360,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: attachment_store.clone(),
         turn_context: crate::TurnContext::default(),
     });

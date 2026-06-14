@@ -378,8 +378,8 @@ async fn process_start_and_cancel_emit_typed_observation_events() -> Result<()> 
 }
 
 #[tokio::test]
-async fn host_event_emit_does_not_append_session_node_or_queue_work() -> Result<()> {
-    let host_event = lash_core::HostEvent::new(
+async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()> {
+    let trigger = lash_core::TriggerEvent::new(
         "Button",
         "ui.button",
         "pressed",
@@ -390,23 +390,23 @@ async fn host_event_emit_does_not_append_session_node_or_queue_work() -> Result<
         .provider(mock_provider())
         .model(mock_model_spec())
         .plugin(Arc::new(StaticPluginFactory::new(
-            "button-host-events",
-            lash_core::PluginSpec::new().with_host_event(host_event),
+            "button-triggers",
+            lash_core::PluginSpec::new().with_trigger_event(trigger),
         )))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .build()?;
-    let session = core.session("command-host-event").open().await?;
+    let session = core.session("command-trigger").open().await?;
     let before = session.control().state().persist_current().await?;
 
-    let source_key = lash_core::empty_host_event_source_key("ui.button.pressed")?;
+    let source_key = lash_core::empty_trigger_source_key("ui.button.pressed")?;
     let scoped_effect_controller = lash_core::ScopedEffectController::shared(
         Arc::new(lash_core::InlineRuntimeEffectController),
-        lash_core::EffectScope::runtime_operation("host-event:button-press-1"),
+        lash_core::EffectScope::runtime_operation("trigger:button-press-1"),
     )?;
     let report = core
-        .host_events()
+        .triggers()
         .emit(
-            lash_core::HostEventOccurrenceRequest::new(
+            lash_core::TriggerOccurrenceRequest::new(
                 "ui.button.pressed",
                 source_key,
                 serde_json::json!({ "pressed": true }),
@@ -425,16 +425,16 @@ async fn host_event_emit_does_not_append_session_node_or_queue_work() -> Result<
         persisted.session_graph.leaf_node_id,
         before.session_graph.leaf_node_id
     );
-    let host_event_nodes = persisted
+    let trigger_nodes = persisted
         .session_graph
         .nodes
         .iter()
         .filter_map(|node| node.plugin())
         .filter(|(plugin_type, body)| {
-            *plugin_type == "lash.host_event" && body["source_type"] == "ui.button.pressed"
+            *plugin_type == "lash.trigger" && body["source_type"] == "ui.button.pressed"
         })
         .collect::<Vec<_>>();
-    assert!(host_event_nodes.is_empty());
+    assert!(trigger_nodes.is_empty());
     Ok(())
 }
 

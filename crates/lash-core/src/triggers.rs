@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 use crate::plugin::PluginError;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostEvent {
+pub struct TriggerEvent {
     pub resource_type: String,
     pub alias: String,
     pub event: String,
     pub payload_ty: lashlang::NamedDataType,
 }
 
-impl HostEvent {
+impl TriggerEvent {
     pub fn new(
         resource_type: impl Into<String>,
         alias: impl Into<String>,
@@ -32,8 +32,8 @@ impl HostEvent {
         &self.payload_ty
     }
 
-    pub fn key(&self) -> HostEventKey {
-        HostEventKey {
+    pub fn key(&self) -> TriggerEventKey {
+        TriggerEventKey {
             resource_type: self.resource_type.clone(),
             alias: self.alias.clone(),
             event: self.event.clone(),
@@ -41,18 +41,18 @@ impl HostEvent {
     }
 
     pub fn source_type(&self) -> String {
-        host_event_source_type(&self.alias, &self.event)
+        trigger_event_type(&self.alias, &self.event)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct HostEventKey {
+pub struct TriggerEventKey {
     pub resource_type: String,
     pub alias: String,
     pub event: String,
 }
 
-impl HostEventKey {
+impl TriggerEventKey {
     pub fn new(
         resource_type: impl Into<String>,
         alias: impl Into<String>,
@@ -66,29 +66,29 @@ impl HostEventKey {
     }
 
     pub fn source_type(&self) -> String {
-        host_event_source_type(&self.alias, &self.event)
+        trigger_event_type(&self.alias, &self.event)
     }
 }
 
-pub fn host_event_source_type(alias: &str, event: &str) -> String {
+pub fn trigger_event_type(alias: &str, event: &str) -> String {
     format!("{alias}.{event}")
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostEventCatalog {
-    events: BTreeMap<HostEventKey, HostEvent>,
+pub struct TriggerEventCatalog {
+    events: BTreeMap<TriggerEventKey, TriggerEvent>,
 }
 
-impl HostEventCatalog {
+impl TriggerEventCatalog {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn declare(&mut self, event: HostEvent) -> Result<(), String> {
+    pub fn declare(&mut self, event: TriggerEvent) -> Result<(), String> {
         let key = event.key();
         if self.events.contains_key(&key) {
             return Err(format!(
-                "duplicate host event `{}.{}.{}`",
+                "duplicate trigger occurrence `{}.{}.{}`",
                 key.resource_type, key.alias, key.event
             ));
         }
@@ -99,7 +99,7 @@ impl HostEventCatalog {
             .find(|existing| existing.source_type() == source_type)
         {
             return Err(format!(
-                "duplicate host event source `{source_type}` declared by `{}.{}.{}` and `{}.{}.{}`",
+                "duplicate trigger source `{source_type}` declared by `{}.{}.{}` and `{}.{}.{}`",
                 existing.resource_type,
                 existing.alias,
                 existing.event,
@@ -112,7 +112,7 @@ impl HostEventCatalog {
         Ok(())
     }
 
-    pub fn from_events(events: impl IntoIterator<Item = HostEvent>) -> Result<Self, String> {
+    pub fn from_events(events: impl IntoIterator<Item = TriggerEvent>) -> Result<Self, String> {
         let mut catalog = Self::new();
         for event in events {
             catalog.declare(event)?;
@@ -120,28 +120,28 @@ impl HostEventCatalog {
         Ok(catalog)
     }
 
-    pub fn get(&self, resource_type: &str, alias: &str, event: &str) -> Option<&HostEvent> {
+    pub fn get(&self, resource_type: &str, alias: &str, event: &str) -> Option<&TriggerEvent> {
         self.events
-            .get(&HostEventKey::new(resource_type, alias, event))
+            .get(&TriggerEventKey::new(resource_type, alias, event))
     }
 
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
 
-    pub fn events(&self) -> impl Iterator<Item = &HostEvent> {
+    pub fn events(&self) -> impl Iterator<Item = &TriggerEvent> {
         self.events.values()
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostEventEmitReport {
+pub struct TriggerEmitReport {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub occurrence_id: String,
     pub started_process_ids: Vec<String>,
 }
 
-impl HostEventEmitReport {
+impl TriggerEmitReport {
     pub fn empty() -> Self {
         Self::default()
     }
@@ -155,7 +155,7 @@ impl HostEventEmitReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HostEventOccurrenceRequest {
+pub struct TriggerOccurrenceRequest {
     pub source_type: String,
     pub source_key: String,
     #[serde(default)]
@@ -165,7 +165,7 @@ pub struct HostEventOccurrenceRequest {
     pub source: Option<serde_json::Value>,
 }
 
-impl HostEventOccurrenceRequest {
+impl TriggerOccurrenceRequest {
     pub fn new(
         source_type: impl Into<String>,
         source_key: impl Into<String>,
@@ -188,7 +188,7 @@ impl HostEventOccurrenceRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HostEventOccurrenceRecord {
+pub struct TriggerOccurrenceRecord {
     pub occurrence_id: String,
     pub source_type: String,
     pub source_key: String,
@@ -202,9 +202,9 @@ pub struct HostEventOccurrenceRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TriggerSourceType(String);
+pub struct TriggerEventType(String);
 
-impl TriggerSourceType {
+impl TriggerEventType {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -214,25 +214,25 @@ impl TriggerSourceType {
     }
 }
 
-impl From<String> for TriggerSourceType {
+impl From<String> for TriggerEventType {
     fn from(value: String) -> Self {
         Self::new(value)
     }
 }
 
-impl From<&str> for TriggerSourceType {
+impl From<&str> for TriggerEventType {
     fn from(value: &str) -> Self {
         Self::new(value)
     }
 }
 
-impl AsRef<str> for TriggerSourceType {
+impl AsRef<str> for TriggerEventType {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl std::fmt::Display for TriggerSourceType {
+impl std::fmt::Display for TriggerEventType {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
@@ -244,7 +244,7 @@ pub struct TriggerRegistration {
     pub source_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    pub source_type: TriggerSourceType,
+    pub source_type: TriggerEventType,
     pub source: serde_json::Value,
     pub target: TriggerTargetSummary,
     #[serde(default = "default_enabled")]
@@ -320,7 +320,7 @@ impl From<&TriggerSubscriptionRecord> for TriggerRegistration {
             handle: route.handle.clone(),
             source_key: route.source_key.clone(),
             name: route.name.clone(),
-            source_type: TriggerSourceType::new(route.source_type.clone()),
+            source_type: TriggerEventType::new(route.source_type.clone()),
             source: route.source.clone(),
             target: TriggerTargetSummary {
                 process_name: route.process_name.clone(),
@@ -398,13 +398,13 @@ impl TriggerSubscriptionFilter {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerDeliveryReservation {
-    pub occurrence: HostEventOccurrenceRecord,
+    pub occurrence: TriggerOccurrenceRecord,
     pub subscription: TriggerSubscriptionRecord,
     pub process_id: String,
 }
 
 #[async_trait::async_trait]
-pub trait HostEventStore: Send + Sync {
+pub trait TriggerStore: Send + Sync {
     fn durability_tier(&self) -> crate::DurabilityTier {
         crate::DurabilityTier::Inline
     }
@@ -414,7 +414,7 @@ pub trait HostEventStore: Send + Sync {
         source_type: &str,
         source: &serde_json::Value,
     ) -> Result<String, PluginError> {
-        default_host_event_source_key(source_type, source)
+        default_trigger_source_key(source_type, source)
     }
 
     async fn register_subscription(
@@ -437,8 +437,8 @@ pub trait HostEventStore: Send + Sync {
 
     async fn record_occurrence(
         &self,
-        request: HostEventOccurrenceRequest,
-    ) -> Result<HostEventOccurrenceRecord, PluginError>;
+        request: TriggerOccurrenceRequest,
+    ) -> Result<TriggerOccurrenceRecord, PluginError>;
 
     async fn reserve_matching_deliveries(
         &self,
@@ -447,22 +447,22 @@ pub trait HostEventStore: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct InMemoryHostEventStore {
-    state: Mutex<InMemoryHostEventState>,
+pub struct InMemoryTriggerStore {
+    state: Mutex<InMemoryTriggerEventState>,
 }
 
 #[derive(Default)]
-struct InMemoryHostEventState {
+struct InMemoryTriggerEventState {
     next_subscription_seq: u64,
     subscriptions: BTreeMap<String, TriggerSubscriptionRecord>,
-    occurrences: BTreeMap<String, HostEventOccurrenceRecord>,
+    occurrences: BTreeMap<String, TriggerOccurrenceRecord>,
     occurrence_id_by_idempotency_key: BTreeMap<String, String>,
     occurrence_hashes: BTreeMap<String, String>,
     deliveries: BTreeSet<(String, String)>,
 }
 
 #[async_trait::async_trait]
-impl HostEventStore for InMemoryHostEventStore {
+impl TriggerStore for InMemoryTriggerStore {
     async fn register_subscription(
         &self,
         draft: TriggerSubscriptionDraft,
@@ -470,7 +470,7 @@ impl HostEventStore for InMemoryHostEventStore {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
         state.next_subscription_seq = state.next_subscription_seq.saturating_add(1);
         let handle = format!("trigger:{}", state.next_subscription_seq);
         let subscription_id = format!("subscription:{}", state.next_subscription_seq);
@@ -506,7 +506,7 @@ impl HostEventStore for InMemoryHostEventStore {
         let state = self
             .state
             .lock()
-            .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
         let mut records = state
             .subscriptions
             .values()
@@ -529,7 +529,7 @@ impl HostEventStore for InMemoryHostEventStore {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
         let now = crate::runtime::current_epoch_ms();
         let Some(record) = state.subscriptions.values_mut().find(|record| {
             record.registrant_session_id() == Some(session_id) && record.handle == handle
@@ -546,7 +546,7 @@ impl HostEventStore for InMemoryHostEventStore {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
         let before = state.subscriptions.len();
         state
             .subscriptions
@@ -556,14 +556,14 @@ impl HostEventStore for InMemoryHostEventStore {
 
     async fn record_occurrence(
         &self,
-        request: HostEventOccurrenceRequest,
-    ) -> Result<HostEventOccurrenceRecord, PluginError> {
-        validate_host_event_occurrence_request(&request)?;
+        request: TriggerOccurrenceRequest,
+    ) -> Result<TriggerOccurrenceRecord, PluginError> {
+        validate_trigger_occurrence_request(&request)?;
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
-        let request_hash = host_event_occurrence_request_hash(&request)?;
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
+        let request_hash = trigger_occurrence_request_hash(&request)?;
         if let Some(existing_id) = state
             .occurrence_id_by_idempotency_key
             .get(&request.idempotency_key)
@@ -576,18 +576,18 @@ impl HostEventStore for InMemoryHostEventStore {
                 .unwrap_or_default();
             if existing_hash != request_hash {
                 return Err(PluginError::Session(format!(
-                    "host event occurrence idempotency conflict for `{}`",
+                    "trigger occurrence idempotency conflict for `{}`",
                     request.idempotency_key
                 )));
             }
             return state.occurrences.get(&existing_id).cloned().ok_or_else(|| {
                 PluginError::Session(format!(
-                    "missing host event occurrence `{existing_id}` for idempotency key"
+                    "missing trigger occurrence `{existing_id}` for idempotency key"
                 ))
             });
         }
         let occurrence_id = deterministic_occurrence_id(&request)?;
-        let record = HostEventOccurrenceRecord {
+        let record = TriggerOccurrenceRecord {
             occurrence_id: occurrence_id.clone(),
             source_type: request.source_type,
             source_key: request.source_key,
@@ -613,13 +613,13 @@ impl HostEventStore for InMemoryHostEventStore {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PluginError::Session("host event store lock poisoned".to_string()))?;
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
         let occurrence = state
             .occurrences
             .get(occurrence_id)
             .cloned()
             .ok_or_else(|| {
-                PluginError::Session(format!("unknown host event occurrence `{occurrence_id}`"))
+                PluginError::Session(format!("unknown trigger occurrence `{occurrence_id}`"))
             })?;
         let subscriptions = state
             .subscriptions
@@ -658,31 +658,29 @@ fn default_enabled() -> bool {
     true
 }
 
-pub fn default_host_event_source_key(
+pub fn default_trigger_source_key(
     source_type: &str,
     source: &serde_json::Value,
 ) -> Result<String, PluginError> {
-    let digest =
-        crate::stable_hash::stable_json_sha256_hex(&(source_type, source)).map_err(|err| {
-            PluginError::Session(format!("failed to hash host event source key: {err}"))
-        })?;
+    let digest = crate::stable_hash::stable_json_sha256_hex(&(source_type, source))
+        .map_err(|err| PluginError::Session(format!("failed to hash trigger source key: {err}")))?;
     Ok(format!("source:{source_type}:sha256:{digest}"))
 }
 
-pub fn empty_host_event_source_key(source_type: &str) -> Result<String, PluginError> {
-    default_host_event_source_key(source_type, &serde_json::json!({}))
+pub fn empty_trigger_source_key(source_type: &str) -> Result<String, PluginError> {
+    default_trigger_source_key(source_type, &serde_json::json!({}))
 }
 
 pub fn deterministic_occurrence_id(
-    request: &HostEventOccurrenceRequest,
+    request: &TriggerOccurrenceRequest,
 ) -> Result<String, PluginError> {
     let digest = crate::stable_hash::stable_json_sha256_hex(&(
         request.source_type.as_str(),
         request.source_key.as_str(),
         request.idempotency_key.as_str(),
     ))
-    .map_err(|err| PluginError::Session(format!("failed to hash host event occurrence: {err}")))?;
-    Ok(format!("host_event:{digest}"))
+    .map_err(|err| PluginError::Session(format!("failed to hash trigger occurrence: {err}")))?;
+    Ok(format!("trigger:{digest}"))
 }
 
 pub fn deterministic_delivery_process_id(
@@ -690,24 +688,22 @@ pub fn deterministic_delivery_process_id(
     subscription_id: &str,
 ) -> Result<String, PluginError> {
     let digest = crate::stable_hash::stable_json_sha256_hex(&(occurrence_id, subscription_id))
-        .map_err(|err| {
-            PluginError::Session(format!("failed to hash host event delivery: {err}"))
-        })?;
-    Ok(format!("process:host-event:{digest}"))
+        .map_err(|err| PluginError::Session(format!("failed to hash trigger delivery: {err}")))?;
+    Ok(format!("process:trigger:{digest}"))
 }
 
 #[derive(Clone)]
-pub struct HostEventRouter {
-    store: Arc<dyn HostEventStore>,
+pub struct TriggerRouter {
+    store: Arc<dyn TriggerStore>,
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
     process_work_poke: Option<crate::ProcessWorkPoke>,
     host_profile_id: String,
 }
 
-impl HostEventRouter {
+impl TriggerRouter {
     pub fn new(
-        store: Arc<dyn HostEventStore>,
+        store: Arc<dyn TriggerStore>,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
         process_work_poke: Option<crate::ProcessWorkPoke>,
@@ -722,15 +718,15 @@ impl HostEventRouter {
         }
     }
 
-    pub fn store(&self) -> Arc<dyn HostEventStore> {
+    pub fn store(&self) -> Arc<dyn TriggerStore> {
         Arc::clone(&self.store)
     }
 
     pub async fn emit(
         &self,
-        request: HostEventOccurrenceRequest,
+        request: TriggerOccurrenceRequest,
         effect_controller: &dyn crate::RuntimeEffectController,
-    ) -> Result<HostEventEmitReport, PluginError> {
+    ) -> Result<TriggerEmitReport, PluginError> {
         let occurrence = self.store.record_occurrence(request).await?;
         let reservations = self
             .store
@@ -738,13 +734,10 @@ impl HostEventRouter {
             .await?;
         let Some(process_registry) = self.process_registry.as_ref() else {
             if reservations.is_empty() {
-                return Ok(HostEventEmitReport::new(
-                    occurrence.occurrence_id,
-                    Vec::new(),
-                ));
+                return Ok(TriggerEmitReport::new(occurrence.occurrence_id, Vec::new()));
             }
             return Err(PluginError::Session(
-                "host event delivery requires a process registry".to_string(),
+                "trigger delivery requires a process registry".to_string(),
             ));
         };
         let mut started_process_ids = Vec::new();
@@ -763,7 +756,7 @@ impl HostEventRouter {
         {
             poke.poke();
         }
-        Ok(HostEventEmitReport::new(
+        Ok(TriggerEmitReport::new(
             occurrence.occurrence_id,
             started_process_ids,
         ))
@@ -807,7 +800,7 @@ impl HostEventRouter {
         let args =
             materialize_trigger_process_args(&subscription.input_template, &occurrence.payload)?;
         let originator_scope_id = subscription.registrant_scope_id();
-        let host_event_invocation = crate::runtime::causal::host_event_invocation(
+        let trigger_occurrence_invocation = crate::runtime::causal::trigger_occurrence_invocation(
             &originator_scope_id,
             &occurrence.occurrence_id,
         );
@@ -824,7 +817,7 @@ impl HostEventRouter {
                 subscription.registrant.clone(),
                 self.host_profile_id.clone(),
             )
-            .with_caused_by(host_event_invocation.causal_ref()),
+            .with_caused_by(trigger_occurrence_invocation.causal_ref()),
         )
         .with_extra_event_types(
             crate::lashlang_process_event_types()
@@ -845,7 +838,7 @@ impl HostEventRouter {
                     ),
                 });
         let execution_context = crate::ProcessExecutionContext::default()
-            .with_causal_invocation(Some(host_event_invocation));
+            .with_causal_invocation(Some(trigger_occurrence_invocation));
         let command = crate::ProcessCommand::Start {
             registration,
             grant,
@@ -857,11 +850,11 @@ impl HostEventRouter {
             effect_id.clone(),
             crate::RuntimeEffectKind::Process,
             format!(
-                "host_event:{}:{}",
+                "trigger:{}:{}",
                 occurrence.occurrence_id, subscription.subscription_id
             ),
         )
-        .with_caused_by(Some(crate::CausalRef::HostEvent {
+        .with_caused_by(Some(crate::CausalRef::TriggerOccurrence {
             occurrence_id: occurrence.occurrence_id.clone(),
         }));
         let outcome = effect_controller
@@ -878,7 +871,7 @@ impl HostEventRouter {
                 result: crate::ProcessEffectOutcome::Start { .. },
             } => Ok(()),
             other => Err(PluginError::Session(format!(
-                "host event process start returned the wrong outcome: {}",
+                "trigger process start returned the wrong outcome: {}",
                 other.kind().as_str()
             ))),
         }
@@ -907,10 +900,7 @@ fn materialize_trigger_process_args(
     }
 }
 
-pub(crate) fn validate_payload(
-    value: &serde_json::Value,
-    ty: &lashlang::TypeExpr,
-) -> Result<(), String> {
+pub fn validate_payload(value: &serde_json::Value, ty: &lashlang::TypeExpr) -> Result<(), String> {
     if json_matches_type(value, ty) {
         Ok(())
     } else {
@@ -954,29 +944,29 @@ fn json_matches_type(value: &serde_json::Value, ty: &lashlang::TypeExpr) -> bool
     }
 }
 
-pub fn validate_host_event_occurrence_request(
-    request: &HostEventOccurrenceRequest,
+pub fn validate_trigger_occurrence_request(
+    request: &TriggerOccurrenceRequest,
 ) -> Result<(), PluginError> {
     if request.source_type.trim().is_empty() {
         return Err(PluginError::Session(
-            "host event occurrence requires source_type".to_string(),
+            "trigger occurrence requires source_type".to_string(),
         ));
     }
     if request.source_key.trim().is_empty() {
         return Err(PluginError::Session(
-            "host event occurrence requires source_key".to_string(),
+            "trigger occurrence requires source_key".to_string(),
         ));
     }
     if request.idempotency_key.trim().is_empty() {
         return Err(PluginError::Session(
-            "host event occurrence requires idempotency_key".to_string(),
+            "trigger occurrence requires idempotency_key".to_string(),
         ));
     }
     Ok(())
 }
 
-pub fn host_event_occurrence_request_hash(
-    request: &HostEventOccurrenceRequest,
+pub fn trigger_occurrence_request_hash(
+    request: &TriggerOccurrenceRequest,
 ) -> Result<String, PluginError> {
     crate::stable_hash::stable_json_sha256_hex(&(
         request.source_type.as_str(),
@@ -984,7 +974,7 @@ pub fn host_event_occurrence_request_hash(
         &request.payload,
         &request.source,
     ))
-    .map_err(|err| PluginError::Session(format!("failed to hash host event occurrence: {err}")))
+    .map_err(|err| PluginError::Session(format!("failed to hash trigger occurrence: {err}")))
 }
 
 #[cfg(test)]
@@ -1000,23 +990,23 @@ mod tests {
                 optional: false,
             }],
         )
-        .expect("valid host event payload")
+        .expect("valid trigger occurrence payload")
     }
 
     #[test]
-    fn host_event_catalog_rejects_duplicate_trigger_source_identity() {
-        let mut catalog = HostEventCatalog::new();
+    fn trigger_catalog_rejects_duplicate_trigger_source_identity() {
+        let mut catalog = TriggerEventCatalog::new();
         catalog
-            .declare(HostEvent::new(
+            .declare(TriggerEvent::new(
                 "Button",
                 "ui.button",
                 "pressed",
                 button_payload_type(),
             ))
-            .expect("first host event");
+            .expect("first trigger occurrence");
 
         let err = catalog
-            .declare(HostEvent::new(
+            .declare(TriggerEvent::new(
                 "AlternateButton",
                 "ui.button",
                 "pressed",
@@ -1024,6 +1014,6 @@ mod tests {
             ))
             .expect_err("duplicate public source identity should be rejected");
 
-        assert!(err.contains("duplicate host event source `ui.button.pressed`"));
+        assert!(err.contains("duplicate trigger source `ui.button.pressed`"));
     }
 }

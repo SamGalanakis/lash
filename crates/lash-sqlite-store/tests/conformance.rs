@@ -9,20 +9,20 @@ use std::sync::{Arc, Mutex};
 
 use lash_core::runtime::RuntimeScope;
 use lash_core::testing::conformance::{
-    ReopenableHostEventStore, ReopenableLashlangArtifactStore, ReopenableProcessRegistry,
-    ReopenableRuntimePersistence,
+    ReopenableLashlangArtifactStore, ReopenableProcessRegistry, ReopenableRuntimePersistence,
+    ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, EffectHost, EffectScope, HostEventOccurrenceRequest, HostEventStore,
-    LashlangArtifactStore, ProcessExecutionEnvRef, ProcessOriginator, ProcessRegistry,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimePersistence, SessionScope, TriggerSubscriptionDraft,
+    DurabilityTier, EffectHost, EffectScope, LashlangArtifactStore, ProcessExecutionEnvRef,
+    ProcessOriginator, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence,
+    SessionScope, TriggerOccurrenceRequest, TriggerStore, TriggerSubscriptionDraft,
     TriggerSubscriptionFilter,
 };
 use lash_sqlite_store::{
-    SqliteEffectHost, SqliteEffectReplayOptions, SqliteHostEventStore, SqliteProcessRegistry,
-    SqliteRuntimeEffectController, Store,
+    SqliteEffectHost, SqliteEffectReplayOptions, SqliteProcessRegistry,
+    SqliteRuntimeEffectController, SqliteTriggerStore, Store,
 };
 use tempfile::TempDir;
 
@@ -72,13 +72,13 @@ fn open_artifact_store(path: &Path) -> Arc<dyn LashlangArtifactStore> {
     })) as Arc<dyn LashlangArtifactStore>
 }
 
-fn open_host_event_store(path: &Path) -> Arc<dyn HostEventStore> {
+fn open_trigger_store(path: &Path) -> Arc<dyn TriggerStore> {
     let path = path.to_path_buf();
     Arc::new(sync_await(async move {
-        SqliteHostEventStore::open(&path)
+        SqliteTriggerStore::open(&path)
             .await
-            .expect("file host event store")
-    })) as Arc<dyn HostEventStore>
+            .expect("file trigger store")
+    })) as Arc<dyn TriggerStore>
 }
 
 fn trigger_subscription_draft(
@@ -176,14 +176,14 @@ async fn sqlite_process_registry_satisfies_conformance() {
 }
 
 #[tokio::test]
-async fn sqlite_host_event_store_satisfies_conformance() {
+async fn sqlite_trigger_store_satisfies_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
-    lash_core::testing::conformance::host_event_store_reopenable(
+    lash_core::testing::conformance::trigger_store_reopenable(
         || {
-            let path = fresh_db_path(&dirs, "host-events.db");
-            ReopenableHostEventStore {
-                open: open_host_event_store(&path),
-                reopen: open_host_event_store(&path),
+            let path = fresh_db_path(&dirs, "triggers.db");
+            ReopenableTriggerStore {
+                open: open_trigger_store(&path),
+                reopen: open_trigger_store(&path),
             }
         },
         DurabilityTier::Durable,
@@ -192,15 +192,14 @@ async fn sqlite_host_event_store_satisfies_conformance() {
 }
 
 #[tokio::test]
-async fn sqlite_host_event_store_persists_subscriptions_and_reserves_idempotently_after_reopen() {
+async fn sqlite_trigger_store_persists_subscriptions_and_reserves_idempotently_after_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("host-events.db");
-    let source_key =
-        lash_core::empty_host_event_source_key("ui.button.pressed").expect("source key");
+    let path = dir.path().join("triggers.db");
+    let source_key = lash_core::empty_trigger_source_key("ui.button.pressed").expect("source key");
 
-    let open = SqliteHostEventStore::open(&path)
+    let open = SqliteTriggerStore::open(&path)
         .await
-        .expect("open host event store");
+        .expect("open trigger store");
     assert_eq!(open.durability_tier(), DurabilityTier::Durable);
     let registration = open
         .register_subscription(trigger_subscription_draft(
@@ -212,9 +211,9 @@ async fn sqlite_host_event_store_persists_subscriptions_and_reserves_idempotentl
         .expect("register subscription");
     assert_eq!(registration.handle, "trigger:1");
 
-    let reopened = SqliteHostEventStore::open(&path)
+    let reopened = SqliteTriggerStore::open(&path)
         .await
-        .expect("reopen host event store");
+        .expect("reopen trigger store");
     let mut source_filter = TriggerSubscriptionFilter::for_source_type("ui.button.pressed");
     source_filter.enabled = Some(true);
     let subscriptions = reopened
@@ -225,7 +224,7 @@ async fn sqlite_host_event_store_persists_subscriptions_and_reserves_idempotentl
     assert_eq!(subscriptions[0].source_key, source_key);
 
     let occurrence = reopened
-        .record_occurrence(HostEventOccurrenceRequest::new(
+        .record_occurrence(TriggerOccurrenceRequest::new(
             "ui.button.pressed",
             subscriptions[0].source_key.clone(),
             serde_json::json!({ "button": "Blue" }),
@@ -241,7 +240,7 @@ async fn sqlite_host_event_store_persists_subscriptions_and_reserves_idempotentl
     assert_eq!(first[0].subscription.handle, registration.handle);
 
     let replayed = reopened
-        .record_occurrence(HostEventOccurrenceRequest::new(
+        .record_occurrence(TriggerOccurrenceRequest::new(
             "ui.button.pressed",
             subscriptions[0].source_key.clone(),
             serde_json::json!({ "button": "Blue" }),
@@ -258,12 +257,11 @@ async fn sqlite_host_event_store_persists_subscriptions_and_reserves_idempotentl
 }
 
 #[tokio::test]
-async fn sqlite_host_event_store_cancels_by_session_and_handle() {
-    let store = SqliteHostEventStore::memory()
+async fn sqlite_trigger_store_cancels_by_session_and_handle() {
+    let store = SqliteTriggerStore::memory()
         .await
-        .expect("memory host event store");
-    let source_key =
-        lash_core::empty_host_event_source_key("ui.button.pressed").expect("source key");
+        .expect("memory trigger store");
+    let source_key = lash_core::empty_trigger_source_key("ui.button.pressed").expect("source key");
     let first = store
         .register_subscription(trigger_subscription_draft(
             "session-a",
@@ -295,7 +293,7 @@ async fn sqlite_host_event_store_cancels_by_session_and_handle() {
     );
 
     let occurrence = store
-        .record_occurrence(HostEventOccurrenceRequest::new(
+        .record_occurrence(TriggerOccurrenceRequest::new(
             "ui.button.pressed",
             source_key,
             serde_json::json!({ "button": "Red" }),

@@ -200,15 +200,18 @@ pub fn process_event_invocation(
     }
 }
 
-pub(crate) fn host_event_invocation(session_id: &str, occurrence_id: &str) -> RuntimeInvocation {
+pub(crate) fn trigger_occurrence_invocation(
+    session_id: &str,
+    occurrence_id: &str,
+) -> RuntimeInvocation {
     RuntimeInvocation {
         scope: RuntimeScope::new(session_id),
-        subject: RuntimeSubject::HostEvent {
+        subject: RuntimeSubject::TriggerOccurrence {
             occurrence_id: occurrence_id.to_string(),
         },
         caused_by: None,
         replay: Some(RuntimeReplay {
-            key: format!("host_event:{occurrence_id}"),
+            key: format!("trigger:{occurrence_id}"),
         }),
     }
 }
@@ -286,7 +289,7 @@ fn causal_replay_discriminator(caused_by: &CausalRef) -> String {
             process_id,
             sequence,
         } => format!("cause:process_event:{process_id}:{sequence}:"),
-        CausalRef::HostEvent { occurrence_id } => format!("cause:host_event:{occurrence_id}:"),
+        CausalRef::TriggerOccurrence { occurrence_id } => format!("cause:trigger:{occurrence_id}:"),
         CausalRef::SessionNode {
             session_id,
             node_id,

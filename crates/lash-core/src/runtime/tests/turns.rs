@@ -697,7 +697,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     let target_scope = crate::SessionScope::new("root");
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "root".to_string(),
-        node_id: "host-event:button".to_string(),
+        node_id: "trigger:button".to_string(),
     };
     registry
         .register_process(
@@ -869,7 +869,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
     let target_scope = crate::SessionScope::new("root");
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "root".to_string(),
-        node_id: "host-event:button".to_string(),
+        node_id: "trigger:button".to_string(),
     };
     registry
         .register_process(

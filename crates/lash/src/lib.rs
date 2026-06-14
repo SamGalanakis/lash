@@ -7,7 +7,7 @@
 //!
 //! Every public name has exactly one home. The crate root carries the daily
 //! core/session/turn path; each domain module ([`tools`], [`persistence`],
-//! [`plugins`], [`observe`], [`host_events`], ...) carries its own
+//! [`plugins`], [`observe`], [`triggers`], ...) carries its own
 //! vocabulary. [`prelude`] mirrors the crate root exactly.
 
 pub mod control;
@@ -24,7 +24,7 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::control::{
-    AdvancedToolsControl, HostEventsControl, PluginActions, SessionCommandsControl, ToolsControl,
+    AdvancedToolsControl, CoreTriggersControl, PluginActions, SessionCommandsControl, ToolsControl,
     TriggersControl,
 };
 pub use crate::core::{LashCore, LashCoreBuilder, SessionDeleteReport};
@@ -53,7 +53,7 @@ pub use tokio_util::sync::CancellationToken;
 /// modules.
 pub mod prelude {
     pub use crate::{
-        AdvancedToolsControl, EmbedError, EnqueueTurnBuilder, HostEventsControl, InputItem,
+        AdvancedToolsControl, CoreTriggersControl, EmbedError, EnqueueTurnBuilder, InputItem,
         LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ModelLimits, ModelSpec,
         ObservableSession, PluginActions, PluginBinding, PluginStack, PromptLayerSink,
         QueuedTurnBuilder, Result, SessionBuilder, SessionCommand, SessionCommandReceipt,
@@ -75,14 +75,14 @@ pub mod observe {
     };
 }
 
-/// Host events and triggers: declaring event sources, emitting occurrences,
+/// Triggers and triggers: declaring event sources, emitting occurrences,
 /// and inspecting trigger subscriptions. Entry points:
-/// [`LashCore::host_events`] and [`LashSession::triggers`].
-pub mod host_events {
+/// [`LashCore::triggers`] and [`LashSession::triggers`].
+pub mod triggers {
     pub use lash_core::{
-        HostEvent, HostEventEmitReport, HostEventOccurrenceRequest, TriggerRegistration,
-        TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary,
-        empty_host_event_source_key,
+        TriggerEmitReport, TriggerEvent, TriggerEventType, TriggerOccurrenceRequest,
+        TriggerRegistration, TriggerSubscriptionFilter, TriggerTargetSummary,
+        empty_trigger_source_key,
     };
 }
 
@@ -90,9 +90,9 @@ pub mod tools {
     pub use lash_core::{
         PreparedToolCall, ToolActivation, ToolAgentSurface, ToolArgumentProjectionPolicy,
         ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
-        ToolContext, ToolContract, ToolDefinition, ToolHostEventControl, ToolManifest,
-        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
-        ToolScheduling, ToolSourceHandle,
+        ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolOutputContract,
+        ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolScheduling,
+        ToolSourceHandle, ToolTriggerControl,
     };
     pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
@@ -176,12 +176,11 @@ pub mod remote {
     pub use lash_remote_protocol::{
         REMOTE_PROTOCOL_VERSION, RemoteAssistantOutput, RemoteAssistantOutputState,
         RemoteAttachmentRef, RemoteCausalRef, RemoteDiagnostic, RemoteExecutionSummary,
-        RemoteGenerationOptions, RemoteHostEventEmitReport, RemoteHostEventOccurrenceRecord,
-        RemoteHostEventOccurrenceRequest, RemoteInputItem, RemoteLiveReplayGap,
-        RemoteLiveReplayGapReason, RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage,
-        RemoteLlmOutputPart, RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestMetadata,
-        RemoteLlmResponse, RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice,
-        RemoteLlmToolSpec, RemoteModelIntent, RemotePromptBuiltin, RemotePromptContribution,
+        RemoteGenerationOptions, RemoteInputItem, RemoteLiveReplayGap, RemoteLiveReplayGapReason,
+        RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage, RemoteLlmOutputPart,
+        RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestMetadata, RemoteLlmResponse,
+        RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec,
+        RemoteModelIntent, RemotePromptBuiltin, RemotePromptContribution,
         RemotePromptContributionGate, RemotePromptLayer, RemotePromptSlot, RemotePromptSlotLayer,
         RemotePromptTemplate, RemotePromptTemplateEntry, RemotePromptTemplateSection,
         RemoteProtocolError, RemoteProtocolTurnOptions, RemoteProviderMetadata,
@@ -192,7 +191,8 @@ pub mod remote {
         RemoteToolAgentSurface, RemoteToolArgumentProjectionPolicy, RemoteToolAvailability,
         RemoteToolCallOutcome, RemoteToolCallRequest, RemoteToolCallResponse,
         RemoteToolCallSummary, RemoteToolGrant, RemoteToolOutputContract, RemoteToolRegistry,
-        RemoteToolRetryPolicy, RemoteToolScheduling, RemoteTriggerRegistration,
+        RemoteToolRetryPolicy, RemoteToolScheduling, RemoteTriggerEmitReport,
+        RemoteTriggerOccurrenceRecord, RemoteTriggerOccurrenceRequest, RemoteTriggerRegistration,
         RemoteTriggerSubscriptionFilter, RemoteTriggerTargetSummary, RemoteTurnActivity,
         RemoteTurnEvent, RemoteTurnFinish, RemoteTurnInput, RemoteTurnIssue, RemoteTurnOutcome,
         RemoteTurnRequest, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,

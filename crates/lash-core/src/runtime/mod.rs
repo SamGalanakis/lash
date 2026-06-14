@@ -113,14 +113,13 @@ pub use process::{
     ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease,
     ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
     ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessSpawnProvenance, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
-    ProcessStatusFilter,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver,
-    ProcessWorkSnapshot, SessionScope, SessionScopeId, UnavailableProcessService, WaitKind,
-    WaitState, current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
-    lashlang_process_signal_event_types, load_process_execution_env,
+    ProcessRegistry, ProcessService, ProcessSessionDeleteReport, ProcessSpawnProvenance,
+    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+    ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+    UnavailableProcessService, WaitKind, WaitState, current_epoch_ms, epoch_ms_from_system_time,
+    lashlang_process_event_types, lashlang_process_signal_event_types, load_process_execution_env,
     materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
@@ -597,7 +596,7 @@ impl Default for TerminationPolicy {
     }
 }
 
-/// Host event sink for low-level streaming runtime events.
+/// Host application sink for low-level streaming runtime events.
 /// `SessionEvent` is protocol-specific preview/progress data.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {

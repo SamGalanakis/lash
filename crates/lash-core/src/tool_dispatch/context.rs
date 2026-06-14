@@ -35,38 +35,38 @@ impl CheckpointMessageBuffer {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ToolHostEventEffectOutcome {
-    pub resource_type: String,
-    pub alias: String,
-    pub event: String,
+pub struct ToolTriggerEffectOutcome {
     pub source_type: String,
     pub source_key: String,
     pub occurrence_id: String,
     #[serde(default)]
     pub payload: serde_json::Value,
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<serde_json::Value>,
     pub started_process_ids: Vec<String>,
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ToolHostEventOutcomeBuffer {
-    queue: Arc<Mutex<Vec<ToolHostEventEffectOutcome>>>,
+pub(crate) struct ToolTriggerOutcomeBuffer {
+    queue: Arc<Mutex<Vec<ToolTriggerEffectOutcome>>>,
 }
 
-impl ToolHostEventOutcomeBuffer {
-    pub(crate) fn enqueue(&self, outcome: ToolHostEventEffectOutcome) -> Result<(), String> {
+impl ToolTriggerOutcomeBuffer {
+    pub(crate) fn enqueue(&self, outcome: ToolTriggerEffectOutcome) -> Result<(), String> {
         let mut queue = self
             .queue
             .lock()
-            .map_err(|_| "tool host event outcome buffer poisoned".to_string())?;
+            .map_err(|_| "tool trigger outcome buffer poisoned".to_string())?;
         queue.push(outcome);
         Ok(())
     }
 
-    pub(crate) fn drain(&self) -> Result<Vec<ToolHostEventEffectOutcome>, String> {
+    pub(crate) fn drain(&self) -> Result<Vec<ToolTriggerEffectOutcome>, String> {
         let mut queue = self
             .queue
             .lock()
-            .map_err(|_| "tool host event outcome buffer poisoned".to_string())?;
+            .map_err(|_| "tool trigger outcome buffer poisoned".to_string())?;
         Ok(queue.drain(..).collect())
     }
 }
@@ -81,7 +81,7 @@ pub struct ToolDispatchContext<'run> {
     pub session_graph: Arc<dyn SessionGraphService>,
     pub processes: Arc<dyn crate::ProcessService>,
     pub process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
-    pub host_event_router: Option<crate::HostEventRouter>,
+    pub trigger_router: Option<crate::TriggerRouter>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
@@ -90,7 +90,7 @@ pub struct ToolDispatchContext<'run> {
     pub agent_frame_id: crate::AgentFrameId,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub(crate) checkpoint_messages: CheckpointMessageBuffer,
-    pub(crate) host_event_outcomes: ToolHostEventOutcomeBuffer,
+    pub(crate) trigger_outcomes: ToolTriggerOutcomeBuffer,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub turn_context: crate::TurnContext,
 }

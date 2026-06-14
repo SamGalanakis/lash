@@ -238,7 +238,7 @@ impl crate::SessionPlugin for ButtonTriggerPlugin {
     }
 
     fn register(&self, reg: &mut crate::PluginRegistrar) -> Result<(), crate::PluginError> {
-        reg.host_events().declare(crate::HostEvent::new(
+        reg.triggers().declare(crate::TriggerEvent::new(
             "Button",
             "ui.button",
             "pressed",
@@ -382,7 +382,7 @@ fn clock_trigger_test_source() -> &'static str {
 struct TriggerRegistrationHost {
     session_id: String,
     resources: lashlang::ResourceCatalog,
-    store: Arc<dyn crate::HostEventStore>,
+    store: Arc<dyn crate::TriggerStore>,
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
 }
 
@@ -561,9 +561,9 @@ async fn execute_trigger_registration(runtime: &mut LashRuntime, source: &str) -
         resources: session.plugins().lashlang_resources(),
         store: runtime
             .host
-            .host_event_store
+            .trigger_store
             .as_ref()
-            .expect("host event store")
+            .expect("trigger store")
             .clone(),
         artifact_store: Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
     };
@@ -599,13 +599,13 @@ async fn emit_test_occurrence(
     source_key: String,
     payload: serde_json::Value,
     idempotency_key: &str,
-) -> crate::HostEventEmitReport {
-    let router = crate::HostEventRouter::new(
+) -> crate::TriggerEmitReport {
+    let router = crate::TriggerRouter::new(
         runtime
             .host
-            .host_event_store
+            .trigger_store
             .as_ref()
-            .expect("host event store")
+            .expect("trigger store")
             .clone(),
         Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
         runtime.host.process_registry.clone(),
@@ -618,21 +618,16 @@ async fn emit_test_occurrence(
         .control
         .effect_host
         .scoped(crate::EffectScope::runtime_operation(format!(
-            "test-host-event:{idempotency_key}"
+            "test-trigger:{idempotency_key}"
         )))
-        .expect("host event effect scope");
+        .expect("trigger occurrence effect scope");
     router
         .emit(
-            crate::HostEventOccurrenceRequest::new(
-                source_type,
-                source_key,
-                payload,
-                idempotency_key,
-            ),
+            crate::TriggerOccurrenceRequest::new(source_type, source_key, payload, idempotency_key),
             scoped.controller(),
         )
         .await
-        .expect("emit host event occurrence")
+        .expect("emit trigger occurrence")
 }
 
 async fn try_emit_test_occurrence(
@@ -641,13 +636,13 @@ async fn try_emit_test_occurrence(
     source_key: String,
     payload: serde_json::Value,
     idempotency_key: &str,
-) -> Result<crate::HostEventEmitReport, crate::PluginError> {
-    let router = crate::HostEventRouter::new(
+) -> Result<crate::TriggerEmitReport, crate::PluginError> {
+    let router = crate::TriggerRouter::new(
         runtime
             .host
-            .host_event_store
+            .trigger_store
             .as_ref()
-            .expect("host event store")
+            .expect("trigger store")
             .clone(),
         Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
         runtime.host.process_registry.clone(),
@@ -660,17 +655,12 @@ async fn try_emit_test_occurrence(
         .control
         .effect_host
         .scoped(crate::EffectScope::runtime_operation(format!(
-            "test-host-event:{idempotency_key}"
+            "test-trigger:{idempotency_key}"
         )))
-        .expect("host event effect scope");
+        .expect("trigger occurrence effect scope");
     router
         .emit(
-            crate::HostEventOccurrenceRequest::new(
-                source_type,
-                source_key,
-                payload,
-                idempotency_key,
-            ),
+            crate::TriggerOccurrenceRequest::new(source_type, source_key, payload, idempotency_key),
             scoped.controller(),
         )
         .await
@@ -679,9 +669,9 @@ async fn try_emit_test_occurrence(
 async fn trigger_subscriptions(runtime: &LashRuntime) -> Vec<crate::TriggerSubscriptionRecord> {
     runtime
         .host
-        .host_event_store
+        .trigger_store
         .as_ref()
-        .expect("host event store")
+        .expect("trigger store")
         .list_subscriptions(crate::TriggerSubscriptionFilter::for_session(
             runtime.session_id(),
         ))
@@ -696,9 +686,9 @@ async fn source_key_for(
 ) -> String {
     runtime
         .host
-        .host_event_store
+        .trigger_store
         .as_ref()
-        .expect("host event store")
+        .expect("trigger store")
         .source_key_for_subscription(source_type, &source)
         .await
         .expect("source key")
@@ -707,16 +697,16 @@ async fn source_key_for(
 async fn cancel_trigger_subscription(runtime: &LashRuntime, handle: &str) -> bool {
     runtime
         .host
-        .host_event_store
+        .trigger_store
         .as_ref()
-        .expect("host event store")
+        .expect("trigger store")
         .cancel_subscription(runtime.session_id(), handle)
         .await
         .expect("cancel trigger subscription")
 }
 
 #[tokio::test]
-async fn host_event_occurrence_activates_matching_button_subscription_without_graph_node() {
+async fn trigger_occurrence_activates_matching_button_subscription_without_graph_node() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(ButtonTriggerFactory)],
         Arc::new(EmptyTools),
@@ -778,11 +768,11 @@ async fn host_event_occurrence_activates_matching_button_subscription_without_gr
         .caused_by
         .clone()
         .expect("triggered process cause");
-    let crate::CausalRef::HostEvent { occurrence_id } = &process_caused_by else {
-        panic!("host-event-triggered process should be caused by the host event occurrence");
+    let crate::CausalRef::TriggerOccurrence { occurrence_id } = &process_caused_by else {
+        panic!("trigger-triggered process should be caused by the trigger occurrence");
     };
     assert_eq!(occurrence_id, &report.occurrence_id);
-    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
+    assert_eq!(plugin_node_count(&runtime, "lash.trigger"), 0);
     assert_eq!(plugin_node_count(&runtime, "lash.trigger_activation"), 0);
 
     let replayed = emit_test_occurrence(
@@ -818,12 +808,12 @@ async fn host_event_occurrence_activates_matching_button_subscription_without_gr
             Arc::clone(&registry),
         )
         .with_session_policy(crate::runtime::tests::helpers::standard_test_policy())
-        .with_host_event_store(
+        .with_trigger_store(
             runtime
                 .host
-                .host_event_store
+                .trigger_store
                 .as_ref()
-                .expect("host event store")
+                .expect("trigger store")
                 .clone(),
         ),
     );
@@ -854,7 +844,7 @@ async fn host_event_occurrence_activates_matching_button_subscription_without_gr
 }
 
 #[tokio::test]
-async fn host_event_occurrence_materializes_event_and_fixed_input_templates() {
+async fn trigger_occurrence_materializes_event_and_fixed_input_templates() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(TriggerRouteTestFactory)],
         Arc::new(EmptyTools),
@@ -920,7 +910,7 @@ async fn host_event_occurrence_materializes_event_and_fixed_input_templates() {
 }
 
 #[tokio::test]
-async fn host_event_router_handles_no_subscriptions_disabled_subscriptions_and_invalid_payloads() {
+async fn trigger_router_handles_no_subscriptions_disabled_subscriptions_and_invalid_payloads() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(ButtonTriggerFactory)],
         Arc::new(EmptyTools),
@@ -943,7 +933,7 @@ async fn host_event_router_handles_no_subscriptions_disabled_subscriptions_and_i
     )
     .await;
     assert!(no_routes.started_process_ids.is_empty());
-    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
+    assert_eq!(plugin_node_count(&runtime, "lash.trigger"), 0);
 
     let finish = execute_trigger_registration(&mut runtime, button_trigger_test_source()).await;
     let finish_json = crate::lashlang_bridge::lashlang_value_to_json(&finish).expect("finish json");
@@ -963,7 +953,7 @@ async fn host_event_router_handles_no_subscriptions_disabled_subscriptions_and_i
     .await
     .expect_err("invalid payload should fail before process start");
     assert!(invalid.to_string().contains("invalid payload for trigger"));
-    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
+    assert_eq!(plugin_node_count(&runtime, "lash.trigger"), 0);
 
     assert!(cancel_trigger_subscription(&runtime, handle).await);
 
@@ -980,7 +970,7 @@ async fn host_event_router_handles_no_subscriptions_disabled_subscriptions_and_i
     )
     .await;
     assert!(disabled.started_process_ids.is_empty());
-    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
+    assert_eq!(plugin_node_count(&runtime, "lash.trigger"), 0);
 }
 
 #[tokio::test]
@@ -1122,12 +1112,12 @@ async fn registering_schedule_source_stores_source_key_and_occurrence_reuses_art
             Arc::clone(&registry),
         )
         .with_session_policy(crate::runtime::tests::helpers::standard_test_policy())
-        .with_host_event_store(
+        .with_trigger_store(
             runtime
                 .host
-                .host_event_store
+                .trigger_store
                 .as_ref()
-                .expect("host event store")
+                .expect("trigger store")
                 .clone(),
         ),
     );
@@ -1146,8 +1136,9 @@ async fn registering_schedule_source_stores_source_key_and_occurrence_reuses_art
         .get_process(process_id)
         .await
         .expect("process record");
-    let Some(crate::CausalRef::HostEvent { occurrence_id }) = record.provenance.caused_by else {
-        panic!("triggered process should be caused by the host event occurrence");
+    let Some(crate::CausalRef::TriggerOccurrence { occurrence_id }) = record.provenance.caused_by
+    else {
+        panic!("triggered process should be caused by the trigger occurrence");
     };
     assert_eq!(occurrence_id, report.occurrence_id);
     assert_eq!(plugin_node_count(&runtime, "lash.trigger_activation"), 0);
@@ -1202,9 +1193,7 @@ async fn source_owner_lists_source_keys_and_emits_exact_key_without_crossfire() 
     let first_handle = finish_json["first"]["id"].as_str().expect("first handle");
     let second_handle = finish_json["second"]["id"].as_str().expect("second handle");
     let source_registrations = runtime
-        .lashlang_trigger_registrations_by_source_type(crate::TriggerSourceType::from(
-            "clock.Alarm",
-        ))
+        .lashlang_trigger_registrations_by_source_type(crate::TriggerEventType::from("clock.Alarm"))
         .await
         .expect("source registrations");
     assert_eq!(
@@ -1270,9 +1259,9 @@ async fn source_owner_lists_source_keys_and_emits_exact_key_without_crossfire() 
     assert!(
         !runtime
             .host
-            .host_event_store
+            .trigger_store
             .as_ref()
-            .expect("host event store")
+            .expect("trigger store")
             .cancel_subscription("other-session", first_handle)
             .await
             .expect("cross-session cancel")
@@ -1376,12 +1365,12 @@ async fn cancel_disables_future_occurrences_without_canceling_started_runs() {
             Arc::clone(&registry),
         )
         .with_session_policy(crate::runtime::tests::helpers::standard_test_policy())
-        .with_host_event_store(
+        .with_trigger_store(
             runtime
                 .host
-                .host_event_store
+                .trigger_store
                 .as_ref()
-                .expect("host event store")
+                .expect("trigger store")
                 .clone(),
         ),
     );
@@ -1401,7 +1390,7 @@ fn session_node_causal_refs_are_exported_as_generic_trace_causality() {
         lash_trace::TraceContext::default(),
         &crate::CausalRef::SessionNode {
             session_id: "session".to_string(),
-            node_id: "plugin-host-event".to_string(),
+            node_id: "plugin-trigger".to_string(),
         },
     );
 
@@ -1410,7 +1399,7 @@ fn session_node_causal_refs_are_exported_as_generic_trace_causality() {
         json!({
             "type": "session_node",
             "session_id": "session",
-            "node_id": "plugin-host-event"
+            "node_id": "plugin-trigger"
         })
     );
     assert_eq!(context.metadata.len(), 1);

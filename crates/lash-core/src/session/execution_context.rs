@@ -54,6 +54,7 @@ pub struct RuntimeExecutionContext<'run> {
     turn_context: crate::TurnContext,
     execution_env_spec: crate::ProcessExecutionEnvSpec,
     process_originator: Option<crate::ProcessOriginator>,
+    pub(super) runtime_process_id: Option<String>,
     process_env_ref: Option<crate::ProcessExecutionEnvRef>,
     process_wake_target: Option<crate::SessionScope>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
@@ -69,11 +70,11 @@ pub struct RuntimeExecutionContext<'run> {
 }
 
 impl<'run> RuntimeExecutionContext<'run> {
-    pub(crate) fn drain_tool_host_event_outcomes(
+    pub(crate) fn drain_tool_trigger_outcomes(
         &self,
-    ) -> Result<Vec<crate::tool_dispatch::ToolHostEventEffectOutcome>, crate::PluginError> {
+    ) -> Result<Vec<crate::tool_dispatch::ToolTriggerEffectOutcome>, crate::PluginError> {
         self.dispatch
-            .host_event_outcomes
+            .trigger_outcomes
             .drain()
             .map_err(crate::PluginError::Session)
     }
@@ -124,6 +125,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 crate::SessionPolicy::default(),
             ),
             process_originator: None,
+            runtime_process_id: None,
             started_process_ids: Arc::default(),
             process_env_ref: None,
             process_wake_target: None,
@@ -204,6 +206,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         registration: &crate::ProcessRegistration,
     ) -> Self {
         self.process_originator = Some(registration.provenance.originator.clone());
+        self.runtime_process_id = Some(registration.id.clone());
         self.process_env_ref = registration.env_ref.clone();
         self.process_wake_target = registration.wake_target.clone();
         self
@@ -407,29 +410,27 @@ impl<'run> RuntimeExecutionContext<'run> {
     ) -> Result<serde_json::Value, String> {
         match lashlang::TriggerHostOperation::from_host_operation(operation) {
             Some(lashlang::TriggerHostOperation::Register) => self
-                .register_host_event_subscription(payload)
+                .register_trigger_subscription(payload)
                 .await
                 .map_err(|err| err.to_string()),
             Some(lashlang::TriggerHostOperation::List) => self
-                .list_host_event_subscriptions(payload)
+                .list_trigger_subscriptions(payload)
                 .await
                 .map_err(|err| err.to_string()),
             Some(lashlang::TriggerHostOperation::Cancel) => self
-                .cancel_host_event_subscription(payload)
+                .cancel_trigger_subscription(payload)
                 .await
                 .map_err(|err| err.to_string()),
             None => Err(format!("unknown trigger operation `{operation}`")),
         }
     }
 
-    async fn register_host_event_subscription(
+    async fn register_trigger_subscription(
         &self,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, crate::PluginError> {
-        let router = self.dispatch.host_event_router.as_ref().ok_or_else(|| {
-            crate::PluginError::Session(
-                "host event store is unavailable in this runtime".to_string(),
-            )
+        let router = self.dispatch.trigger_router.as_ref().ok_or_else(|| {
+            crate::PluginError::Session("trigger store is unavailable in this runtime".to_string())
         })?;
         let request = lashlang::TriggerRegistrationRequest::decode(&payload)
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
@@ -492,14 +493,12 @@ impl<'run> RuntimeExecutionContext<'run> {
         Ok(crate::plugin::trigger_handle_json(&record.handle))
     }
 
-    async fn list_host_event_subscriptions(
+    async fn list_trigger_subscriptions(
         &self,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, crate::PluginError> {
-        let router = self.dispatch.host_event_router.as_ref().ok_or_else(|| {
-            crate::PluginError::Session(
-                "host event store is unavailable in this runtime".to_string(),
-            )
+        let router = self.dispatch.trigger_router.as_ref().ok_or_else(|| {
+            crate::PluginError::Session("trigger store is unavailable in this runtime".to_string())
         })?;
         let request = lashlang::TriggerListRequest::decode(&payload)
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
@@ -520,14 +519,12 @@ impl<'run> RuntimeExecutionContext<'run> {
         })
     }
 
-    async fn cancel_host_event_subscription(
+    async fn cancel_trigger_subscription(
         &self,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, crate::PluginError> {
-        let router = self.dispatch.host_event_router.as_ref().ok_or_else(|| {
-            crate::PluginError::Session(
-                "host event store is unavailable in this runtime".to_string(),
-            )
+        let router = self.dispatch.trigger_router.as_ref().ok_or_else(|| {
+            crate::PluginError::Session("trigger store is unavailable in this runtime".to_string())
         })?;
         let request = lashlang::TriggerCancelRequest::decode(&payload)
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
@@ -755,7 +752,7 @@ mod tests {
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -771,7 +768,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -822,7 +819,7 @@ mod tests {
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -838,7 +835,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -921,7 +918,7 @@ mod tests {
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -937,7 +934,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -1013,7 +1010,7 @@ mod tests {
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -1029,7 +1026,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });

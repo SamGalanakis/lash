@@ -9,7 +9,7 @@ use crate::llm::types::{
 };
 use crate::runtime::ProcessHandleGrantEntry;
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
-use crate::tool_dispatch::ToolHostEventEffectOutcome;
+use crate::tool_dispatch::ToolTriggerEffectOutcome;
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
     ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
@@ -122,9 +122,11 @@ impl RuntimeInvocation {
                 process_id: process_id.clone(),
                 sequence: *sequence,
             }),
-            RuntimeSubject::HostEvent { occurrence_id } => Some(CausalRef::HostEvent {
-                occurrence_id: occurrence_id.clone(),
-            }),
+            RuntimeSubject::TriggerOccurrence { occurrence_id } => {
+                Some(CausalRef::TriggerOccurrence {
+                    occurrence_id: occurrence_id.clone(),
+                })
+            }
             RuntimeSubject::SessionNode { node_id } => Some(CausalRef::SessionNode {
                 session_id: self.scope.session_id.clone(),
                 node_id: node_id.clone(),
@@ -189,7 +191,7 @@ pub enum RuntimeSubject {
         sequence: u64,
         event_type: String,
     },
-    HostEvent {
+    TriggerOccurrence {
         occurrence_id: String,
     },
     SessionNode {
@@ -440,7 +442,7 @@ pub enum ProcessEffectOutcome {
 pub struct ToolCallEffectOutcome {
     pub result: CompletedToolCall,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub host_events: Vec<ToolHostEventEffectOutcome>,
+    pub triggers: Vec<ToolTriggerEffectOutcome>,
 }
 
 /// Serializable result of a runtime effect command.
@@ -457,7 +459,7 @@ pub enum RuntimeEffectOutcome {
     ToolCall {
         result: CompletedToolCall,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        host_events: Vec<ToolHostEventEffectOutcome>,
+        triggers: Vec<ToolTriggerEffectOutcome>,
     },
     Process {
         result: ProcessEffectOutcome,
@@ -650,13 +652,7 @@ impl RuntimeEffectOutcome {
         self,
     ) -> Result<ToolCallEffectOutcome, RuntimeEffectControllerError> {
         match self {
-            Self::ToolCall {
-                result,
-                host_events,
-            } => Ok(ToolCallEffectOutcome {
-                result,
-                host_events,
-            }),
+            Self::ToolCall { result, triggers } => Ok(ToolCallEffectOutcome { result, triggers }),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ToolCall,
                 other.kind(),

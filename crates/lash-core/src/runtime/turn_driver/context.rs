@@ -29,7 +29,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             manager.process_cancel_ability(),
             effect_controller,
             direct_completions,
-            manager.host_event_router(),
+            manager.trigger_router(),
             event_tx,
             chronological_projection,
             self.protocol_extension.clone(),

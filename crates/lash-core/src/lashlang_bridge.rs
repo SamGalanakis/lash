@@ -37,7 +37,6 @@ pub fn process_event_payload(
     Ok(serde_json::json!({
         "value": lashlang_value_to_json(value)?,
         "text": value.to_string(),
-        "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
 

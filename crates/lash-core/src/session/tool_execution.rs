@@ -147,6 +147,7 @@ impl RuntimeExecutionContext<'_> {
                         crate::ToolContext::from_dispatch(std::sync::Arc::clone(&dispatch_context))
                             .prepared_call(&prepared)
                             .cancellation_token(self.cancellation_token.clone())
+                            .runtime_process_id(self.runtime_process_id.clone())
                             .parent_invocation(parent_invocation.clone())
                             .lashlang_execution_call_site(lashlang_execution_call_site.clone())
                             .build();
@@ -220,6 +221,7 @@ impl RuntimeExecutionContext<'_> {
         let tool_context = crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
             .prepared_call(&prepared)
             .cancellation_token(self.cancellation_token.clone())
+            .runtime_process_id(self.runtime_process_id.clone())
             .parent_invocation(run.parent_invocation.clone())
             .build();
         let mut outcome = dispatch_prepared_tool_call_with_execution_context(

@@ -234,16 +234,16 @@ fn observation_types_are_homed_in_observe(
     let _ = (cursor, observation, resume, revision);
 }
 
-fn host_event_types_are_homed_in_host_events(
-    event: lash::host_events::HostEvent,
-    report: lash::host_events::HostEventEmitReport,
-    registration: lash::host_events::TriggerRegistration,
-    source_type: lash::host_events::TriggerSourceType,
-    filter: lash::host_events::TriggerSubscriptionFilter,
-    target: lash::host_events::TriggerTargetSummary,
+fn trigger_types_are_homed_in_triggers(
+    event: lash::triggers::TriggerEvent,
+    report: lash::triggers::TriggerEmitReport,
+    registration: lash::triggers::TriggerRegistration,
+    source_type: lash::triggers::TriggerEventType,
+    filter: lash::triggers::TriggerSubscriptionFilter,
+    target: lash::triggers::TriggerTargetSummary,
 ) {
     let _ = (event, report, registration, source_type, filter, target);
-    let _ = lash::host_events::empty_host_event_source_key("ui.button.pressed");
+    let _ = lash::triggers::empty_trigger_source_key("ui.button.pressed");
 }
 
 async fn persistence_load_helpers_are_nameable(
@@ -274,7 +274,7 @@ fn main() {
     let _ = model_spec_types_are_nameable;
     let _ = persistence_load_helpers_are_nameable;
     let _ = observation_types_are_homed_in_observe;
-    let _ = host_event_types_are_homed_in_host_events;
+    let _ = trigger_types_are_homed_in_triggers;
     let _ = cancellation_token_is_at_root;
     let _ = queued_work_wait_is_nameable;
 }

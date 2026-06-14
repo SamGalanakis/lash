@@ -36,6 +36,6 @@ never cancels a process — orphans are reported and lifecycle is host policy.
 - A process-created session is an ordinary session recording `caused_by` (downstream
   provenance); its usage is its own — there is no live usage channel to the originator.
 - Wake fan-out is deliberately not a process feature (wake target is 0..1); the
-  host-event bus is the pub/sub path.
+  trigger bus is the pub/sub path.
 - Persisted process and trigger-subscription records from before this change do not
   deserialize (pre-1.0 break, no shims).

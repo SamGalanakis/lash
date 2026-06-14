@@ -263,7 +263,7 @@ submit {{
 
 fn trigger_setup_script() -> String {
     r#"
-Register this host event trigger.
+Register this trigger.
 
 ```lashlang
 process on_button(event: ui.button.Pressed) {

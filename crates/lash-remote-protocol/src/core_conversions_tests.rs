@@ -189,26 +189,26 @@ fn prompt_layer_round_trips_without_protocol_crate_depending_on_core_by_default(
 }
 
 #[test]
-fn host_event_dtos_round_trip_core_values() {
-    let request = lash_core::HostEventOccurrenceRequest::new(
+fn trigger_dtos_round_trip_core_values() {
+    let request = lash_core::TriggerOccurrenceRequest::new(
         "ui.button.pressed",
         "source-key",
         serde_json::json!({ "button": "Blue" }),
         "button-blue-1",
     )
     .with_source(serde_json::json!({ "id": "blue" }));
-    let remote = RemoteHostEventOccurrenceRequest::from(request.clone());
+    let remote = RemoteTriggerOccurrenceRequest::from(request.clone());
     remote.validate().expect("valid remote request");
-    let core = lash_core::HostEventOccurrenceRequest::try_from(remote).expect("core request");
+    let core = lash_core::TriggerOccurrenceRequest::try_from(remote).expect("core request");
     assert_eq!(core, request);
 
-    let report = lash_core::HostEventEmitReport {
+    let report = lash_core::TriggerEmitReport {
         occurrence_id: "occurrence:1".to_string(),
         started_process_ids: vec!["process:1".to_string()],
     };
-    let remote = RemoteHostEventEmitReport::from(report.clone());
+    let remote = RemoteTriggerEmitReport::from(report.clone());
     remote.validate().expect("valid remote report");
-    let core = lash_core::HostEventEmitReport::try_from(remote).expect("core report");
+    let core = lash_core::TriggerEmitReport::try_from(remote).expect("core report");
     assert_eq!(core, report);
 
     let mut filter = lash_core::TriggerSubscriptionFilter::for_source_type("ui.button.pressed");
@@ -225,7 +225,7 @@ fn host_event_dtos_round_trip_core_values() {
         handle: "trigger:1".to_string(),
         source_key: "source-key".to_string(),
         name: Some("button watcher".to_string()),
-        source_type: lash_core::TriggerSourceType::new("ui.button.pressed"),
+        source_type: lash_core::TriggerEventType::new("ui.button.pressed"),
         source: serde_json::json!({}),
         target: lash_core::TriggerTargetSummary {
             process_name: "on_button".to_string(),
@@ -237,7 +237,7 @@ fn host_event_dtos_round_trip_core_values() {
     let core = lash_core::TriggerRegistration::try_from(remote).expect("core registration");
     assert_eq!(core, registration);
 
-    let cause = lash_core::CausalRef::HostEvent {
+    let cause = lash_core::CausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
     };
     let remote = RemoteCausalRef::from(cause.clone());

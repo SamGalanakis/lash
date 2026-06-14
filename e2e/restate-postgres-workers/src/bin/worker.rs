@@ -354,7 +354,7 @@ fn prompt_for_request(request: &TurnRequest) -> String {
             request.workflow_id, request.fail_once
         ),
         TurnScenario::TriggerSetup => format!(
-            "Register the E2E host event trigger through Lashlang. workflow_id={} trigger_setup=true",
+            "Register the E2E trigger through Lashlang. workflow_id={} trigger_setup=true",
             request.workflow_id
         ),
         TurnScenario::DrainQueued => format!(

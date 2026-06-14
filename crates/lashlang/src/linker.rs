@@ -924,7 +924,7 @@ pub enum LinkError {
     #[error("trigger cancellation requires {{ handle }}")]
     InvalidTriggerCancel { span: Option<Span> },
     #[error("trigger source type `{source_ty}` is not registered as a TriggerSource")]
-    UnknownTriggerSourceType {
+    UnknownTriggerEventType {
         source_ty: String,
         span: Option<Span>,
     },
@@ -1018,7 +1018,7 @@ impl LinkError {
             | Self::TriggerEventProjection { span }
             | Self::InvalidTriggerList { span }
             | Self::InvalidTriggerCancel { span }
-            | Self::UnknownTriggerSourceType { span, .. }
+            | Self::UnknownTriggerEventType { span, .. }
             | Self::InvalidTriggerTarget { span, .. }
             | Self::TriggerEventMismatch { span, .. }
             | Self::UnresolvedReceiver { span, .. }
@@ -2106,7 +2106,7 @@ impl<'module> Linker<'module> {
                     .surface
                     .resources
                     .trigger_source_event(&source_ty)
-                    .ok_or_else(|| LinkError::UnknownTriggerSourceType {
+                    .ok_or_else(|| LinkError::UnknownTriggerEventType {
                         source_ty: format_type_expr(&source_ty),
                         span: scope.span,
                     })?;
@@ -2250,7 +2250,7 @@ impl<'module> Linker<'module> {
             .surface
             .resources
             .trigger_source_event(&source_ty)
-            .ok_or_else(|| LinkError::UnknownTriggerSourceType {
+            .ok_or_else(|| LinkError::UnknownTriggerEventType {
                 source_ty: format_type_expr(&source_ty),
                 span: scope.span,
             })?;
@@ -3269,7 +3269,7 @@ mod tests {
                 LashlangAbilities::all(),
             ),
         )
-        .expect("link first host event shape");
+        .expect("link first trigger occurrence shape");
         let second = LinkedModule::link(
             program,
             LashlangSurface::new(
@@ -3277,7 +3277,7 @@ mod tests {
                 LashlangAbilities::all(),
             ),
         )
-        .expect("link changed host event shape");
+        .expect("link changed trigger occurrence shape");
 
         assert_ne!(first.required_surface_ref, second.required_surface_ref);
     }
@@ -3641,7 +3641,7 @@ mod tests {
         .expect("parse wrong source");
         assert!(matches!(
             LinkedModule::link(wrong_source, full_surface()),
-            Err(LinkError::UnknownTriggerSourceType { .. })
+            Err(LinkError::UnknownTriggerEventType { .. })
         ));
 
         let payload_mismatch = crate::parse(

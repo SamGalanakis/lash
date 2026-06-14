@@ -253,11 +253,9 @@ impl RuntimeSessionServices {
         DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id)
     }
 
-    pub(in crate::runtime) fn host_event_router(
-        self: &Arc<Self>,
-    ) -> Option<crate::HostEventRouter> {
-        self.current.host.host_event_store.as_ref().map(|store| {
-            crate::HostEventRouter::new(
+    pub(in crate::runtime) fn trigger_router(self: &Arc<Self>) -> Option<crate::TriggerRouter> {
+        self.current.host.trigger_store.as_ref().map(|store| {
+            crate::TriggerRouter::new(
                 Arc::clone(store),
                 Arc::clone(&self.current.host.core.durability.lashlang_artifact_store),
                 self.current.host.process_registry.clone(),

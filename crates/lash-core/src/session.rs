@@ -9,7 +9,6 @@ use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, T
 mod execution_context;
 pub(crate) mod process_handles;
 mod tool_execution;
-pub(crate) mod triggers;
 
 pub use execution_context::RuntimeExecutionContext;
 pub(crate) use execution_context::lashlang_surface_from_tool_surface;
@@ -319,7 +318,7 @@ impl Session {
         process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         direct_completions: crate::DirectCompletionClient<'run>,
-        host_event_router: Option<crate::HostEventRouter>,
+        trigger_router: Option<crate::TriggerRouter>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
@@ -336,7 +335,7 @@ impl Session {
             session_graph,
             processes,
             process_cancel_ability,
-            host_event_router,
+            trigger_router,
             effect_controller,
             direct_completions: direct_completions.clone(),
             parent_invocation: None,
@@ -345,7 +344,7 @@ impl Session {
             agent_frame_id: agent_frame_id.to_string(),
             event_tx,
             checkpoint_messages,
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::clone(&self.services.attachment_store),
             turn_context: turn_context.clone(),
         });

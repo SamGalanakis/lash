@@ -234,12 +234,12 @@ impl PluginHost {
         contributions
             .context_compactors
             .sort_by_key(|entry| std::cmp::Reverse(entry.0));
-        let host_events = crate::HostEventCatalog::from_events(contributions.host_events.clone())
+        let triggers = crate::TriggerEventCatalog::from_events(contributions.triggers.clone())
             .map_err(|message| {
-            PluginError::Registration(format!("invalid host event catalog: {message}"))
-        })?;
+                PluginError::Registration(format!("invalid trigger event catalog: {message}"))
+            })?;
         let mut lashlang_resources = self.lashlang_resources.clone();
-        for event in host_events.events() {
+        for event in triggers.events() {
             lashlang_resources
                 .add_trigger_source_constructor(
                     event.source_type().split('.'),
@@ -248,7 +248,7 @@ impl PluginHost {
                 )
                 .map_err(|err| {
                     PluginError::Registration(format!(
-                        "invalid host event trigger source `{}.{}`: {err}",
+                        "invalid trigger source `{}.{}`: {err}",
                         event.alias, event.event
                     ))
                 })?;
@@ -287,7 +287,7 @@ impl PluginHost {
             lashlang_abilities: self.lashlang_abilities,
             lashlang_language_features: self.lashlang_language_features,
             lashlang_resources,
-            host_events,
+            triggers,
             contributions,
         });
         self.register_session(&session_id, &session)?;

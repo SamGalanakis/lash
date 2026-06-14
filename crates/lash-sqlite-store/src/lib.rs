@@ -73,25 +73,25 @@ mod blobs;
 mod conn;
 mod effect_replay;
 mod graph;
-mod host_events;
 mod leases;
 mod lifecycle;
 mod persistence;
 mod process_registry;
 mod queued_work;
 mod schema;
+mod triggers;
 
 use conn::TxOutcome;
 pub use effect_replay::{
     SqliteEffectHost, SqliteEffectReplayOptions, SqliteRuntimeEffectController,
 };
-pub use host_events::SqliteHostEventStore;
 use leases::*;
 use queued_work::*;
 use schema::{
-    StoreBacking, apply_pragmas, ensure_effect_schema, ensure_host_event_schema,
-    ensure_process_schema, ensure_schema,
+    StoreBacking, apply_pragmas, ensure_effect_schema, ensure_process_schema, ensure_schema,
+    ensure_trigger_schema,
 };
+pub use triggers::SqliteTriggerStore;
 
 /// SQLite-backed store for checkpoint blobs and the canonical session head.
 ///

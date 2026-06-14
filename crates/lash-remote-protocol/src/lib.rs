@@ -729,7 +729,7 @@ impl RemoteTurnResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteHostEventOccurrenceRequest {
+pub struct RemoteTriggerOccurrenceRequest {
     pub protocol_version: u32,
     pub source_type: String,
     pub source_key: String,
@@ -740,7 +740,7 @@ pub struct RemoteHostEventOccurrenceRequest {
     pub source: Option<serde_json::Value>,
 }
 
-impl RemoteHostEventOccurrenceRequest {
+impl RemoteTriggerOccurrenceRequest {
     pub fn new(
         source_type: impl Into<String>,
         source_key: impl Into<String>,
@@ -765,17 +765,17 @@ impl RemoteHostEventOccurrenceRequest {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
         require_non_empty(
-            "RemoteHostEventOccurrenceRequest",
+            "RemoteTriggerOccurrenceRequest",
             "source_type",
             &self.source_type,
         )?;
         require_non_empty(
-            "RemoteHostEventOccurrenceRequest",
+            "RemoteTriggerOccurrenceRequest",
             "source_key",
             &self.source_key,
         )?;
         require_non_empty(
-            "RemoteHostEventOccurrenceRequest",
+            "RemoteTriggerOccurrenceRequest",
             "idempotency_key",
             &self.idempotency_key,
         )
@@ -783,7 +783,7 @@ impl RemoteHostEventOccurrenceRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteHostEventOccurrenceRecord {
+pub struct RemoteTriggerOccurrenceRecord {
     pub occurrence_id: String,
     pub source_type: String,
     pub source_key: String,
@@ -796,7 +796,7 @@ pub struct RemoteHostEventOccurrenceRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteHostEventEmitReport {
+pub struct RemoteTriggerEmitReport {
     pub protocol_version: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub occurrence_id: String,
@@ -804,7 +804,7 @@ pub struct RemoteHostEventEmitReport {
     pub started_process_ids: Vec<String>,
 }
 
-impl RemoteHostEventEmitReport {
+impl RemoteTriggerEmitReport {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)
     }
@@ -915,7 +915,7 @@ pub enum RemoteCausalRef {
         process_id: String,
         sequence: u64,
     },
-    HostEvent {
+    TriggerOccurrence {
         occurrence_id: String,
     },
     SessionNode {

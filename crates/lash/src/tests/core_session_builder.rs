@@ -1246,7 +1246,7 @@ fn turn_result_total_usage_sums_parent_and_children() {
 // - durable attachment store       => `lash::FileAttachmentStore`
 // - durable artifact store         => `lash_sqlite_store::Store`
 // - durable process registry       => `lash_sqlite_store::SqliteProcessRegistry`
-// - durable host event store       => `lash_sqlite_store::SqliteHostEventStore`
+// - durable trigger store       => `lash_sqlite_store::SqliteTriggerStore`
 //
 // Ephemeral peers are the named in-memory implementations.
 
@@ -1293,11 +1293,11 @@ async fn durable_artifact_store(
     )
 }
 
-async fn durable_host_event_store(dir: &std::path::Path) -> Arc<dyn lash_core::HostEventStore> {
+async fn durable_trigger_store(dir: &std::path::Path) -> Arc<dyn lash_core::TriggerStore> {
     Arc::new(
-        lash_sqlite_store::SqliteHostEventStore::open(&dir.join("host-events.db"))
+        lash_sqlite_store::SqliteTriggerStore::open(&dir.join("triggers.db"))
             .await
-            .expect("open durable host event store"),
+            .expect("open durable trigger store"),
     )
 }
 
@@ -1376,7 +1376,7 @@ async fn durable_process_registry_rejects_missing_durable_store_factory_at_build
 async fn all_durable_stores_build_successfully() -> Result<()> {
     // Positive control: a coherent durable wiring (durable session store +
     // durable attachment + durable artifact + durable process registry +
-    // durable host event store) builds without error.
+    // durable trigger store) builds without error.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
@@ -1388,14 +1388,14 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
-        .host_event_store(durable_host_event_store(dir.path()).await)
+        .trigger_store(durable_trigger_store(dir.path()).await)
         .process_registry(registry)
         .build()?;
     Ok(())
 }
 
 #[tokio::test]
-async fn durable_process_registry_rejects_ephemeral_host_event_store_at_build() {
+async fn durable_process_registry_rejects_ephemeral_trigger_store_at_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
@@ -1411,13 +1411,13 @@ async fn durable_process_registry_rejects_ephemeral_host_event_store_at_build() 
         .build();
     let err = expect_build_error(
         result,
-        "durable process registry without durable host event store must be rejected",
+        "durable process registry without durable trigger store must be rejected",
     );
 
     assert!(matches!(
         err,
         EmbedError::DurableStorePeerRequired {
-            facet: "host event store"
+            facet: "trigger store"
         }
     ));
 }
@@ -1443,7 +1443,7 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
         .child_store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
-        .host_event_store(durable_host_event_store(dir.path()).await)
+        .trigger_store(durable_trigger_store(dir.path()).await)
         .process_registry(registry)
         .build()?;
     Ok(())
@@ -1526,18 +1526,18 @@ async fn default_process_work_runner_spawns_when_registry_and_store_factory_pres
 async fn durable_process_worker_config_uses_core_process_registry() -> Result<()> {
     let registry =
         Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
-    let host_event_store = Arc::new(lash_core::InMemoryHostEventStore::default())
-        as Arc<dyn lash_core::HostEventStore>;
+    let trigger_store =
+        Arc::new(lash_core::InMemoryTriggerStore::default()) as Arc<dyn lash_core::TriggerStore>;
     let core = explicit_ephemeral_facets(peer_coherence_builder())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .host_event_store(Arc::clone(&host_event_store))
+        .trigger_store(Arc::clone(&trigger_store))
         .process_registry(Arc::clone(&registry))
         .build()?;
 
     assert!(core.processes().observer().is_ok());
     let config = core.durable_process_worker_config()?;
     assert!(Arc::ptr_eq(&config.process_registry, &registry));
-    assert!(Arc::ptr_eq(&config.host_event_store, &host_event_store));
+    assert!(Arc::ptr_eq(&config.trigger_store, &trigger_store));
     Ok(())
 }
 

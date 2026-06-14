@@ -7,12 +7,11 @@ mod scheduling;
 #[cfg(test)]
 mod tests;
 
-pub use context::{ToolDispatchContext, ToolHostEventEffectOutcome};
+pub use context::{ToolDispatchContext, ToolTriggerEffectOutcome};
 pub use scheduling::{ParallelToolCallOutcome, ParallelToolCallSpec, dispatch_parallel_tool_calls};
 
 pub(crate) use context::{
-    CheckpointMessageBuffer, ToolDispatchOutcome, ToolHostEventOutcomeBuffer,
-    ToolPreparationOutcome,
+    CheckpointMessageBuffer, ToolDispatchOutcome, ToolPreparationOutcome, ToolTriggerOutcomeBuffer,
 };
 pub(crate) use execution::dispatch_prepared_tool_call_with_execution_context;
 #[cfg(test)]

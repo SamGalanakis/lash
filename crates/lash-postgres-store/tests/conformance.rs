@@ -1,10 +1,10 @@
 use std::sync::{Arc, LazyLock};
 
 use lash_core::testing::conformance::{
-    ReopenableHostEventStore, ReopenableLashlangArtifactStore, ReopenableProcessRegistry,
-    ReopenableRuntimePersistence,
+    ReopenableLashlangArtifactStore, ReopenableProcessRegistry, ReopenableRuntimePersistence,
+    ReopenableTriggerStore,
 };
-use lash_core::{DurabilityTier, HostEventStore, ProcessRegistry, RuntimePersistence};
+use lash_core::{DurabilityTier, ProcessRegistry, RuntimePersistence, TriggerStore};
 use lash_postgres_store::PostgresStorage;
 
 /// All four suites share one database and `reset()` truncates every `lash_*`
@@ -43,9 +43,9 @@ async fn reset(storage: &PostgresStorage) {
     sqlx::query(
         r#"
         TRUNCATE
-            lash_host_event_deliveries,
-            lash_host_event_occurrences,
-            lash_host_event_trigger_subscriptions,
+            lash_trigger_deliveries,
+            lash_trigger_occurrences,
+            lash_trigger_subscriptions,
             lash_process_wake_acks,
             lash_process_handle_grants,
             lash_process_leases,
@@ -67,14 +67,14 @@ async fn reset(storage: &PostgresStorage) {
     .execute(pool)
     .await
     .expect("reset postgres conformance tables");
-    // `lash_host_event_subscription_seq` is a standalone sequence (not owned by a
+    // `lash_trigger_subscription_seq` is a standalone sequence (not owned by a
     // truncated table), so RESTART IDENTITY does not reset it. Reset it in a
     // separate statement — sqlx's prepared protocol rejects multiple commands in
     // one query.
-    sqlx::query("ALTER SEQUENCE lash_host_event_subscription_seq RESTART WITH 1")
+    sqlx::query("ALTER SEQUENCE lash_trigger_subscription_seq RESTART WITH 1")
         .execute(pool)
         .await
-        .expect("reset postgres host-event subscription sequence");
+        .expect("reset postgres trigger subscription sequence");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -118,23 +118,21 @@ async fn postgres_process_registry_satisfies_conformance_when_configured() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_host_event_store_satisfies_conformance_when_configured() {
+async fn postgres_trigger_store_satisfies_conformance_when_configured() {
     let _db_guard = DB_GUARD.lock().await;
     let Some(storage) = storage().await else {
-        eprintln!(
-            "skipping Postgres host-event conformance: LASH_POSTGRES_DATABASE_URL is not set"
-        );
+        eprintln!("skipping Postgres trigger conformance: LASH_POSTGRES_DATABASE_URL is not set");
         return;
     };
     let storage = Arc::new(storage);
-    lash_core::testing::conformance::host_event_store_reopenable(
+    lash_core::testing::conformance::trigger_store_reopenable(
         || {
             let storage = Arc::clone(&storage);
             sync_await(async move {
                 reset(&storage).await;
-                let open = Arc::new(storage.host_event_store()) as Arc<dyn HostEventStore>;
-                let reopen = Arc::new(storage.host_event_store()) as Arc<dyn HostEventStore>;
-                ReopenableHostEventStore { open, reopen }
+                let open = Arc::new(storage.trigger_store()) as Arc<dyn TriggerStore>;
+                let reopen = Arc::new(storage.trigger_store()) as Arc<dyn TriggerStore>;
+                ReopenableTriggerStore { open, reopen }
             })
         },
         DurabilityTier::Durable,

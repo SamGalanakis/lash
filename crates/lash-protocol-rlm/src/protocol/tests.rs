@@ -185,7 +185,7 @@ fn execution_section_hides_trigger_registry_language_when_disabled() {
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("Trigger registry"));
-    assert!(!section.contains("matching host-event occurrences"));
+    assert!(!section.contains("matching trigger occurrences"));
 }
 
 #[test]

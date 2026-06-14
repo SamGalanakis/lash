@@ -269,8 +269,8 @@ impl LashRuntime {
         if let Some(factory) = env.session_store_factory.as_ref() {
             embedded = embedded.with_session_store_factory(Arc::clone(factory));
         }
-        if let Some(store) = env.host_event_store.as_ref() {
-            embedded = embedded.with_host_event_store(Arc::clone(store));
+        if let Some(store) = env.trigger_store.as_ref() {
+            embedded = embedded.with_trigger_store(Arc::clone(store));
         }
         let mut runtime = Self::assemble_runtime(
             policy,

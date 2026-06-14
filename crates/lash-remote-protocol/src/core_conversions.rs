@@ -31,12 +31,12 @@ impl From<lash_core::ProtocolTurnOptions> for RemoteProtocolTurnOptions {
     }
 }
 
-impl TryFrom<RemoteHostEventOccurrenceRequest> for lash_core::HostEventOccurrenceRequest {
+impl TryFrom<RemoteTriggerOccurrenceRequest> for lash_core::TriggerOccurrenceRequest {
     type Error = RemoteProtocolError;
 
-    fn try_from(value: RemoteHostEventOccurrenceRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: RemoteTriggerOccurrenceRequest) -> Result<Self, Self::Error> {
         value.validate()?;
-        let RemoteHostEventOccurrenceRequest {
+        let RemoteTriggerOccurrenceRequest {
             protocol_version: _,
             source_type,
             source_key,
@@ -44,7 +44,7 @@ impl TryFrom<RemoteHostEventOccurrenceRequest> for lash_core::HostEventOccurrenc
             idempotency_key,
             source,
         } = value;
-        let mut request = lash_core::HostEventOccurrenceRequest::new(
+        let mut request = lash_core::TriggerOccurrenceRequest::new(
             source_type,
             source_key,
             payload,
@@ -55,9 +55,9 @@ impl TryFrom<RemoteHostEventOccurrenceRequest> for lash_core::HostEventOccurrenc
     }
 }
 
-impl From<lash_core::HostEventOccurrenceRequest> for RemoteHostEventOccurrenceRequest {
-    fn from(value: lash_core::HostEventOccurrenceRequest) -> Self {
-        let lash_core::HostEventOccurrenceRequest {
+impl From<lash_core::TriggerOccurrenceRequest> for RemoteTriggerOccurrenceRequest {
+    fn from(value: lash_core::TriggerOccurrenceRequest) -> Self {
+        let lash_core::TriggerOccurrenceRequest {
             source_type,
             source_key,
             payload,
@@ -75,9 +75,9 @@ impl From<lash_core::HostEventOccurrenceRequest> for RemoteHostEventOccurrenceRe
     }
 }
 
-impl From<lash_core::HostEventOccurrenceRecord> for RemoteHostEventOccurrenceRecord {
-    fn from(value: lash_core::HostEventOccurrenceRecord) -> Self {
-        let lash_core::HostEventOccurrenceRecord {
+impl From<lash_core::TriggerOccurrenceRecord> for RemoteTriggerOccurrenceRecord {
+    fn from(value: lash_core::TriggerOccurrenceRecord) -> Self {
+        let lash_core::TriggerOccurrenceRecord {
             occurrence_id,
             source_type,
             source_key,
@@ -98,9 +98,9 @@ impl From<lash_core::HostEventOccurrenceRecord> for RemoteHostEventOccurrenceRec
     }
 }
 
-impl From<RemoteHostEventOccurrenceRecord> for lash_core::HostEventOccurrenceRecord {
-    fn from(value: RemoteHostEventOccurrenceRecord) -> Self {
-        let RemoteHostEventOccurrenceRecord {
+impl From<RemoteTriggerOccurrenceRecord> for lash_core::TriggerOccurrenceRecord {
+    fn from(value: RemoteTriggerOccurrenceRecord) -> Self {
+        let RemoteTriggerOccurrenceRecord {
             occurrence_id,
             source_type,
             source_key,
@@ -121,9 +121,9 @@ impl From<RemoteHostEventOccurrenceRecord> for lash_core::HostEventOccurrenceRec
     }
 }
 
-impl From<lash_core::HostEventEmitReport> for RemoteHostEventEmitReport {
-    fn from(value: lash_core::HostEventEmitReport) -> Self {
-        let lash_core::HostEventEmitReport {
+impl From<lash_core::TriggerEmitReport> for RemoteTriggerEmitReport {
+    fn from(value: lash_core::TriggerEmitReport) -> Self {
+        let lash_core::TriggerEmitReport {
             occurrence_id,
             started_process_ids,
         } = value;
@@ -135,12 +135,12 @@ impl From<lash_core::HostEventEmitReport> for RemoteHostEventEmitReport {
     }
 }
 
-impl TryFrom<RemoteHostEventEmitReport> for lash_core::HostEventEmitReport {
+impl TryFrom<RemoteTriggerEmitReport> for lash_core::TriggerEmitReport {
     type Error = RemoteProtocolError;
 
-    fn try_from(value: RemoteHostEventEmitReport) -> Result<Self, Self::Error> {
+    fn try_from(value: RemoteTriggerEmitReport) -> Result<Self, Self::Error> {
         value.validate()?;
-        let RemoteHostEventEmitReport {
+        let RemoteTriggerEmitReport {
             protocol_version: _,
             occurrence_id,
             started_process_ids,
@@ -267,7 +267,7 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
             handle,
             source_key,
             name,
-            source_type: lash_core::TriggerSourceType::new(source_type),
+            source_type: lash_core::TriggerEventType::new(source_type),
             source,
             target: lash_core::TriggerTargetSummary {
                 process_name,
@@ -312,7 +312,9 @@ impl From<lash_core::CausalRef> for RemoteCausalRef {
                 process_id,
                 sequence,
             },
-            lash_core::CausalRef::HostEvent { occurrence_id } => Self::HostEvent { occurrence_id },
+            lash_core::CausalRef::TriggerOccurrence { occurrence_id } => {
+                Self::TriggerOccurrence { occurrence_id }
+            }
             lash_core::CausalRef::SessionNode {
                 session_id,
                 node_id,
@@ -358,7 +360,9 @@ impl From<RemoteCausalRef> for lash_core::CausalRef {
                 process_id,
                 sequence,
             },
-            RemoteCausalRef::HostEvent { occurrence_id } => Self::HostEvent { occurrence_id },
+            RemoteCausalRef::TriggerOccurrence { occurrence_id } => {
+                Self::TriggerOccurrence { occurrence_id }
+            }
             RemoteCausalRef::SessionNode {
                 session_id,
                 node_id,

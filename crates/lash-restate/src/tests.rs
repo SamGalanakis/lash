@@ -1253,7 +1253,10 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
             resolved[0].key,
             lash_core::process_signal_wait_key("task-signal", "notify", 1)
         );
-        assert_eq!(resolved[0].payload, serde_json::json!({ "signal": "notify" }));
+        assert_eq!(
+            resolved[0].payload,
+            serde_json::json!({ "signal": "notify" })
+        );
     }
 
     let outcome = host
@@ -1782,9 +1785,9 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
 
 /// Build a durable registration for a trigger-started lashlang process.
 ///
-/// A trigger/host-event-started process carries a [`ProcessInput::LashlangProcess`]
+/// A trigger/trigger-started process carries a [`ProcessInput::LashlangProcess`]
 /// (the trigger route's process body) and provenance whose `caused_by` is the
-/// host event that fired it — distinct from a turn-started process, whose
+/// trigger occurrence that fired it — distinct from a turn-started process, whose
 /// provenance traces to a live turn/tool call. The module artifact is stored
 /// in the process-global in-memory artifact store, mirroring how a trigger
 /// route's linked module is published before the process runs; that store
@@ -1830,7 +1833,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
         )
         .with_caused_by(Some(lash_core::CausalRef::SessionNode {
             session_id: "root".to_string(),
-            node_id: "host-event:resource.updated".to_string(),
+            node_id: "trigger:resource.updated".to_string(),
         })),
     )
     .with_extra_event_types(lash_core::lashlang_process_event_types())
@@ -1843,8 +1846,8 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
 /// durable re-execution guarantee a turn-started process has (invariant 3).
 ///
 /// Mirrors `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
-/// but the process is started by a trigger/host event (a `LashlangProcess` row
-/// with host-event provenance), not by a live turn's tool call. It also pins
+/// but the process is started by a trigger/trigger occurrence (a `LashlangProcess` row
+/// with trigger provenance), not by a live turn's tool call. It also pins
 /// the lease single-owner / fencing contract: an active lease fences a
 /// competing owner and a superseded (stale) writer is rejected (invariant 4).
 #[tokio::test]

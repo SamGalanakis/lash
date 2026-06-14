@@ -3,7 +3,7 @@ use crate::tool_dispatch::schedule_tool_batch;
 
 pub(in crate::runtime) struct ToolBatchRunOutcome {
     pub completed: Vec<crate::sansio::CompletedToolCall>,
-    pub host_events: Vec<crate::tool_dispatch::ToolHostEventEffectOutcome>,
+    pub triggers: Vec<crate::tool_dispatch::ToolTriggerEffectOutcome>,
 }
 
 /// Run a single pending tool call through the dispatch context and result
@@ -202,11 +202,8 @@ impl RuntimeTurnDriver<'_> {
         )
         .await;
 
-        let host_events = context.drain_tool_host_event_outcomes().map_err(|err| {
-            crate::RuntimeEffectControllerError::new(
-                "tool_host_event_outcome_drain",
-                err.to_string(),
-            )
+        let triggers = context.drain_tool_trigger_outcomes().map_err(|err| {
+            crate::RuntimeEffectControllerError::new("tool_trigger_outcome_drain", err.to_string())
         })?;
         drop(context);
         drop(tool_event_tx);
@@ -215,7 +212,7 @@ impl RuntimeTurnDriver<'_> {
         let _ = turn_event_forwarder.await;
         Ok(ToolBatchRunOutcome {
             completed: outcomes,
-            host_events,
+            triggers,
         })
     }
 }

@@ -1,7 +1,6 @@
 pub mod attachments;
 pub mod chronological;
 pub mod direct;
-pub mod host_events;
 pub mod lashlang_bridge;
 pub mod llm;
 mod model;
@@ -23,6 +22,7 @@ mod tool_provider;
 pub mod tool_registry;
 mod tool_result;
 mod trace;
+pub mod triggers;
 
 pub use lash_sansio::sansio;
 
@@ -44,15 +44,6 @@ pub use chronological::{
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
-};
-pub use host_events::{
-    HostEvent, HostEventCatalog, HostEventEmitReport, HostEventKey, HostEventOccurrenceRecord,
-    HostEventOccurrenceRequest, HostEventRouter, HostEventStore, InMemoryHostEventStore,
-    TriggerDeliveryReservation, TriggerRegistration, TriggerSourceType, TriggerSubscriptionDraft,
-    TriggerSubscriptionFilter, TriggerSubscriptionRecord, TriggerTargetSummary,
-    default_host_event_source_key, deterministic_delivery_process_id, deterministic_occurrence_id,
-    empty_host_event_source_key, host_event_occurrence_request_hash, host_event_source_type,
-    validate_host_event_occurrence_request,
 };
 pub use lash_sansio::llm::types::{
     GenerationOptions, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason,
@@ -85,6 +76,15 @@ pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolRestoreReport, ToolSourceHandle, ToolState, ToolStateEntry,
 };
 pub use tool_result::ToolResult;
+pub use triggers::{
+    InMemoryTriggerStore, TriggerDeliveryReservation, TriggerEmitReport, TriggerEvent,
+    TriggerEventCatalog, TriggerEventKey, TriggerEventType, TriggerOccurrenceRecord,
+    TriggerOccurrenceRequest, TriggerRegistration, TriggerRouter, TriggerStore,
+    TriggerSubscriptionDraft, TriggerSubscriptionFilter, TriggerSubscriptionRecord,
+    TriggerTargetSummary, default_trigger_source_key, deterministic_delivery_process_id,
+    deterministic_occurrence_id, empty_trigger_source_key, trigger_event_type,
+    trigger_occurrence_request_hash, validate_payload, validate_trigger_occurrence_request,
+};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProtocolTurnOptions {
     #[serde(default = "empty_protocol_turn_payload")]
@@ -199,13 +199,13 @@ pub use plugin::{
     AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
     CheckpointHookContext, CompactionContext, ContextCompaction, ContextCompactor, ContextError,
-    ContextRegistrations, DirectCompletion, DirectLlmCompletion, HostEventRegistrations,
-    OpenAgentFrameRequest, OpenAgentFrameResult, PersistentRuntimeServices, PluginAction,
-    PluginActionContext, PluginActionDef, PluginActionFailure, PluginActionInvokeError,
-    PluginActionKind, PluginDirective, PluginError, PluginFactory, PluginHost,
-    PluginLifecycleEvent, PluginLifecycleEventHook, PluginOptions, PluginOwned, PluginRegistrar,
-    PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
-    PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
+    ContextRegistrations, DirectCompletion, DirectLlmCompletion, OpenAgentFrameRequest,
+    OpenAgentFrameResult, PersistentRuntimeServices, PluginAction, PluginActionContext,
+    PluginActionDef, PluginActionFailure, PluginActionInvokeError, PluginActionKind,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginLifecycleEvent,
+    PluginLifecycleEventHook, PluginOptions, PluginOwned, PluginRegistrar, PluginSession,
+    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
+    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
     ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices, SessionAppendNode,
     SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionGraphService,
     SessionHandle, SessionLifecycleService, SessionParam, SessionPlugin, SessionPluginSource,
@@ -214,8 +214,8 @@ pub use plugin::{
     SessionTurnRequest, SnapshotReader, SnapshotWriter, SubagentSessionContext,
     ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
     ToolDiscoveryToolContribution, ToolResultProjectionContext, ToolResultProjector,
-    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
-    TurnResultSummary, TurnTransformContext, plugin_action_def,
+    ToolSurfaceContribution, TriggerEventRegistrations, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -246,19 +246,19 @@ pub use runtime::{
     ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
     ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
     ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
-    ProcessStartRequest,
-    ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec,
-    ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
-    ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkPoke,
-    ProcessWorkRunner, ProcessWorkSnapshot, PromptUsage, ProtocolSessionExtension,
-    ProtocolSessionExtensionHandle, ProtocolTurnExtension, ProtocolTurnExtensionHandle,
-    QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest,
-    QueuedWorkRunner, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError,
-    RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig, RuntimeObservation, ScopedEffectController,
-    SessionCommand, SessionCommandReceipt, SessionCursor, SessionCursorError, SessionObservation,
-    SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
-    SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision, SessionScope,
-    SessionScopeId, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
+    ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
+    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
+    ProcessWorkObserver, ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, PromptUsage,
+    ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
+    ProtocolTurnExtensionHandle, QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome,
+    QueuedWorkRunRequest, QueuedWorkRunner, Residency, RuntimeEnvironment,
+    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig,
+    RuntimeObservation, ScopedEffectController, SessionCommand, SessionCommandReceipt,
+    SessionCursor, SessionCursorError, SessionObservation, SessionObservationEvent,
+    SessionObservationEventPayload, SessionObservationSubscription, SessionProcessEventKind,
+    SessionQueueEventKind, SessionResume, SessionRevision, SessionScope, SessionScopeId,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
     TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
     TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UnavailableProcessService,
     UsageReportRow, UsageTotals, WaitKind, WaitState, current_epoch_ms, diff_token_ledger,
@@ -315,9 +315,9 @@ pub use store::{
     refresh_persisted_session_state,
 };
 pub use tool_provider::{
-    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolHostEventControl,
+    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext,
     ToolLashlangExecutionCallSite, ToolPrepareCall, ToolPrepareContext, ToolProvider,
-    ToolSessionControl, ToolSessionModel,
+    ToolSessionControl, ToolSessionModel, ToolTriggerControl,
 };
 
 #[cfg(test)]

@@ -172,7 +172,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         duration_ms: 0,
                         replay: call.replay,
                     },
-                    host_events: Vec::new(),
+                    triggers: Vec::new(),
                 })
             }
             RuntimeEffectCommand::Process { .. } => Err(RuntimeEffectControllerError::new(
@@ -915,7 +915,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
 }
 
 #[tokio::test]
-async fn tool_emitted_host_event_is_serialized_without_appending_session_node() {
+async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
     #[derive(Clone, Default)]
     struct CapturingToolReplayController {
         llm_calls: Arc<Mutex<usize>>,
@@ -950,8 +950,8 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
                     *llm_calls += 1;
                     let parts = if *llm_calls == 1 {
                         vec![LlmOutputPart::ToolCall {
-                            call_id: "host-event-call".to_string(),
-                            tool_name: "host_event_tool".to_string(),
+                            call_id: "trigger-call".to_string(),
+                            tool_name: "trigger_tool".to_string(),
                             input_json: serde_json::json!({}).to_string(),
                             replay: None,
                         }]
@@ -991,13 +991,13 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
         }
     }
 
-    struct HostEventTool;
+    struct TriggerEventTool;
 
-    fn host_event_tool_definition() -> crate::ToolDefinition {
+    fn trigger_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
-            "tool:host_event_tool",
-            "host_event_tool",
-            "Emit a test host event.",
+            "tool:trigger_tool",
+            "trigger_tool",
+            "Emit a test trigger occurrence.",
             serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -1008,26 +1008,37 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     }
 
     #[async_trait::async_trait]
-    impl crate::ToolProvider for HostEventTool {
+    impl crate::ToolProvider for TriggerEventTool {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-            vec![host_event_tool_definition().manifest()]
+            vec![trigger_tool_definition().manifest()]
         }
 
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-            (name == "host_event_tool").then(|| Arc::new(host_event_tool_definition().contract()))
+            (name == "trigger_tool").then(|| Arc::new(trigger_tool_definition().contract()))
         }
 
         async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            let source_type = crate::trigger_event_type("ui.button", "pressed");
+            let source_key =
+                crate::empty_trigger_source_key(&source_type).expect("empty trigger source key");
+            let idempotency_key = call
+                .context
+                .replay_key()
+                .map(|key| format!("{key}:trigger:button-pressed"))
+                .unwrap_or_else(|| "test-trigger:button-pressed".to_string());
             call.context
-                .host_events()
+                .triggers()
                 .emit(
-                    "Button",
-                    "ui.button",
-                    "pressed",
-                    serde_json::json!({ "pressed": true }),
+                    crate::TriggerOccurrenceRequest::new(
+                        source_type,
+                        source_key,
+                        serde_json::json!({ "pressed": true }),
+                        idempotency_key,
+                    )
+                    .with_source(serde_json::json!({})),
                 )
                 .await
-                .expect("emit tool host event");
+                .expect("emit tool trigger occurrence");
             crate::ToolResult::ok(serde_json::json!({ "emitted": true }))
         }
     }
@@ -1037,7 +1048,7 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
         mock_provider(Vec::new()).into_handle(),
     ));
-    let host_event = crate::HostEvent::new(
+    let trigger = crate::TriggerEvent::new(
         "Button",
         "ui.button",
         "pressed",
@@ -1045,10 +1056,10 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     );
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         vec![Arc::new(StaticPluginFactory::new(
-            "button-host-events",
-            crate::PluginSpec::new().with_host_event(host_event),
+            "button-triggers",
+            crate::PluginSpec::new().with_trigger_event(trigger),
         ))],
-        Arc::new(HostEventTool),
+        Arc::new(TriggerEventTool),
         mock_provider(Vec::new()),
         EmbeddedRuntimeHost::new(config),
     )
@@ -1056,12 +1067,12 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
 
     let turn = runtime
         .stream_turn(
-            TurnInput::text("emit host event from tool"),
+            TurnInput::text("emit trigger from tool"),
             TurnOptions::new(
                 CancellationToken::new(),
                 ScopedEffectController::shared(
                     Arc::new(controller.clone()),
-                    EffectScope::turn("root", "host-event-tool"),
+                    EffectScope::turn("root", "trigger-tool"),
                 )
                 .expect("capturing effect scope"),
             )
@@ -1075,34 +1086,34 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     assert_eq!(tool_outcomes.len(), 1);
     assert_eq!(tool_outcomes[0]["type"], "tool_call");
     assert_eq!(
-        tool_outcomes[0]["host_events"][0]["source_type"],
+        tool_outcomes[0]["triggers"][0]["source_type"],
         serde_json::json!("ui.button.pressed")
     );
     assert_eq!(
-        tool_outcomes[0]["host_events"][0]["payload"],
+        tool_outcomes[0]["triggers"][0]["payload"],
         serde_json::json!({ "pressed": true })
     );
     assert!(
-        tool_outcomes[0]["host_events"][0]["occurrence_id"]
+        tool_outcomes[0]["triggers"][0]["occurrence_id"]
             .as_str()
             .is_some_and(|value| !value.is_empty())
     );
 
-    let host_event_nodes = turn
+    let trigger_nodes = turn
         .state
         .session_graph
         .active_path_nodes()
         .into_iter()
         .filter_map(|node| match &node.payload {
             crate::SessionNodePayload::Plugin { plugin_type, body }
-                if plugin_type == "lash.host_event" =>
+                if plugin_type == "lash.trigger" =>
             {
                 Some(body.as_ref().clone())
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(host_event_nodes.is_empty());
+    assert!(trigger_nodes.is_empty());
 }
 
 #[tokio::test]

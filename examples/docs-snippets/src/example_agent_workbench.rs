@@ -1,7 +1,7 @@
 //! Compiled sources for the Rust snippets on `docs/example-agent-workbench.html`.
 
-use lash::host_events::HostEvent;
 use lash::plugins::{PluginError, PluginRegistrar};
+use lash::triggers::TriggerEvent;
 
 fn schedule_config_type() -> lashlang::TypeExpr {
     lashlang::TypeExpr::Object(vec![])
@@ -38,7 +38,7 @@ fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
 }
 
 fn declare_button_event(reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-    reg.host_events().declare(HostEvent::new(
+    reg.triggers().declare(TriggerEvent::new(
         "Button",
         "ui.button",
         "pressed",

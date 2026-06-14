@@ -1,10 +1,11 @@
-error[E0599]: no method named `host_events` found for struct `LashSession` in the current scope
- --> tests/ui/effect_host_activation_methods_are_removed.rs:6:10
+error[E0599]: no method named `emit_with_effect_host` found for struct `TriggersControl` in the current scope
+ --> tests/ui/effect_host_activation_methods_are_removed.rs:7:10
   |
 5 |       let _ = session
   |  _____________-
-6 | |         .host_events()
-  | |         -^^^^^^^^^^^ method not found in `LashSession`
+6 | |         .triggers()
+7 | |         .emit_with_effect_host("Button", "ui.button", "pressed", serde_json::json!({}), scope.controller())
+  | |         -^^^^^^^^^^^^^^^^^^^^^ method not found in `TriggersControl`
   | |_________|
   |
 

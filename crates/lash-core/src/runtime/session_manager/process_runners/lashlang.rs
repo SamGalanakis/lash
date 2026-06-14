@@ -195,6 +195,7 @@ impl RuntimeSessionServices {
             queued_work_poke: self.current.host.queued_work_poke.clone(),
             sleep_sequence: AtomicU64::new(0),
             event_sequence: AtomicU64::new(0),
+            resource_tool_sequence: AtomicU64::new(0),
             signal_send_sequence: AtomicU64::new(0),
             signal_wait_ordinals: tokio::sync::Mutex::new(BTreeMap::new()),
         };
@@ -253,6 +254,7 @@ struct LashlangProcessHost<'run> {
     /// gets the same ordinal — and thus the same replay key — across a
     /// crash-recovery re-run, making the append idempotent on redelivery.
     event_sequence: AtomicU64,
+    resource_tool_sequence: AtomicU64,
     signal_send_sequence: AtomicU64,
     signal_wait_ordinals: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
@@ -287,6 +289,24 @@ impl LashlangProcessHost<'_> {
             &self.module_ref,
             &self.process_ref,
             &self.process_name,
+        )
+    }
+
+    fn resource_tool_call_id(
+        &self,
+        host_operation: &str,
+        call_site: Option<&::lashlang::LashlangExecutionCallSite>,
+    ) -> String {
+        if let Some(call_site) = call_site {
+            return format!(
+                "lashlang:{}:resource:{}:{}:{}",
+                self.process_id, host_operation, call_site.site.node_id, call_site.occurrence
+            );
+        }
+        let ordinal = self.resource_tool_sequence.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "lashlang:{}:resource:{}:ordinal:{}",
+            self.process_id, host_operation, ordinal
         )
     }
 }
@@ -326,6 +346,7 @@ impl LashlangProcessHost<'_> {
                 operation
             ))
         })?;
+        let call_id = self.resource_tool_call_id(&host_operation, call_site.as_ref());
         let call_site = call_site.and_then(|call_site| {
             self.lashlang_execution_sink.as_ref().map(|sink| {
                 crate::ToolLashlangExecutionCallSite::new(
@@ -338,7 +359,6 @@ impl LashlangProcessHost<'_> {
             })
         });
         let payload = self.resource_payload(&args)?;
-        let call_id = uuid::Uuid::new_v4().to_string();
         let reply = if let Some(call_site) = call_site {
             self.ctx
                 .call_tool_with_lashlang_execution_call_site(

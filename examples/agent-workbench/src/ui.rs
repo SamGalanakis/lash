@@ -1673,7 +1673,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
             </span>
           </button>
         </div>
-        <p class="trigger-caption">red and blue emit host events</p>
+        <p class="trigger-caption">red and blue emit triggers</p>
         <section class="schedule-card" aria-label="Cron schedule example">
           <div class="schedule-card-label">try scheduling</div>
           <div class="schedule-card-code">cron.Schedule(...)</div>
@@ -1727,7 +1727,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
               <dt>shift + enter</dt><dd>insert a newline</dd>
               <dt>esc</dt><dd>stop the running turn</dd>
               <dt>↑ (empty composer)</dt><dd>recall your last prompt</dd>
-              <dt>click red or blue</dt><dd>emit a host event</dd>
+              <dt>click red or blue</dt><dd>emit a trigger occurrence</dd>
             </dl>
             <h2>what's what</h2>
             <dl>
@@ -1741,7 +1741,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
       <section id="timeline" class="timeline" aria-busy="false">
         <div id="timelineEmpty" class="empty">
-          no turns yet. ask the agent something below, or click red or blue to fire a host event.
+          no turns yet. ask the agent something below, or click red or blue to fire a trigger occurrence.
         </div>
       </section>
 
@@ -2528,7 +2528,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       const empty = document.createElement("div");
       empty.id = "timelineEmpty";
       empty.className = "empty";
-      empty.textContent = "no turns yet. ask the agent something below, or click red or blue to fire a host event.";
+      empty.textContent = "no turns yet. ask the agent something below, or click red or blue to fire a trigger occurrence.";
       timeline.appendChild(empty);
     }
 

@@ -25,7 +25,7 @@ pub struct DurableProcessWorkerConfig {
     pub session_policy: crate::SessionPolicy,
     pub session_store_factory: Arc<dyn SessionStoreFactory>,
     pub process_registry: Arc<dyn ProcessRegistry>,
-    pub host_event_store: Arc<dyn crate::HostEventStore>,
+    pub trigger_store: Arc<dyn crate::TriggerStore>,
     /// Residency for sessions the worker rebuilds to run a process. Defaults to
     /// [`Residency::KeepAll`]; a host running [`Residency::ActivePathOnly`] wires
     /// it here so the worker's rebuilt sessions trim to the active path too,
@@ -47,13 +47,13 @@ impl DurableProcessWorkerConfig {
             session_policy: crate::SessionPolicy::default(),
             session_store_factory,
             process_registry,
-            host_event_store: Arc::new(crate::InMemoryHostEventStore::default()),
+            trigger_store: Arc::new(crate::InMemoryTriggerStore::default()),
             residency: crate::Residency::default(),
         }
     }
 
-    pub fn with_host_event_store(mut self, store: Arc<dyn crate::HostEventStore>) -> Self {
-        self.host_event_store = store;
+    pub fn with_trigger_store(mut self, store: Arc<dyn crate::TriggerStore>) -> Self {
+        self.trigger_store = store;
         self
     }
 
@@ -193,7 +193,7 @@ impl DurableProcessWorker {
     /// this worker can claim, driving each to a terminal state.
     ///
     /// This is the crash-recovery counterpart to a worker that ran a process
-    /// from a live turn: a trigger/host-event-started process whose worker
+    /// from a live turn: a trigger/trigger-started process whose worker
     /// died mid-flight is left non-terminal in the registry, and a subsequent
     /// worker reopening that registry must finish it. The sweep:
     ///
@@ -513,7 +513,7 @@ impl DurableProcessWorker {
             .with_policy(policy)
             .with_plugin_options(plugin_options)
             .with_session_store_factory(Arc::clone(&self.config.session_store_factory))
-            .with_host_event_store(Arc::clone(&self.config.host_event_store))
+            .with_trigger_store(Arc::clone(&self.config.trigger_store))
             .with_process_registry(Arc::clone(&self.config.process_registry))
             .with_residency(self.config.residency)
             .with_store(store)
@@ -575,8 +575,8 @@ impl DurableProcessWorker {
         if self.config.process_registry.durability_tier() != crate::DurabilityTier::Durable {
             return Err(require(crate::DurableStoreFacet::ProcessRegistry));
         }
-        if self.config.host_event_store.durability_tier() != crate::DurabilityTier::Durable {
-            return Err(require(crate::DurableStoreFacet::HostEventStore));
+        if self.config.trigger_store.durability_tier() != crate::DurabilityTier::Durable {
+            return Err(require(crate::DurableStoreFacet::TriggerStore));
         }
         Ok(())
     }
@@ -635,8 +635,8 @@ mod boundary_tests {
     use super::*;
     use crate::{
         AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
-        DurableStoreFacet, HostEventStore, InMemoryAttachmentStore, LashlangArtifactStore,
-        ProcessInput, ProcessRegistration, RuntimeEffectController, RuntimeError, StoredAttachment,
+        DurableStoreFacet, InMemoryAttachmentStore, LashlangArtifactStore, ProcessInput,
+        ProcessRegistration, RuntimeEffectController, RuntimeError, StoredAttachment, TriggerStore,
     };
     use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentRef};
 
@@ -754,22 +754,22 @@ mod boundary_tests {
         }
     }
 
-    struct TierHostEventStore {
+    struct TierTriggerStore {
         tier: DurabilityTier,
-        inner: crate::InMemoryHostEventStore,
+        inner: crate::InMemoryTriggerStore,
     }
 
-    impl TierHostEventStore {
+    impl TierTriggerStore {
         fn new(tier: DurabilityTier) -> Self {
             Self {
                 tier,
-                inner: crate::InMemoryHostEventStore::default(),
+                inner: crate::InMemoryTriggerStore::default(),
             }
         }
     }
 
     #[async_trait::async_trait]
-    impl HostEventStore for TierHostEventStore {
+    impl TriggerStore for TierTriggerStore {
         fn durability_tier(&self) -> DurabilityTier {
             self.tier
         }
@@ -805,8 +805,8 @@ mod boundary_tests {
 
         async fn record_occurrence(
             &self,
-            request: crate::HostEventOccurrenceRequest,
-        ) -> Result<crate::HostEventOccurrenceRecord, PluginError> {
+            request: crate::TriggerOccurrenceRequest,
+        ) -> Result<crate::TriggerOccurrenceRecord, PluginError> {
             self.inner.record_occurrence(request).await
         }
 
@@ -840,7 +840,7 @@ mod boundary_tests {
         artifact: Arc<dyn LashlangArtifactStore>,
         session_store_tier: DurabilityTier,
         process_registry_tier: DurabilityTier,
-        host_event_store_tier: DurabilityTier,
+        trigger_store_tier: DurabilityTier,
     ) -> DurableProcessWorker {
         let mut runtime_host = RuntimeHostConfig::in_memory();
         runtime_host.control.effect_host =
@@ -854,11 +854,11 @@ mod boundary_tests {
         let registry: Arc<dyn ProcessRegistry> = Arc::new(
             crate::TestLocalProcessRegistry::default().with_durability_tier(process_registry_tier),
         );
-        let host_event_store: Arc<dyn HostEventStore> =
-            Arc::new(TierHostEventStore::new(host_event_store_tier));
+        let trigger_store: Arc<dyn TriggerStore> =
+            Arc::new(TierTriggerStore::new(trigger_store_tier));
         DurableProcessWorker::new(
             DurableProcessWorkerConfig::new(plugin_host, runtime_host, factory, registry)
-                .with_host_event_store(host_event_store),
+                .with_trigger_store(trigger_store),
         )
     }
 
@@ -945,7 +945,7 @@ mod boundary_tests {
     }
 
     #[tokio::test]
-    async fn durable_worker_rejects_ephemeral_host_event_store() {
+    async fn durable_worker_rejects_ephemeral_trigger_store() {
         let worker = worker_with_store_tiers(
             Arc::new(DurableAttachmentStore::default()),
             Arc::new(DurableArtifactStore::default()),
@@ -955,8 +955,8 @@ mod boundary_tests {
         );
         let err = run(&worker)
             .await
-            .expect_err("ephemeral host event store must be rejected at the worker boundary");
-        assert_facet(err, DurableStoreFacet::HostEventStore);
+            .expect_err("ephemeral trigger store must be rejected at the worker boundary");
+        assert_facet(err, DurableStoreFacet::TriggerStore);
     }
 
     #[tokio::test]

@@ -168,29 +168,31 @@ fn remote_turn_result_json_round_trips() {
 }
 
 #[test]
-fn remote_host_event_dtos_json_round_trip() {
-    let request = RemoteHostEventOccurrenceRequest::new(
+fn remote_trigger_dtos_json_round_trip() {
+    let request = RemoteTriggerOccurrenceRequest::new(
         "ui.button.pressed",
         "source-key",
         serde_json::json!({ "button": "Blue" }),
         "button-blue-1",
     )
     .with_source(serde_json::json!({ "id": "blue" }));
-    request.validate().expect("valid host event request");
-    let decoded: RemoteHostEventOccurrenceRequest =
+    request
+        .validate()
+        .expect("valid trigger occurrence request");
+    let decoded: RemoteTriggerOccurrenceRequest =
         serde_json::from_value(serde_json::to_value(&request).expect("serialize request"))
             .expect("deserialize request");
     assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.source_type, "ui.button.pressed");
     assert_eq!(decoded.source.as_ref().unwrap()["id"], "blue");
 
-    let report = RemoteHostEventEmitReport {
+    let report = RemoteTriggerEmitReport {
         protocol_version: REMOTE_PROTOCOL_VERSION,
         occurrence_id: "occurrence:1".to_string(),
         started_process_ids: vec!["process:1".to_string()],
     };
     report.validate().expect("valid report");
-    let decoded: RemoteHostEventEmitReport =
+    let decoded: RemoteTriggerEmitReport =
         serde_json::from_value(serde_json::to_value(&report).expect("serialize report"))
             .expect("deserialize report");
     assert_eq!(decoded.started_process_ids, vec!["process:1".to_string()]);
@@ -222,11 +224,11 @@ fn remote_host_event_dtos_json_round_trip() {
     .expect("deserialize registration");
     assert_eq!(decoded.target.process_name, "on_button");
 
-    let cause = RemoteCausalRef::HostEvent {
+    let cause = RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
     };
     let value = serde_json::to_value(&cause).expect("serialize cause");
-    assert_eq!(value["type"], "host_event");
+    assert_eq!(value["type"], "trigger_occurrence");
     assert_eq!(value["occurrence_id"], "occurrence:1");
 }
 
@@ -334,7 +336,7 @@ fn wrong_protocol_versions_are_rejected() {
         Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
     ));
 
-    let mut event = RemoteHostEventOccurrenceRequest::new(
+    let mut event = RemoteTriggerOccurrenceRequest::new(
         "ui.button.pressed",
         "source-key",
         serde_json::Value::Null,
@@ -353,7 +355,7 @@ fn wrong_protocol_versions_are_rejected() {
         Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
     ));
 
-    let report = RemoteHostEventEmitReport {
+    let report = RemoteTriggerEmitReport {
         protocol_version: REMOTE_PROTOCOL_VERSION + 1,
         occurrence_id: "occurrence:1".to_string(),
         started_process_ids: Vec::new(),
@@ -397,8 +399,8 @@ fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteToolCallRequest>();
     assert_schema_has_protocol_version::<RemoteToolCallResponse>();
     assert_schema_has_protocol_version::<RemoteTurnActivity>();
-    assert_schema_has_protocol_version::<RemoteHostEventOccurrenceRequest>();
-    assert_schema_has_protocol_version::<RemoteHostEventEmitReport>();
+    assert_schema_has_protocol_version::<RemoteTriggerOccurrenceRequest>();
+    assert_schema_has_protocol_version::<RemoteTriggerEmitReport>();
     assert_schema_has_protocol_version::<RemoteTriggerSubscriptionFilter>();
 }
 

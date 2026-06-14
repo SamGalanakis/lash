@@ -1,33 +1,33 @@
-//! [`HostEventStore`](crate::HostEventStore) conformance: trigger
+//! [`TriggerStore`](crate::TriggerStore) conformance: trigger
 //! subscriptions and idempotent occurrence reservations.
 
 use super::*;
 
 // ---------------------------------------------------------------------------
-// HostEventStore conformance
+// TriggerStore conformance
 // ---------------------------------------------------------------------------
 
-/// Run the full [`HostEventStore`](crate::HostEventStore) conformance suite
+/// Run the full [`TriggerStore`](crate::TriggerStore) conformance suite
 /// against the backend produced by `make`. `make` must return a fresh, empty
 /// store on each call.
-pub async fn host_event_store<F>(make: F, expected_tier: DurabilityTier)
+pub async fn trigger_store<F>(make: F, expected_tier: DurabilityTier)
 where
-    F: Fn() -> Arc<dyn crate::HostEventStore>,
+    F: Fn() -> Arc<dyn crate::TriggerStore>,
 {
-    host_event_store_reports_declared_tier(make(), expected_tier);
-    host_event_source_key_is_stable(make()).await;
-    host_event_store_registers_lists_and_cancels(make()).await;
-    host_event_store_records_and_reserves_idempotently(make()).await;
+    trigger_store_reports_declared_tier(make(), expected_tier);
+    trigger_source_key_is_stable(make()).await;
+    trigger_store_registers_lists_and_cancels(make()).await;
+    trigger_store_records_and_reserves_idempotently(make()).await;
 }
 
-/// Run the full [`HostEventStore`](crate::HostEventStore) suite plus durable
+/// Run the full [`TriggerStore`](crate::TriggerStore) suite plus durable
 /// reopen checks.
-pub async fn host_event_store_reopenable<F>(make: F, expected_tier: DurabilityTier)
+pub async fn trigger_store_reopenable<F>(make: F, expected_tier: DurabilityTier)
 where
-    F: Fn() -> ReopenableHostEventStore,
+    F: Fn() -> ReopenableTriggerStore,
 {
-    host_event_store(|| make().open, expected_tier).await;
-    host_event_store_survives_reopen(make()).await;
+    trigger_store(|| make().open, expected_tier).await;
+    trigger_store_survives_reopen(make()).await;
 }
 
 fn sample_trigger_subscription_draft(
@@ -64,8 +64,8 @@ fn sample_trigger_subscription_draft(
 fn button_occurrence_request(
     source_key: impl Into<String>,
     idempotency_key: impl Into<String>,
-) -> crate::HostEventOccurrenceRequest {
-    crate::HostEventOccurrenceRequest::new(
+) -> crate::TriggerOccurrenceRequest {
+    crate::TriggerOccurrenceRequest::new(
         "ui.button.pressed",
         source_key,
         serde_json::json!({ "button": "Blue" }),
@@ -74,8 +74,8 @@ fn button_occurrence_request(
     .with_source(serde_json::json!({}))
 }
 
-fn host_event_store_reports_declared_tier(
-    store: Arc<dyn crate::HostEventStore>,
+fn trigger_store_reports_declared_tier(
+    store: Arc<dyn crate::TriggerStore>,
     expected: DurabilityTier,
 ) {
     assert_eq!(
@@ -85,7 +85,7 @@ fn host_event_store_reports_declared_tier(
     );
 }
 
-async fn host_event_source_key_is_stable(store: Arc<dyn crate::HostEventStore>) {
+async fn trigger_source_key_is_stable(store: Arc<dyn crate::TriggerStore>) {
     let source = serde_json::json!({ "button": "Blue" });
     let first = store
         .source_key_for_subscription("ui.button.pressed", &source)
@@ -99,7 +99,7 @@ async fn host_event_source_key_is_stable(store: Arc<dyn crate::HostEventStore>) 
     assert!(!first.is_empty(), "source keys must be non-empty");
 }
 
-async fn host_event_store_registers_lists_and_cancels(store: Arc<dyn crate::HostEventStore>) {
+async fn trigger_store_registers_lists_and_cancels(store: Arc<dyn crate::TriggerStore>) {
     let source_key = store
         .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
         .await
@@ -165,7 +165,7 @@ async fn host_event_store_registers_lists_and_cancels(store: Arc<dyn crate::Host
     assert!(!disabled[0].enabled);
 }
 
-async fn host_event_store_records_and_reserves_idempotently(store: Arc<dyn crate::HostEventStore>) {
+async fn trigger_store_records_and_reserves_idempotently(store: Arc<dyn crate::TriggerStore>) {
     let source_key = store
         .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
         .await
@@ -243,7 +243,7 @@ async fn host_event_store_records_and_reserves_idempotently(store: Arc<dyn crate
     assert!(disabled_deliveries.is_empty());
 }
 
-async fn host_event_store_survives_reopen(factory: ReopenableHostEventStore) {
+async fn trigger_store_survives_reopen(factory: ReopenableTriggerStore) {
     let source_key = factory
         .open
         .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))

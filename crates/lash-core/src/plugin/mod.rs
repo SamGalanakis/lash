@@ -56,10 +56,10 @@ pub use protocol::{
     ProtocolSessionPlugin,
 };
 pub use registrar::{
-    ContextRegistrations, ExecutionRegistrations, HostEventRegistrations, OutputRegistrations,
-    PluginActionRegistrations, PluginRegistrar, PromptRegistrations, ProtocolRegistrations,
-    SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations,
-    ToolResultRegistrations, TurnRegistrations,
+    ContextRegistrations, ExecutionRegistrations, OutputRegistrations, PluginActionRegistrations,
+    PluginRegistrar, PromptRegistrations, ProtocolRegistrations, SessionRegistrations,
+    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
+    TriggerEventRegistrations, TurnRegistrations,
 };
 pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
@@ -335,31 +335,31 @@ mod tests {
     }
 
     #[test]
-    fn declared_host_events_enter_session_lashlang_resources() {
-        struct HostEventOnlyFactory;
+    fn declared_triggers_enter_session_lashlang_resources() {
+        struct TriggerEventOnlyFactory;
 
-        impl PluginFactory for HostEventOnlyFactory {
+        impl PluginFactory for TriggerEventOnlyFactory {
             fn id(&self) -> &'static str {
-                "host_event_only"
+                "trigger_only"
             }
 
             fn build(
                 &self,
                 _ctx: &PluginSessionContext,
             ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-                Ok(Arc::new(HostEventOnlyPlugin))
+                Ok(Arc::new(TriggerEventOnlyPlugin))
             }
         }
 
-        struct HostEventOnlyPlugin;
+        struct TriggerEventOnlyPlugin;
 
-        impl SessionPlugin for HostEventOnlyPlugin {
+        impl SessionPlugin for TriggerEventOnlyPlugin {
             fn id(&self) -> &'static str {
-                "host_event_only"
+                "trigger_only"
             }
 
             fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-                reg.host_events().declare(crate::HostEvent::new(
+                reg.triggers().declare(crate::TriggerEvent::new(
                     "Button",
                     "ui.button",
                     "pressed",
@@ -376,7 +376,7 @@ mod tests {
             }
         }
 
-        let host = PluginHost::new(vec![Arc::new(HostEventOnlyFactory)]);
+        let host = PluginHost::new(vec![Arc::new(TriggerEventOnlyFactory)]);
 
         assert!(
             host.lashlang_resources()
@@ -386,7 +386,7 @@ mod tests {
         let session = host.build_session("root", None).expect("session");
         assert!(
             session
-                .host_events()
+                .triggers()
                 .get("Button", "ui.button", "pressed")
                 .is_some()
         );

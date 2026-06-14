@@ -1285,10 +1285,10 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
             .await
             .expect("open process registry"),
     );
-    let host_event_store = Arc::new(
-        lash_sqlite_store::SqliteHostEventStore::open(&dir.path().join("host-events.db"))
+    let trigger_store = Arc::new(
+        lash_sqlite_store::SqliteTriggerStore::open(&dir.path().join("triggers.db"))
             .await
-            .expect("open host event store"),
+            .expect("open trigger store"),
     );
     let controller = Arc::new(RecordingDurableEffectController::default());
     let scoped_effect_controller = ScopedEffectController::borrowed(
@@ -1305,7 +1305,7 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
             dir.path().join("attachments"),
         )))
         .lashlang_artifact_store(artifact_store)
-        .host_event_store(host_event_store)
+        .trigger_store(trigger_store)
         .process_registry(process_registry)
         .build()?;
     let session = core.session(session_id).open().await?;

@@ -1,7 +1,7 @@
 //! PostgreSQL durable storage for Lash.
 //!
 //! One [`PostgresStorage`] owns a shared [`sqlx::PgPool`] and creates durable
-//! implementations for the runtime session store, process registry, host-event
+//! implementations for the runtime session store, process registry, trigger
 //! store, Lashlang artifact store, and attachment manifest.
 
 use std::collections::HashSet;
@@ -30,9 +30,8 @@ use lash_core::{
     SessionStoreFactory, SlotPolicy, StoreError, TokenLedgerEntry, VacuumReport,
 };
 use lash_core::{
-    HostEventOccurrenceRecord, HostEventOccurrenceRequest, HostEventStore, PluginError,
-    TriggerDeliveryReservation, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
-    TriggerSubscriptionRecord,
+    PluginError, TriggerDeliveryReservation, TriggerOccurrenceRecord, TriggerOccurrenceRequest,
+    TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter, TriggerSubscriptionRecord,
 };
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
@@ -72,7 +71,7 @@ pub struct PostgresProcessRegistry {
 }
 
 #[derive(Clone)]
-pub struct PostgresHostEventStore {
+pub struct PostgresTriggerStore {
     pool: PgPool,
 }
 
@@ -205,8 +204,8 @@ impl PostgresStorage {
         }
     }
 
-    pub fn host_event_store(&self) -> PostgresHostEventStore {
-        PostgresHostEventStore {
+    pub fn trigger_store(&self) -> PostgresTriggerStore {
+        PostgresTriggerStore {
             pool: self.pool.clone(),
         }
     }
@@ -389,8 +388,8 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             lease_expires_at_ms BIGINT NOT NULL DEFAULT 0
         );
 
-        CREATE SEQUENCE IF NOT EXISTS lash_host_event_subscription_seq;
-        CREATE TABLE IF NOT EXISTS lash_host_event_trigger_subscriptions (
+        CREATE SEQUENCE IF NOT EXISTS lash_trigger_subscription_seq;
+        CREATE TABLE IF NOT EXISTS lash_trigger_subscriptions (
             subscription_id TEXT PRIMARY KEY,
             registrant_scope_id TEXT NOT NULL,
             handle TEXT NOT NULL,
@@ -402,12 +401,12 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             record_json TEXT NOT NULL,
             UNIQUE(registrant_scope_id, handle)
         );
-        CREATE INDEX IF NOT EXISTS idx_lash_host_event_subscriptions_registrant
-            ON lash_host_event_trigger_subscriptions(registrant_scope_id, handle);
-        CREATE INDEX IF NOT EXISTS idx_lash_host_event_subscriptions_source
-            ON lash_host_event_trigger_subscriptions(source_type, source_key, enabled);
+        CREATE INDEX IF NOT EXISTS idx_lash_trigger_subscriptions_registrant
+            ON lash_trigger_subscriptions(registrant_scope_id, handle);
+        CREATE INDEX IF NOT EXISTS idx_lash_trigger_subscriptions_source
+            ON lash_trigger_subscriptions(source_type, source_key, enabled);
 
-        CREATE TABLE IF NOT EXISTS lash_host_event_occurrences (
+        CREATE TABLE IF NOT EXISTS lash_trigger_occurrences (
             occurrence_id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
             request_hash TEXT NOT NULL,
@@ -417,9 +416,9 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             record_json TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS lash_host_event_deliveries (
-            occurrence_id TEXT NOT NULL REFERENCES lash_host_event_occurrences(occurrence_id) ON DELETE CASCADE,
-            subscription_id TEXT NOT NULL REFERENCES lash_host_event_trigger_subscriptions(subscription_id) ON DELETE CASCADE,
+        CREATE TABLE IF NOT EXISTS lash_trigger_deliveries (
+            occurrence_id TEXT NOT NULL REFERENCES lash_trigger_occurrences(occurrence_id) ON DELETE CASCADE,
+            subscription_id TEXT NOT NULL REFERENCES lash_trigger_subscriptions(subscription_id) ON DELETE CASCADE,
             process_id TEXT NOT NULL,
             created_at_ms BIGINT NOT NULL,
             PRIMARY KEY (occurrence_id, subscription_id)
@@ -2672,7 +2671,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
 }
 
 #[async_trait::async_trait]
-impl HostEventStore for PostgresHostEventStore {
+impl TriggerStore for PostgresTriggerStore {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -2682,7 +2681,7 @@ impl HostEventStore for PostgresHostEventStore {
         draft: TriggerSubscriptionDraft,
     ) -> Result<TriggerSubscriptionRecord, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        let seq: i64 = sqlx::query_scalar("SELECT nextval('lash_host_event_subscription_seq')")
+        let seq: i64 = sqlx::query_scalar("SELECT nextval('lash_trigger_subscription_seq')")
             .fetch_one(&mut *tx)
             .await
             .map_err(plugin_sqlx_error)?;
@@ -2710,7 +2709,7 @@ impl HostEventStore for PostgresHostEventStore {
             updated_at_ms: now,
         };
         sqlx::query(
-            "INSERT INTO lash_host_event_trigger_subscriptions (
+            "INSERT INTO lash_trigger_subscriptions (
                 subscription_id, registrant_scope_id, handle, source_type, source_key,
                 enabled, created_at_ms, updated_at_ms, record_json
              )
@@ -2737,7 +2736,7 @@ impl HostEventStore for PostgresHostEventStore {
         filter: TriggerSubscriptionFilter,
     ) -> Result<Vec<TriggerSubscriptionRecord>, PluginError> {
         let rows = sqlx::query(
-            "SELECT record_json FROM lash_host_event_trigger_subscriptions
+            "SELECT record_json FROM lash_trigger_subscriptions
              ORDER BY registrant_scope_id ASC, handle ASC",
         )
         .fetch_all(&self.pool)
@@ -2762,7 +2761,7 @@ impl HostEventStore for PostgresHostEventStore {
     ) -> Result<bool, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         let rows = sqlx::query(
-            "SELECT record_json FROM lash_host_event_trigger_subscriptions
+            "SELECT record_json FROM lash_trigger_subscriptions
              WHERE handle = $1
              ORDER BY registrant_scope_id ASC
              FOR UPDATE",
@@ -2791,7 +2790,7 @@ impl HostEventStore for PostgresHostEventStore {
         record.enabled = false;
         record.updated_at_ms = current_epoch_ms();
         sqlx::query(
-            "UPDATE lash_host_event_trigger_subscriptions
+            "UPDATE lash_trigger_subscriptions
              SET enabled = $3, updated_at_ms = $4, record_json = $5
              WHERE registrant_scope_id = $1 AND handle = $2",
         )
@@ -2811,7 +2810,7 @@ impl HostEventStore for PostgresHostEventStore {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         let rows = sqlx::query(
             "SELECT subscription_id, record_json
-             FROM lash_host_event_trigger_subscriptions
+             FROM lash_trigger_subscriptions
              ORDER BY registrant_scope_id ASC, handle ASC
              FOR UPDATE",
         )
@@ -2827,13 +2826,11 @@ impl HostEventStore for PostgresHostEventStore {
             if record.registrant_session_id() != Some(session_id) {
                 continue;
             }
-            sqlx::query(
-                "DELETE FROM lash_host_event_trigger_subscriptions WHERE subscription_id = $1",
-            )
-            .bind(&subscription_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(plugin_sqlx_error)?;
+            sqlx::query("DELETE FROM lash_trigger_subscriptions WHERE subscription_id = $1")
+                .bind(&subscription_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
             deleted = deleted.saturating_add(1);
         }
         tx.commit().await.map_err(plugin_sqlx_error)?;
@@ -2842,15 +2839,15 @@ impl HostEventStore for PostgresHostEventStore {
 
     async fn record_occurrence(
         &self,
-        request: HostEventOccurrenceRequest,
-    ) -> Result<HostEventOccurrenceRecord, PluginError> {
-        lash_core::validate_host_event_occurrence_request(&request)?;
-        let request_hash = lash_core::host_event_occurrence_request_hash(&request)?;
+        request: TriggerOccurrenceRequest,
+    ) -> Result<TriggerOccurrenceRecord, PluginError> {
+        lash_core::validate_trigger_occurrence_request(&request)?;
+        let request_hash = lash_core::trigger_occurrence_request_hash(&request)?;
         let occurrence_id = lash_core::deterministic_occurrence_id(&request)?;
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         let existing = sqlx::query(
             "SELECT request_hash, record_json
-             FROM lash_host_event_occurrences
+             FROM lash_trigger_occurrences
              WHERE idempotency_key = $1
              FOR UPDATE",
         )
@@ -2863,7 +2860,7 @@ impl HostEventStore for PostgresHostEventStore {
             let existing_json: String = row.get(1);
             if existing_hash != request_hash {
                 return Err(PluginError::Session(format!(
-                    "host event occurrence idempotency conflict for `{}`",
+                    "trigger occurrence idempotency conflict for `{}`",
                     request.idempotency_key
                 )));
             }
@@ -2871,7 +2868,7 @@ impl HostEventStore for PostgresHostEventStore {
             tx.commit().await.map_err(plugin_sqlx_error)?;
             return Ok(record);
         }
-        let record = HostEventOccurrenceRecord {
+        let record = TriggerOccurrenceRecord {
             occurrence_id: occurrence_id.clone(),
             source_type: request.source_type,
             source_key: request.source_key,
@@ -2881,7 +2878,7 @@ impl HostEventStore for PostgresHostEventStore {
             occurred_at_ms: current_epoch_ms(),
         };
         sqlx::query(
-            "INSERT INTO lash_host_event_occurrences (
+            "INSERT INTO lash_trigger_occurrences (
                 occurrence_id, idempotency_key, request_hash, source_type, source_key,
                 occurred_at_ms, record_json
              )
@@ -2907,7 +2904,7 @@ impl HostEventStore for PostgresHostEventStore {
     ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         let occurrence_json: Option<String> = sqlx::query_scalar(
-            "SELECT record_json FROM lash_host_event_occurrences WHERE occurrence_id = $1",
+            "SELECT record_json FROM lash_trigger_occurrences WHERE occurrence_id = $1",
         )
         .bind(occurrence_id)
         .fetch_optional(&mut *tx)
@@ -2915,13 +2912,13 @@ impl HostEventStore for PostgresHostEventStore {
         .map_err(plugin_sqlx_error)?;
         let Some(occurrence_json) = occurrence_json else {
             return Err(PluginError::Session(format!(
-                "unknown host event occurrence `{occurrence_id}`"
+                "unknown trigger occurrence `{occurrence_id}`"
             )));
         };
-        let occurrence: HostEventOccurrenceRecord =
+        let occurrence: TriggerOccurrenceRecord =
             serde_json::from_str(&occurrence_json).map_err(process_decode_error)?;
         let rows = sqlx::query(
-            "SELECT record_json FROM lash_host_event_trigger_subscriptions
+            "SELECT record_json FROM lash_trigger_subscriptions
              WHERE enabled = TRUE AND source_type = $1 AND source_key = $2
              ORDER BY registrant_scope_id ASC, handle ASC",
         )
@@ -2940,7 +2937,7 @@ impl HostEventStore for PostgresHostEventStore {
                 &subscription.subscription_id,
             )?;
             let inserted = sqlx::query(
-                "INSERT INTO lash_host_event_deliveries (
+                "INSERT INTO lash_trigger_deliveries (
                     occurrence_id, subscription_id, process_id, created_at_ms
                  )
                  VALUES ($1, $2, $3, $4)

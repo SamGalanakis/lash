@@ -92,7 +92,7 @@ pub struct PluginSession {
     pub(super) lashlang_abilities: lashlang::LashlangAbilities,
     pub(super) lashlang_language_features: lashlang::LashlangLanguageFeatures,
     pub(super) lashlang_resources: lashlang::ResourceCatalog,
-    pub(super) host_events: crate::HostEventCatalog,
+    pub(super) triggers: crate::TriggerEventCatalog,
     pub(super) contributions: PluginContributions,
 }
 impl PluginSession {
@@ -120,8 +120,8 @@ impl PluginSession {
         self.lashlang_resources.clone()
     }
 
-    pub fn host_events(&self) -> &crate::HostEventCatalog {
-        &self.host_events
+    pub fn triggers(&self) -> &crate::TriggerEventCatalog {
+        &self.triggers
     }
 
     pub fn host(&self) -> &PluginHost {

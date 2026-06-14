@@ -11,18 +11,18 @@ use crate::{AttachmentStore, ToolContract, ToolManifest, ToolResult};
 mod attachments;
 mod direct_completion;
 mod dispatch;
-mod host_events;
 mod process;
 pub(crate) mod process_events;
 mod session;
+mod triggers;
 
 pub use attachments::ToolAttachmentControl;
 pub use direct_completion::ToolDirectCompletionControl;
 pub use dispatch::ToolDispatchControl;
-pub use host_events::ToolHostEventControl;
 pub use process::ToolProcessControl;
 pub use process_events::ToolProcessEventControl;
 pub use session::{ToolSessionControl, ToolSessionModel};
+pub use triggers::ToolTriggerControl;
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -49,6 +49,7 @@ pub struct ToolContext<'run> {
     pub(crate) runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_process_id: Option<String>,
+    pub(crate) runtime_process_id: Option<String>,
     pub(crate) process_events: Option<ToolProcessEventContext>,
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
@@ -112,6 +113,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
     async_process_id: Option<String>,
+    runtime_process_id: Option<String>,
     process_events: Option<ToolProcessEventContext>,
     attachment_store: Arc<dyn AttachmentStore>,
     direct_completions: crate::DirectCompletionClient<'run>,
@@ -138,6 +140,7 @@ impl<'run> ToolContextBuilder<'run> {
             runtime_dispatch: Some(Arc::clone(&dispatch)),
             cancellation_token: None,
             async_process_id: None,
+            runtime_process_id: None,
             process_events: None,
             attachment_store: Arc::clone(&dispatch.attachment_store),
             direct_completions: dispatch.direct_completions.clone(),
@@ -166,6 +169,11 @@ impl<'run> ToolContextBuilder<'run> {
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Self {
         self.cancellation_token = cancellation_token;
+        self
+    }
+
+    pub(crate) fn runtime_process_id(mut self, process_id: Option<String>) -> Self {
+        self.runtime_process_id = process_id;
         self
     }
 
@@ -223,6 +231,7 @@ impl<'run> ToolContextBuilder<'run> {
             runtime_dispatch: self.runtime_dispatch,
             cancellation_token: self.cancellation_token,
             async_process_id: self.async_process_id,
+            runtime_process_id: self.runtime_process_id,
             process_events: self.process_events,
             attachment_store: self.attachment_store,
             direct_completions: self.direct_completions,
@@ -267,6 +276,7 @@ impl<'run> ToolContext<'run> {
             runtime_dispatch: None,
             cancellation_token: None,
             async_process_id: None,
+            runtime_process_id: None,
             process_events: None,
             attachment_store,
             direct_completions,
@@ -310,8 +320,8 @@ impl<'run> ToolContext<'run> {
         }
     }
 
-    pub fn host_events(&self) -> ToolHostEventControl<'run> {
-        ToolHostEventControl {
+    pub fn triggers(&self) -> ToolTriggerControl<'run> {
+        ToolTriggerControl {
             context: self.clone(),
         }
     }
@@ -412,6 +422,17 @@ impl<'run> ToolContext<'run> {
         self.async_process_id.as_deref()
     }
 
+    pub fn runtime_process_id(&self) -> Option<&str> {
+        self.async_process_id
+            .as_deref()
+            .or(self.runtime_process_id.as_deref())
+            .or_else(|| {
+                self.process_events
+                    .as_ref()
+                    .map(|context| context.process_id.as_str())
+            })
+    }
+
     pub fn tool_call_id(&self) -> Option<&str> {
         self.tool_call_id.as_deref()
     }
@@ -445,6 +466,7 @@ impl<'run> ToolContext<'run> {
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         self.async_process_id = Some(process_id.into());
+        self.runtime_process_id = self.async_process_id.clone();
         self.cancellation_token = Some(cancellation_token);
         self
     }

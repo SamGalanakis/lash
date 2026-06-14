@@ -20,12 +20,13 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::{MAIL_EVENT_ALIAS, MAIL_EVENT_EVENT, MAIL_EVENT_RESOURCE};
+use crate::MAIL_RECEIVED_SOURCE_TYPE;
 use async_trait::async_trait;
 use lash::tools::{
     ToolAgentSurface, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
     ToolResult, ToolScheduling,
 };
+use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -46,7 +47,7 @@ impl MailMessage {
     }
 }
 
-/// One delivered mock message, used to build the `mail.received` host event.
+/// One delivered mock message, used to build the `mail.received` trigger occurrence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MailDelivery {
     pub account: String,
@@ -411,14 +412,28 @@ impl ToolProvider for MockMailProvider {
                         Ok(payload) => payload,
                         Err(err) => return ToolResult::err_fmt(err.to_string()),
                     };
+                    let source_key = match empty_trigger_source_key(MAIL_RECEIVED_SOURCE_TYPE) {
+                        Ok(source_key) => source_key,
+                        Err(err) => return ToolResult::err_fmt(err.to_string()),
+                    };
+                    let Some(replay_key) = call.context.replay_key() else {
+                        return ToolResult::err_fmt(
+                            "mail send trigger emission requires a replay key",
+                        );
+                    };
+                    let idempotency_key =
+                        format!("{replay_key}:mail.received:{}", delivered.message.id);
                     if let Err(err) = call
                         .context
-                        .host_events()
+                        .triggers()
                         .emit(
-                            MAIL_EVENT_RESOURCE,
-                            MAIL_EVENT_ALIAS,
-                            MAIL_EVENT_EVENT,
-                            payload,
+                            TriggerOccurrenceRequest::new(
+                                MAIL_RECEIVED_SOURCE_TYPE,
+                                source_key,
+                                payload,
+                                idempotency_key,
+                            )
+                            .with_source(json!({})),
                         )
                         .await
                     {

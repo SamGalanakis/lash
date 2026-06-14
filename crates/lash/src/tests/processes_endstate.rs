@@ -182,7 +182,7 @@ async fn wait_for_terminal(
 
 fn process_test_core(
     artifact_store: Arc<dyn lash_core::LashlangArtifactStore>,
-    host_event_store: Arc<dyn lash_core::HostEventStore>,
+    trigger_store: Arc<dyn lash_core::TriggerStore>,
     registry: Arc<dyn lash_core::ProcessRegistry>,
 ) -> Result<LashCore> {
     explicit_ephemeral_facets(LashCore::rlm())
@@ -190,7 +190,7 @@ fn process_test_core(
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .lashlang_artifact_store(artifact_store)
-        .host_event_store(host_event_store)
+        .trigger_store(trigger_store)
         .process_registry(registry)
         .build()
 }
@@ -199,13 +199,13 @@ fn process_test_core(
 async fn host_owned_processes_run_without_application_session() -> Result<()> {
     let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
         Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
-    let host_event_store: Arc<dyn lash_core::HostEventStore> =
-        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let trigger_store: Arc<dyn lash_core::TriggerStore> =
+        Arc::new(lash_core::InMemoryTriggerStore::default());
     let registry: Arc<dyn lash_core::ProcessRegistry> =
         Arc::new(TestLocalProcessRegistry::default());
     let core = process_test_core(
         Arc::clone(&artifact_store),
-        Arc::clone(&host_event_store),
+        Arc::clone(&trigger_store),
         Arc::clone(&registry),
     )?;
     let process = LinkedTestProcess::new(
@@ -254,24 +254,24 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
     .await;
 
     let source_type = "timer.tick";
-    let source_key = host_event_store
+    let source_key = trigger_store
         .source_key_for_subscription(source_type, &serde_json::json!({}))
         .await?;
     let env_ref = persist_process_env_ref(artifact_store.as_ref()).await;
-    host_event_store
+    trigger_store
         .register_subscription(process.trigger_draft(source_type, source_key.clone(), env_ref))
         .await?;
     let report = core
-        .host_events()
+        .triggers()
         .emit(
-            lash_core::HostEventOccurrenceRequest::new(
+            lash_core::TriggerOccurrenceRequest::new(
                 source_type,
                 source_key,
                 serde_json::json!({ "at": "2026-06-10T12:00:00Z" }),
-                "sessionless-host-event-1",
+                "sessionless-trigger-1",
             )
             .with_source(serde_json::json!({})),
-            runtime_operation_scope("sessionless-host-event"),
+            runtime_operation_scope("sessionless-trigger"),
         )
         .await?;
     assert_eq!(report.started_process_ids.len(), 1);
@@ -315,13 +315,13 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
 async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> Result<()> {
     let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
         Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
-    let host_event_store: Arc<dyn lash_core::HostEventStore> =
-        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let trigger_store: Arc<dyn lash_core::TriggerStore> =
+        Arc::new(lash_core::InMemoryTriggerStore::default());
     let registry: Arc<dyn lash_core::ProcessRegistry> =
         Arc::new(TestLocalProcessRegistry::default());
     let core = process_test_core(
         Arc::clone(&artifact_store),
-        Arc::clone(&host_event_store),
+        Arc::clone(&trigger_store),
         Arc::clone(&registry),
     )?;
     let process = LinkedTestProcess::new(
@@ -383,7 +383,10 @@ async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> R
 
     // Both rejected sends left the process parked with nothing consumed.
     let still_waiting = wait_for_waiting_signal(&core, process_id, "ready").await;
-    assert_eq!(still_waiting.lifecycle, lash_core::ProcessLifecycleStatus::Running);
+    assert_eq!(
+        still_waiting.lifecycle,
+        lash_core::ProcessLifecycleStatus::Running
+    );
     assert!(
         core.processes()
             .events(process_id, 0)
@@ -413,13 +416,13 @@ async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> R
 async fn repeated_waits_on_one_signal_consume_in_order() -> Result<()> {
     let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
         Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
-    let host_event_store: Arc<dyn lash_core::HostEventStore> =
-        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let trigger_store: Arc<dyn lash_core::TriggerStore> =
+        Arc::new(lash_core::InMemoryTriggerStore::default());
     let registry: Arc<dyn lash_core::ProcessRegistry> =
         Arc::new(TestLocalProcessRegistry::default());
     let core = process_test_core(
         Arc::clone(&artifact_store),
-        Arc::clone(&host_event_store),
+        Arc::clone(&trigger_store),
         Arc::clone(&registry),
     )?;
     let process = LinkedTestProcess::new(
@@ -505,13 +508,13 @@ async fn repeated_waits_on_one_signal_consume_in_order() -> Result<()> {
 async fn process_starts_and_awaits_child_process() -> Result<()> {
     let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
         Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
-    let host_event_store: Arc<dyn lash_core::HostEventStore> =
-        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let trigger_store: Arc<dyn lash_core::TriggerStore> =
+        Arc::new(lash_core::InMemoryTriggerStore::default());
     let registry: Arc<dyn lash_core::ProcessRegistry> =
         Arc::new(TestLocalProcessRegistry::default());
     let core = process_test_core(
         Arc::clone(&artifact_store),
-        Arc::clone(&host_event_store),
+        Arc::clone(&trigger_store),
         Arc::clone(&registry),
     )?;
     let process = LinkedTestProcess::new(
@@ -577,13 +580,13 @@ async fn process_starts_and_awaits_child_process() -> Result<()> {
 async fn process_children_inherit_session_chain_provenance() -> Result<()> {
     let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
         Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
-    let host_event_store: Arc<dyn lash_core::HostEventStore> =
-        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let trigger_store: Arc<dyn lash_core::TriggerStore> =
+        Arc::new(lash_core::InMemoryTriggerStore::default());
     let registry: Arc<dyn lash_core::ProcessRegistry> =
         Arc::new(TestLocalProcessRegistry::default());
     let core = process_test_core(
         Arc::clone(&artifact_store),
-        Arc::clone(&host_event_store),
+        Arc::clone(&trigger_store),
         Arc::clone(&registry),
     )?;
     let session_id = "chain-session";
@@ -610,19 +613,18 @@ async fn process_children_inherit_session_chain_provenance() -> Result<()> {
         .start(
             {
                 let mut request = process.start_request(process_id);
-                request.originator = lash_core::ProcessOriginator::session(
-                    lash_core::SessionScope::new(session_id),
-                );
+                request.originator =
+                    lash_core::ProcessOriginator::session(lash_core::SessionScope::new(session_id));
                 request
             }
-                .with_wake_target(Some(lash_core::SessionScope::new(session_id)))
-                .with_grant(Some(lash_core::ProcessStartGrant {
-                    session_scope: lash_core::SessionScope::new(session_id),
-                    descriptor: lash_core::ProcessHandleDescriptor::new(
-                        Some("lashlang"),
-                        Some("chain parent"),
-                    ),
-                })),
+            .with_wake_target(Some(lash_core::SessionScope::new(session_id)))
+            .with_grant(Some(lash_core::ProcessStartGrant {
+                session_scope: lash_core::SessionScope::new(session_id),
+                descriptor: lash_core::ProcessHandleDescriptor::new(
+                    Some("lashlang"),
+                    Some("chain parent"),
+                ),
+            })),
             runtime_operation_scope("chain-parent-start"),
         )
         .await?;
@@ -673,13 +675,13 @@ async fn process_children_inherit_session_chain_provenance() -> Result<()> {
 async fn process_outlives_deleted_session_and_resumes_from_host_signal() -> Result<()> {
     let artifact_store: Arc<dyn lash_core::LashlangArtifactStore> =
         Arc::new(lash_core::InMemoryLashlangArtifactStore::new());
-    let host_event_store: Arc<dyn lash_core::HostEventStore> =
-        Arc::new(lash_core::InMemoryHostEventStore::default());
+    let trigger_store: Arc<dyn lash_core::TriggerStore> =
+        Arc::new(lash_core::InMemoryTriggerStore::default());
     let registry: Arc<dyn lash_core::ProcessRegistry> =
         Arc::new(TestLocalProcessRegistry::default());
     let core = process_test_core(
         Arc::clone(&artifact_store),
-        Arc::clone(&host_event_store),
+        Arc::clone(&trigger_store),
         Arc::clone(&registry),
     )?;
     let session_id = "process-outlives-session";

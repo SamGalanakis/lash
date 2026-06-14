@@ -94,8 +94,8 @@ async fn main() -> anyhow_like::Result<()> {
             .await
             .map_err(|err| err.to_string())?,
     ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
-    let host_event_store = Arc::new(
-        lash_sqlite_store::SqliteHostEventStore::open(&data_dir.join("host-events.db"))
+    let trigger_store = Arc::new(
+        lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
             .await
             .map_err(|err| err.to_string())?,
     );
@@ -124,7 +124,7 @@ async fn main() -> anyhow_like::Result<()> {
             Arc::new(JsonlTraceSink::new(trace_path)),
         ])))
         .trace_level(TraceLevel::Extended)
-        .host_event_store(host_event_store);
+        .trigger_store(trigger_store);
     let process_registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .await

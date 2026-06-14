@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
   <section class="opener">
     <h1 class="opener__title">agent<span class="slash">/</span>workbench</h1>
-    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes host-event button presses, and registers Restate-backed cron triggers. Restate is required — the bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
+    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes trigger button presses, and registers Restate-backed cron triggers. Restate is required — the bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
   </section>
 
   <main class="body" id="content">
@@ -50,7 +50,7 @@
     <div class="section" id="demonstrates">
       <div class="section-header">
         <h2>What It Demonstrates</h2>
-        <p>The browser UI has three work areas: a left rail of host-event buttons, a cron schedule card, and per-turn model controls; a center pane that switches between the chat/event stream and a mock multi-account inbox; and a right rail that polls the process registry for the session's granted background work.</p>
+        <p>The browser UI has three work areas: a left rail of trigger buttons, a cron schedule card, and per-turn model controls; a center pane that switches between the chat/event stream and a mock multi-account inbox; and a right rail that polls the process registry for the session's granted background work.</p>
       </div>
       <div class="module-grid">
         <article class="panel"><h3>Background processes</h3><p>The model emits named Lashlang <code>process</code> declarations and <code>start name(...)</code>; started processes appear in the right-rail registry view.</p></article>
@@ -63,7 +63,7 @@
       </div>
     </div>
 
-    <div class="section" id="host-events">
+    <div class="section" id="triggers">
       <div class="section-header">
         <h2>Host-Event Buttons</h2>
         <p>The buttons are a zero-config trigger source — the source config is <code>{}</code>, and red/blue selection arrives in the event payload. The model registers a trigger that wakes a process when a button is pressed.</p>
@@ -101,13 +101,13 @@ handle = await triggers.register({
   name: "daily_digest"
 })?
 submit { handle: handle, registrations: await triggers.list({ target: daily_digest })? }</code></pre>
-      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that source key to <code>WorkbenchCronJob/{session_id}:{source_key}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler first schedules the next <code>run</code> with a delayed Restate send (so a tick that fails cannot kill the schedule), then emits a validated <code>cron.Tick</code> host-event occurrence whose idempotency key includes the journaled fire time — unique per tick, stable across retries of the same tick. A job whose session is no longer the live workbench session terminates itself on its next fire instead of ticking into a deleted session. Resetting the workbench cancels the old session's cron jobs derived from its durable trigger registrations (plus anything armed in-process), and an equal-request re-sync revives a chain whose stored next execution is already in the past. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code>, <code>agent_workbench.cron.restate.run</code>, and <code>agent_workbench.cron.restate.zombie_cancelled</code> events.</p>
+      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that source key to <code>WorkbenchCronJob/{session_id}:{source_key}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler first schedules the next <code>run</code> with a delayed Restate send (so a tick that fails cannot kill the schedule), then emits a validated <code>cron.Tick</code> trigger occurrence whose idempotency key includes the journaled fire time — unique per tick, stable across retries of the same tick. A job whose session is no longer the live workbench session terminates itself on its next fire instead of ticking into a deleted session. Resetting the workbench cancels the old session's cron jobs derived from its durable trigger registrations (plus anything armed in-process), and an equal-request re-sync revives a chain whose stored next execution is already in the past. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code>, <code>agent_workbench.cron.restate.run</code>, and <code>agent_workbench.cron.restate.zombie_cancelled</code> events.</p>
     </div>
 
     <div class="section" id="host-wiring">
       <div class="section-header">
         <h2>Host Wiring</h2>
-        <p>The host declares the trigger source constructors through the plugin's <code>lashlang_resources()</code> hook, and registers the button's event type through host-event registration. The button payload is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
+        <p>The host declares the trigger source constructors through the plugin's <code>lashlang_resources()</code> hook, and registers the button's event type through trigger registration. The button payload is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
       </div>
       <pre data-lang="rust" data-snippet="example_agent_workbench#workbench-resources"><code>fn workbench_lashlang_resources() -&gt; lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
@@ -129,7 +129,7 @@ submit { handle: handle, registrations: await triggers.list({ target: daily_dige
 }
 
 fn declare_button_event(reg: &amp;mut PluginRegistrar) -&gt; Result&lt;(), PluginError&gt; {
-    reg.host_events().declare(HostEvent::new(
+    reg.triggers().declare(TriggerEvent::new(
         "Button",
         "ui.button",
         "pressed",

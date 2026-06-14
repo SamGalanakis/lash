@@ -16,11 +16,11 @@ error[E0425]: cannot find type `SessionResume` in crate `lash`
 7 |     let _: Option<lash::SessionResume> = None;
   |                         ^^^^^^^^^^^^^ not found in `lash`
 
-error[E0425]: cannot find type `HostEvent` in crate `lash`
+error[E0425]: cannot find type `TriggerEvent` in crate `lash`
  --> tests/ui/taxonomy_types_are_not_root.rs:8:25
   |
-8 |     let _: Option<lash::HostEvent> = None;
-  |                         ^^^^^^^^^ not found in `lash`
+8 |     let _: Option<lash::TriggerEvent> = None;
+  |                         ^^^^^^^^^^^^ not found in `lash`
 
 error[E0425]: cannot find type `TriggerRegistration` in crate `lash`
  --> tests/ui/taxonomy_types_are_not_root.rs:9:25
@@ -40,8 +40,8 @@ error[E0425]: cannot find type `ToolState` in crate `lash`
 11 |     let _: Option<lash::ToolState> = None;
    |                         ^^^^^^^^^ not found in `lash`
 
-error[E0425]: cannot find function `empty_host_event_source_key` in crate `lash`
+error[E0425]: cannot find function `empty_trigger_source_key` in crate `lash`
   --> tests/ui/taxonomy_types_are_not_root.rs:12:19
    |
-12 |     let _ = lash::empty_host_event_source_key("ui.button.pressed");
-   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `lash`
+12 |     let _ = lash::empty_trigger_source_key("ui.button.pressed");
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^ not found in `lash`

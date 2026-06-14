@@ -235,9 +235,9 @@
           kind: "internal",
         },
         {
-          title: "Host events",
-          href: "architecture/host-events.html",
-          summary: "Session-agnostic ingress: declare, emit, match by source_type, idempotent delivery, and the wake that is the only session-ordered step. Timers and cron as host-event sources.",
+          title: "Triggers",
+          href: "architecture/triggers.html",
+          summary: "Session-agnostic ingress: declare, emit, match by source_type, idempotent delivery, and the wake that is the only session-ordered step. Timers and cron as trigger sources.",
           kind: "internal",
         },
         {

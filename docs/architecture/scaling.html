@@ -22,7 +22,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">scaling<span class="slash">/</span>stateless</h1>
-    <p class="opener__lede">lash is a durable-object / actor-per-session architecture: the durable truth lives behind async store traits, and the in-process runtime holds only a rehydratable working copy. Running lash as a horizontally-scaling microservice is now a concrete deployment shape: Postgres for runtime/process/host-event state, S3-compatible attachment bytes, Restate for durable execution and failover, and session-agnostic ingress for external signals.</p>
+    <p class="opener__lede">lash is a durable-object / actor-per-session architecture: the durable truth lives behind async store traits, and the in-process runtime holds only a rehydratable working copy. Running lash as a horizontally-scaling microservice is now a concrete deployment shape: Postgres for runtime/process/trigger state, S3-compatible attachment bytes, Restate for durable execution and failover, and session-agnostic ingress for external signals.</p>
   </section>
 
   <main class="body" id="content">
@@ -58,7 +58,7 @@ flowchart TB
   WA --> P["shared session store<br/>CAS on each session's revision &middot; durable work queue"]
   WB --> P
   WN --> P
-  WA -.-> H["networked HostEventStore<br/>occurrences &middot; subscriptions &middot; deliveries"]
+  WA -.-> H["networked TriggerStore<br/>occurrences &middot; subscriptions &middot; deliveries"]
   WB -.-> H
   WN -.-> H
   R["Restate<br/>durable execution + dispatch"] -.-> WA
@@ -66,7 +66,7 @@ flowchart TB
   R -.-> WN
             </div>
           </div>
-          <p>The store box is shared by the whole fleet, so it must be a <strong>networked backend</strong> every worker can reach. <code>lash-postgres-store</code> supplies the distributed <code>RuntimePersistence</code>, <code>ProcessRegistry</code>, <code>HostEventStore</code>, and <code>LashlangArtifactStore</code>; <code>lash-s3-store</code> supplies the shared attachment byte store. The local-file SQLite store remains right for embedded and single-host deployments.</p>
+          <p>The store box is shared by the whole fleet, so it must be a <strong>networked backend</strong> every worker can reach. <code>lash-postgres-store</code> supplies the distributed <code>RuntimePersistence</code>, <code>ProcessRegistry</code>, <code>TriggerStore</code>, and <code>LashlangArtifactStore</code>; <code>lash-s3-store</code> supplies the shared attachment byte store. The local-file SQLite store remains right for embedded and single-host deployments.</p>
           <p>Concurrent writers are safe by construction: the CAS on each session's revision in <code>commit_runtime_state</code> lets exactly one writer win; the loser reloads and retries. No worker claims or locks the session — collisions are detected at commit, not prevented by ownership. (The "head revision conflict" surfaced by the two-process store test <em>is</em> this guard firing — the intended multi-writer safety net, not a bug.)</p>
           <div class="diagram">
             <div class="diagram-title">Per-session request lifecycle</div>
@@ -96,7 +96,7 @@ flowchart LR
                 <tr><td><code>commit_runtime_state</code> CAS on <code>session_head</code></td><td>optimistic concurrency for many writers</td><td><code>store/mod.rs</code></td></tr>
                 <tr><td>queue with claim + fencing tokens</td><td>exactly-once work pickup by any worker</td><td><code>queued_work_batches</code></td></tr>
                 <tr><td>effect replay keys + <code>lash-restate</code></td><td>re-run a turn on another worker, replay effects</td><td><code>crates/lash-restate</code></td></tr>
-                <tr><td><code>lash-postgres-store</code> + <code>lash-s3-store</code></td><td>networked runtime/process/host-event/artifact state plus content-addressed attachment bytes</td><td><code>crates/lash-postgres-store</code>, <code>crates/lash-s3-store</code></td></tr>
+                <tr><td><code>lash-postgres-store</code> + <code>lash-s3-store</code></td><td>networked runtime/process/trigger/artifact state plus content-addressed attachment bytes</td><td><code>crates/lash-postgres-store</code>, <code>crates/lash-s3-store</code></td></tr>
                 <tr><td>rehydratable <code>state</code> + <code>Residency</code></td><td>no durable-only memory; reload anywhere</td><td><code>runtime/session_ops.rs</code></td></tr>
               </tbody>
             </table>
@@ -112,10 +112,10 @@ flowchart LR
             <table>
               <thead><tr><th>Choice</th><th>What it needs</th></tr></thead>
               <tbody>
-                <tr><td><strong>Networked store</strong></td><td>Use <code>PostgresStorage</code> for sessions, queued work, process registry, host events, and Lashlang artifacts; use <code>S3AttachmentStore</code> for attachment bytes. The backend-agnostic conformance suites run against Postgres.</td></tr>
+                <tr><td><strong>Networked store</strong></td><td>Use <code>PostgresStorage</code> for sessions, queued work, process registry, triggers, and Lashlang artifacts; use <code>S3AttachmentStore</code> for attachment bytes. The backend-agnostic conformance suites run against Postgres.</td></tr>
                 <tr><td><strong>Turn durability across workers</strong></td><td>Deploy turns under <strong>Restate</strong> with <code>RestateRuntimeEffectController</code>; a crash reruns the handler and replays effect outcomes before the final session commit.</td></tr>
                 <tr><td><strong>Fleet work dispatch</strong></td><td>Restate can push handlers for turn and process workflows, while shared queue and process rows retain claim/fencing semantics for recoverable work. The distributed worker E2E exercises two workers behind an h2c proxy.</td></tr>
-                <tr><td><strong>Session-agnostic ingress</strong></td><td>External signals must route to whichever worker holds the session, so ingress must not be bolted to one session. See Host Events below.</td></tr>
+                <tr><td><strong>Session-agnostic ingress</strong></td><td>External signals must route to whichever worker holds the session, so ingress must not be bolted to one session. See Triggers below.</td></tr>
                 <tr><td><strong>Affinity vs pure reload</strong></td><td>A routing policy choice: <code>session_id</code> affinity (warm working-copy cache) vs reload-per-request (simpler, more store reads). CAS supports either; <code>Residency</code> tunes reload cost.</td></tr>
                 <tr><td><strong>Operations envelope</strong></td><td>Choose Postgres and object-store sizing, Restate retention/ingress topology, trace collection, idempotency-key policy, and replay observability for the host product.</td></tr>
               </tbody>
@@ -150,8 +150,8 @@ flowchart LR
 
         <div class="section">
           <div class="section-header">
-            <h2>Host Events — Ingress</h2>
-            <p>Host events are the session-agnostic ingress that completes the stateless model. A host event is <em>not</em> attached to a session: it is recorded to its own backend-swappable seam and routed to whichever worker holds the interested session/process. Only the resulting wake is session-coupled.</p>
+            <h2>Triggers — Ingress</h2>
+            <p>Triggers are the session-agnostic ingress that completes the stateless model. A trigger occurrence is <em>not</em> attached to a session: it is recorded to its own backend-swappable seam and routed to whichever worker holds the interested session/process. Only the resulting wake is session-coupled.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Ingress: emit → match → idempotent delivery → wake</div>
@@ -165,19 +165,19 @@ flowchart LR
             </div>
           </div>
           <ul class="bullets">
-            <li><strong>A second store seam.</strong> Subscriptions, occurrences, and delivery reservations live behind a <code>HostEventStore</code> trait — parallel to <code>RuntimePersistence</code>. A distributed fleet uses <code>PostgresHostEventStore</code> for the same reason it uses Postgres-backed session persistence.</li>
+            <li><strong>A second store seam.</strong> Subscriptions, occurrences, and delivery reservations live behind a <code>TriggerStore</code> trait — parallel to <code>RuntimePersistence</code>. A distributed fleet uses <code>PostgresTriggerStore</code> for the same reason it uses Postgres-backed session persistence.</li>
             <li><strong>The event carries no session; the subscription carries process edges.</strong> An emitted event is matched by <code>source_type</code> against registered subscriptions. Each subscription stores the registrant, captured execution environment, and optional wake target for the process it will start (a wake target also earns that session a handle grant at delivery). A single event fans out to 0..N subscribers, including subscriptions with no session edges. Session identity enters only through those optional edges — never through the event.</li>
             <li><strong>Delivery is an idempotent effect.</strong> Each matched delivery runs through the effect controller with a deterministic id (<code>occurrence_id</code> from <code>source_type</code> + source key + idempotency key; delivery process id from <code>occurrence_id</code> + <code>subscription_id</code>). Delivery is <strong>exactly-once</strong> and replay-safe: any worker can run it, and a crash-and-replay under Restate cannot double-start a trigger process.</li>
             <li><strong>Only a wake target is session-coupled.</strong> When a delivered process wakes an agent and has a live wake target, that wake lands on the target session's input queue at <code>EarliestSafeBoundary</code> — the sole point where session identity and turn-ordering apply.</li>
           </ul>
-          <p>Net for the fleet: route external signals to a runtime-level emit → match → idempotent effect-delivery → wake. Host events reuse the existing CAS, claim, and replay machinery, and the Postgres-backed implementation is exercised by the distributed Restate/Postgres/MinIO E2E.</p>
+          <p>Net for the fleet: route external signals to a runtime-level emit → match → idempotent effect-delivery → wake. Triggers reuse the existing CAS, claim, and replay machinery, and the Postgres-backed implementation is exercised by the distributed Restate/Postgres/MinIO E2E.</p>
         </div>
   </main>
 
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__link" href="./host-events.html"><span class="pager__dir">previous</span><span class="pager__title">host events / ingress</span></a>
+    <a class="pager__link" href="./triggers.html"><span class="pager__dir">previous</span><span class="pager__title">triggers / ingress</span></a>
     <a class="pager__link" href="./reference.html"><span class="pager__dir">next</span><span class="pager__title">api / reference</span></a>
   </div>
 </section>

@@ -250,9 +250,9 @@ pub async fn reset_e2e_rows(pool: &PgPool) -> Result<()> {
         "DELETE FROM lash_e2e_provider_calls",
         "DELETE FROM lash_e2e_tool_events",
         "DELETE FROM lash_e2e_turn_events",
-        "DELETE FROM lash_host_event_deliveries",
-        "DELETE FROM lash_host_event_occurrences",
-        "DELETE FROM lash_host_event_trigger_subscriptions",
+        "DELETE FROM lash_trigger_deliveries",
+        "DELETE FROM lash_trigger_occurrences",
+        "DELETE FROM lash_trigger_subscriptions",
         "DELETE FROM lash_queued_work_items",
         "DELETE FROM lash_queued_work_batches",
         "DELETE FROM lash_process_leases",
@@ -451,8 +451,8 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         Arc::new(config.storage.lashlang_artifact_store()) as Arc<dyn LashlangArtifactStore>;
     let session_store_factory =
         Arc::new(config.storage.session_store_factory()) as Arc<dyn SessionStoreFactory>;
-    let host_event_store =
-        Arc::new(config.storage.host_event_store()) as Arc<dyn lash_core::HostEventStore>;
+    let trigger_store =
+        Arc::new(config.storage.trigger_store()) as Arc<dyn lash_core::TriggerStore>;
     let provider = lash_core::ProviderHandle::new(
         OpenAiCompatibleProvider::new(
             "e2e-key",
@@ -480,7 +480,7 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         .attachment_store(config.attachment_store)
         .lashlang_artifact_store(artifact_store)
         .effect_host(Arc::new(RestateEffectHost::new()) as Arc<dyn EffectHost>)
-        .host_event_store(host_event_store)
+        .trigger_store(trigger_store)
         .process_work_driver(config.process_work_driver)
         .plugin(Arc::new(E2ePluginFactory {
             pool: config.storage.pool().clone(),
@@ -560,13 +560,12 @@ impl SessionPlugin for E2eSessionPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), lash::plugins::PluginError> {
-        reg.host_events()
-            .declare(lash::host_events::HostEvent::new(
-                "Button",
-                "ui.button",
-                "pressed",
-                button_pressed_event_type(),
-            ))?;
+        reg.triggers().declare(lash::triggers::TriggerEvent::new(
+            "Button",
+            "ui.button",
+            "pressed",
+            button_pressed_event_type(),
+        ))?;
         reg.tools()
             .provider(e2e_tool_provider(
                 self.pool.clone(),

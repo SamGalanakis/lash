@@ -1,7 +1,7 @@
 # Agent Workbench
 
 A standalone RLM chat demo for background processes, subagents, web tools,
-button host events, and Restate-backed cron triggers.
+button triggers, and Restate-backed cron triggers.
 
 Restate is required. Run the example from the repo root with the bundled
 entrypoint. The default command starts the workbench as a detached local
@@ -164,7 +164,7 @@ This gives the demo three kinds of trigger source — a UI button (synthetic
 event), an inbound email (data event), and a cron schedule (clock) — all
 activating durable processes through the same registry. The host declares the
 `mail.received` source through the plugin's `lashlang_resources()` hook and a
-matching `mail` host-event registration, exactly like the button.
+matching `mail` trigger registration, exactly like the button.
 
 The button source config is `{}`. Red/blue selection arrives in the event
 payload:
@@ -211,7 +211,7 @@ After a Restate-backed turn registers an enabled `cron.Schedule`, the workbench
 syncs that source key to `WorkbenchCronJob/{session_id}:{source_key}`. The
 virtual object stores the source request, the next execution timestamp, and the
 Restate invocation id in Restate K/V state. Its `run` handler emits a validated
-`cron.Tick` host-event occurrence for that stored source key:
+`cron.Tick` trigger occurrence for that stored source key:
 
 ```json
 { "fired_at": "2026-06-02T12:00:00Z" }
@@ -232,7 +232,7 @@ execution is already in the past. The trace JSONL files include
 
 The host side declares those source constructors through the plugin's
 `lashlang_resources()` hook. The button is a zero-config source whose event
-payload is validated separately through the host-event registration:
+payload is validated separately through the trigger registration:
 
 ```rust
 fn cron_tick_event_type() -> lashlang::NamedDataType {
@@ -291,8 +291,8 @@ fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
     resources
 }
 
-reg.host_events().declare(
-    HostEvent::new("Button", "ui.button", "pressed", button_trigger_event_type()),
+reg.triggers().declare(
+    TriggerEvent::new("Button", "ui.button", "pressed", button_trigger_event_type()),
 )?;
 ```
 

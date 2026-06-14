@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
   <section class="opener">
     <h1 class="opener__title">example<span class="slash">/</span>apps</h1>
-    <p class="opener__lede">Two runnable apps in <code>examples/</code> drive the <code>lash</code> facade end to end — full hosts with a browser UI, real persistence, and optional durable execution, not toy snippets. <code>agent-service</code> is the focused starting point; <code>agent-workbench</code> adds background processes, host events, and Restate-backed cron triggers.</p>
+    <p class="opener__lede">Two runnable apps in <code>examples/</code> drive the <code>lash</code> facade end to end — full hosts with a browser UI, real persistence, and optional durable execution, not toy snippets. <code>agent-service</code> is the focused starting point; <code>agent-workbench</code> adds background processes, triggers, and Restate-backed cron triggers.</p>
   </section>
 
   <main class="body" id="content">
@@ -34,7 +34,7 @@
         <dt><a href="./example-agent-service.html">agent service</a></dt>
         <dd>Localhost SQLite chat app — the smallest realistic host. RLM mode, a typed session plugin, app-owned board tools, semantic streaming, per-chat model choice, and optional Restate-backed turns.</dd>
         <dt><a href="./example-agent-workbench.html">agent workbench</a></dt>
-        <dd>RLM chat workbench for durable background work — background processes, subagents, web tools, host-event buttons, a mock inbox that fires <code>mail.received</code> triggers, and Restate-backed cron triggers. Restate is required and starts automatically in Docker.</dd>
+        <dd>RLM chat workbench for durable background work — background processes, subagents, web tools, trigger buttons, a mock inbox that fires <code>mail.received</code> triggers, and Restate-backed cron triggers. Restate is required and starts automatically in Docker.</dd>
       </dl>
     </div>
 
@@ -61,7 +61,7 @@
       </div>
       <div class="module-grid">
         <article class="panel"><h3>Background work</h3><p>The model starts named Lashlang <code>process</code>es and spawns subagents; the right rail polls the process registry for live runs.</p></article>
-        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> host-event occurrences that start processes for matching trigger registrations.</p></article>
+        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences that start processes for matching trigger registrations.</p></article>
         <article class="panel"><h3>Restate cron</h3><p>A registered <code>cron.Schedule</code> source syncs to a <code>WorkbenchCronJob</code> Restate virtual object that fires <code>cron.Tick</code>s on its own timer.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel reads <code>TraceLashlangGraphStore</code> — a trace-derived view of foreground blocks, durable runs, and child links.</p></article>
       </div>

@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-Lash has several sources of deferred runtime work: user turn input, early turn injection, process wakes, and maintenance commands. Host events are a separate runtime-level ingress, and timers are host-owned scheduling; neither is queued session work. Splitting session-scoped work into local CLI queues or separate host-specific queues creates unclear authority: the UI can show or cancel work that the runtime has already claimed, and background work can accidentally look like foreground user work.
+Lash has several sources of deferred runtime work: user turn input, early turn injection, process wakes, and maintenance commands. Triggers are a separate runtime-level ingress, and timers are host-owned scheduling; neither is queued session work. Splitting session-scoped work into local CLI queues or separate host-specific queues creates unclear authority: the UI can show or cancel work that the runtime has already claimed, and background work can accidentally look like foreground user work.
 
 ## Decision
 
@@ -26,5 +26,5 @@ Slash commands remain CLI host commands and are never queued as model work. Tool
 - Dispatch claims durable batch ids selected from that snapshot.
 - Accepted or claimed queued turns disappear from preview when the runtime claims or starts them.
 - Process wakes and session commands never appear as queued user input.
-- Host events and timers never appear as queued work at all; a matched host-event occurrence may start a process, and only that process's wake enters queued work at a safe turn boundary.
+- Triggers and timers never appear as queued work at all; a matched trigger occurrence may start a process, and only that process's wake enters queued work at a safe turn boundary.
 - Background process work does not promote the foreground footer state to `Working`.

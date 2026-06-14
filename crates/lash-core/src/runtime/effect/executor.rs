@@ -626,7 +626,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 })?;
                 Ok(RuntimeEffectOutcome::ToolCall {
                     result,
-                    host_events: outcome.host_events,
+                    triggers: outcome.triggers,
                 })
             }
             RuntimeEffectCommand::ExecCode { code } => {

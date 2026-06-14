@@ -1,33 +1,33 @@
-//! SQLite-backed runtime host-event store.
+//! SQLite-backed runtime trigger store.
 //!
 //! This is the durable peer of [`SqliteProcessRegistry`]: it stores trigger
-//! subscriptions and append-only host-event occurrences at deployment scope,
+//! subscriptions and append-only trigger occurrences at deployment scope,
 //! outside any session database.
 
 use super::*;
 
-pub struct SqliteHostEventStore {
+pub struct SqliteTriggerStore {
     conn: SqliteConnection,
 }
 
-impl SqliteHostEventStore {
+impl SqliteTriggerStore {
     pub async fn open(path: &Path) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path).await?;
-        ensure_host_event_schema(&conn).await?;
+        ensure_trigger_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::File).await?;
         Ok(Self { conn })
     }
 
     pub async fn memory() -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory().await?;
-        ensure_host_event_schema(&conn).await?;
+        ensure_trigger_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::Memory).await?;
         Ok(Self { conn })
     }
 
     fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, lash_core::PluginError> {
         serde_json::to_string(value).map_err(|err| {
-            lash_core::PluginError::Session(format!("failed to encode host event row: {err}"))
+            lash_core::PluginError::Session(format!("failed to encode trigger row: {err}"))
         })
     }
 
@@ -36,23 +36,23 @@ impl SqliteHostEventStore {
     ) -> Result<lash_core::TriggerSubscriptionRecord, lash_core::PluginError> {
         serde_json::from_str(&json).map_err(|err| {
             lash_core::PluginError::Session(format!(
-                "failed to decode host event subscription row: {err}"
+                "failed to decode trigger subscription row: {err}"
             ))
         })
     }
 
     fn decode_occurrence(
         json: String,
-    ) -> Result<lash_core::HostEventOccurrenceRecord, lash_core::PluginError> {
+    ) -> Result<lash_core::TriggerOccurrenceRecord, lash_core::PluginError> {
         serde_json::from_str(&json).map_err(|err| {
             lash_core::PluginError::Session(format!(
-                "failed to decode host event occurrence row: {err}"
+                "failed to decode trigger occurrence row: {err}"
             ))
         })
     }
 }
 
-fn host_event_tx_outcome<T>(
+fn trigger_tx_outcome<T>(
     result: Result<T, lash_core::PluginError>,
 ) -> TxOutcome<Result<T, lash_core::PluginError>> {
     match result {
@@ -62,7 +62,7 @@ fn host_event_tx_outcome<T>(
 }
 
 #[async_trait::async_trait]
-impl lash_core::HostEventStore for SqliteHostEventStore {
+impl lash_core::TriggerStore for SqliteTriggerStore {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -73,8 +73,8 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
     ) -> Result<lash_core::TriggerSubscriptionRecord, lash_core::PluginError> {
         self.conn
             .write_flow(move |tx| {
-                Ok(host_event_tx_outcome((|| {
-                    tx.execute("INSERT INTO host_event_subscription_seq DEFAULT VALUES", [])
+                Ok(trigger_tx_outcome((|| {
+                    tx.execute("INSERT INTO trigger_subscription_seq DEFAULT VALUES", [])
                         .map_err(process_sqlite_error)?;
                     let seq = tx.last_insert_rowid();
                     let handle = format!("trigger:{seq}");
@@ -101,7 +101,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                         updated_at_ms: now,
                     };
                     tx.execute(
-                        "INSERT INTO host_event_trigger_subscriptions (
+                        "INSERT INTO trigger_subscriptions (
                             subscription_id, registrant_scope_id, handle, source_type, source_key,
                             enabled, created_at_ms, updated_at_ms, record_json
                          )
@@ -134,8 +134,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
             .call(move |conn| {
                 Ok((|| {
                     let mut sql =
-                        "SELECT record_json FROM host_event_trigger_subscriptions WHERE 1 = 1"
-                            .to_string();
+                        "SELECT record_json FROM trigger_subscriptions WHERE 1 = 1".to_string();
                     let mut values = Vec::<rusqlite::types::Value>::new();
                     if let Some(handle) = filter.handle.as_ref() {
                         sql.push_str(" AND handle = ?");
@@ -187,12 +186,12 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
         let handle = handle.to_string();
         self.conn
             .write_flow(move |tx| {
-                Ok(host_event_tx_outcome((|| {
+                Ok(trigger_tx_outcome((|| {
                     let json = {
                         let mut stmt = tx
                             .prepare(
                                 "SELECT record_json
-                                 FROM host_event_trigger_subscriptions
+                                 FROM trigger_subscriptions
                                  WHERE handle = ?1
                                  ORDER BY registrant_scope_id ASC",
                             )
@@ -219,7 +218,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                     record.enabled = false;
                     record.updated_at_ms = current_epoch_ms();
                     tx.execute(
-                        "UPDATE host_event_trigger_subscriptions
+                        "UPDATE trigger_subscriptions
                          SET enabled = ?3, updated_at_ms = ?4, record_json = ?5
                          WHERE registrant_scope_id = ?1 AND handle = ?2",
                         params![
@@ -245,12 +244,12 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
         let session_id = session_id.to_string();
         self.conn
             .write_flow(move |tx| {
-                Ok(host_event_tx_outcome((|| {
+                Ok(trigger_tx_outcome((|| {
                     let rows = {
                         let mut stmt = tx
                             .prepare(
                                 "SELECT subscription_id, record_json
-                                 FROM host_event_trigger_subscriptions
+                                 FROM trigger_subscriptions
                                  ORDER BY registrant_scope_id ASC, handle ASC",
                             )
                             .map_err(process_sqlite_error)?;
@@ -272,7 +271,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                             continue;
                         }
                         tx.execute(
-                            "DELETE FROM host_event_trigger_subscriptions WHERE subscription_id = ?1",
+                            "DELETE FROM trigger_subscriptions WHERE subscription_id = ?1",
                             params![subscription_id.as_str()],
                         )
                         .map_err(process_sqlite_error)?;
@@ -287,18 +286,18 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
 
     async fn record_occurrence(
         &self,
-        request: lash_core::HostEventOccurrenceRequest,
-    ) -> Result<lash_core::HostEventOccurrenceRecord, lash_core::PluginError> {
-        lash_core::validate_host_event_occurrence_request(&request)?;
-        let request_hash = lash_core::host_event_occurrence_request_hash(&request)?;
+        request: lash_core::TriggerOccurrenceRequest,
+    ) -> Result<lash_core::TriggerOccurrenceRecord, lash_core::PluginError> {
+        lash_core::validate_trigger_occurrence_request(&request)?;
+        let request_hash = lash_core::trigger_occurrence_request_hash(&request)?;
         let occurrence_id = lash_core::deterministic_occurrence_id(&request)?;
         self.conn
             .write_flow(move |tx| {
-                Ok(host_event_tx_outcome((|| {
+                Ok(trigger_tx_outcome((|| {
                     let existing: Option<(String, String)> = tx
                         .query_row(
                             "SELECT request_hash, record_json
-                             FROM host_event_occurrences
+                             FROM trigger_occurrences
                              WHERE idempotency_key = ?1",
                             params![request.idempotency_key.as_str()],
                             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -308,13 +307,13 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                     if let Some((existing_hash, existing_json)) = existing {
                         if existing_hash != request_hash {
                             return Err(lash_core::PluginError::Session(format!(
-                                "host event occurrence idempotency conflict for `{}`",
+                                "trigger occurrence idempotency conflict for `{}`",
                                 request.idempotency_key
                             )));
                         }
                         return Self::decode_occurrence(existing_json);
                     }
-                    let record = lash_core::HostEventOccurrenceRecord {
+                    let record = lash_core::TriggerOccurrenceRecord {
                         occurrence_id: occurrence_id.clone(),
                         source_type: request.source_type,
                         source_key: request.source_key,
@@ -324,7 +323,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                         occurred_at_ms: current_epoch_ms(),
                     };
                     tx.execute(
-                        "INSERT INTO host_event_occurrences (
+                        "INSERT INTO trigger_occurrences (
                             occurrence_id, idempotency_key, request_hash, source_type,
                             source_key, occurred_at_ms, record_json
                          )
@@ -354,11 +353,11 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
         let occurrence_id = occurrence_id.to_string();
         self.conn
             .write_flow(move |tx| {
-                Ok(host_event_tx_outcome((|| {
+                Ok(trigger_tx_outcome((|| {
                     let occurrence_json: Option<String> = tx
                         .query_row(
                             "SELECT record_json
-                             FROM host_event_occurrences
+                             FROM trigger_occurrences
                              WHERE occurrence_id = ?1",
                             params![occurrence_id.as_str()],
                             |row| row.get(0),
@@ -367,7 +366,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                         .map_err(process_sqlite_error)?;
                     let Some(occurrence_json) = occurrence_json else {
                         return Err(lash_core::PluginError::Session(format!(
-                            "unknown host event occurrence `{occurrence_id}`"
+                            "unknown trigger occurrence `{occurrence_id}`"
                         )));
                     };
                     let occurrence = Self::decode_occurrence(occurrence_json)?;
@@ -375,7 +374,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                         let mut stmt = tx
                             .prepare(
                                 "SELECT record_json
-                                 FROM host_event_trigger_subscriptions
+                                 FROM trigger_subscriptions
                                  WHERE enabled = 1 AND source_type = ?1 AND source_key = ?2
                                  ORDER BY registrant_scope_id ASC, handle ASC",
                             )
@@ -405,7 +404,7 @@ impl lash_core::HostEventStore for SqliteHostEventStore {
                         )?;
                         let inserted = tx
                             .execute(
-                                "INSERT OR IGNORE INTO host_event_deliveries (
+                                "INSERT OR IGNORE INTO trigger_deliveries (
                                     occurrence_id, subscription_id, process_id, created_at_ms
                                  )
                                  VALUES (?1, ?2, ?3, ?4)",
