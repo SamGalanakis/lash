@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-#[cfg(any(test, feature = "testing"))]
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -527,6 +526,10 @@ pub trait EffectHost: Send + Sync {
         false
     }
 
+    fn supports_durable_effects(&self) -> bool {
+        false
+    }
+
     fn scoped<'run>(
         &'run self,
         scope: ExecutionScope,
@@ -585,6 +588,10 @@ pub trait RuntimeEffectController: Send + Sync {
     }
 
     fn requires_durable_attachment_store(&self) -> bool {
+        false
+    }
+
+    fn supports_durable_effects(&self) -> bool {
         false
     }
 
@@ -785,6 +792,21 @@ struct TestingRuntimeEffectLocalRunner<'run> {
     run: Box<TestingRuntimeEffectLocalRunnerFn<'run>>,
 }
 
+type DurableStepLocalRunnerFn<'run> = dyn FnOnce(
+        serde_json::Value,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<serde_json::Value, RuntimeEffectControllerError>>
+                + Send
+                + 'run,
+        >,
+    > + Send
+    + 'run;
+
+struct DurableStepLocalRunner<'run> {
+    run: Box<DurableStepLocalRunnerFn<'run>>,
+}
+
 enum RuntimeEffectLocalExecutorState<'run> {
     Unavailable,
     SleepOnly {
@@ -832,6 +854,20 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
     pub fn processes(registry: Arc<dyn ProcessRegistry>) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution { registry }),
+        }
+    }
+
+    pub fn durable_step<F, Fut>(run: F) -> Self
+    where
+        F: FnOnce(serde_json::Value) -> Fut + Send + 'run,
+        Fut: Future<Output = Result<serde_json::Value, RuntimeError>> + Send + 'run,
+    {
+        Self {
+            state: RuntimeEffectLocalExecutorState::Runner(Box::new(DurableStepLocalRunner {
+                run: Box::new(move |input| {
+                    Box::pin(async move { run(input).await.map_err(Into::into) })
+                }),
+            })),
         }
     }
 
@@ -949,6 +985,28 @@ impl RuntimeEffectLocalRunner for TestingRuntimeEffectLocalRunner<'_> {
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         (self.run)(envelope).await
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectLocalRunner for DurableStepLocalRunner<'_> {
+    async fn execute(
+        self: Box<Self>,
+        envelope: RuntimeEffectEnvelope,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        match envelope.command {
+            RuntimeEffectCommand::DurableStep { input, .. } => {
+                let value = (self.run)(input).await?;
+                Ok(RuntimeEffectOutcome::DurableStep { value })
+            }
+            command => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_local_executor_mismatch",
+                format!(
+                    "local durable step executor cannot execute {} command",
+                    command.kind().as_str()
+                ),
+            )),
+        }
     }
 }
 
@@ -1142,14 +1200,19 @@ async fn sleep_with_cancellation(
 
 /// Default in-process effect controller.
 ///
-/// Stateless: the inline controller only registers process rows; the
-/// lease-protected [`ProcessWorkRunner`](crate::ProcessWorkRunner) is the sole
-/// executor.
+/// The inline controller executes local runners in process, provides in-memory
+/// await-event resolution, and exposes durable-tool-effect semantics for local
+/// runs. It does not make in-flight effects crash durable; workflow adapters
+/// provide that by recording outcomes in their own history.
 #[derive(Clone, Default)]
 pub struct InlineRuntimeEffectController;
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for InlineRuntimeEffectController {
+    fn supports_durable_effects(&self) -> bool {
+        true
+    }
+
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
@@ -1241,6 +1304,10 @@ impl EffectHost for InlineEffectHost {
 
     fn requires_durable_attachment_store(&self) -> bool {
         self.controller.requires_durable_attachment_store()
+    }
+
+    fn supports_durable_effects(&self) -> bool {
+        self.controller.supports_durable_effects()
     }
 
     fn scoped<'run>(

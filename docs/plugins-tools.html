@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">plugin<span class="slash">/</span>tools</h1>
-    <p class="opener__lede">The <code>ToolCall&lt;'_&gt;</code> shape, <code>ToolContext</code> capabilities, parallel vs serial execution, active vs deferred completion, and tool-output budgeting.</p>
+    <p class="opener__lede">The <code>ToolCall&lt;'_&gt;</code> shape, <code>ToolContext</code> capabilities, parallel vs serial execution, active vs deferred completion, durable tool effects, and tool-output budgeting.</p>
   </section>
 
   <main class="body" id="content">
@@ -43,7 +43,7 @@
         <div class="section" id="tool-capabilities">
           <div class="section-header">
             <h2>Tool Capabilities</h2>
-            <p><code>ToolContext</code> exposes named capabilities instead of a broad runtime host handle. Tools ask for exactly the capability they need: the current model, the current session snapshot, the searchable tool catalog, dynamic tool availability, child-session client, process admin, or a direct completion.</p>
+            <p><code>ToolContext</code> exposes named capabilities instead of a broad runtime host handle. Tools ask for exactly the capability they need: the current model, the current session snapshot, the searchable tool catalog, dynamic tool availability, child-session client, process admin, process event append, borrowed durable effects, or a direct completion.</p>
           </div>
           <div class="table">
             <table>
@@ -57,6 +57,7 @@
                 <tr><td><code>context.sessions()</code></td><td>Cloneable child-session client: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses process handles granted to sessions, not child-turn handles.</td></tr>
                 <tr><td><code>context.processes()</code></td><td>Session-scoped process admin: start a process from a tool, await its output, and list the process handles granted to the session.</td></tr>
                 <tr><td><code>context.process_events().emit(...).await?</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
+                <tr><td><code>context.durable_effects()?</code></td><td>Borrow the caller's durable effect boundary for advanced in-process tools. Use it only from prepared tool calls running under a controller that supports durable tool effects.</td></tr>
                 <tr><td><code>context.direct_completions().complete(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>caused_by</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect replay keys; set <code>DirectRequest::replay</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
               </tbody>
             </table>
@@ -176,7 +177,28 @@ enqueue_external_work(key);
 // Returning Pending without first taking the key fails the call with
 // `pending_tool_missing_completion_key`.
 ToolResult::pending(PendingCompletion::new())</code></pre>
-          <p><code>PendingCompletion</code> configures the wait: an optional <code>deadline</code>, an <code>on_timeout</code> behavior (<code>ErrorAsResult</code> feeds a timeout result back to the model; <code>FailTurn</code> fails the whole turn), and an <code>on_cancel</code> hint (<code>CancelExternalWork</code> by default, or <code>Ignore</code> to leave the out-of-band work running). Adjust it with <code>PendingCompletion::new().with_deadline(..)</code> and <code>.fail_turn_on_timeout()</code>. Remote tools express the same outcome over the wire — see the <a href="./remote-protocol.html">Lash API · remote protocol</a> guide.</p>
+          <p><code>PendingCompletion</code> configures the wait: an optional <code>deadline</code>, an <code>on_timeout</code> behavior (<code>ErrorAsResult</code> feeds a timeout result back to the model; <code>FailTurn</code> fails the whole turn), and an <code>on_cancel</code> hint (<code>CancelExternalWork</code> by default, or <code>Ignore</code> to leave the out-of-band work running). Adjust it with <code>PendingCompletion::new().with_deadline(..)</code> and <code>.fail_turn_on_timeout()</code>. The remote protocol carries tool grants only; execute tools through a normal <code>ToolProvider</code> at the host boundary.</p>
+        </div>
+
+        <div class="section" id="durable-tool-effects">
+          <div class="section-header">
+            <h2>Durable Tool Effects</h2>
+            <p>Advanced in-process tools can borrow the caller's effect boundary through <code>call.context.durable_effects()?</code>. The facade records JSON steps and waits in the active effect log without exposing Restate, Temporal, or any workflow-native context.</p>
+          </div>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">step</div>
+              <div class="listing__body"><p><code>run_json(step_id, input, run)</code> records one journaled JSON step. <code>step_id</code> must be non-empty and unique within one tool invocation; the replay envelope includes the step id, input, and invocation replay key.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">external wait</div>
+              <div class="listing__body"><p><code>external_event_key(key)</code> returns a signed custom <code>AwaitEventKey</code>. Store the whole returned key when an external route will resolve it later, then call <code>await_event_json(key)</code> to resume with the resolved JSON payload.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">process event</div>
+              <div class="listing__body"><p><code>emit_process_event(event_type, payload)</code> appends a typed process event when the tool is executing inside a durable process. Calls outside a process fail explicitly.</p></div>
+            </div>
+          </div>
         </div>
 
         <div class="section" id="tool-output-budget">

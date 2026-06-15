@@ -164,7 +164,7 @@
         {
           title: "Tool plugins",
           href: "plugins-tools.html",
-          summary: "Advertise manifests, resolve contracts, validate args, execute tools, and expose tool catalogs.",
+          summary: "Advertise tools, execute calls, use ToolContext capabilities, and borrow durable effect boundaries.",
           kind: "guide",
         },
         {
@@ -262,7 +262,7 @@
         {
           title: "Remote protocol",
           href: "remote-protocol.html",
-          summary: "Versioned DTOs for exposing Lash through HTTP, queues, callbacks, workflow handlers, and remote tool transports.",
+          summary: "Versioned DTOs for exposing Lash through HTTP, queues, callbacks, workflow handlers, and host-owned tool grants.",
           kind: "reference",
         },
         {

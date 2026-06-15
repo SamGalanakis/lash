@@ -32,6 +32,7 @@ pub enum RuntimeEffectKind {
     SyncExecutionEnvironment,
     Sleep,
     AwaitEvent,
+    DurableStep,
 }
 
 impl RuntimeEffectKind {
@@ -46,6 +47,7 @@ impl RuntimeEffectKind {
             Self::SyncExecutionEnvironment => "sync_execution_environment",
             Self::Sleep => "sleep",
             Self::AwaitEvent => "await_event",
+            Self::DurableStep => "durable_step",
         }
     }
 }
@@ -216,6 +218,7 @@ impl RuntimeEffectEnvelope {
         command: RuntimeEffectCommand,
     ) -> Result<Self, RuntimeEffectControllerError> {
         validate_effect_invocation(&invocation, command.kind())?;
+        validate_effect_command(&command)?;
         Ok(Self {
             invocation,
             command,
@@ -271,6 +274,20 @@ fn validate_effect_invocation(
     Ok(())
 }
 
+fn validate_effect_command(
+    command: &RuntimeEffectCommand,
+) -> Result<(), RuntimeEffectControllerError> {
+    if let RuntimeEffectCommand::DurableStep { step_id, .. } = command
+        && step_id.trim().is_empty()
+    {
+        return Err(RuntimeEffectControllerError::new(
+            "runtime_effect_durable_step_id",
+            "runtime effect durable step id must be non-empty",
+        ));
+    }
+    Ok(())
+}
+
 /// Serializable command emitted at Lash's nondeterministic runtime boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -303,6 +320,10 @@ pub enum RuntimeEffectCommand {
     AwaitEvent {
         key: crate::AwaitEventKey,
     },
+    DurableStep {
+        step_id: String,
+        input: serde_json::Value,
+    },
 }
 
 impl RuntimeEffectCommand {
@@ -323,6 +344,7 @@ impl RuntimeEffectCommand {
             Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep { .. } => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
+            Self::DurableStep { .. } => RuntimeEffectKind::DurableStep,
         }
     }
 }
@@ -489,6 +511,9 @@ pub enum RuntimeEffectOutcome {
     Sleep,
     AwaitEvent {
         resolution: crate::Resolution,
+    },
+    DurableStep {
+        value: serde_json::Value,
     },
 }
 
@@ -738,6 +763,16 @@ impl RuntimeEffectOutcome {
         }
     }
 
+    pub fn into_durable_step(self) -> Result<serde_json::Value, RuntimeEffectControllerError> {
+        match self {
+            Self::DurableStep { value } => Ok(value),
+            other => Err(RuntimeEffectControllerError::wrong_outcome(
+                RuntimeEffectKind::DurableStep,
+                other.kind(),
+            )),
+        }
+    }
+
     pub fn kind(&self) -> RuntimeEffectKind {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
@@ -749,6 +784,7 @@ impl RuntimeEffectOutcome {
             Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
+            Self::DurableStep { .. } => RuntimeEffectKind::DurableStep,
         }
     }
 }

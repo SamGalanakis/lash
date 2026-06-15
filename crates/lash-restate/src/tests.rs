@@ -42,6 +42,15 @@ async fn restate_handler_controller_satisfies_concurrent_replay_conformance() {
     )
     .await;
 
+    let durable_context = Arc::new(ReplayableRecordingContext::default());
+    let durable_controller = RestateRuntimeEffectController::new(Arc::clone(&durable_context));
+    let durable_replay_context = Arc::clone(&durable_context);
+    lash_core::testing::conformance::effect_controller_durable_steps_replay(
+        &durable_controller,
+        move || durable_replay_context.start_replay(),
+    )
+    .await;
+
     let runs = context.runs();
     assert_eq!(runs.len(), 4);
     assert!(runs.iter().any(|name| name.ends_with(":effect-slow")));
@@ -372,6 +381,25 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
             RestateEffectExecution::Timer,
         ),
         (
+            RuntimeEffectCommand::process(ProcessCommand::List {
+                session_scope: lash_core::SessionScope::new("session"),
+                mode: lash_core::ProcessListMode::Live,
+            }),
+            RestateEffectExecution::DirectProcess,
+        ),
+        (
+            RuntimeEffectCommand::AwaitEvent {
+                key: restate_await_event_key(
+                    &ExecutionScope::turn("session", "turn"),
+                    AwaitEventWaitIdentity::Custom {
+                        key: "event".to_string(),
+                    },
+                )
+                .expect("await-event key"),
+            },
+            RestateEffectExecution::AwaitEvent,
+        ),
+        (
             RuntimeEffectCommand::LlmCall {
                 request: Box::new(llm_spec()),
             },
@@ -405,6 +433,13 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
         (
             RuntimeEffectCommand::SyncExecutionEnvironment {
                 update_machine_config: true,
+            },
+            RestateEffectExecution::JournaledRun,
+        ),
+        (
+            RuntimeEffectCommand::DurableStep {
+                step_id: "step".to_string(),
+                input: serde_json::json!({ "x": 1 }),
             },
             RestateEffectExecution::JournaledRun,
         ),

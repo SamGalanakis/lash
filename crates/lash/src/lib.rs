@@ -92,8 +92,8 @@ pub mod tools {
         CancelHint, LashlangToolBinding, PendingCompletion, PreparedToolCall, TimeoutBehavior,
         ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
         ToolCall, ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
-        ToolManifest, ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider,
-        ToolResult, ToolScheduling, ToolSourceHandle, ToolTriggerClient,
+        ToolDurableEffects, ToolManifest, ToolOutputContract, ToolPrepareCall, ToolPrepareContext,
+        ToolProvider, ToolResult, ToolScheduling, ToolSourceHandle, ToolTriggerClient,
     };
     pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
@@ -190,12 +190,12 @@ pub mod remote {
         RemoteSessionObservationEventPayload, RemoteSessionProcessEventKind,
         RemoteSessionQueueEventKind, RemoteTokenLedgerEntry, RemoteToolActivation,
         RemoteToolArgumentProjectionPolicy, RemoteToolAvailability, RemoteToolCallOutcome,
-        RemoteToolCallRequest, RemoteToolCallResponse, RemoteToolCallSummary, RemoteToolGrant,
-        RemoteToolOutputContract, RemoteToolRegistry, RemoteToolRetryPolicy, RemoteToolScheduling,
-        RemoteTriggerEmitReport, RemoteTriggerOccurrenceRecord, RemoteTriggerOccurrenceRequest,
-        RemoteTriggerRegistration, RemoteTriggerSubscriptionFilter, RemoteTriggerTargetSummary,
-        RemoteTurnActivity, RemoteTurnEvent, RemoteTurnFinish, RemoteTurnInput, RemoteTurnIssue,
-        RemoteTurnOutcome, RemoteTurnRequest, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,
+        RemoteToolCallSummary, RemoteToolGrant, RemoteToolOutputContract, RemoteToolRegistry,
+        RemoteToolRetryPolicy, RemoteToolScheduling, RemoteTriggerEmitReport,
+        RemoteTriggerOccurrenceRecord, RemoteTriggerOccurrenceRequest, RemoteTriggerRegistration,
+        RemoteTriggerSubscriptionFilter, RemoteTriggerTargetSummary, RemoteTurnActivity,
+        RemoteTurnEvent, RemoteTurnFinish, RemoteTurnInput, RemoteTurnIssue, RemoteTurnOutcome,
+        RemoteTurnRequest, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,
         RemoteTurnUsageSummary, RemoteUsage, assert_remote_tool_registry_reopenable,
         ensure_protocol_version,
     };

@@ -148,14 +148,23 @@ impl RuntimeExecutionContext<'_> {
             match prepare_tool_call_with_context(&dispatch, pending, Some(call_id.clone())).await {
                 ToolPreparationOutcome::Prepared(prepared) => {
                     let dispatch_context = std::sync::Arc::new(dispatch.clone());
-                    let tool_context =
+                    let mut tool_context =
                         crate::ToolContext::from_dispatch(std::sync::Arc::clone(&dispatch_context))
                             .prepared_call(&prepared)
                             .cancellation_token(self.cancellation_token.clone())
                             .runtime_process_id(self.runtime_process_id.clone())
                             .parent_invocation(parent_invocation.clone())
-                            .lashlang_execution_call_site(lashlang_execution_call_site.clone())
-                            .build();
+                            .lashlang_execution_call_site(lashlang_execution_call_site.clone());
+                    if let Some(process_events) = self.process_event_context.as_ref() {
+                        tool_context = tool_context.process_events(
+                            process_events.process_id.clone(),
+                            std::sync::Arc::clone(&process_events.registry),
+                            process_events.store.clone(),
+                            process_events.session_store_factory.clone(),
+                            process_events.queued_work_poke.clone(),
+                        );
+                    }
+                    let tool_context = tool_context.build();
                     dispatch_prepared_tool_call_launch_with_execution_context(
                         dispatch_context.as_ref(),
                         prepared,
@@ -249,12 +258,22 @@ impl RuntimeExecutionContext<'_> {
         )
         .await;
 
-        let tool_context = crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
-            .prepared_call(&prepared)
-            .cancellation_token(self.cancellation_token.clone())
-            .runtime_process_id(self.runtime_process_id.clone())
-            .parent_invocation(run.parent_invocation.clone())
-            .build();
+        let mut tool_context =
+            crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
+                .prepared_call(&prepared)
+                .cancellation_token(self.cancellation_token.clone())
+                .runtime_process_id(self.runtime_process_id.clone())
+                .parent_invocation(run.parent_invocation.clone());
+        if let Some(process_events) = self.process_event_context.as_ref() {
+            tool_context = tool_context.process_events(
+                process_events.process_id.clone(),
+                std::sync::Arc::clone(&process_events.registry),
+                process_events.store.clone(),
+                process_events.session_store_factory.clone(),
+                process_events.queued_work_poke.clone(),
+            );
+        }
+        let tool_context = tool_context.build();
         let outcome = Box::pin(dispatch_prepared_tool_call_launch_with_execution_context(
             self.dispatch.as_ref(),
             prepared,

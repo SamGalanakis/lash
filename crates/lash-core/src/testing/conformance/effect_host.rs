@@ -45,6 +45,9 @@ impl RuntimeEffectController for RecordingEffectHostController {
             });
         match envelope.command {
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
+            RuntimeEffectCommand::DurableStep { input, .. } => {
+                Ok(RuntimeEffectOutcome::DurableStep { value: input })
+            }
             command => Err(RuntimeEffectControllerError::new(
                 "recording_effect_host_unsupported_command",
                 format!(
@@ -144,6 +147,150 @@ where
     effect_host_await_event_cancel_and_timeout_are_terminal(make()).await;
     effect_host_await_event_revokes_session_scope(make()).await;
     effect_host_await_event_rejects_tampered_keys(make()).await;
+}
+
+/// Run the generic durable-step conformance suite for effect hosts that expose
+/// durable tool effects through their scoped controllers.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_host_durable_steps<F>(make: F)
+where
+    F: Fn() -> Arc<dyn EffectHost>,
+{
+    let host = make();
+    assert!(
+        host.supports_durable_effects(),
+        "durable-step conformance requires a host that advertises durable effects"
+    );
+    let scoped = host
+        .scoped(ExecutionScope::turn(
+            "durable-step-session",
+            "durable-step-turn",
+        ))
+        .expect("durable-step scope");
+    effect_controller_durable_steps(scoped.controller()).await;
+}
+
+/// Run durable-step execution checks for a handler-scoped controller.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_controller_durable_steps(controller: &dyn RuntimeEffectController) {
+    assert!(
+        controller.supports_durable_effects(),
+        "durable-step conformance requires a controller that advertises durable effects"
+    );
+    let first = durable_step_conformance_envelope("create", serde_json::json!({ "x": 1 }));
+    let second = durable_step_conformance_envelope("create", serde_json::json!({ "x": 1 }));
+    assert_eq!(
+        first.stable_hash().expect("first hash"),
+        second.stable_hash().expect("second hash"),
+        "same step id/input/replay key must hash stably"
+    );
+    assert!(
+        first.invocation.replay_key().is_some(),
+        "durable-step envelope must carry replay.key"
+    );
+    let changed = durable_step_conformance_envelope("create", serde_json::json!({ "x": 2 }));
+    assert_ne!(
+        first.stable_hash().expect("first hash"),
+        changed.stable_hash().expect("changed hash"),
+        "durable-step input must participate in the stable envelope hash"
+    );
+
+    let outcome = controller
+        .execute_effect(
+            first,
+            RuntimeEffectLocalExecutor::durable_step(|input| async move {
+                Ok(serde_json::json!({ "recorded": input }))
+            }),
+        )
+        .await
+        .expect("durable-step success");
+    assert_eq!(
+        outcome.into_durable_step().expect("durable-step outcome"),
+        serde_json::json!({ "recorded": { "x": 1 } })
+    );
+
+    let err = controller
+        .execute_effect(
+            durable_step_conformance_envelope("error", serde_json::json!({ "x": 1 })),
+            RuntimeEffectLocalExecutor::durable_step(|_| async {
+                Err(crate::RuntimeError::new(
+                    "durable_step_conformance_error",
+                    "durable step failed",
+                ))
+            }),
+        )
+        .await
+        .expect_err("durable-step error must be recorded as controller error");
+    assert_eq!(err.code, "durable_step_conformance_error");
+}
+
+/// Run durable-step replay checks for controllers with an explicit replay mode.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_controller_durable_steps_replay(
+    controller: &dyn RuntimeEffectController,
+    start_replay: impl FnOnce(),
+) {
+    effect_controller_durable_steps(controller).await;
+    let success =
+        durable_step_conformance_envelope("replay-success", serde_json::json!({ "n": 1 }));
+    let error = durable_step_conformance_envelope("replay-error", serde_json::json!({ "n": 2 }));
+
+    let first_success = controller
+        .execute_effect(
+            success.clone(),
+            RuntimeEffectLocalExecutor::durable_step(|input| async move {
+                Ok(serde_json::json!({ "first": input }))
+            }),
+        )
+        .await
+        .expect("first durable-step success");
+    assert_eq!(
+        first_success
+            .into_durable_step()
+            .expect("first durable-step value"),
+        serde_json::json!({ "first": { "n": 1 } })
+    );
+    let first_error = controller
+        .execute_effect(
+            error.clone(),
+            RuntimeEffectLocalExecutor::durable_step(|_| async {
+                Err(crate::RuntimeError::new(
+                    "durable_step_replay_error",
+                    "recorded error",
+                ))
+            }),
+        )
+        .await
+        .expect_err("first durable-step error");
+    assert_eq!(first_error.code, "durable_step_replay_error");
+
+    start_replay();
+    let local_calls = Arc::new(Mutex::new(Vec::new()));
+    let replay_success = controller
+        .execute_effect(
+            success,
+            durable_step_conformance_failing_executor(Arc::clone(&local_calls)),
+        )
+        .await
+        .expect("replayed durable-step success");
+    assert_eq!(
+        replay_success
+            .into_durable_step()
+            .expect("replayed durable-step value"),
+        serde_json::json!({ "first": { "n": 1 } })
+    );
+    let replay_error = controller
+        .execute_effect(
+            error,
+            durable_step_conformance_failing_executor(Arc::clone(&local_calls)),
+        )
+        .await
+        .expect_err("replayed durable-step error");
+    assert_eq!(replay_error.code, "durable_step_replay_error");
+    assert!(
+        local_calls.lock().expect("local calls").is_empty(),
+        "durable-step replay must not invoke local closures"
+    );
 }
 
 async fn effect_host_preserves_scope_metadata(host: Arc<dyn EffectHost>) {
@@ -443,6 +590,41 @@ pub async fn effect_controller_concurrent_replay_deterministic(
             .is_empty(),
         "replay must return recorded outcomes without invoking local executors"
     );
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn durable_step_conformance_envelope(
+    step_id: &'static str,
+    input: serde_json::Value,
+) -> RuntimeEffectEnvelope {
+    RuntimeEffectEnvelope::new(
+        RuntimeInvocation::effect(
+            RuntimeScope::for_turn("durable-step-session", "durable-step-turn", 7, 0),
+            format!("durable-step:{step_id}"),
+            RuntimeEffectKind::DurableStep,
+            format!("durable-step-replay:{step_id}"),
+        ),
+        RuntimeEffectCommand::DurableStep {
+            step_id: step_id.to_string(),
+            input,
+        },
+    )
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn durable_step_conformance_failing_executor(
+    local_calls: Arc<Mutex<Vec<String>>>,
+) -> RuntimeEffectLocalExecutor<'static> {
+    RuntimeEffectLocalExecutor::durable_step(move |input| async move {
+        local_calls
+            .lock()
+            .expect("local calls")
+            .push(input.to_string());
+        Err(crate::RuntimeError::new(
+            "durable_step_replay_local_executor_called",
+            "recorded durable-step replay must not invoke local execution",
+        ))
+    })
 }
 
 #[cfg(any(test, feature = "testing"))]

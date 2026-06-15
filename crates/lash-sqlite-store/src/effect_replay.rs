@@ -561,6 +561,10 @@ impl RuntimeEffectController for SqliteRuntimeEffectController {
         true
     }
 
+    fn supports_durable_effects(&self) -> bool {
+        true
+    }
+
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,

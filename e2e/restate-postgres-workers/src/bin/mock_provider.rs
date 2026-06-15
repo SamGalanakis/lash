@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
-    EXPECTED_ASYNC_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_WAKE_TEXT, ensure_e2e_schema, env,
-    record_provider_call, required_env,
+    EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_WAKE_TEXT,
+    ensure_e2e_schema, env, record_provider_call, required_env,
 };
 
 #[derive(Clone)]
@@ -62,6 +62,10 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
         MockScenario::AsyncCompletion => {
             ("async_completion", async_completion_script(&workflow_id))
         }
+        MockScenario::DurableInputRequest => (
+            "durable_input_request",
+            durable_input_request_script(&workflow_id),
+        ),
         MockScenario::KitchenSink => (
             "kitchen_sink",
             kitchen_sink_script(&workflow_id, full_text.contains("fail_once=true")),
@@ -163,10 +167,15 @@ enum MockScenario {
     TriggerSetup,
     SignalSuspend,
     AsyncCompletion,
+    DurableInputRequest,
 }
 
 fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     [
+        (
+            "durable_input_request=true",
+            MockScenario::DurableInputRequest,
+        ),
         ("async_completion=true", MockScenario::AsyncCompletion),
         ("trigger_setup=true", MockScenario::TriggerSetup),
         ("signal_suspend=true", MockScenario::SignalSuspend),
@@ -343,6 +352,32 @@ submit {{
   workflow_id: "{workflow_id}",
   async: result,
   final: "{EXPECTED_ASYNC_TEXT}"
+}}
+```
+"#
+    )
+}
+
+fn durable_input_request_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Exercise a durable in-process tool that opens an input request and resumes through a custom await key.
+
+```lashlang
+process durable_child(tools: Tools, workflow_id: str) {{
+  input = await tools.durable_input_request({{
+    workflow_id: workflow_id,
+    question: "approve durable input?"
+  }})?
+  finish input
+}}
+
+handle = start durable_child(tools: tools, workflow_id: "{workflow_id}")
+result = (await handle)?
+submit {{
+  workflow_id: "{workflow_id}",
+  durable: result,
+  final: "{EXPECTED_DURABLE_INPUT_TEXT}"
 }}
 ```
 "#

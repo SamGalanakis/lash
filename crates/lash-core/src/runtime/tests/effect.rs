@@ -86,7 +86,7 @@ impl RuntimeEffectController for RecordingEffectController {
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
-        _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        local_executor: crate::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         self.envelopes
             .lock()
@@ -203,6 +203,14 @@ impl RuntimeEffectController for RecordingEffectController {
             RuntimeEffectCommand::AwaitEvent { .. } => Ok(RuntimeEffectOutcome::AwaitEvent {
                 resolution: crate::Resolution::Ok(serde_json::json!(null)),
             }),
+            RuntimeEffectCommand::DurableStep { step_id, input } => {
+                local_executor
+                    .execute(RuntimeEffectEnvelope::new(
+                        envelope.invocation,
+                        RuntimeEffectCommand::DurableStep { step_id, input },
+                    ))
+                    .await
+            }
             RuntimeEffectCommand::Direct { request, .. } => {
                 // Both the text-only (`direct_completion`) and full-response
                 // (`direct_llm_completion`) client methods now flow through the

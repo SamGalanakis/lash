@@ -132,6 +132,7 @@ mod tests {
     async fn inline_effect_host_satisfies_conformance() {
         effect_host(|| Arc::new(crate::InlineEffectHost::default())).await;
         effect_host_await_events(|| Arc::new(crate::InlineEffectHost::default())).await;
+        effect_host_durable_steps(|| Arc::new(crate::InlineEffectHost::default())).await;
     }
 
     #[tokio::test]
@@ -139,6 +140,10 @@ mod tests {
         let host = RecordingEffectHost::default();
         let scope = ExecutionScope::runtime_operation("trigger:button-1");
         let scoped = host.scoped(scope.clone()).expect("scoped controller");
+        assert!(
+            !scoped.controller().supports_durable_effects(),
+            "recording effect host should not advertise durable-step support"
+        );
         let envelope = RuntimeEffectEnvelope::new(
             crate::RuntimeInvocation::effect(
                 RuntimeScope::new("session-1"),

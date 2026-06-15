@@ -1,26 +1,7 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::*;
-
-struct RecordingTransport {
-    requests: Mutex<Vec<RemoteToolCallRequest>>,
-    response: RemoteToolCallResponse,
-}
-
-impl RemoteToolTransport for RecordingTransport {
-    fn send<'a>(
-        &'a self,
-        request: RemoteToolCallRequest,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<RemoteToolCallResponse, RemoteProtocolError>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            self.requests.lock().expect("requests lock").push(request);
-            Ok(self.response.clone())
-        })
-    }
-}
 
 #[test]
 fn turn_input_round_trips_remote_safe_fields() {
@@ -306,60 +287,6 @@ fn remote_tool_grants_validate_explicit_bindings_and_duplicates() {
         RemoteToolGrant::validate_all(&[grant, duplicate]),
         Err(RemoteProtocolError::DuplicateRemoteCallPath { .. })
     ));
-}
-
-#[tokio::test]
-async fn remote_tool_provider_forwards_idempotency_headers_and_failures() {
-    let transport = RecordingTransport {
-        requests: Mutex::new(Vec::new()),
-        response: RemoteToolCallResponse::Failure {
-            protocol_version: REMOTE_PROTOCOL_VERSION,
-            code: "failed".to_string(),
-            message: "nope".to_string(),
-            raw: Some(serde_json::json!({ "detail": true })),
-            retry_after_ms: Some(5),
-        },
-    };
-    let provider = RemoteToolProvider::new(vec![demo_grant("demo", "tools", "run")], transport)
-        .expect("provider");
-    let host = Arc::new(lash_core::testing::MockSessionManager::default());
-    let sessions: Arc<dyn lash_core::plugin::SessionStateService> = host.clone();
-    let session_lifecycle: Arc<dyn lash_core::plugin::SessionLifecycleService> = host.clone();
-    let session_graph: Arc<dyn lash_core::plugin::SessionGraphService> = host;
-    let context = lash_core::ToolContext::__for_testing(
-        "session-1".to_string(),
-        sessions,
-        session_lifecycle,
-        session_graph,
-        Arc::new(lash_core::UnavailableProcessService),
-        Arc::new(lash_core::InMemoryAttachmentStore::new()),
-        lash_core::DirectCompletionClient::from_fn(|_, _| {
-            Err(lash_core::PluginError::Session("unavailable".to_string()))
-        }),
-        Some("call-1".to_string()),
-    );
-    let result = provider
-        .execute(lash_core::ToolCall {
-            name: "demo",
-            args: &serde_json::json!({ "x": 1 }),
-            context: &context,
-            progress: None,
-        })
-        .await;
-    assert!(!result.is_success());
-    let request = provider
-        .transport
-        .requests
-        .lock()
-        .expect("requests lock")
-        .pop()
-        .expect("request");
-    assert_eq!(request.headers["x-lash-tool-call-id"], "call-1");
-    assert_eq!(
-        request.headers["x-lash-replay-key"],
-        "lash-tool:session-1:call-1:demo"
-    );
-    assert_eq!(request.call_path, "tools.run");
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use crate::support::*;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lash_core::LlmOutputPart;
 use lash_core::llm::transport::LlmTransportError;
@@ -514,6 +515,169 @@ impl ToolProvider for PendingAppTools {
         }
         lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
     }
+}
+
+struct DurableInputTools {
+    key_tx:
+        StdMutex<Option<oneshot::Sender<std::result::Result<lash_core::AwaitEventKey, String>>>>,
+    step_count: Arc<AtomicUsize>,
+}
+
+impl DurableInputTools {
+    fn new(key_tx: oneshot::Sender<std::result::Result<lash_core::AwaitEventKey, String>>) -> Self {
+        Self {
+            key_tx: StdMutex::new(Some(key_tx)),
+            step_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn step_count(&self) -> usize {
+        self.step_count.load(Ordering::SeqCst)
+    }
+
+    fn send_key_result(&self, result: std::result::Result<lash_core::AwaitEventKey, String>) {
+        if let Some(tx) = self.key_tx.lock().expect("durable input key tx").take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for DurableInputTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![durable_input_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "mock_input_request").then(|| Arc::new(durable_input_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        assert_eq!(call.name, "mock_input_request");
+        let durable = match call.context.durable_effects() {
+            Ok(durable) => durable,
+            Err(err) => {
+                self.send_key_result(Err(err.to_string()));
+                return lash_core::ToolResult::err_fmt(err);
+            }
+        };
+        let question = call
+            .args
+            .get("question")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("answer")
+            .to_string();
+
+        let step_count = Arc::clone(&self.step_count);
+        let opened = match durable
+            .run_json(
+                "create",
+                serde_json::json!({ "question": question }),
+                move |input| {
+                    let step_count = Arc::clone(&step_count);
+                    async move {
+                        step_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(serde_json::json!({
+                            "request_id": "request-1",
+                            "question": input["question"].clone()
+                        }))
+                    }
+                },
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                self.send_key_result(Err(err.to_string()));
+                return lash_core::ToolResult::err_fmt(err);
+            }
+        };
+
+        let key = match durable
+            .external_event_key("mock-input-request:request-1")
+            .await
+        {
+            Ok(key) => key,
+            Err(err) => {
+                self.send_key_result(Err(err.to_string()));
+                return lash_core::ToolResult::err_fmt(err);
+            }
+        };
+        if let Err(err) = durable
+            .emit_process_event(
+                "process.yield",
+                serde_json::json!({
+                    "type": "work.input_request.opened",
+                    "request_id": opened["request_id"].clone(),
+                    "question": opened["question"].clone(),
+                    "await_key_id": key.key_id,
+                }),
+            )
+            .await
+        {
+            self.send_key_result(Err(err.to_string()));
+            return lash_core::ToolResult::err_fmt(err);
+        }
+        self.send_key_result(Ok(key.clone()));
+
+        let resolved = match durable.await_event_json(key).await {
+            Ok(value) => value,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        let step_count = Arc::clone(&self.step_count);
+        match durable
+            .run_json(
+                "complete",
+                serde_json::json!({
+                    "request_id": opened["request_id"].clone(),
+                    "answer": resolved["answer"].clone(),
+                }),
+                move |input| {
+                    let step_count = Arc::clone(&step_count);
+                    async move {
+                        step_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(serde_json::json!({
+                            "request_id": input["request_id"].clone(),
+                            "answer": input["answer"].clone(),
+                        }))
+                    }
+                },
+            )
+            .await
+        {
+            Ok(value) => lash_core::ToolResult::ok(value),
+            Err(err) => lash_core::ToolResult::err_fmt(err),
+        }
+    }
+}
+
+fn durable_input_tool_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "tool:mock_input_request",
+        "mock_input_request",
+        "Open a durable input request and wait for the answer.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": { "type": "string" }
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "request_id": { "type": "string" },
+                "answer": {}
+            },
+            "required": ["request_id", "answer"],
+            "additionalProperties": true
+        }),
+    )
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(
+        ["tools"],
+        "mock_input_request",
+    ))
 }
 
 struct AgentFrameSwitchTools;

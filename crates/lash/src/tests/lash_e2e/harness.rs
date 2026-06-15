@@ -257,6 +257,131 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
     Ok(())
 }
 
+pub(super) async fn run_durable_input_request_case() -> Result<()> {
+    let session_id = "lash-e2e-durable-input-request";
+    let graph_store = Arc::new(crate::tracing::TraceLashlangGraphStore::default());
+    let process_registry = Arc::new(TestLocalProcessRegistry::default());
+    let prompt_captures = Arc::new(StdMutex::new(Vec::new()));
+    let provider = scripted_provider(
+        vec![
+            r#"```lashlang
+process request_answer(tools: Tools) {
+  result = await tools.mock_input_request({ question: "Need input?" })?
+  finish result
+}
+handle = start request_answer(tools: tools)
+result = (await handle)?
+submit result.answer
+```"#,
+            "```lashlang\nsubmit { recovered: true }\n```",
+        ],
+        Arc::clone(&prompt_captures),
+    );
+    let (key_tx, key_rx) = oneshot::channel();
+    let tools = Arc::new(DurableInputTools::new(key_tx));
+    let core = explicit_ephemeral_facets(LashCore::rlm())
+        .provider(provider)
+        .model(mock_model_spec())
+        .tools(Arc::clone(&tools) as Arc<dyn ToolProvider>)
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::clone(&process_registry) as Arc<dyn ProcessRegistry>)
+        .lashlang_execution_sink(Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>)
+        .build()?;
+    let session = core.session(session_id).open().await?;
+    let events = Arc::new(RecordingEvents::default());
+    let turn_session = session.clone();
+    let turn_events = Arc::clone(&events);
+    let mut turn = tokio::spawn(async move {
+        turn_session
+            .turn(TurnInput::text(
+                "Start a process that asks for durable input.",
+            ))
+            .stream_to(turn_events.as_ref())
+            .await
+    });
+
+    let key_result = tokio::time::timeout(std::time::Duration::from_secs(1), key_rx)
+        .await
+        .expect("durable input tool should publish await key")
+        .expect("durable input key sender should stay alive");
+    let key = match key_result {
+        Ok(key) => key,
+        Err(err) => {
+            panic!(
+                "durable input tool failed before awaiting external input: {err}; events: {:#?}",
+                events.snapshot().await
+            )
+        }
+    };
+    assert!(
+        matches!(
+            key.wait,
+            lash_core::AwaitEventWaitIdentity::Custom { ref key }
+                if key == "mock-input-request:request-1"
+        ),
+        "durable input tool should use a custom await key: {:?}",
+        key.wait
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    if let Ok(joined) = tokio::time::timeout(std::time::Duration::from_millis(20), &mut turn).await
+    {
+        let result = joined.expect("turn task completed before durable input resolution");
+        panic!(
+            "turn completed before the durable input request was resolved: {result:#?}; events: {:#?}",
+            events.snapshot().await
+        );
+    }
+
+    let answer = serde_json::json!({ "answer": "approved" });
+    let outcome = core
+        .completions()
+        .resolve(key, lash_core::Resolution::Ok(answer))
+        .await?;
+    assert_eq!(outcome, lash_core::ResolveOutcome::Accepted);
+
+    let turn_output = turn.await.expect("turn task")?;
+    session.processes().await_all().await?;
+    assert!(matches!(
+        turn_output.outcome,
+        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+    ));
+    assert_eq!(
+        turn_output.submitted_value(),
+        Some(&serde_json::json!("approved"))
+    );
+    assert_eq!(tools.step_count(), 2);
+
+    let final_process_list = all_host_process_summaries(&core).await?;
+    assert_eq!(
+        final_process_list.len(),
+        1,
+        "durable input request should not start a child process"
+    );
+    assert_all_processes_terminal(&final_process_list);
+    let process_id = final_process_list[0].process_id.clone();
+    let process_events = core.processes().events(&process_id, 0).await?;
+    assert!(
+        process_events.iter().any(|event| {
+            event.event_type == "process.yield"
+                && event.payload.get("type")
+                    == Some(&serde_json::json!("work.input_request.opened"))
+                && event.payload.get("answer").is_none()
+                && event.payload.get("request_id") == Some(&serde_json::json!("request-1"))
+        }),
+        "durable input request event was not appended: {process_events:#?}"
+    );
+    assert!(
+        process_events
+            .iter()
+            .all(|event| event.event_type != "process.waiting"),
+        "durable input request should not rely on wait_signal: {process_events:#?}"
+    );
+    assert_eq!(prompt_captures.lock().expect("prompt captures").len(), 1);
+    let contract = GraphContract::from_graphs(&graph_store.graphs());
+    assert_min_completed_process_graphs(&contract, 1);
+    Ok(())
+}
+
 fn scripted_provider(
     responses: Vec<&'static str>,
     prompt_captures: Arc<StdMutex<Vec<LlmRequest>>>,
