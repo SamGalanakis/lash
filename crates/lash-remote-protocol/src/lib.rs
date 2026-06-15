@@ -18,9 +18,7 @@ include!("protocol/registry_errors.rs");
 mod core_conversions;
 
 #[cfg(feature = "core-conversions")]
-pub use core_conversions::{
-    RemoteToolProvider, RemoteToolTransport, RemoteTurnActivitySink, replay_collected_activities,
-};
+pub use core_conversions::{RemoteTurnActivitySink, replay_collected_activities};
 
 #[cfg(test)]
 mod tests;

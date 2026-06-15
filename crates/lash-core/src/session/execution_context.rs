@@ -56,6 +56,7 @@ pub struct RuntimeExecutionContext<'run> {
     execution_env_spec: crate::ProcessExecutionEnvSpec,
     process_originator: Option<crate::ProcessOriginator>,
     pub(super) runtime_process_id: Option<String>,
+    pub(super) process_event_context: Option<RuntimeExecutionProcessEventContext>,
     process_env_ref: Option<crate::ProcessExecutionEnvRef>,
     process_wake_target: Option<crate::SessionScope>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
@@ -69,6 +70,15 @@ pub struct RuntimeExecutionContext<'run> {
     /// run-local children are not session handle grants (the ephemeral
     /// execution scope must never appear in durable grant state).
     started_process_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct RuntimeExecutionProcessEventContext {
+    pub process_id: String,
+    pub registry: Arc<dyn crate::ProcessRegistry>,
+    pub store: Option<Arc<dyn crate::RuntimePersistence>>,
+    pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
+    pub queued_work_poke: Option<crate::QueuedWorkPoke>,
 }
 
 impl<'run> RuntimeExecutionContext<'run> {
@@ -128,6 +138,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             ),
             process_originator: None,
             runtime_process_id: None,
+            process_event_context: None,
             started_process_ids: Arc::default(),
             process_env_ref: None,
             process_wake_target: None,
@@ -212,6 +223,24 @@ impl<'run> RuntimeExecutionContext<'run> {
         self.runtime_process_id = Some(registration.id.clone());
         self.process_env_ref = registration.env_ref.clone();
         self.process_wake_target = registration.wake_target.clone();
+        self
+    }
+
+    pub(crate) fn with_process_event_context(
+        mut self,
+        process_id: impl Into<String>,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        store: Option<Arc<dyn crate::RuntimePersistence>>,
+        session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
+        queued_work_poke: Option<crate::QueuedWorkPoke>,
+    ) -> Self {
+        self.process_event_context = Some(RuntimeExecutionProcessEventContext {
+            process_id: process_id.into(),
+            registry,
+            store,
+            session_store_factory,
+            queued_work_poke,
+        });
         self
     }
 

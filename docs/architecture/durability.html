@@ -52,7 +52,8 @@
                 <tr><td><code>Checkpoint</code></td><td><code>checkpoint: CheckpointKind</code></td><td><code>Checkpoint</code> with plugin-injected messages</td></tr>
                 <tr><td><code>Sleep</code></td><td><code>duration_ms: u64</code></td><td><code>Sleep</code></td></tr>
                 <tr><td><code>SyncExecutionEnvironment</code></td><td><code>update_machine_config</code> flag</td><td><code>ExecutionEnvironmentSynced</code> with refreshed prompt + tool specs</td></tr>
-                <tr><td><code>AwaitEvent</code></td><td><code>key: AwaitEventKey</code> — the durable wait a pending tool completion or process signal parks on</td><td><code>AwaitEvent</code> with a <code>Resolution</code> (ok / err / timeout / cancelled)</td></tr>
+                <tr><td><code>AwaitEvent</code></td><td><code>key: AwaitEventKey</code> — the durable wait a pending tool completion, durable tool wait, or process signal parks on</td><td><code>AwaitEvent</code> with a <code>Resolution</code> (ok / err / timeout / cancelled)</td></tr>
+                <tr><td><code>DurableStep</code></td><td><code>step_id</code> plus JSON <code>input</code>, emitted by <code>ToolDurableEffects::run_json(...)</code></td><td><code>DurableStep</code> with the recorded JSON value</td></tr>
               </tbody>
             </table>
           </div>
@@ -98,7 +99,7 @@
             <p><code>EffectId(u64)</code> is a monotonic counter held in the machine. The next id is allocated on each yielded effect. The first effect of a turn is always <code>EffectId(1)</code>; the n-th effect is always <code>EffectId(n)</code> for that deterministic run. Durable workflow hosts replay the handler and return recorded effect outcomes for the same scoped replay keys.</p>
           </div>
           <p>Every controller invocation receives a serializable <code>RuntimeInvocation</code>: <code>scope</code> identifies the session and optional turn coordinates, <code>subject</code> identifies the effect, <code>caused_by</code> carries the typed causal parent, and <code>replay.key</code> provides the stable replay discriminator. The live <code>RuntimeEffectEnvelope</code> is serializable and carries ref-only request data. Cancellation, streams, provider trace sinks, and attachment byte hydration stay in the local executor or host workflow.</p>
-          <p>The built turn replay key includes <code>session_id</code>, <code>turn_id</code>, <code>turn_index</code>, <code>protocol_iteration</code>, effect kind, and <code>EffectId</code>; per-tool invocations append the model tool call id. Scoped durable runs require a non-empty stable <code>turn_id</code>. Direct completions derive stable keys from the request payload, usage source, typed causal parent when present, and optional caller-provided <code>DirectRequest::replay</code>.</p>
+          <p>The built turn replay key includes <code>session_id</code>, <code>turn_id</code>, <code>turn_index</code>, <code>protocol_iteration</code>, effect kind, and <code>EffectId</code>; per-tool invocations append the model tool call id. Durable tool steps derive child replay keys from the caller's invocation plus the prepared tool call id and <code>step_id</code>; the stable envelope hash also includes the JSON input. Scoped durable runs require a non-empty stable <code>turn_id</code>. Direct completions derive stable keys from the request payload, usage source, typed causal parent when present, and optional caller-provided <code>DirectRequest::replay</code>.</p>
           <p><code>EffectId</code> is local to one turn. Across turns, the counter resets to 1; use the full replay key, not the bare id, for globally unique effect identity.</p>
         </div>
 
@@ -168,6 +169,7 @@ impl RuntimeEffectController for WorkflowEffectController {
           <p>The shape matches Temporal's <em>workflow + activity</em> split and Restate's <em>handler + side-effect</em> split. Each typed runtime effect can become one durable activity: the invocation carries typed scope, subject, causal parent, and replay key, and <code>replay.key</code> joins the activity result back to the logical turn effect. Restate uses <code>ctx.run(...)</code> around the normal local executor for non-sleep effects and Restate timers for sleeps. The store is touched only when Lash commits settled session state.</p>
           <p>Process effects cross the same controller boundary for start/list/transfer/delete-session/await/cancel/signal, but durable execution of a background process is owned by the process registry and worker, not by the turn that happened to start it. The process section below covers the durable intent record, handle grants, worker rebuild inputs, Restate workflow metadata, and event-sourced terminal state.</p>
           <p>Successful completion uses <code>RuntimeCommit.turn_commit</code>. The store accepts identical retries for the same <code>(session_id, turn_id)</code> and rejects a changed commit hash, so a workflow replay can retry the final Lash commit without duplicating or mutating settled state.</p>
+          <p>Advanced in-process tools use <code>ToolContext::durable_effects()</code> to borrow this same boundary without receiving workflow-native context. <code>run_json(...)</code> emits <code>DurableStep</code>; <code>external_event_key(...)</code> signs a custom <code>AwaitEventKey</code>; <code>await_event_json(...)</code> waits through <code>AwaitEvent</code>; and <code>emit_process_event(...)</code> appends a domain process event only when the tool is executing inside a process.</p>
         </div>
 
         <div class="section">
@@ -243,11 +245,11 @@ flowchart LR
           <div class="two-col">
             <article class="panel">
               <h3>Inside the seam</h3>
-              <p>Turn LLM calls, native tool calls, RLM exec, plugin checkpoints, execution-surface sync, retry sleeps, direct completions, direct LLM completions, and controller-mediated process start/list/transfer/delete-session/await/cancel/signal. Turn effects include <code>EffectId</code> and replay key; direct effects include typed causal parents when present and stable direct replay keys.</p>
+              <p>Turn LLM calls, native tool calls, durable tool steps and waits, RLM exec, plugin checkpoints, execution-surface sync, retry sleeps, direct completions, direct LLM completions, and controller-mediated process start/list/transfer/delete-session/await/cancel/signal. Turn effects include <code>EffectId</code> and replay key; direct effects include typed causal parents when present and stable direct replay keys.</p>
             </article>
             <article class="panel">
               <h3>Outside the seam</h3>
-              <p>Fire-and-forget <code>Emit</code> and <code>Log</code> effects, and anything a tool implementation does that's not its <code>execute()</code> return value or a controller-mediated process. Workflows that need those durable should fold them into their own activities.</p>
+              <p>Fire-and-forget <code>Emit</code> and <code>Log</code> effects, and side effects a tool implementation performs outside <code>ToolResult</code>, <code>ToolDurableEffects</code>, or a controller-mediated process. Workflows that need those durable should fold them into their own activities.</p>
             </article>
           </div>
           <p>Sessions opened through the regular <code>LashCore</code> / <code>LashSession</code> path also get durability through the <a href="../persistence.html">session store</a>, but at a coarser grain: a turn either commits to the store atomically or fails as a whole. Run with a scoped <code>RuntimeEffectController</code> when you need crash recovery <em>inside</em> a turn — when a single LLM call is expensive enough to replay, or when an individual tool call can run for minutes and you can't afford to lose its progress.</p>

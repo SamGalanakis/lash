@@ -1,15 +1,17 @@
 use anyhow::{Context, Result};
+use lash::durability::EffectHost;
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::{
-    ExecutionScope, InlineRuntimeEffectController, RuntimePersistence, ScopedEffectController,
+    AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, RuntimePersistence,
+    ScopedEffectController,
 };
 use lash_postgres_store::PostgresStorage;
-use lash_restate::RestateProcessDeployment;
+use lash_restate::{RestateEffectHost, RestateProcessDeployment};
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
-    EXPECTED_FINAL_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse,
-    TurnScenario, build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
-    process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
+    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME,
+    TurnRequest, TurnResponse, TurnScenario, build_e2e_core, ensure_e2e_schema, env,
+    expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -163,7 +165,31 @@ async fn main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &async_request.workflow_id).await?;
     assert_async_completion_response(&async_response)?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 9).await?;
+    let durable_input_request = TurnRequest {
+        workflow_id: "e2e-durable-input".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::DurableInputRequest,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &durable_input_request).await?;
+    let durable_key =
+        wait_for_durable_input_key(storage.pool(), &durable_input_request.workflow_id).await?;
+    let durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
+        .resolve_await_event(
+            &durable_key,
+            lash_core::Resolution::Ok(json!({ "answer": "durable-approved" })),
+        )
+        .await
+        .context("resolve durable input await key")?;
+    anyhow::ensure!(
+        matches!(durable_resolve, lash_core::ResolveOutcome::Accepted),
+        "durable input resolve was not accepted: {durable_resolve:?}"
+    );
+    let durable_response =
+        wait_for_terminal_result(storage.pool(), &durable_input_request.workflow_id).await?;
+    assert_durable_input_response(&durable_response)?;
+
+    let responses = wait_for_terminal_results(storage.pool(), 10).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -171,6 +197,7 @@ async fn main() -> Result<()> {
     assert_failover(storage.pool()).await?;
     assert_provider_calls(storage.pool()).await?;
     assert_tool_and_turn_telemetry(storage.pool()).await?;
+    assert_durable_input_steps(storage.pool()).await?;
     assert_trigger_delivery(storage.pool(), &trigger_process_id).await?;
     assert_attachments_round_trip(storage.pool(), &attachment_store, &responses).await?;
     assert_reopened_session_agrees(
@@ -630,6 +657,66 @@ fn assert_async_completion_response(response: &TurnResponse) -> Result<()> {
     Ok(())
 }
 
+fn assert_durable_input_response(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == EXPECTED_DURABLE_INPUT_TEXT,
+        "workflow `{}` durable input final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    let durable = response
+        .submitted_value
+        .get("durable")
+        .context("durable input response missing durable result")?;
+    anyhow::ensure!(
+        durable.get("answer").and_then(Value::as_str) == Some("durable-approved"),
+        "durable input answer mismatch: {}",
+        response.submitted_value
+    );
+    anyhow::ensure!(
+        durable
+            .get("request_id")
+            .and_then(Value::as_str)
+            .is_some_and(|request_id| request_id.ends_with(":request-1")),
+        "durable input request id mismatch: {}",
+        response.submitted_value
+    );
+    Ok(())
+}
+
+async fn wait_for_durable_input_key(
+    pool: &sqlx::PgPool,
+    workflow_id: &str,
+) -> Result<AwaitEventKey> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let row: Option<String> = sqlx::query_scalar(
+            "SELECT result_json
+             FROM lash_e2e_tool_events
+             WHERE workflow_id = $1 AND tool_name = 'durable_input_request.opened'
+             ORDER BY event_id DESC
+             LIMIT 1",
+        )
+        .bind(workflow_id)
+        .fetch_optional(pool)
+        .await
+        .with_context(|| format!("load durable input key for `{workflow_id}`"))?;
+        if let Some(result_json) = row {
+            let value: Value = serde_json::from_str(&result_json)
+                .with_context(|| format!("decode durable input key row for `{workflow_id}`"))?;
+            let key_value = value
+                .get("await_key")
+                .cloned()
+                .context("durable input key row missing await_key")?;
+            let key: AwaitEventKey =
+                serde_json::from_value(key_value).context("decode durable input AwaitEventKey")?;
+            return Ok(key);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("timed out waiting for durable input key for `{workflow_id}`")
+}
+
 async fn wait_for_queued_work(
     storage: &PostgresStorage,
     mock_provider_base_url: &str,
@@ -1008,6 +1095,7 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
     .context("list provider scenarios")?;
     for expected in [
         "async_completion",
+        "durable_input_request",
         "kitchen_sink",
         "queued_wake",
         "trigger_setup",
@@ -1027,6 +1115,7 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
         "async_lookup",
         "make_attachment",
         "crash_once",
+        "durable_input_request",
     ] {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM lash_e2e_tool_events WHERE tool_name = $1")
@@ -1081,6 +1170,29 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
         live_replay_checks >= 5,
         "expected live replay checks for five workflow turns, got {live_replay_checks}"
     );
+    Ok(())
+}
+
+async fn assert_durable_input_steps(pool: &sqlx::PgPool) -> Result<()> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT step_id, count
+         FROM lash_e2e_durable_step_counts
+         WHERE workflow_id = 'e2e-durable-input'
+         ORDER BY step_id",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load durable input step counts")?;
+    let counts = rows
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for step_id in ["complete", "create"] {
+        let count = counts.get(step_id).copied().unwrap_or_default();
+        anyhow::ensure!(
+            count == 1,
+            "durable input step `{step_id}` ran {count} times; counts={counts:?}"
+        );
+    }
     Ok(())
 }
 

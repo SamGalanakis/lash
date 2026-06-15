@@ -4,7 +4,6 @@
 //! dropping off the wire.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -12,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
+use lash_core::ToolDefinition;
 use lash_core::llm::types as core_llm;
-use lash_core::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
 
 use super::*;
 

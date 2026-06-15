@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lash_sansio::llm::types::ProviderReplayMeta;
@@ -68,6 +71,34 @@ impl ToolCompletionState {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct ToolDurableEffectState {
+    step_ids: Arc<Mutex<HashSet<String>>>,
+    process_event_sequence: Arc<AtomicU64>,
+}
+
+impl ToolDurableEffectState {
+    fn reserve_step(&self, step_id: &str) -> Result<(), crate::RuntimeError> {
+        let mut guard = self.step_ids.lock().map_err(|_| {
+            crate::RuntimeError::new(
+                "durable_effect_state_poisoned",
+                "durable effect step state lock poisoned",
+            )
+        })?;
+        if !guard.insert(step_id.to_string()) {
+            return Err(crate::RuntimeError::new(
+                "durable_effect_duplicate_step_id",
+                format!("durable effect step id `{step_id}` was already used by this tool call"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn next_process_event_sequence(&self) -> u64 {
+        self.process_event_sequence.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
 /// Per-call environment for [`ToolProvider::execute`]. Fields are sealed so
 /// the runtime can add capabilities without breaking tool authors.
 #[derive(Clone)]
@@ -93,6 +124,7 @@ pub struct ToolContext<'run> {
     pub(crate) max_attempts: u32,
     pub(crate) replay_key: Option<String>,
     pub(crate) completion: ToolCompletionState,
+    pub(crate) durable_effects: ToolDurableEffectState,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
     pub(crate) execution_env_spec: crate::ProcessExecutionEnvSpec,
     pub(crate) lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
@@ -154,6 +186,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     prepared_payload: serde_json::Value,
     tool_call_id: Option<String>,
     completion: ToolCompletionState,
+    durable_effects: ToolDurableEffectState,
     parent_invocation: Option<crate::RuntimeInvocation>,
     execution_env_spec: crate::ProcessExecutionEnvSpec,
     lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
@@ -182,6 +215,7 @@ impl<'run> ToolContextBuilder<'run> {
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
             completion: ToolCompletionState::default(),
+            durable_effects: ToolDurableEffectState::default(),
             parent_invocation: dispatch.parent_invocation.clone(),
             execution_env_spec: dispatch.execution_env_spec.clone(),
             lashlang_execution_call_site: None,
@@ -277,6 +311,7 @@ impl<'run> ToolContextBuilder<'run> {
             max_attempts: 1,
             replay_key: None,
             completion: self.completion,
+            durable_effects: self.durable_effects,
             parent_invocation: self.parent_invocation,
             execution_env_spec: self.execution_env_spec,
             lashlang_execution_call_site: self.lashlang_execution_call_site,
@@ -320,6 +355,7 @@ impl<'run> ToolContext<'run> {
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
             completion: ToolCompletionState::default(),
+            durable_effects: ToolDurableEffectState::default(),
             parent_invocation: None,
             execution_env_spec: crate::ProcessExecutionEnvSpec::new(
                 crate::PluginOptions::default(),
@@ -450,6 +486,35 @@ impl<'run> ToolContext<'run> {
         ToolProcessEventClient {
             context: self.process_events.clone(),
         }
+    }
+
+    /// Borrow this tool call's durable effect boundary.
+    ///
+    /// This is available only while executing a prepared tool call under a
+    /// controller that explicitly supports durable tool effects. The returned
+    /// facade records JSON steps and await-event waits in the caller's existing
+    /// effect log; it does not expose the underlying workflow engine context.
+    pub fn durable_effects(&self) -> Result<ToolDurableEffects<'_, 'run>, crate::RuntimeError> {
+        let Some(tool_call_id) = self.tool_call_id.as_deref() else {
+            return Err(crate::RuntimeError::new(
+                "durable_effects_missing_call_id",
+                "durable effects require a prepared tool call id",
+            ));
+        };
+        if tool_call_id.trim().is_empty() {
+            return Err(crate::RuntimeError::new(
+                "durable_effects_missing_call_id",
+                "durable effects require a non-empty prepared tool call id",
+            ));
+        }
+        let scoped = self.effect_controller.scoped();
+        if !scoped.controller().supports_durable_effects() {
+            return Err(crate::RuntimeError::new(
+                "durable_effects_unavailable",
+                "this effect controller does not support durable tool effects",
+            ));
+        }
+        Ok(ToolDurableEffects { context: self })
     }
 
     pub fn cancellation_token(&self) -> Option<&tokio_util::sync::CancellationToken> {
@@ -657,6 +722,204 @@ impl<'run> ToolContext<'run> {
     }
 }
 
+/// Durable effect operations available to advanced in-process tools.
+///
+/// The facade borrows the caller's existing runtime effect boundary. It records
+/// JSON-only local steps and awaits host-signed event keys without exposing
+/// Restate, Temporal, or any other workflow-native context.
+pub struct ToolDurableEffects<'ctx, 'run> {
+    context: &'ctx ToolContext<'run>,
+}
+
+impl<'ctx, 'run> ToolDurableEffects<'ctx, 'run> {
+    pub async fn run_json<F, Fut>(
+        &self,
+        step_id: impl Into<String>,
+        input: serde_json::Value,
+        run: F,
+    ) -> Result<serde_json::Value, crate::RuntimeError>
+    where
+        F: FnOnce(serde_json::Value) -> Fut + Send + 'run,
+        Fut: Future<Output = Result<serde_json::Value, crate::RuntimeError>> + Send + 'run,
+    {
+        let step_id = step_id.into();
+        if step_id.trim().is_empty() {
+            return Err(crate::RuntimeError::new(
+                "durable_effect_empty_step_id",
+                "durable effect step id must be non-empty",
+            ));
+        }
+        self.context.durable_effects.reserve_step(&step_id)?;
+        let invocation = self.step_invocation(
+            format!("durable-step:{step_id}"),
+            crate::RuntimeEffectKind::DurableStep,
+            format!("durable-step:{step_id}"),
+        )?;
+        let outcome = self
+            .context
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::DurableStep {
+                        step_id,
+                        input: input.clone(),
+                    },
+                ),
+                crate::RuntimeEffectLocalExecutor::durable_step(run),
+            )
+            .await
+            .map_err(crate::RuntimeEffectControllerError::into_runtime_error)?;
+        outcome
+            .into_durable_step()
+            .map_err(crate::RuntimeEffectControllerError::into_runtime_error)
+    }
+
+    pub async fn external_event_key(
+        &self,
+        key: impl Into<String>,
+    ) -> Result<crate::AwaitEventKey, crate::RuntimeError> {
+        let key = key.into();
+        if key.trim().is_empty() {
+            return Err(crate::RuntimeError::new(
+                "durable_effect_empty_event_key",
+                "durable effect external event key must be non-empty",
+            ));
+        }
+        let scoped = self.context.effect_controller.scoped();
+        scoped
+            .controller()
+            .await_event_key(
+                scoped.execution_scope(),
+                crate::AwaitEventWaitIdentity::Custom { key },
+            )
+            .await
+    }
+
+    pub async fn await_event_json(
+        &self,
+        key: crate::AwaitEventKey,
+    ) -> Result<serde_json::Value, crate::RuntimeError> {
+        let invocation = self.step_invocation(
+            format!("await-event:{}", key.key_id),
+            crate::RuntimeEffectKind::AwaitEvent,
+            format!("await-event:{}", key.key_id),
+        )?;
+        let cancellation = self.context.cancellation_token.clone().unwrap_or_default();
+        let outcome = self
+            .context
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::AwaitEvent { key },
+                ),
+                crate::RuntimeEffectLocalExecutor::await_event(cancellation, None),
+            )
+            .await
+            .map_err(crate::RuntimeEffectControllerError::into_runtime_error)?;
+        match outcome
+            .into_await_event()
+            .map_err(crate::RuntimeEffectControllerError::into_runtime_error)?
+        {
+            crate::Resolution::Ok(value) => Ok(value),
+            crate::Resolution::Err(err) => Err(crate::RuntimeError::new(err.code, err.message)),
+            crate::Resolution::Timeout => Err(crate::RuntimeError::new(
+                "durable_effect_event_timeout",
+                "durable effect external event wait timed out",
+            )),
+            crate::Resolution::Cancelled => Err(crate::RuntimeError::new(
+                "durable_effect_event_cancelled",
+                "durable effect external event wait was cancelled",
+            )),
+        }
+    }
+
+    pub async fn emit_process_event(
+        &self,
+        event_type: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<crate::ProcessEvent, crate::RuntimeError> {
+        let Some(process) = self.context.process_events.as_ref() else {
+            return Err(crate::RuntimeError::new(
+                "durable_effect_process_event_unavailable",
+                "durable effect process events are unavailable outside a durable process",
+            ));
+        };
+        let event_type = event_type.into();
+        if event_type.trim().is_empty() {
+            return Err(crate::RuntimeError::new(
+                "durable_effect_empty_process_event_type",
+                "durable effect process event type must be non-empty",
+            ));
+        }
+        let tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::RuntimeError::new(
+                "durable_effects_missing_call_id",
+                "durable effects require a prepared tool call id",
+            )
+        })?;
+        let sequence = self.context.durable_effects.next_process_event_sequence();
+        let request = crate::ProcessEventAppendRequest::new(event_type, payload).with_replay_key(
+            format!("tool:{tool_call_id}:durable-process-event:{sequence}"),
+        );
+        self.context
+            .process_events()
+            .emit_request(request)
+            .await
+            .map_err(|err| {
+                crate::RuntimeError::new("durable_effect_process_event", err.to_string())
+            })
+            .and_then(|event| {
+                if event.process_id == process.process_id {
+                    Ok(event)
+                } else {
+                    Err(crate::RuntimeError::new(
+                        "durable_effect_process_event",
+                        "process event append returned an event for a different process",
+                    ))
+                }
+            })
+    }
+
+    fn step_invocation(
+        &self,
+        effect_id_suffix: impl Into<String>,
+        kind: crate::RuntimeEffectKind,
+        replay_suffix: impl AsRef<str>,
+    ) -> Result<crate::RuntimeInvocation, crate::RuntimeError> {
+        let tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::RuntimeError::new(
+                "durable_effects_missing_call_id",
+                "durable effects require a prepared tool call id",
+            )
+        })?;
+        let effect_id_suffix = effect_id_suffix.into();
+        if let Some(parent) = self.context.parent_invocation.as_ref() {
+            return Ok(crate::runtime::causal::child_effect_invocation(
+                parent,
+                format!("{tool_call_id}:{effect_id_suffix}"),
+                kind,
+                replay_suffix,
+            ));
+        }
+        let scoped = self.context.effect_controller.scoped();
+        let replay_key = format!(
+            "{}:tool:{tool_call_id}:{}",
+            scoped.scope_id(),
+            replay_suffix.as_ref()
+        );
+        Ok(crate::RuntimeInvocation::effect(
+            crate::RuntimeScope::new(self.context.session_id.clone()),
+            format!("{tool_call_id}:{effect_id_suffix}"),
+            kind,
+            replay_key,
+        ))
+    }
+}
+
 /// Runtime-prepared executable tool call.
 ///
 /// The raw model/provider identity remains visible, but any argument rewrites
@@ -805,6 +1068,46 @@ pub trait ToolProvider: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProcessRegistry;
+    use crate::RuntimeEffectController;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct NoDurableEffectController;
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeEffectController for NoDurableEffectController {
+        async fn execute_effect(
+            &self,
+            _envelope: crate::RuntimeEffectEnvelope,
+            _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
+            Err(crate::RuntimeEffectControllerError::new(
+                "unexpected_effect",
+                "test controller should not execute effects",
+            ))
+        }
+    }
+
+    fn test_context_with_controller(
+        tool_call_id: Option<String>,
+        controller: Arc<dyn crate::RuntimeEffectController>,
+    ) -> ToolContext<'static> {
+        ToolContext::builder(
+            "session-1".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::UnavailableProcessService),
+            Arc::new(crate::DefaultProcessCancelAbility),
+            crate::runtime::RuntimeEffectControllerHandle::shared(controller),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+        )
+        .tool_call_id(tool_call_id)
+        .build()
+    }
 
     #[test]
     fn tool_context_builder_carries_call_payload_and_cancellation_state() {
@@ -845,5 +1148,258 @@ mod tests {
         );
         assert_eq!(context.async_process_id(), Some("process-1"));
         assert!(context.cancellation_token().is_some());
+    }
+
+    #[test]
+    fn durable_effects_requires_prepared_call_id_and_supporting_controller() {
+        let missing_call =
+            test_context_with_controller(None, Arc::new(crate::InlineRuntimeEffectController));
+        let err = match missing_call.durable_effects() {
+            Ok(_) => panic!("missing prepared tool call id should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code.as_str(), "durable_effects_missing_call_id");
+
+        let unsupported = test_context_with_controller(
+            Some("call-1".to_string()),
+            Arc::new(NoDurableEffectController),
+        );
+        let err = match unsupported.durable_effects() {
+            Ok(_) => panic!("unsupported controller should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code.as_str(), "durable_effects_unavailable");
+    }
+
+    #[tokio::test]
+    async fn durable_run_json_executes_and_maps_closure_errors() {
+        let context = test_context_with_controller(
+            Some("call-run-json".to_string()),
+            Arc::new(crate::InlineRuntimeEffectController),
+        );
+        let durable = context.durable_effects().expect("durable effects");
+        let value = durable
+            .run_json(
+                "create",
+                serde_json::json!({ "x": 1 }),
+                |input| async move { Ok(serde_json::json!({ "seen": input["x"] })) },
+            )
+            .await
+            .expect("durable step");
+        assert_eq!(value, serde_json::json!({ "seen": 1 }));
+
+        let err = durable
+            .run_json("fail", serde_json::json!({}), |_| async {
+                Err(crate::RuntimeError::new(
+                    "durable_step_failed",
+                    "step failed",
+                ))
+            })
+            .await
+            .expect_err("closure error");
+        assert_eq!(err.code.as_str(), "durable_step_failed");
+        assert_eq!(err.message, "step failed");
+    }
+
+    #[tokio::test]
+    async fn durable_run_json_rejects_empty_or_duplicate_step_ids_before_running() {
+        let context = test_context_with_controller(
+            Some("call-step-ids".to_string()),
+            Arc::new(crate::InlineRuntimeEffectController),
+        );
+        let durable = context.durable_effects().expect("durable effects");
+        let runs = Arc::new(AtomicU64::new(0));
+
+        let err = durable
+            .run_json("", serde_json::Value::Null, {
+                let runs = Arc::clone(&runs);
+                move |_| async move {
+                    runs.fetch_add(1, Ordering::Relaxed);
+                    Ok(serde_json::Value::Null)
+                }
+            })
+            .await
+            .expect_err("empty step id");
+        assert_eq!(err.code.as_str(), "durable_effect_empty_step_id");
+        assert_eq!(runs.load(Ordering::Relaxed), 0);
+
+        durable
+            .run_json("same", serde_json::Value::Null, {
+                let runs = Arc::clone(&runs);
+                move |_| async move {
+                    runs.fetch_add(1, Ordering::Relaxed);
+                    Ok(serde_json::Value::Null)
+                }
+            })
+            .await
+            .expect("first step");
+        let err = durable
+            .run_json("same", serde_json::Value::Null, {
+                let runs = Arc::clone(&runs);
+                move |_| async move {
+                    runs.fetch_add(1, Ordering::Relaxed);
+                    Ok(serde_json::Value::Null)
+                }
+            })
+            .await
+            .expect_err("duplicate step id");
+        assert_eq!(err.code.as_str(), "durable_effect_duplicate_step_id");
+        assert_eq!(runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_external_event_key_is_custom_and_stable() {
+        let context = test_context_with_controller(
+            Some("call-event-key".to_string()),
+            Arc::new(crate::InlineRuntimeEffectController),
+        );
+        let durable = context.durable_effects().expect("durable effects");
+        let first = durable
+            .external_event_key("tool-event-stable")
+            .await
+            .expect("first key");
+        let second = durable
+            .external_event_key("tool-event-stable")
+            .await
+            .expect("second key");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.wait,
+            crate::AwaitEventWaitIdentity::Custom {
+                key: "tool-event-stable".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_await_event_json_maps_terminal_resolutions() {
+        let controller = Arc::new(crate::InlineRuntimeEffectController);
+        let context =
+            test_context_with_controller(Some("call-await-event".to_string()), controller.clone());
+        let durable = context.durable_effects().expect("durable effects");
+
+        let ok_key = durable
+            .external_event_key("tool-event-ok")
+            .await
+            .expect("ok key");
+        controller
+            .resolve_await_event(
+                &ok_key,
+                crate::Resolution::Ok(serde_json::json!({ "answer": 42 })),
+            )
+            .await
+            .expect("resolve ok");
+        let value = durable
+            .await_event_json(ok_key)
+            .await
+            .expect("await ok value");
+        assert_eq!(value, serde_json::json!({ "answer": 42 }));
+
+        let err_key = durable
+            .external_event_key("tool-event-err")
+            .await
+            .expect("err key");
+        controller
+            .resolve_await_event(
+                &err_key,
+                crate::Resolution::Err(crate::ExternalCompletionError::new(
+                    "external_bad",
+                    "external failed",
+                )),
+            )
+            .await
+            .expect("resolve err");
+        let err = durable
+            .await_event_json(err_key)
+            .await
+            .expect_err("await err value");
+        assert_eq!(err.code.as_str(), "external_bad");
+
+        let cancelled_key = durable
+            .external_event_key("tool-event-cancelled")
+            .await
+            .expect("cancelled key");
+        controller
+            .resolve_await_event(&cancelled_key, crate::Resolution::Cancelled)
+            .await
+            .expect("resolve cancelled");
+        let err = durable
+            .await_event_json(cancelled_key)
+            .await
+            .expect_err("await cancelled value");
+        assert_eq!(err.code.as_str(), "durable_effect_event_cancelled");
+
+        let timeout_key = durable
+            .external_event_key("tool-event-timeout")
+            .await
+            .expect("timeout key");
+        controller
+            .resolve_await_event(&timeout_key, crate::Resolution::Timeout)
+            .await
+            .expect("resolve timeout");
+        let err = durable
+            .await_event_json(timeout_key)
+            .await
+            .expect_err("await timeout value");
+        assert_eq!(err.code.as_str(), "durable_effect_event_timeout");
+    }
+
+    #[tokio::test]
+    async fn durable_emit_process_event_requires_process_and_appends_inside_process() {
+        let context = test_context_with_controller(
+            Some("call-no-process".to_string()),
+            Arc::new(crate::InlineRuntimeEffectController),
+        );
+        let err = context
+            .durable_effects()
+            .expect("durable effects")
+            .emit_process_event("tool.event", serde_json::json!({}))
+            .await
+            .expect_err("outside process");
+        assert_eq!(
+            err.code.as_str(),
+            "durable_effect_process_event_unavailable"
+        );
+
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let process_id = "process:durable-tool-event";
+        registry
+            .register_process(
+                crate::ProcessRegistration::new(
+                    process_id,
+                    crate::ProcessInput::External {
+                        metadata: serde_json::json!({}),
+                    },
+                    crate::ProcessProvenance::host("test"),
+                )
+                .with_extra_event_types([crate::ProcessEventType {
+                    name: "tool.event".to_string(),
+                    payload_schema: crate::LashSchema::any(),
+                    semantics: crate::ProcessEventSemanticsSpec::default(),
+                }]),
+            )
+            .await
+            .expect("register process");
+        let registry_dyn: Arc<dyn crate::ProcessRegistry> = registry;
+        let context = test_context_with_controller(
+            Some("call-process-event".to_string()),
+            Arc::new(crate::InlineRuntimeEffectController),
+        )
+        .with_process_events_for_testing(process_id, registry_dyn);
+
+        let event = context
+            .durable_effects()
+            .expect("durable effects")
+            .emit_process_event("tool.event", serde_json::json!({ "ok": true }))
+            .await
+            .expect("process event");
+        assert_eq!(event.process_id, process_id);
+        assert_eq!(event.event_type, "tool.event");
+        assert_eq!(event.payload, serde_json::json!({ "ok": true }));
+        assert_eq!(
+            event.invocation.replay_key(),
+            Some("tool:call-process-event:durable-process-event:0")
+        );
     }
 }

@@ -195,6 +195,13 @@ impl RuntimeSessionServices {
         )
         .with_execution_env_spec(current_execution_env_spec(&self.current))
         .with_process_registration_context(&registration)
+        .with_process_event_context(
+            registration.id.clone(),
+            Arc::clone(&registry),
+            self.current.store.clone(),
+            self.current.host.session_store_factory.clone(),
+            self.current.host.queued_work_poke.clone(),
+        )
         .with_cancellation_token(cancellation.clone());
         if let Some(invocation) = execution_context.causal_invocation.clone() {
             ctx = ctx.with_parent_invocation(invocation);

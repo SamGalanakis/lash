@@ -263,6 +263,10 @@ impl EffectHost for RestateEffectHost {
         true
     }
 
+    fn supports_durable_effects(&self) -> bool {
+        true
+    }
+
     fn scoped<'run>(
         &'run self,
         scope: ExecutionScope,
@@ -1153,6 +1157,10 @@ where
         true
     }
 
+    fn supports_durable_effects(&self) -> bool {
+        true
+    }
+
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
@@ -1434,9 +1442,8 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
         | RuntimeEffectCommand::ToolCall { .. }
         | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
-        | RuntimeEffectCommand::SyncExecutionEnvironment { .. } => {
-            RestateEffectExecution::JournaledRun
-        }
+        | RuntimeEffectCommand::SyncExecutionEnvironment { .. }
+        | RuntimeEffectCommand::DurableStep { .. } => RestateEffectExecution::JournaledRun,
     }
 }
 

@@ -44,7 +44,7 @@
     <div class="listing">
       <div class="listing__row">
         <div class="listing__label">remote edge</div>
-        <div class="listing__body"><p>A web service, worker, workflow activity, queue consumer, remote provider, or remote tool executor must exchange Lash-owned fields with another process.</p></div>
+        <div class="listing__body"><p>A web service, worker, workflow activity, queue consumer, remote provider, or host-owned tool service must exchange Lash-owned fields with another process.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">local call</div>
@@ -134,23 +134,11 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">executor</div>
-        <div class="listing__body"><p>The remote protocol describes callable tools and tool-call envelopes. It does not prescribe HTTP, callback, or queue transport; each host maps tool calls to implementation using its own binding metadata.</p></div>
+        <div class="listing__body"><p>The remote protocol describes granted callable tools; it does not define a remote tool execution transport. Tool execution is host-owned: implement a normal <code>ToolProvider</code>, and call HTTP services, queues, or callbacks inside that provider when your deployment needs remote work.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">call path</div>
         <div class="listing__body"><p>The grant's <code>lashlang_binding.module_path</code> plus <code>operation</code> forms the remote call path. Duplicate call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div>
-      </div>
-      <div class="listing__row">
-        <div class="listing__label">provider helper</div>
-        <div class="listing__body"><p>When using the <code>lash-remote-protocol</code> crate directly with its <code>core-conversions</code> feature, <code>RemoteToolProvider&lt;T&gt;</code> adapts grants into a normal <code>ToolProvider</code> and dispatches canonical tool-call requests through your host-owned <code>RemoteToolTransport</code>.</p></div>
-      </div>
-      <div class="listing__row">
-        <div class="listing__label">call request</div>
-        <div class="listing__body"><p><code>RemoteToolCallRequest</code> carries <code>tool_name</code>, <code>call_path</code>, <code>args</code>, <code>session_id</code>, attempt counters, optional <code>tool_call_id</code>/<code>replay_key</code>, and a <strong>required non-null <code>completion_key</code></strong>. The key is Lash's durable wait handle: an executor that cannot answer inline echoes it back later to resolve the call. <code>validate()</code> rejects an empty <code>tool_name</code>, <code>call_path</code>, or <code>session_id</code>, and a null <code>completion_key</code>.</p></div>
-      </div>
-      <div class="listing__row">
-        <div class="listing__label">call response</div>
-        <div class="listing__body"><p><code>RemoteToolCallResponse</code> is a <code>status</code>-tagged enum: <code>Success</code>, <code>Failure</code> (code, message, optional raw and <code>retry_after_ms</code>), <code>Cancelled</code>, and <code>Pending</code>. <code>Pending</code> is the wire form of the in-process <code>ToolResult::Pending</code> outcome (see <a href="./plugins-tools.html#tool-completion-modes">plugins · tools</a>): it carries an optional <code>deadline_ms</code>, an <code>on_timeout</code> (<code>RemoteTimeoutBehavior</code>: <code>error_as_result</code> or <code>fail_turn</code>), and an <code>on_cancel</code> (<code>RemoteCancelHint</code>: <code>ignore</code> or <code>cancel_external_work</code>). The executor returns <code>Pending</code> when it has accepted the work but will deliver the real result later against the request's <code>completion_key</code>.</p></div>
       </div>
     </div>
   </div>
@@ -167,7 +155,7 @@ request.validate()?;</code></pre>
       <div class="listing__row"><div class="listing__label">attachments</div><div class="listing__body"><p>Attachments require a non-empty MIME type. Attachment references require non-empty <code>id</code> and <code>mime</code>. Image blobs require non-empty ids and base64 payloads.</p></div></div>
       <div class="listing__row"><div class="listing__label">generation</div><div class="listing__body"><p><code>RemoteGenerationOptions.output_token_cap</code> must be greater than zero when present. Temperature and top-p are strings so provider-specific precision can round-trip.</p></div></div>
       <div class="listing__row"><div class="listing__label">triggers</div><div class="listing__body"><p>Trigger occurrence requests require non-empty <code>source_type</code>, <code>source_key</code>, and <code>idempotency_key</code>. Trigger filters and emit reports validate protocol version but leave authorization and tenant scoping to the boundary host.</p></div></div>
-      <div class="listing__row"><div class="listing__label">remote tools</div><div class="listing__body"><p>Remote tool call requests require non-empty <code>tool_name</code>, <code>call_path</code>, and <code>session_id</code>, plus a non-null <code>completion_key</code> so deferred (<code>Pending</code>) outcomes can be resolved later.</p></div></div>
+      <div class="listing__row"><div class="listing__label">remote tools</div><div class="listing__body"><p>Remote tool grants require non-empty names, schemas, and Lashlang bindings. Duplicate <code>module_path</code> / <code>operation</code> call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div></div>
     </div>
     <aside class="gotcha">
       <strong>Gotcha</strong>

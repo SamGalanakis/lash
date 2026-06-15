@@ -316,7 +316,7 @@ pub use store::{
     refresh_persisted_session_state,
 };
 pub use tool_provider::{
-    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext,
+    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolDurableEffects,
     ToolLashlangExecutionCallSite, ToolPrepareCall, ToolPrepareContext, ToolProvider,
     ToolSessionAdmin, ToolSessionModel, ToolTriggerClient,
 };

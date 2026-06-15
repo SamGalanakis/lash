@@ -6,8 +6,8 @@ use super::contracts::{
     assert_no_forbidden_error_text, assert_subagent_bridge_exec_graphs,
 };
 use super::harness::{
-    ExpectedContracts, LashE2eCase, run_session_turn_process_case, run_turn_case,
-    run_turn_case_without_success_assertions,
+    ExpectedContracts, LashE2eCase, run_durable_input_request_case, run_session_turn_process_case,
+    run_turn_case, run_turn_case_without_success_assertions,
 };
 
 #[test]
@@ -72,6 +72,13 @@ submit result
         })
         .await?;
         Ok(())
+    })
+}
+
+#[test]
+fn lash_e2e_process_durable_input_request_tool() -> Result<()> {
+    run_async_test_on_stack_budget("lash-e2e-durable-input-request", || async {
+        run_durable_input_request_case().await
     })
 }
 

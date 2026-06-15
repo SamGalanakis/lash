@@ -90,10 +90,6 @@ pub enum RemoteProtocolError {
         before_call_paths: Vec<String>,
         after_call_paths: Vec<String>,
     },
-    #[error("unknown remote tool `{tool_name}`")]
-    UnknownRemoteTool { tool_name: String },
-    #[error("remote tool transport failed: {0}")]
-    RemoteToolTransport(String),
     #[error("failed to serialize remote activity: {0}")]
     ActivitySerialization(#[from] serde_json::Error),
     #[error("failed to write remote activity: {0}")]

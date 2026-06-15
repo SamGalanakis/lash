@@ -585,6 +585,18 @@ async fn sqlite_effect_controller_satisfies_replay_conformance() {
         || controller.start_replay(),
     )
     .await;
+
+    let durable_controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn(
+        "durable-step-session",
+        "durable-step-turn",
+    ))
+    .await
+    .expect("durable step controller");
+    lash_core::testing::conformance::effect_controller_durable_steps_replay(
+        &durable_controller,
+        || durable_controller.start_replay(),
+    )
+    .await;
 }
 
 #[tokio::test]
