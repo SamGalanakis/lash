@@ -1694,16 +1694,16 @@
       <div class="trigger-bay">
         <div class="trigger-buttons">
           <button class="host-trigger" type="button" data-trigger-button data-button="Red"
-                  aria-label="Fire the red button event"
-                  title="Emit the host-owned button event.">
+                  aria-label="Emit the red button trigger occurrence"
+                  title="Emit a red button trigger occurrence.">
             <span class="trigger-face">
               <strong>RED</strong>
               <span>fire</span>
             </span>
           </button>
           <button class="host-trigger" type="button" data-trigger-button data-button="Blue"
-                  aria-label="Fire the blue button event"
-                  title="Emit the host-owned button event.">
+                  aria-label="Emit the blue button trigger occurrence"
+                  title="Emit a blue button trigger occurrence.">
             <span class="trigger-face">
               <strong>BLUE</strong>
               <span>fire</span>
@@ -1722,7 +1722,7 @@
         <label class="field">
           <span>model</span>
           <input id="modelInput" list="modelList" autocomplete="off" spellcheck="false"
-                 title="Provider model slug, e.g. anthropic/claude-sonnet-4.6. Applies to chat sends and button events." />
+                 title="Provider model slug, e.g. anthropic/claude-sonnet-4.6. Applies to chat sends and button trigger occurrences." />
           <datalist id="modelList"></datalist>
           <small id="modelHint" class="field-hint" hidden></small>
         </label>
@@ -1951,7 +1951,7 @@
     function setBusy(next, label) {
       busy = next;
       syncCommandAvailability();
-      stopButton.hidden = true;
+      stopButton.hidden = !next;
       busyPill.classList.toggle("run", next);
       busyText.textContent = next ? "running" : "idle";
       timeline.setAttribute("aria-busy", String(next));
@@ -2474,7 +2474,10 @@
     }
 
     async function postCommand(url, payload) {
-      if (busy) return;
+      if (busy) {
+        renderNote("turn already running");
+        return;
+      }
       lastRequest = { url, payload };
       const commandController = new AbortController();
       controller = commandController;
@@ -2558,7 +2561,11 @@
 
     function stopTurn() {
       if (controller) controller.abort();
-      fetch("/api/turn/cancel", { method: "POST" }).catch(() => {});
+      fetch("/api/turn/cancel", { method: "POST" })
+        .catch(() => {})
+        .finally(() => {
+          if (!resetInFlight) setBusy(false, "ready");
+        });
     }
     stopButton.addEventListener("click", stopTurn);
 

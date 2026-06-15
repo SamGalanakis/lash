@@ -15,10 +15,8 @@ async fn run_one_tool_call(
     invocation: crate::RuntimeInvocation,
     context: crate::RuntimeExecutionContext<'_>,
 ) -> crate::runtime::ToolCallLaunch {
-    let executed =
-        Box::pin(context.execute_prepared_tool_call_launch(prepared_tool, index, Some(invocation)))
-            .await;
-    executed
+    Box::pin(context.execute_prepared_tool_call_launch(prepared_tool, index, Some(invocation)))
+        .await
 }
 
 fn cancelled_tool_call_launch(

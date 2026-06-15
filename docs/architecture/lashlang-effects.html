@@ -75,7 +75,7 @@
             <dt><code>LashlangHostCatalog</code></dt>
             <dd>The catalog records module instances, resource authority types, receiver operations, pure constructors, named host data types, and trigger-source event metadata. Trigger and trigger payloads are validated named object types such as <code>cron.Tick</code>; source values such as <code>cron.Schedule</code> remain opaque host identities.</dd>
             <dt><code>PluginFactory::lashlang_resources</code></dt>
-            <dd>Plugins use this hook for language resources that are not ordinary tools: trigger registry operations, <code>cron.Schedule(...)</code>, <code>ui.button.pressed(...)</code>, or any other typed host descriptor constructor. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
+            <dd>Plugins use this hook for language resources that are not ordinary tools: configured trigger-source constructors such as <code>cron.Schedule(...)</code>, typed resource constructors, and other host descriptor constructors. Zero-config trigger sources such as <code>ui.button.pressed({})</code> are added to the session catalog from <code>reg.triggers().declare(...)</code>. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
             <dt><code>LashlangAbilities</code></dt>
             <dd>The host enables process starts, sleep, process signals, and trigger registry operations explicitly. A configured process registry derives process/lifecycle availability for sessions; plugins such as the built-in session-trigger plugin contribute trigger operations and resources.</dd>
             <dt><code>LashlangLanguageFeatures</code></dt>
@@ -181,7 +181,7 @@ submit {
         <div class="section" id="triggers">
           <div class="section-header">
             <h2>Triggers</h2>
-          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value, a process definition, and explicit <code>inputs</code> to awaited registry operations such as <code>triggers.register</code>, <code>triggers.list</code>, and <code>triggers.cancel</code>. Every process param is mapped exactly once; <code>trigger.event</code> is the direct whole-event placeholder inside <code>inputs</code>. A trigger registration is a durable rule; a matched runtime trigger occurrence starts the target process.</p>
+          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code>; zero-config trigger sources such as <code>ui.button.pressed({})</code> are exposed from the session's declared <code>TriggerEvent</code>s. In both cases the catalog records protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value, a process definition, and explicit <code>inputs</code> to awaited registry operations such as <code>triggers.register</code>, <code>triggers.list</code>, and <code>triggers.cancel</code>. Every process param is mapped exactly once; <code>trigger.event</code> is the direct whole-event placeholder inside <code>inputs</code>. A trigger registration is a durable rule; a matched runtime trigger occurrence starts the target process.</p>
           </div>
           <pre><code>process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
@@ -203,7 +203,7 @@ registrations = await triggers.list({ target: daily_digest })?
 broad_registrations = await triggers.list({})?
 
 submit handle</code></pre>
-          <p>A trigger source uses the same registry. The workbench registers a typed UI button event whose source config is empty; the selected button arrives in the matched occurrence payload:</p>
+          <p>A trigger source uses the same registry. The workbench declares a typed UI button trigger event; the runtime exposes <code>ui.button.pressed({})</code> as a zero-config source constructor, and the selected button arrives in the matched occurrence payload:</p>
           <pre><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
@@ -216,7 +216,7 @@ handle = await triggers.register({
   name: "button watcher"
 })?
 submit handle</code></pre>
-          <p>The matching host contract exposes constructors, trigger-source relations, and optionally typed triggers. Source owners list source registrations by source type/key, keep their own source-specific schedules, and emit declared trigger occurrences that validate payloads and fan out to matching routes:</p>
+          <p>The matching host contract exposes configured constructors, trigger-source relations, and typed trigger declarations. Source owners list source registrations by source type/key, keep their own source-specific schedules, and emit declared trigger occurrences that validate payloads and fan out to matching routes:</p>
           <pre><code>let cron_tick = NamedDataType::object(
     "cron.Tick",
     vec![TypeField { name: "fired_at".into(), ty: TypeExpr::Str, optional: false }],
@@ -235,12 +235,6 @@ resources.add_trigger_source_constructor(
     schedule_config_type(),
     cron_tick,
 )?;
-resources.add_trigger_source_constructor(
-    ["ui", "button", "pressed"],
-    TypeExpr::Object(vec![]),
-    button_pressed.clone(),
-)?;
-
 reg.triggers().declare(
     TriggerEvent::new("Button", "ui.button", "pressed", button_pressed),
 )?;

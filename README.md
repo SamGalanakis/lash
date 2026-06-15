@@ -16,7 +16,7 @@ Every completed turn lands as one semantic `RuntimeCommit` against a `SessionGra
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::EffectHost` is the host integration boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process admin, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross a scoped controller with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, and ref-only attachment specs. The default `InlineEffectHost` runs in process and reopens only the last committed state after a local crash. Workflow adapters create handler-scoped `ScopedEffectController`s for stable `ExecutionScope`s; Restate recovery reruns the handler with the same turn id, replays effects from Restate history, and lets Lash retry the final idempotent commit. Process handles and trigger routing are explicit persistence support: install deployment-level peers such as `lash-sqlite-store::SqliteProcessRegistry` / `SqliteTriggerStore` for local durable hosts or `lash-postgres-store::PostgresProcessRegistry` / `PostgresTriggerStore` for distributed hosts; otherwise process start/list/await/cancel/signal/transfer/session-delete fail loudly. Processes are self-contained runtime entities: a session-scoped `SessionProcessAdmin` starts and cancels the processes a session can see, the runtime-level `LashCore::processes()` handle addresses any process by id, and deleting a session reports orphaned processes without cancelling them. Optional process observation attaches through trace sinks such as `TraceLashlangGraphStore`.
+`lash-core::EffectHost` is the host integration boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process admin, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross a scoped controller with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, and ref-only attachment specs. The default `InlineEffectHost` runs in process and reopens only the last committed state after a local crash. Workflow adapters create handler-scoped `ScopedEffectController`s for stable `ExecutionScope`s; the first-party Restate adapter reruns the handler with the same turn id, replays effects from Restate history, and lets Lash retry the final idempotent commit. Other workflow hosts can implement the same boundary. Process handles and trigger routing are explicit persistence support: install deployment-level peers such as `lash-sqlite-store::SqliteProcessRegistry` / `SqliteTriggerStore` for local durable hosts, `lash-postgres-store::PostgresProcessRegistry` / `PostgresTriggerStore` for distributed hosts, or another implementation of the same store traits; otherwise process start/list/await/cancel/signal/transfer/session-delete fail loudly. Processes are self-contained runtime entities: a session-scoped `SessionProcessAdmin` starts and cancels the processes a session can see, the runtime-level `LashCore::processes()` handle addresses any process by id, and deleting a session reports orphaned processes without cancelling them. Optional process observation attaches through trace sinks such as `TraceLashlangGraphStore`.
 
 ### Two execution modes, one commit unit
 
@@ -42,14 +42,18 @@ Attach a `TraceSink` for structured turn, tool, LLM, prompt, stream, and usage r
 
 - `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output; no Lashlang dependency.
 - `lash-core` — async runtime internals, plugin host, protocol build input, providers, persistence, session graph, child-session orchestration, built-in tools, and Lashlang host-surface construction.
-- `lash-postgres-store` — shared durable Postgres runtime state for sessions, queued work, process registry rows, triggers, attachment manifests, and Lashlang artifacts.
+- `lash-sqlite-store` / `lash-postgres-store` — durable runtime state for sessions, queued work, process registry rows, triggers, attachment manifests, and Lashlang artifacts.
 - `lash-s3-store` — S3-compatible durable attachment bytes for AWS S3 and MinIO, using content-addressed object keys.
-- `lash-remote-protocol` — runtime-neutral canonical DTOs for wrapping Lash behind a service boundary: remote turn requests/results, LLM requests/responses, prompt patches, activity streams, and transport-neutral tool grants.
+- `lash-restate` — Restate effect-controller and process-workflow adapter for durable turns, timers, and background process execution.
+- `lash-remote-protocol` — runtime-neutral canonical DTOs for wrapping Lash behind a service boundary: remote turn requests/results, LLM requests/responses, prompt patches, activity streams, trigger occurrence/subscription envelopes, and transport-neutral tool grants.
 - `lash` — app-facing facade for runtime construction, sessions, turn streaming, provider / mode / plugin wiring, host integrations.
-- `lash-protocol-standard` / `lash-protocol-rlm` — protocol plugins.
-- `lash-standard-plugins`, `lash-subagents`, `lash-plugin-*`, `lash-provider-*` — first-party tool, plugin, and provider crates.
+- `lash-protocol-standard` / `lash-protocol-rlm` / `lash-rlm-types` — protocol plugins and shared RLM turn-output types.
+- `lash-trace` / `lash-trace-viewer` — structured trace records, JSONL sinks, Lashlang graph projections, optional OTel export, and a workspace-only HTML trace renderer.
+- `lash-llm-transport`, `lash-provider-auth`, `lash-provider-*` — provider transport, credential/OAuth helpers, and first-party provider integrations.
+- `lash-tools`, `lash-llm-tools`, `lash-tool-support`, `lash-standard-plugins`, `lash-subagents`, `lash-plugin-*` — first-party tool suites, plugin bundles, helper APIs, and subagent support.
 - `lashlang` — the RLM execution language: parser, VM, projection.
-- `lash-cli` — first-party terminal frontend on top of the library.
+- `lash-cli`, `lash-tui`, `lash-tui-extensions`, `lash-export`, `lash-file-index`, `lash-autoresearch` — terminal frontend and workspace-only app support crates.
+- `lash-perf`, `lash-harness-opt` — developer-only profiling, phase measurement, aggregation, and optimization harnesses.
 
 ## Embed it
 
@@ -190,7 +194,7 @@ just release-automation-test
 just restate-postgres-workers-e2e
 ```
 
-`just perf-guard` writes the combined report to `.benchmarks/perf-guard/local.json`. `just stack-budget` runs `scripts/ci-stack-budget.sh` with the default 2 MiB stack budget (`LASH_STACK_BUDGET_KB=2048`, `RUST_MIN_STACK=2097152`) and executes the stack-sensitive Lashlang, runtime, and subagent seeds. `just release-automation-test` pins release-version handling for lockstep vs private workspace crates and publisher retry classification. `just restate-postgres-workers-e2e` is the heavy Docker E2E for the distributed Restate/Postgres/MinIO stack: mock OpenAI-compatible provider, two workers behind the h2c proxy, shared Postgres/S3 state, failover, trigger occurrence delivery, live replay, and JSONL trace assertions.
+`just perf-guard` writes the combined report to `.benchmarks/perf-guard/local.json`. `just stack-budget` runs `scripts/ci-stack-budget.sh` with the default 2 MiB stack budget (`LASH_STACK_BUDGET_KB=2048`, `LASH_RUST_MIN_STACK_BUDGET=2097152`) and executes the stack-sensitive Lashlang, runtime, and subagent seeds. `just release-automation-test` pins release-version handling for lockstep vs private workspace crates and publisher retry classification. `just restate-postgres-workers-e2e` is the heavy Docker E2E for the distributed Restate/Postgres/MinIO stack: mock OpenAI-compatible provider, two workers behind the h2c proxy, shared Postgres/S3 state, failover, trigger occurrence delivery, live replay, and JSONL trace assertions.
 
 ## Contributing
 

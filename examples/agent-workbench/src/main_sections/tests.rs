@@ -932,7 +932,9 @@ mod tests {
             state
                 .messages_snapshot()
                 .iter()
-                .any(|message| message.role == "event" && message.text == "blue button event"),
+                .any(|message| {
+                    message.role == "event" && message.text == "blue button trigger occurrence"
+                }),
             "button click should publish the local accepted event"
         );
 

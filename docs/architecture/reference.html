@@ -45,7 +45,7 @@
         </article>
         <article class="panel">
           <h3><a href="https://docs.rs/lash-remote-protocol" target="_blank" rel="noopener">lash-remote-protocol <span aria-hidden="true">↗</span></a></h3>
-          <p>Versioned DTOs for exposing Lash behind service boundaries: <code>RemoteTurnRequest</code>, <code>RemoteTurnResult</code>, <code>RemoteLlmRequest</code>, <code>RemoteLlmResponse</code>, prompt layers, activity streams, remote tool grants, and optional <code>lash-core</code> conversions. See the <a href="../remote-protocol.html">remote protocol guide</a> for the contract.</p>
+          <p>Versioned DTOs for exposing Lash behind service boundaries: <code>RemoteTurnRequest</code>, <code>RemoteTurnResult</code>, <code>RemoteLlmRequest</code>, <code>RemoteLlmResponse</code>, prompt layers, activity streams, trigger occurrence/subscription envelopes, remote tool grants, and optional <code>lash-core</code> conversions. See the <a href="../remote-protocol.html">remote protocol guide</a> for the contract.</p>
         </article>
         <article class="panel">
           <h3><a href="https://docs.rs/lashlang" target="_blank" rel="noopener">lashlang <span aria-hidden="true">↗</span></a></h3>
@@ -64,7 +64,7 @@
         <li>Plugin crates: <code>lash-plugin-mcp</code>, <code>lash-plugin-process-controls</code>, <code>lash-plugin-tool-discovery</code>, <code>lash-plugin-observational-memory</code>, <code>lash-plugin-plan-mode</code>, and the <code>lash-standard-plugins</code> aggregator (which also bundles the rolling-history plugin).</li>
         <li>Tool crates: <code>lash-tools</code> (shell, files, search, web, apply-patch modules), shared scaffolding in <code>lash-tool-support</code> and <code>lash-llm-tools</code>.</li>
         <li>Mode crates: <code>lash-protocol-standard</code>, <code>lash-protocol-rlm</code>.</li>
-        <li>Persistence, tracing, durable execution, and remote DTOs: <code>lash-sqlite-store</code>, <code>lash-postgres-store</code>, <code>lash-s3-store</code>, <code>lash-restate</code>, <code>lash-trace</code>, <code>lash-trace-viewer</code>, <code>lash-export</code>, <code>lash-remote-protocol</code>.</li>
+        <li>Persistence, tracing, durable execution, profiling, and remote DTOs: <code>lash-sqlite-store</code>, <code>lash-postgres-store</code>, <code>lash-s3-store</code>, <code>lash-restate</code>, <code>lash-trace</code>, <code>lash-trace-viewer</code>, <code>lash-export</code>, <code>lash-perf</code>, <code>lash-remote-protocol</code>.</li>
         <li>Hosts: <code>lash-cli</code>, <code>lash-tui</code>, <code>lash-tui-extensions</code>.</li>
       </ul>
       <p>Every published crate has its own page on docs.rs at <code>https://docs.rs/&lt;crate-name&gt;</code>. The crates.io index is at <a href="https://crates.io/search?q=lash" target="_blank" rel="noopener">crates.io/search?q=lash <span aria-hidden="true">↗</span></a>.</p>

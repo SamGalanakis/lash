@@ -151,9 +151,7 @@ fn retry_after_ms(
     if matches!(retry_policy, ToolRetryPolicy::Never) {
         return None;
     }
-    let Some(output) = result.as_done_output() else {
-        return None;
-    };
+    let output = result.as_done_output()?;
     let ToolCallOutcome::Failure(failure) = &output.outcome else {
         return None;
     };

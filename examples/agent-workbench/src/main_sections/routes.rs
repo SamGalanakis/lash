@@ -94,7 +94,10 @@ async fn button_trigger(
         }),
     );
     let pressed_at = Utc::now().to_rfc3339();
-    state.push_message("event", format!("{} button event", request.button.lower()));
+    state.push_message(
+        "event",
+        format!("{} button trigger occurrence", request.button.lower()),
+    );
     restate::submit_button_trigger(
         &state,
         restate::WorkbenchButtonTriggerWorkflowRequest {

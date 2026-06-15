@@ -95,6 +95,7 @@ let core = LashCore::builder()
     .store(Arc::new(my_custom_persistence))
     .open()
     .await?;</code></pre>
+      <p>The examples use the first-party SQLite adapter because it is the smallest local durable setup. The runtime contract is <code>SessionStoreFactory</code> / <code>RuntimePersistence</code>; a host can provide another database-backed implementation when it preserves the same optimistic head commits, checkpoint/blob references, queued work, and idempotency semantics.</p>
       <p>Without <code>.store_factory(...)</code> or <code>.store(...)</code>, turns still succeed but state stays in memory. You still provide explicit in-memory effect, artifact, and attachment facets.</p>
     </div>
 

@@ -139,7 +139,7 @@ flowchart LR
             </article>
             <article class="panel">
               <h3>Long LLM turns</h3>
-              <p>A long turn holds or migrates a worker; durable execution (Restate) is the answer, at the cost of replay on recovery.</p>
+              <p>A long turn holds or migrates a worker; a durable effect host is the answer, at the cost of replay on recovery. Restate is the first-party adapter, not the only possible workflow runtime.</p>
             </article>
             <article class="panel">
               <h3>Not a blocker: tokio</h3>
@@ -158,19 +158,19 @@ flowchart LR
             <div class="mermaid">
 flowchart LR
   Sig["external signal<br/>button &middot; mail &middot; cron &middot; webhook"] --> Emit["router.emit<br/>record occurrence"]
-  Emit --> Match["reserve_matching_deliveries<br/>match by source_type"]
+  Emit --> Match["reserve_matching_deliveries<br/>match by source_type + source_key"]
   Match --> Deliver["idempotent effect delivery<br/>deterministic occurrence / delivery id"]
   Deliver --> Proc["start trigger process<br/>with stored registrant + env_ref"]
   Proc --> Wake["wake → target session input queue<br/>EarliestSafeBoundary"]
             </div>
           </div>
           <ul class="bullets">
-            <li><strong>A second store seam.</strong> Subscriptions, occurrences, and delivery reservations live behind a <code>TriggerStore</code> trait — parallel to <code>RuntimePersistence</code>. A distributed fleet uses <code>PostgresTriggerStore</code> for the same reason it uses Postgres-backed session persistence.</li>
-            <li><strong>The event carries no session; the subscription carries process edges.</strong> An emitted event is matched by <code>source_type</code> against registered subscriptions. Each subscription stores the registrant, captured execution environment, and optional wake target for the process it will start (a wake target also earns that session a handle grant at delivery). A single event fans out to 0..N subscribers, including subscriptions with no session edges. Session identity enters only through those optional edges — never through the event.</li>
-            <li><strong>Delivery is an idempotent effect.</strong> Each matched delivery runs through the effect controller with a deterministic id (<code>occurrence_id</code> from <code>source_type</code> + source key + idempotency key; delivery process id from <code>occurrence_id</code> + <code>subscription_id</code>). Delivery is <strong>exactly-once</strong> and replay-safe: any worker can run it, and a crash-and-replay under Restate cannot double-start a trigger process.</li>
+            <li><strong>A second store seam.</strong> Subscriptions, occurrences, and delivery reservations live behind a <code>TriggerStore</code> trait — parallel to <code>RuntimePersistence</code>. The first-party shared-worker implementation is <code>PostgresTriggerStore</code>; another fleet can use a different backend with the same matching and reservation semantics.</li>
+            <li><strong>The event carries no session; the subscription carries process edges.</strong> An emitted event is matched by <code>source_type</code> and <code>source_key</code> against registered subscriptions. Each subscription stores the registrant, captured execution environment, and optional wake target for the process it will start (a wake target also earns that session a handle grant at delivery). A single event fans out to 0..N subscribers, including subscriptions with no session edges. Session identity enters only through those optional edges — never through the event.</li>
+            <li><strong>Delivery is an idempotent effect.</strong> Each matched delivery runs through the effect controller with a deterministic id (<code>occurrence_id</code> from <code>source_type</code> + source key + idempotency key; delivery process id from <code>occurrence_id</code> + <code>subscription_id</code>). Delivery is <strong>exactly-once</strong> and replay-safe: any worker can run it, and replay under a durable effect host cannot double-start a trigger process.</li>
             <li><strong>Only a wake target is session-coupled.</strong> When a delivered process wakes an agent and has a live wake target, that wake lands on the target session's input queue at <code>EarliestSafeBoundary</code> — the sole point where session identity and turn-ordering apply.</li>
           </ul>
-          <p>Net for the fleet: route external signals to a runtime-level emit → match → idempotent effect-delivery → wake. Triggers reuse the existing CAS, claim, and replay machinery, and the Postgres-backed implementation is exercised by the distributed Restate/Postgres/MinIO E2E.</p>
+          <p>Net for the fleet: route external signals to a runtime-level emit → match → idempotent effect-delivery → wake. Triggers reuse the existing CAS, claim, and replay machinery; the Postgres-backed implementation is exercised by the distributed Restate/Postgres/MinIO E2E, but the contract is the <code>TriggerStore</code> and effect-host boundary.</p>
         </div>
   </main>
 

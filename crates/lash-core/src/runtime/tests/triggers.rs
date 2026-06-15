@@ -844,6 +844,79 @@ async fn trigger_occurrence_activates_matching_button_subscription_without_graph
 }
 
 #[tokio::test]
+async fn trigger_occurrence_starts_valid_deliveries_when_stale_matching_subscription_fails() {
+    let mut runtime = runtime_with_plugins_and_tools(
+        vec![Arc::new(ButtonTriggerFactory)],
+        Arc::new(EmptyTools),
+        mock_provider(Vec::new()),
+    )
+    .await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+
+    execute_trigger_registration(&mut runtime, button_trigger_test_source()).await;
+    let subscription = trigger_subscriptions(&runtime)
+        .await
+        .into_iter()
+        .next()
+        .expect("button subscription");
+    runtime
+        .host
+        .trigger_store
+        .as_ref()
+        .expect("trigger store")
+        .register_subscription(crate::TriggerSubscriptionDraft {
+            registrant: crate::ProcessOriginator::session(crate::SessionScope::new(
+                "stale-session",
+            )),
+            env_ref: subscription.env_ref.clone(),
+            wake_target: Some(crate::SessionScope::new("stale-session")),
+            name: Some("stale button watcher".to_string()),
+            source_type: subscription.source_type.clone(),
+            source_key: subscription.source_key.clone(),
+            source: subscription.source.clone(),
+            event_ty: subscription.event_ty.clone(),
+            module_ref: lashlang::ModuleRef::new(&lashlang::ContentHash::new("missing-module")),
+            host_requirements_ref: subscription.host_requirements_ref.clone(),
+            process_ref: subscription.process_ref.clone(),
+            process_name: subscription.process_name.clone(),
+            input_template: subscription.input_template.clone(),
+        })
+        .await
+        .expect("register stale subscription");
+
+    let report = emit_test_occurrence(
+        &runtime,
+        "ui.button.pressed",
+        subscription.source_key,
+        json!({
+            "button": "Blue",
+            "message": "user pressed the blue button",
+            "pressed_at": "2026-06-02T12:00:00Z"
+        }),
+        "button-blue-with-stale-subscriber",
+    )
+    .await;
+
+    assert_eq!(report.started_process_ids.len(), 1);
+    let record = registry
+        .get_process(&report.started_process_ids[0])
+        .await
+        .expect("valid delivery process");
+    let crate::ProcessInput::LashlangProcess { args, .. } = record.input.as_ref() else {
+        panic!("valid trigger delivery should start a lashlang process");
+    };
+    assert_eq!(
+        args.get("event").and_then(|event| event.get("button")),
+        Some(&json!("Blue"))
+    );
+}
+
+#[tokio::test]
 async fn trigger_occurrence_materializes_event_and_fixed_input_templates() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(TriggerRouteTestFactory)],

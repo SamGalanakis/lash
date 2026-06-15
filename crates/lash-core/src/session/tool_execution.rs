@@ -434,7 +434,7 @@ impl RuntimeExecutionContext<'_> {
             crate::RuntimeEffectKind::AwaitEvent,
             format!("{call_id}:await"),
         );
-        let cancellation = cancellation.unwrap_or_else(tokio_util::sync::CancellationToken::new);
+        let cancellation = cancellation.unwrap_or_default();
         let deadline = pending
             .pending
             .deadline

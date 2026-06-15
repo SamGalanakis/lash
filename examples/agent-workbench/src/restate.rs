@@ -633,9 +633,9 @@ async fn run_button_trigger(
         }),
     );
     state.push_message("event", "button trigger occurrence emitted");
-    // Host-event dispatch is the end of this client-initiated request. Emit a
-    // terminal Done so the UI clears its busy state even when no trigger
-    // matched (any process the event started streams its own turn separately).
+    // Trigger occurrence dispatch is the end of this client-initiated request.
+    // Emit a terminal Done so the UI clears its busy state even when no trigger
+    // matched (any process the occurrence started streams its own turn separately).
     state.publish(crate::StreamItem::Done);
     Ok(())
 }
@@ -678,9 +678,9 @@ async fn run_mail_received(
         }),
     );
     state.push_message("event", "mail received trigger occurrence queued");
-    // Host-event dispatch is the end of this client-initiated request. Emit a
-    // terminal Done so the UI clears its busy state even when no trigger
-    // matched (any process the event started streams its own turn separately).
+    // Trigger occurrence dispatch is the end of this client-initiated request.
+    // Emit a terminal Done so the UI clears its busy state even when no trigger
+    // matched (any process the occurrence started streams its own turn separately).
     state.publish(crate::StreamItem::Done);
     Ok(())
 }
@@ -751,6 +751,15 @@ async fn run_queued_turn(
         .await
         .map_err(AppError::internal)?
     else {
+        state.trace(
+            "queued_work.restate.empty",
+            json!({
+                "reason": request.reason,
+                "session_id": request.session_id,
+                "turn_id": request.turn_id,
+            }),
+        );
+        state.publish(crate::StreamItem::Done);
         return Ok(());
     };
     record_turn_output(&state, output, turn_state, "restate_queued_turn.completed");

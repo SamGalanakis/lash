@@ -16,7 +16,9 @@ scheduling sources: a source owner emits a trigger occurrence with a stored
 `source_key`, and every matched subscription starts a deterministic process run
 with the same lease-protected execution + recovery. This note records the design
 and principle; the *Implementation* section below maps it to the code that
-shipped.
+shipped. Restate references name the first-party adapter and the regression this
+design fixed; the boundary applies to any workflow host that supplies a scoped
+effect controller and durable timers.
 
 ## Problem (the asymmetry this resolved)
 
@@ -63,10 +65,12 @@ holding its `ProcessLease`.
 
 lash's thesis is that **the runtime is the durable end** for committed session
 state and process admin records, while the active effect host owns in-flight
-effect replay. Restate supplies durable handler history and timers for turn
-effects; SQLite supplies the committed session store and process registry.
-Process execution follows that split: **lash owns the process durability logic;
-the host supplies the backend.**
+effect replay. A durable workflow host supplies handler history and timers for
+turn effects; the configured store supplies committed session state and process
+registry rows. SQLite and Postgres are first-party store adapters, but the
+contract is the store trait, not a specific database. Process execution follows
+that split: **lash owns the process durability logic; the host supplies the
+backend.**
 
 ## What the OpenAI Agents SDK does — and why it is the wrong template
 

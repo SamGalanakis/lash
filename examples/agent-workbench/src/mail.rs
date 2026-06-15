@@ -14,9 +14,9 @@
 //! the point of the multi-account showcase.
 //!
 //! Accounts are added at runtime from the UI. The provider reads the live
-//! account set in [`MockMailProvider::definitions`], and the runtime rebuilds
-//! the tool catalog on the next opened turn, so newly added accounts appear as
-//! authorities without any explicit refresh.
+//! account set in [`MockMailProvider::definitions`], and route handlers enqueue
+//! a durable tool-catalog refresh so the next opened turn sees the updated
+//! `inbox.<slug>` authority set.
 
 use std::sync::{Arc, RwLock};
 

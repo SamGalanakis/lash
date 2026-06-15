@@ -184,14 +184,14 @@ impl DurableProcessWorker {
             });
         }
         let mut runtime = self.runtime_for_registration(&registration).await?;
-        let probe_scope = registration.wake_target.as_ref().or_else(|| {
-            if let crate::ProcessOriginator::Session { scope } = &registration.provenance.originator
-            {
-                Some(scope)
-            } else {
-                None
-            }
-        });
+        let originator_scope = if let crate::ProcessOriginator::Session { scope } =
+            &registration.provenance.originator
+        {
+            Some(scope)
+        } else {
+            None
+        };
+        let probe_scope = registration.wake_target.as_ref().or(originator_scope);
         if let Some(probe) =
             probe_scope.and_then(|scope| self.config.turn_phase_probe_slot.get_for_scope(scope))
         {

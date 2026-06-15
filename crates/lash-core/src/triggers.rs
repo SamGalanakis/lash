@@ -741,20 +741,34 @@ impl TriggerRouter {
             ));
         };
         let mut started_process_ids = Vec::new();
+        let mut start_errors = Vec::new();
         for reservation in reservations {
             let process_id = reservation.process_id.clone();
-            self.start_delivery(
-                &reservation,
-                Arc::clone(process_registry),
-                effect_controller,
-            )
-            .await?;
+            if let Err(err) = self
+                .start_delivery(
+                    &reservation,
+                    Arc::clone(process_registry),
+                    effect_controller,
+                )
+                .await
+            {
+                start_errors.push(format!(
+                    "{}: {err}",
+                    reservation.subscription.subscription_id
+                ));
+                continue;
+            }
             started_process_ids.push(process_id);
         }
         if !started_process_ids.is_empty()
             && let Some(poke) = self.process_work_poke.as_ref()
         {
             poke.poke();
+        }
+        if started_process_ids.is_empty()
+            && let Some(message) = trigger_delivery_failure_summary(&start_errors)
+        {
+            return Err(PluginError::Session(message));
         }
         Ok(TriggerEmitReport::new(
             occurrence.occurrence_id,
@@ -875,6 +889,18 @@ impl TriggerRouter {
                 other.kind().as_str()
             ))),
         }
+    }
+}
+
+fn trigger_delivery_failure_summary(errors: &[String]) -> Option<String> {
+    match errors {
+        [] => None,
+        [only] => Some(format!("trigger delivery failed: {only}")),
+        [first, rest @ ..] => Some(format!(
+            "trigger delivery failed for {} matching subscriptions: {first}; {} more failed",
+            errors.len(),
+            rest.len()
+        )),
     }
 }
 
@@ -1015,5 +1041,48 @@ mod tests {
             .expect_err("duplicate public source identity should be rejected");
 
         assert!(err.contains("duplicate trigger source `ui.button.pressed`"));
+    }
+
+    #[test]
+    fn trigger_subscription_record_rejects_legacy_required_surface_ref() {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+        let record = TriggerSubscriptionRecord {
+            subscription_id: "subscription:1".to_string(),
+            registrant: crate::ProcessOriginator::session(crate::SessionScope::new("session-a")),
+            env_ref: crate::ProcessExecutionEnvRef::new("process-env:session-a"),
+            wake_target: Some(crate::SessionScope::new("session-a")),
+            handle: "trigger:1".to_string(),
+            name: Some("button watcher".to_string()),
+            source_type: "ui.button.pressed".to_string(),
+            source_key: empty_trigger_source_key("ui.button.pressed").expect("source key"),
+            source: serde_json::json!({}),
+            event_ty: lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                name: "button".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            }]),
+            module_ref: lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
+            host_requirements_ref: lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new(
+                "surface",
+            )),
+            process_ref: lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 0),
+            process_name: "on_button".to_string(),
+            input_template: lashlang::TriggerInputTemplate::new(inputs),
+            enabled: true,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let mut value = serde_json::to_value(record).expect("record json");
+        let object = value.as_object_mut().expect("record object");
+        let legacy_ref = object
+            .remove("host_requirements_ref")
+            .expect("host requirements ref");
+        object.insert("required_surface_ref".to_string(), legacy_ref);
+
+        let err = serde_json::from_value::<TriggerSubscriptionRecord>(value)
+            .expect_err("legacy record must be malformed");
+
+        assert!(err.to_string().contains("host_requirements_ref"));
     }
 }

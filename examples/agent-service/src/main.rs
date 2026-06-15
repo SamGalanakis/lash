@@ -41,6 +41,8 @@ use lash_restate::{LashProcessWorkflow, RestateEffectHost, RestateProcessDeploym
 
 #[tokio::main]
 async fn main() -> anyhow_like::Result<()> {
+    let _ = dotenvy::dotenv();
+
     let durability = AgentServiceDurability::configured()?;
     let api_key = std::env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY is required".to_string())?;

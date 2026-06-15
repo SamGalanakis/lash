@@ -112,6 +112,34 @@ fn trigger_subscription_draft(
     }
 }
 
+fn rewrite_sqlite_subscription_to_required_surface_ref(path: &Path, subscription_id: &str) {
+    let conn = rusqlite::Connection::open(path).expect("open raw trigger db");
+    let record_json: String = conn
+        .query_row(
+            "SELECT record_json FROM trigger_subscriptions WHERE subscription_id = ?1",
+            rusqlite::params![subscription_id],
+            |row| row.get(0),
+        )
+        .expect("subscription record json");
+    let mut legacy_value: serde_json::Value =
+        serde_json::from_str(&record_json).expect("subscription json value");
+    let legacy_object = legacy_value
+        .as_object_mut()
+        .expect("subscription json object");
+    let host_requirements_ref = legacy_object
+        .remove("host_requirements_ref")
+        .expect("host requirements ref");
+    legacy_object.insert("required_surface_ref".to_string(), host_requirements_ref);
+    conn.execute(
+        "UPDATE trigger_subscriptions SET record_json = ?2 WHERE subscription_id = ?1",
+        rusqlite::params![
+            subscription_id,
+            serde_json::to_string(&legacy_value).expect("legacy json text"),
+        ],
+    )
+    .expect("rewrite legacy trigger row");
+}
+
 fn exec_envelope(replay_key: &str, code: &str) -> RuntimeEffectEnvelope {
     RuntimeEffectEnvelope::new(
         RuntimeInvocation::effect(
@@ -254,6 +282,171 @@ async fn sqlite_trigger_store_persists_subscriptions_and_reserves_idempotently_a
         .await
         .expect("reserve duplicate delivery");
     assert!(duplicate.is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_trigger_store_skips_legacy_required_surface_ref_subscription() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("triggers.db");
+    let source_key = lash_core::empty_trigger_source_key("ui.button.pressed").expect("source key");
+
+    let (legacy, current) = {
+        let store = SqliteTriggerStore::open(&path)
+            .await
+            .expect("open trigger store");
+        let legacy = store
+            .register_subscription(trigger_subscription_draft(
+                "legacy-session",
+                &source_key,
+                "legacy_button",
+            ))
+            .await
+            .expect("register legacy");
+        let current = store
+            .register_subscription(trigger_subscription_draft(
+                "current-session",
+                &source_key,
+                "current_button",
+            ))
+            .await
+            .expect("register current");
+        (legacy, current)
+    };
+
+    rewrite_sqlite_subscription_to_required_surface_ref(&path, &legacy.subscription_id);
+
+    let reopened = SqliteTriggerStore::open(&path)
+        .await
+        .expect("reopen trigger store");
+    let mut source_filter = TriggerSubscriptionFilter::for_source_type("ui.button.pressed");
+    source_filter.source_key = Some(source_key.clone());
+    source_filter.enabled = Some(true);
+    let listed = reopened
+        .list_subscriptions(source_filter)
+        .await
+        .expect("list subscriptions");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].handle, current.handle);
+
+    let occurrence = reopened
+        .record_occurrence(TriggerOccurrenceRequest::new(
+            "ui.button.pressed",
+            source_key.clone(),
+            serde_json::json!({ "button": "Blue" }),
+            "button-blue-legacy-row",
+        ))
+        .await
+        .expect("record occurrence");
+    let deliveries = reopened
+        .reserve_matching_deliveries(&occurrence.occurrence_id)
+        .await
+        .expect("reserve deliveries");
+    let handles = deliveries
+        .iter()
+        .map(|delivery| delivery.subscription.handle.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(deliveries.len(), 1);
+    assert!(handles.contains(&current.handle.as_str()));
+
+    assert!(
+        reopened
+            .cancel_subscription("legacy-session", &legacy.handle)
+            .await
+            .expect("cancel legacy row")
+    );
+    let conn = rusqlite::Connection::open(&path).expect("open raw trigger db");
+    let (enabled, record_json): (i64, String) = conn
+        .query_row(
+            "SELECT enabled, record_json FROM trigger_subscriptions WHERE subscription_id = ?1",
+            rusqlite::params![legacy.subscription_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("legacy row after cancel");
+    assert_eq!(enabled, 0);
+    assert!(record_json.contains("required_surface_ref"));
+    assert!(!record_json.contains("host_requirements_ref"));
+    drop(conn);
+
+    assert_eq!(
+        reopened
+            .delete_session_subscriptions("legacy-session")
+            .await
+            .expect("delete legacy session rows"),
+        1
+    );
+    let conn = rusqlite::Connection::open(&path).expect("open raw trigger db");
+    let legacy_rows = raw_count(
+        &conn,
+        "SELECT COUNT(*) FROM trigger_subscriptions WHERE subscription_id = ?1",
+        legacy.subscription_id.as_str(),
+    );
+    assert_eq!(legacy_rows, 0);
+
+    let canonical_rows = raw_count(
+        &conn,
+        "SELECT COUNT(*) FROM trigger_subscriptions WHERE subscription_id = ?1",
+        current.subscription_id.as_str(),
+    );
+    assert_eq!(canonical_rows, 1);
+}
+
+#[tokio::test]
+async fn sqlite_trigger_store_skips_malformed_matching_subscription_during_reservation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("triggers.db");
+    let source_key = lash_core::empty_trigger_source_key("ui.button.pressed").expect("source key");
+
+    let (malformed, current) = {
+        let store = SqliteTriggerStore::open(&path)
+            .await
+            .expect("open trigger store");
+        let malformed = store
+            .register_subscription(trigger_subscription_draft(
+                "malformed-session",
+                &source_key,
+                "malformed_button",
+            ))
+            .await
+            .expect("register malformed");
+        let current = store
+            .register_subscription(trigger_subscription_draft(
+                "current-session",
+                &source_key,
+                "current_button",
+            ))
+            .await
+            .expect("register current");
+        (malformed, current)
+    };
+
+    let conn = rusqlite::Connection::open(&path).expect("open raw trigger db");
+    conn.execute(
+        "UPDATE trigger_subscriptions SET record_json = ?2 WHERE subscription_id = ?1",
+        rusqlite::params![malformed.subscription_id.as_str(), "{not valid json"],
+    )
+    .expect("poison trigger row");
+    drop(conn);
+
+    let reopened = SqliteTriggerStore::open(&path)
+        .await
+        .expect("reopen trigger store");
+    let occurrence = reopened
+        .record_occurrence(TriggerOccurrenceRequest::new(
+            "ui.button.pressed",
+            source_key,
+            serde_json::json!({ "button": "Blue" }),
+            "button-blue-malformed-row",
+        ))
+        .await
+        .expect("record occurrence");
+    let deliveries = reopened
+        .reserve_matching_deliveries(&occurrence.occurrence_id)
+        .await
+        .expect("reserve deliveries");
+
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].subscription.handle, current.handle);
 }
 
 #[tokio::test]

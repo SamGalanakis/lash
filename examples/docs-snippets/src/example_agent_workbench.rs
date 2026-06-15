@@ -3,21 +3,64 @@
 use lash::plugins::{PluginError, PluginRegistrar};
 use lash::triggers::TriggerEvent;
 
+// docs:start:workbench-resources
+fn field(name: &str, ty: lashlang::TypeExpr) -> lashlang::TypeField {
+    lashlang::TypeField {
+        name: name.into(),
+        ty,
+        optional: false,
+    }
+}
+
 fn schedule_config_type() -> lashlang::TypeExpr {
-    lashlang::TypeExpr::Object(vec![])
+    lashlang::TypeExpr::Object(vec![
+        field("expr", lashlang::TypeExpr::Str),
+        lashlang::TypeField {
+            name: "tz".into(),
+            ty: lashlang::TypeExpr::Str,
+            optional: true,
+        },
+    ])
 }
 
 fn cron_tick_event_type() -> lashlang::NamedDataType {
-    lashlang::NamedDataType::new("cron.Tick", lashlang::TypeExpr::Object(vec![]))
-        .expect("valid event type")
+    lashlang::NamedDataType::object(
+        "cron.Tick",
+        vec![field("fired_at", lashlang::TypeExpr::Str)],
+    )
+    .expect("valid cron tick type")
 }
 
 fn button_trigger_event_type() -> lashlang::NamedDataType {
-    lashlang::NamedDataType::new("ui.button.Pressed", lashlang::TypeExpr::Object(vec![]))
-        .expect("valid event type")
+    lashlang::NamedDataType::object(
+        "ui.button.Pressed",
+        vec![
+            field(
+                "button",
+                lashlang::TypeExpr::Union(vec![
+                    lashlang::TypeExpr::Enum(vec!["Red".into()]),
+                    lashlang::TypeExpr::Enum(vec!["Blue".into()]),
+                ]),
+            ),
+            field("message", lashlang::TypeExpr::Str),
+            field("pressed_at", lashlang::TypeExpr::Str),
+        ],
+    )
+    .expect("valid button trigger event type")
 }
 
-// docs:start:workbench-resources
+fn mail_received_event_type() -> lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "mail.Received",
+        vec![
+            field("account", lashlang::TypeExpr::Str),
+            field("title", lashlang::TypeExpr::Str),
+            field("text", lashlang::TypeExpr::Str),
+        ],
+    )
+    .expect("valid mail received event type")
+}
+
 fn workbench_lashlang_resources() -> lashlang::LashlangHostCatalog {
     let mut resources = lashlang::LashlangHostCatalog::new();
     resources
@@ -29,11 +72,11 @@ fn workbench_lashlang_resources() -> lashlang::LashlangHostCatalog {
         .expect("valid cron trigger source");
     resources
         .add_trigger_source_constructor(
-            ["ui", "button", "pressed"],
+            ["mail", "received"],
             lashlang::TypeExpr::Object(vec![]),
-            button_trigger_event_type(),
+            mail_received_event_type(),
         )
-        .expect("valid button trigger source");
+        .expect("valid mail trigger source");
     resources
 }
 

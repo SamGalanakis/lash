@@ -35,10 +35,10 @@
             <div class="diagram-title">Declare → emit → match → deliver → wake</div>
             <div class="mermaid">
 flowchart TB
-  Decl["Host declares: TriggerEventCatalog<br/>+ trigger-source constructors (cron.Schedule, ui.button.pressed)"]
-  Reg["triggers.register(source, target process, inputs)<br/>durable subscription, keyed by source_type"]
+  Decl["Host declares: TriggerEventCatalog<br/>+ configured source constructors (cron.Schedule)"]
+  Reg["triggers.register(source, target process, inputs)<br/>durable subscription, keyed by source_type + source_key"]
   Emit["source owner emits occurrence<br/>TriggerStore.record_occurrence (session-agnostic)"]
-  Match["reserve_matching_deliveries<br/>match by source_type"]
+  Match["reserve_matching_deliveries<br/>match by source_type + source_key"]
   Start["start target process (idempotent effect)<br/>with stored registrant + env_ref"]
   Wake["process wake → session input queue<br/>EarliestSafeBoundary"]
   Turn["turn runs → commit to session graph"]
@@ -56,8 +56,8 @@ flowchart TB
           </div>
           <ul class="bullets">
             <li><strong>Catalog.</strong> <code>TriggerEventCatalog</code> holds typed <code>TriggerEvent</code> declarations (<code>resource_type</code>, <code>alias</code>, <code>event</code>, and a named payload type). Identity is the <code>source_type</code> = <code>alias.event</code>; duplicate source types are rejected. Emitted payloads are validated against the declared type.</li>
-            <li><strong>Sources.</strong> A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata that the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Declarative <code>trigger</code> syntax does not exist; programs pass a source value plus a process definition and explicit <code>inputs</code> to <code>triggers.register</code> / <code>triggers.list</code> / <code>triggers.cancel</code>.</li>
-            <li><strong>Subscriptions.</strong> <code>triggers.register</code> writes a durable subscription into the runtime trigger store, keyed by <code>source_type</code>. Each subscription carries a registrant (<code>Host</code> or <code>Session</code>), a captured execution environment reference (<code>env_ref</code>), an optional wake target, the target process refs (module / host requirements / process), and an input template — <code>trigger.event</code> is the whole-event placeholder. Subscription handles are unique per registrant scope (<code>registrant_scope_id</code>), and session-side listing and cancellation filter by the registrant session. Deleting a session deletes that session's subscriptions; host-registered subscriptions are untouched. Session identity is optional metadata on those edges, not the substrate of trigger matching.</li>
+            <li><strong>Sources.</strong> A host exposes configured pure source constructors such as <code>cron.Schedule(...)</code>; zero-config sources such as <code>ui.button.pressed({})</code> are derived from declared <code>TriggerEvent</code>s. In both cases the session catalog records protocol metadata that the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Declarative <code>trigger</code> syntax does not exist; programs pass a source value plus a process definition and explicit <code>inputs</code> to <code>triggers.register</code> / <code>triggers.list</code> / <code>triggers.cancel</code>.</li>
+            <li><strong>Subscriptions.</strong> <code>triggers.register</code> writes a durable subscription into the runtime trigger store, keyed for matching by <code>source_type</code> and <code>source_key</code>. Each subscription carries a registrant (<code>Host</code> or <code>Session</code>), a captured execution environment reference (<code>env_ref</code>), an optional wake target, the target process refs (module / host requirements / process), and an input template — <code>trigger.event</code> is the whole-event placeholder. Subscription handles are unique per registrant scope (<code>registrant_scope_id</code>), and session-side listing and cancellation filter by the registrant session. Deleting a session deletes that session's subscriptions; host-registered subscriptions are untouched. Session identity is optional metadata on those edges, not the substrate of trigger matching.</li>
           </ul>
         </div>
 
@@ -70,8 +70,8 @@ flowchart TB
             <table>
               <thead><tr><th>Step</th><th>What happens</th></tr></thead>
               <tbody>
-                <tr><td><strong>record</strong></td><td><code>TriggerStore::record_occurrence</code> stores the occurrence with a deterministic id derived from <code>source_type</code> + source key + idempotency key. The occurrence is session-agnostic.</td></tr>
-                <tr><td><strong>match</strong></td><td><code>reserve_matching_deliveries</code> looks up subscriptions by <code>source_type</code> and reserves one delivery per match. A single occurrence may fan out to 0..N subscribers, including host-registered subscriptions with no session edges.</td></tr>
+                <tr><td><strong>record</strong></td><td><code>TriggerStore::record_occurrence</code> stores the occurrence with a deterministic id derived from <code>source_type</code>, <code>source_key</code>, and idempotency key. The occurrence is session-agnostic.</td></tr>
+                <tr><td><strong>match</strong></td><td><code>reserve_matching_deliveries</code> looks up subscriptions by the occurrence's <code>source_type</code> and <code>source_key</code>, then reserves one delivery per match. A single occurrence may fan out to 0..N subscribers, including host-registered subscriptions with no session edges.</td></tr>
                 <tr><td><strong>deliver</strong></td><td>Each reservation starts the subscription's target process through the effect controller with the subscription's registrant as provenance, its captured <code>env_ref</code>, and its wake target; a wake target also earns that session a handle grant on the started process. The delivery process id is deterministic (<code>occurrence_id</code> + <code>subscription_id</code>). Delivery is therefore <strong>idempotent / exactly-once</strong> and replay-safe; the started process carries <code>CausalRef::TriggerOccurrence</code> so causality is referenced, not copied.</td></tr>
               </tbody>
             </table>
@@ -92,7 +92,7 @@ flowchart TB
             <h2>The Store Is A Backend Seam</h2>
             <p>Subscriptions, occurrences, and delivery reservations live behind a <code>TriggerStore</code> trait — parallel to <code>RuntimePersistence</code>, and separate from it.</p>
           </div>
-          <p>The default implementation is in-memory. Because matching and delivery must reach whichever worker holds the target session, a distributed deployment supplies <code>PostgresTriggerStore</code> (the same way it supplies Postgres-backed <code>RuntimePersistence</code>). The distributed Restate/Postgres/MinIO E2E covers registration, occurrence delivery, trigger process execution, and replay-safe failover. The trigger store is durable intent for delivery, not conversation history — durable session state remains in <code>RuntimePersistence</code>.</p>
+          <p>The default implementation is in-memory. Local durable hosts can use the first-party <code>SqliteTriggerStore</code>; shared-worker deployments can use <code>PostgresTriggerStore</code>; hosts can also provide another <code>TriggerStore</code> implementation when it preserves occurrence idempotency, matching, reservation, and delivery semantics. The distributed Restate/Postgres/MinIO E2E is one exercised deployment, not the interface contract. The trigger store is durable intent for delivery, not conversation history — durable session state remains in <code>RuntimePersistence</code>.</p>
         </div>
 
         <div class="section">
@@ -100,7 +100,7 @@ flowchart TB
             <h2>Timers And Cron</h2>
             <p>Timers and recurring jobs are host-owned source policies, not Lashlang syntax and not queued work.</p>
           </div>
-          <p>A source owner keeps its own schedules and, when a schedule fires, emits a declared trigger occurrence with a stored source key. From there it is an ordinary occurrence: matched by <code>source_type</code> and delivered to subscribed processes through the same durable worker path. A cron firing is thus the same shape as a button press — there is no separate by-handle activation path.</p>
+          <p>A source owner keeps its own schedules and, when a schedule fires, emits a declared trigger occurrence with a stored source key. From there it is an ordinary occurrence: matched by <code>source_type</code> plus <code>source_key</code> and delivered to subscribed processes through the same durable worker path. A cron firing is thus the same shape as a button press — there is no separate by-handle activation path.</p>
         </div>
   </main>
 

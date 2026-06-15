@@ -76,7 +76,7 @@ pub mod observe {
     };
 }
 
-/// Triggers and triggers: declaring event sources, emitting occurrences,
+/// Triggers and subscriptions: declaring event sources, emitting occurrences,
 /// and inspecting trigger subscriptions. Entry points:
 /// [`LashCore::triggers`] and [`LashSession::triggers`].
 pub mod triggers {

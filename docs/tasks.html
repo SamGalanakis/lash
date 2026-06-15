@@ -78,7 +78,7 @@
       <div class="listing__row">
         <div class="listing__label">add a tool</div>
         <div class="listing__body">
-          <p>Implement <code>ToolProvider</code> or use <code>StaticToolProvider</code>; advertise cheap manifests, resolve full contracts, and execute work in <code>execute()</code>. Register the provider through a plugin or core tool catalog. See <a href="./plugins.html#worked-example">Plugin basics</a> and <a href="./plugins-tools.html">Tool plugins</a>.</p>
+          <p>Implement <code>ToolProvider</code> or use <code>StaticToolProvider</code>; advertise cheap manifests, resolve full contracts, and execute work in <code>execute()</code>. Install the provider through <code>LashCoreBuilder::tools(...)</code>, a plugin registration, or the session/core <code>ToolAdmin</code> when availability needs to change at runtime. See <a href="./plugins.html#worked-example">Plugin basics</a> and <a href="./plugins-tools.html">Tool plugins</a>.</p>
         </div>
       </div>
       <div class="listing__row">

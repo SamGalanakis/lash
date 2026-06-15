@@ -71,12 +71,13 @@ async fn execute_code_inner(
     projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> ExecResponse {
     state.dirty = true;
-    let cached_program = match {
+    let compile_result = {
         let _phase = ctx.named_phase("rlm_lashlang.compile_link");
         state
             .linked_programs
             .get_or_compile(code, ctx.lashlang_host_environment())
-    } {
+    };
+    let cached_program = match compile_result {
         Ok(program) => program,
         Err(lashlang::LinkedProgramCacheError::Parse(err)) => {
             return ExecResponse {

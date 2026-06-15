@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">plugin<span class="slash">/</span>tools</h1>
-    <p class="opener__lede">The <code>ToolCall&lt;'_&gt;</code> shape, <code>ToolContext</code> capabilities, parallel vs serial execution, and tool-output budgeting.</p>
+    <p class="opener__lede">The <code>ToolCall&lt;'_&gt;</code> shape, <code>ToolContext</code> capabilities, parallel vs serial execution, active vs deferred completion, and tool-output budgeting.</p>
   </section>
 
   <main class="body" id="content">
@@ -95,6 +95,31 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
           <p><code>ToolContext</code> exposes no public <code>host()</code> escape hatch. Runtime host wiring stays inside <code>lash-core</code>; plugin-facing code uses explicit context capabilities. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
         </div>
 
+        <div class="section" id="tool-registry-state">
+          <div class="section-header">
+            <h2>Tool Registry State</h2>
+            <p>The model sees a projected <code>ToolCatalog</code>, but the runtime owns a richer <code>ToolRegistry</code>: live tool sources, per-tool availability, source identity, and a serializable <code>ToolState</code> snapshot.</p>
+          </div>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">sources</div>
+              <div class="listing__body"><p>Static providers, plugin registrations, MCP providers, and host-added providers enter as registry sources. A source handle lets the host replace or remove one advertised surface without rebuilding the session.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">projection</div>
+              <div class="listing__body"><p><code>ToolRegistry</code> resolves manifests and execution providers; <code>ToolCatalog</code> is the model-facing projection used by provider requests, discovery tools, and Lashlang host surfaces. Availability changes advance the registry generation and refresh the session catalog.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">apply vs restore</div>
+              <div class="listing__body"><p><code>apply_state</code> is a generation-checked edit for a live registry. <code>restore_state</code> adopts a persisted generation during cold resume or worker rebuild; missing sources remain visible as orphaned, forced-Off tools until a matching source returns.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">admin API</div>
+              <div class="listing__body"><p>App hosts normally use <code>LashCoreBuilder::tools(...)</code>, plugin registration, or <code>LashSession::tools()</code> / <code>LashSession::admin().tools()</code>. The advanced admin exposes raw <code>ToolState</code> only for hosts that need to persist, migrate, or inspect the full registry surface.</p></div>
+            </div>
+          </div>
+        </div>
+
         <div class="section" id="tool-execution-modes">
           <div class="section-header">
             <h2>Tool Execution Modes</h2>
@@ -120,6 +145,38 @@ ToolDefinition::raw_named(
 )
 .with_scheduling(ToolScheduling::Serial)</code></pre>
           <p>Mixing parallel and serial tools in one batch is supported and common: a read-heavy plan emitting five <code>read_file</code> calls plus one <code>write_file</code> gets the reads concurrently and the write afterward. There is no model-visible distinction — the model sees the same JSON tool list regardless of dispatch mode.</p>
+        </div>
+
+        <div class="section" id="tool-completion-modes">
+          <div class="section-header">
+            <h2>Active vs. Deferred Completion</h2>
+            <p>A tool's <code>execute()</code> returns a <code>ToolResult</code>, and the variant it returns chooses how the call completes. Most tools finish inline; a tool that waits on out-of-band work parks the call and lets an external resolver deliver the result later.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>ToolResult::Done</code> (active await)</h3>
+              <p>The result is available inline and the runtime finalizes the call immediately. Build it with <code>ToolResult::ok</code>, <code>ToolResult::err</code>, <code>ToolResult::failure</code>, and friends. Every example above returns <code>Done</code>.</p>
+            </article>
+            <article class="panel">
+              <h3><code>ToolResult::Pending</code> (deferred completion)</h3>
+              <p>The tool has launched out-of-band work — a webhook, a human approval, another service — and the real outcome is delivered later against a completion key. The runtime parks the call on a durable wait and resumes it when the key resolves.</p>
+            </article>
+          </div>
+          <p>Deferred completion has one hard rule: <strong>before returning <code>ToolResult::Pending</code>, the tool must first obtain a completion key</strong> by calling <code>call.context.completion_key().await</code>. That key names the durable wait and is what the external resolver later uses to deliver the result. Returning <code>Pending</code> without having taken a key fails the call with the internal error <code>pending_tool_missing_completion_key</code>.</p>
+          <pre data-lang="rust" data-snippet="plugins_tools#detached-tool"><code>use lash::tools::PendingCompletion;
+
+// Take the completion key BEFORE returning Pending, then hand it to whatever
+// will deliver the result out-of-band — a webhook, a job queue, a human.
+let key = match call.context.completion_key().await {
+    Ok(key) =&gt; key,
+    Err(err) =&gt; return ToolResult::err_fmt(format_args!("{err}")),
+};
+enqueue_external_work(key);
+
+// Returning Pending without first taking the key fails the call with
+// `pending_tool_missing_completion_key`.
+ToolResult::pending(PendingCompletion::new())</code></pre>
+          <p><code>PendingCompletion</code> configures the wait: an optional <code>deadline</code>, an <code>on_timeout</code> behavior (<code>ErrorAsResult</code> feeds a timeout result back to the model; <code>FailTurn</code> fails the whole turn), and an <code>on_cancel</code> hint (<code>CancelExternalWork</code> by default, or <code>Ignore</code> to leave the out-of-band work running). Adjust it with <code>PendingCompletion::new().with_deadline(..)</code> and <code>.fail_turn_on_timeout()</code>. Remote tools express the same outcome over the wire — see the <a href="./remote-protocol.html">Lash API · remote protocol</a> guide.</p>
         </div>
 
         <div class="section" id="tool-output-budget">

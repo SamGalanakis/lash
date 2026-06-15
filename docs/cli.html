@@ -61,7 +61,7 @@
                 <tr><td><code>/provider</code></td><td><code>/login</code></td><td><code>/provider</code></td><td>Switch, add, or re-authenticate providers</td></tr>
                 <tr><td><code>/logout</code></td><td>—</td><td><code>/logout</code></td><td>Remove stored credentials for active provider</td></tr>
                 <tr><td><code>/retry</code></td><td>—</td><td><code>/retry</code></td><td>Replay the previous turn payload</td></tr>
-                <tr><td><code>/resume</code></td><td><code>/continue</code></td><td><code>/resume [name]</code></td><td>Browse or load a previous session (interactive picker if no arg)</td></tr>
+                <tr><td><code>/resume</code></td><td><code>/continue</code></td><td><code>/resume [id-or-name]</code></td><td>Search sessions or resume by id/name (interactive picker if no arg)</td></tr>
                 <tr><td><code>/skills</code></td><td>—</td><td><code>/skills</code></td><td>Browse loaded skills</td></tr>
                 <tr><td><code>/help</code></td><td><code>/?</code></td><td><code>/help</code></td><td>Open the commands and shortcuts overlay</td></tr>
                 <tr><td><code>/exit</code></td><td><code>/quit</code></td><td><code>/exit</code></td><td>Quit</td></tr>
@@ -168,6 +168,20 @@
                 <dt><code>--debug</code></dt><dd>Detailed lifecycle/debug logs plus per-session LLM traces.</dd>
                 <dt><code>--trace-level &lt;standard|extended&gt;</code></dt><dd>Trace detail. Default <code>standard</code>.</dd>
                 <dt><code>--debug-ui-trace trace.json</code></dt><dd>Record the live TUI session as a replayable UI trace plus a final snapshot.</dd>
+                <dt><code>--debug-ui-trace-interval-ms &lt;ms&gt;</code></dt><dd>When recording a UI trace, also capture numbered checkpoint snapshots at the given interval.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Observational memory</h3>
+              <dl class="def-list">
+                <dt><code>--om-observation-message-tokens &lt;tokens&gt;</code></dt><dd>Observe recent raw history after this many new message tokens.</dd>
+                <dt><code>--om-observation-buffer-tokens &lt;tokens&gt;</code></dt><dd>Keep this much message-token slack before observation pressure starts.</dd>
+                <dt><code>--om-observation-block-after-tokens &lt;tokens&gt;</code></dt><dd>Block new turns once unobserved message tokens pass this threshold.</dd>
+                <dt><code>--om-observation-max-tokens-per-batch &lt;tokens&gt;</code></dt><dd>Cap the raw-history slice sent to one observer pass.</dd>
+                <dt><code>--om-previous-observer-tokens &lt;tokens&gt;</code></dt><dd>Budget previous observer notes included in a fresh observation pass.</dd>
+                <dt><code>--om-reflection-observation-tokens &lt;tokens&gt;</code></dt><dd>Target observation-token volume before reflection becomes useful.</dd>
+                <dt><code>--om-reflection-buffer-activation-percent &lt;percent&gt;</code></dt><dd>Start reflection when the reflection buffer reaches this percentage.</dd>
+                <dt><code>--om-reflection-block-after-tokens &lt;tokens&gt;</code></dt><dd>Block new turns once pending reflection material passes this threshold.</dd>
               </dl>
             </article>
             <article class="panel">
@@ -253,12 +267,16 @@ $ lash --print "Investigate the latest test failure." \
               <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
               <tbody>
                 <tr><td><code>LASH_HOME</code></td><td>Override the root data directory (defaults to <code>~/.lash/</code>).</td></tr>
+                <tr><td><code>OPENAI_API_KEY</code> / <code>OPENAI_COMPATIBLE_API_KEY</code></td><td>Provider API keys used during setup or one-shot sessions when no stored key is configured.</td></tr>
                 <tr><td><code>TAVILY_API_KEY</code></td><td>Tavily API key for the bundled web search tool. Alternative to <code>--tavily-api-key</code> and the config file.</td></tr>
+                <tr><td><code>LASH_GOOGLE_CLIENT_ID</code> / <code>LASH_GOOGLE_CLIENT_SECRET</code></td><td>Override the OAuth client credentials used by the Google / Code Assist provider.</td></tr>
+                <tr><td><code>CODE_ASSIST_ENDPOINT</code> / <code>CODE_ASSIST_API_VERSION</code></td><td>Override the Google Code Assist API endpoint and version for provider integration testing.</td></tr>
                 <tr><td><code>LASH_COPY_BINDING</code></td><td>Override the copy keystroke: <code>ctrl-shift-c</code> (default) or <code>ctrl-y</code>. <code>Ctrl+C</code> stays reserved for cancel semantics, so <code>ctrl-c</code> falls back to the default.</td></tr>
                 <tr><td><code>LASH_LOG</code></td><td><code>tracing-subscriber</code> log filter (e.g. <code>debug</code>, <code>warn</code>, <code>lash=trace</code>).</td></tr>
                 <tr><td><code>LASH_NO_OSC52</code></td><td>Disable OSC 52 clipboard escape sequences.</td></tr>
                 <tr><td><code>LASH_INSTALL_DIR</code></td><td>Override the install dir used by <code>--update</code>.</td></tr>
                 <tr><td><code>LASH_REPO</code></td><td>Override the GitHub repo used by <code>--check-update</code> / <code>--update</code>.</td></tr>
+                <tr><td><code>LASH_TOKIO_STACK_BYTES</code></td><td>Override the worker-thread stack size used by the CLI Tokio runtime.</td></tr>
                 <tr><td><code>GOOGLE_CLOUD_PROJECT[_ID]</code></td><td>Google Cloud project ID for the Gemini / Code Assist provider.</td></tr>
               </tbody>
             </table>

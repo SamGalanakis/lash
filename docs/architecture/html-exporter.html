@@ -177,7 +177,7 @@
             </li>
             <li>
               <h3>View topology</h3>
-              <p>A <strong>view</strong> is one persisted session: the root or a spawned subagent. <code>html::write_view</code> writes one <code>&lt;section class="view"&gt;</code> per session — hero, lineage strip, minimap spine, and transcript. <code>continue_as</code> AgentFrame switches stay inline in that session's transcript (they never split the view), and spawned subagents are reachable through <code>[data-go]</code> navigation in the lineage strip and breadcrumb that targets child-session views.</p>
+              <p>A <strong>view</strong> is one persisted session: the root or a spawned subagent. <code>html::tree::write_view</code> writes one <code>&lt;section class="view"&gt;</code> per session — hero, lineage strip, minimap spine, and transcript. <code>continue_as</code> AgentFrame switches stay inline in that session's transcript (they never split the view), and spawned subagents are reachable through <code>[data-go]</code> navigation in the lineage strip and breadcrumb that targets child-session views.</p>
             </li>
             <li>
               <h3>View switching</h3>
@@ -197,7 +197,7 @@
           </div>
           <div class="module-grid">
             <article class="panel"><h3><code>lash-export</code></h3><p>Tree discovery and edge classification. Returns a <code>LoadedSessionTree</code> with one <code>LoadedSessionNode</code> per discovered session; each carries its own chronological projection, partitioned LLM prompts, and the list of subagent edges anchored by parent <code>call_id</code>.</p></article>
-            <article class="panel"><h3><code>lash-export</code></h3><p><code>render_tree</code> is the multi-view entry point. <code>write_crumb_bar</code>, <code>write_view</code>, <code>write_view_hero</code>, <code>write_lineage</code>, and <code>render_tree_data_script</code> own the multi-view elements; <code>render_node_entries</code> reuses the existing message/tool/RLM-step renderers unchanged.</p></article>
+            <article class="panel"><h3><code>lash-export</code></h3><p>The public <code>render_tree(tree, format)</code> is the multi-view entry point; the writers in the <code>html::tree</code> submodule — <code>write_crumb_bar</code>, <code>write_view</code>, <code>write_view_hero</code>, <code>write_lineage</code>, and <code>render_tree_data_script</code> — own the multi-view elements, while <code>render_node_entries</code> reuses the existing message/tool/RLM-step renderers unchanged.</p></article>
             <article class="panel"><h3><code>lash-export</code></h3><p>Tokens are appended at the bottom under "multi-view: breadcrumb, lineage, drill, AgentFrame switch". The base trace stylesheet stays intact for single-session exports; multi-view rules only activate when the page contains <code>.view</code> sections.</p></article>
             <article class="panel"><h3><code>lash-export</code></h3><p>The view-switcher IIFE at the bottom reads <code>window.__lashTraceTree</code>, wires <code>[data-go]</code> click handlers, renders the breadcrumb, and listens for <code>popstate</code>. It exits cleanly if the tree global is absent (single-session export).</p></article>
           </div>

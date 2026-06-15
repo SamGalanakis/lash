@@ -134,7 +134,7 @@ agent-workbench-restate-e2e:
   RESTATE_ADMIN_URL="$admin_url" \
   AGENT_WORKBENCH_E2E_ENDPOINT_BIND="$endpoint_bind" \
   AGENT_WORKBENCH_E2E_ENDPOINT_URL="$endpoint_url" \
-  cargo test -p agent-workbench --features fff-zlob \
+  cargo test -p agent-workbench \
     live_restate_cron_runs_trigger_and_queued_turn_end_to_end -- --ignored --nocapture
 
 restate-postgres-workers-e2e:

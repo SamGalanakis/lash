@@ -155,7 +155,7 @@ let reliability = ProviderReliability::default()
           </div>
           <div class="def-list-grid">
             <article class="panel"><h3>State</h3><p>Per-handle config: API key, base URL, default model, options like <code>thinking</code> exposure.</p></article>
-            <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime. OAuth backends (Codex, Google) share token storage and refresh primitives from <code>lash-provider-auth</code>; vendor-specific endpoints, device-code, and PKCE helpers live in each crate's <code>oauth.rs</code>.</p></article>
+            <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime. OAuth backends (Codex, Google) share token storage and refresh primitives from <code>lash-provider-auth</code>; vendor-specific endpoints, device-code, and PKCE helpers live in each provider's OAuth module — <code>oauth.rs</code> for Google, <code>codex/oauth.rs</code> for Codex.</p></article>
             <article class="panel"><h3>Readiness</h3><p>Optional pre-flight check (token refresh, capability probe) that runs once per session.</p></article>
             <article class="panel"><h3>Transport</h3><p>The actual HTTP call. Translates <code>LlmRequest</code> to the wire format, streams the response, normalizes back to <code>LlmResponse</code> chunks.</p></article>
             <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to model-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>

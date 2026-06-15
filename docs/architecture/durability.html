@@ -45,14 +45,14 @@
               <thead><tr><th>Runtime effect</th><th>Payload</th><th>Outcome / response</th></tr></thead>
               <tbody>
                 <tr><td><code>LlmCall</code></td><td><code>LlmRequestSpec</code> with attachment refs, not bytes</td><td><code>LlmComplete</code> with <code>Result&lt;LlmResponse, LlmCallError&gt;</code></td></tr>
-                <tr><td><code>DirectCompletion</code></td><td>Ref-only direct helper request, normalized request, selected model, and usage source</td><td><code>DirectCompletion</code> result for plugin/helper LLM use</td></tr>
-                <tr><td><code>DirectLlmCompletion</code></td><td>Ref-only core <code>LlmRequestSpec</code> and usage source</td><td><code>DirectLlmCompletion</code> result for direct LLM clients</td></tr>
+                <tr><td><code>Direct</code></td><td>Ref-only <code>LlmRequestSpec</code> plus a <code>usage_source</code> label, covering both plugin/helper and direct one-shot LLM calls</td><td><code>Direct</code> with <code>Result&lt;LlmResponse, LlmCallError&gt;</code></td></tr>
                 <tr><td><code>ToolCall</code></td><td>One <code>PendingToolCall</code> from a sans-IO tool-call batch</td><td>One <code>CompletedToolCall</code>; the runtime reassembles <code>ToolResults</code> for <code>TurnMachine</code></td></tr>
                 <tr><td><code>Process</code></td><td><code>ProcessCommand::{Start,List,Transfer,DeleteSession,Await,Cancel,Signal}</code> against the explicit process admin plane</td><td><code>ProcessEffectOutcome</code> with process records, visible handle grants, transfer completion, session-delete report, await output, cancellation records, or appended signal events</td></tr>
                 <tr><td><code>ExecCode</code></td><td><code>code: String</code></td><td><code>ExecResult</code> with <code>Result&lt;ExecResponse, String&gt;</code></td></tr>
                 <tr><td><code>Checkpoint</code></td><td><code>checkpoint: CheckpointKind</code></td><td><code>Checkpoint</code> with plugin-injected messages</td></tr>
                 <tr><td><code>Sleep</code></td><td><code>duration_ms: u64</code></td><td><code>Sleep</code></td></tr>
                 <tr><td><code>SyncExecutionEnvironment</code></td><td><code>update_machine_config</code> flag</td><td><code>ExecutionEnvironmentSynced</code> with refreshed prompt + tool specs</td></tr>
+                <tr><td><code>AwaitEvent</code></td><td><code>key: AwaitEventKey</code> — the durable wait a pending tool completion or process signal parks on</td><td><code>AwaitEvent</code> with a <code>Resolution</code> (ok / err / timeout / cancelled)</td></tr>
               </tbody>
             </table>
           </div>
@@ -126,6 +126,7 @@
             <li><code>cumulative_usage: TokenUsage</code> — running token totals for this turn.</li>
             <li><code>termination: TurnTerminationPolicyState</code> — max-turns / forced-final state.</li>
             <li><code>synced_protocol_iteration: Option&lt;usize&gt;</code> — last iteration the execution environment was synced.</li>
+            <li><code>next_synthetic_message_id: u64</code>, <code>turn_causes: Vec&lt;TurnCause&gt;</code>, <code>progress_event_cursor: usize</code> — internal bookkeeping that also round-trips through serde.</li>
           </ul>
           <p><code>restore_from_checkpoint</code> remains a sans-IO machine primitive for tests and protocol work. Runtime crash recovery does not persist or reload in-flight machine payloads from the store. Local/inline runs reopen the last committed session state; durable workflow integrations replay the host handler and effect history, then Lash retries the final commit.</p>
         </div>

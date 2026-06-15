@@ -1,9 +1,7 @@
 //! SQLite-backed [`ProcessRegistry`] (`SqliteProcessRegistry`).
 //!
-//! Ported from the prior store, preserving the public async surface byte-for-byte
-//! (the type name keeps the `Sqlite` prefix so the path-rename swap keeps
-//! compiling). The prior implementation ran every op directly on `&rusqlite::Connection`
-//! with `.await`; here every DB body is a *synchronous* rusqlite closure handed
+//! First-party SQLite implementation of the public async process-registry
+//! surface. Every DB body is a *synchronous* rusqlite closure handed
 //! to [`SqliteConnection::call`] (reads) or [`SqliteConnection::write_flow`]
 //! (read-then-write).
 //!

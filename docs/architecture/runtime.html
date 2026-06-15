@@ -39,8 +39,8 @@ flowchart TD
   Runtime --> Env["RuntimeEnvironment<br/>providers, tools, tasks, traces"]
   Runtime --> Manager["RuntimeSessionServices<br/>host capability set"]
   Runtime --> Persistence["RuntimePersistence trait"]
-  Persistence --> Stores["lash-sqlite-store / lash-postgres-store<br/>SQLite/Postgres state + blob manifests"]
-  Runtime --> Attachments["AttachmentStore<br/>local files or S3-compatible bytes"]
+  Persistence --> Stores["store implementations<br/>SQLite, Postgres, or host-provided DB"]
+  Runtime --> Attachments["AttachmentStore<br/>local files, S3-compatible bytes, or host-provided"]
   Manager --> Session["Session"]
   Session --> Machine["lash-sansio TurnMachine"]
   Session --> Plugins["SessionPlugin hooks"]
@@ -59,7 +59,7 @@ flowchart TD
             <p><code>RuntimeTurnDriver</code> only polls <code>TurnMachine</code>, builds a <code>RuntimeEffectEnvelope</code>, invokes the active <code>ScopedEffectController</code>, and feeds the returned response back. The default <code>InlineEffectHost</code> creates in-process scopes; durable adapters create handler-scoped controllers for stable <code>ExecutionScope</code> values.</p>
           </div>
           <p>Every invocation carries a <code>RuntimeInvocation</code>: session id, optional turn id/index, protocol iteration, subject, optional typed causal parent, stable <code>replay.key</code>, and ref-only request data. Cancellation, streams, provider trace sinks, and attachment byte hydration stay in the local executor or host workflow. The boundary covers turn LLM calls, direct/plugin LLM completions, individual tool calls, process admin, retry sleeps, RLM exec, checkpoints, and execution-surface sync. Process registry presence derives the Lashlang process/lifecycle abilities for newly built sessions; there is no separate compatibility boolean on the plugin session.</p>
-          <p><code>RuntimeHostConfig::new</code>, <code>RuntimeEnvironmentBuilder::with_effect_host</code>, <code>EmbeddedRuntimeBuilder::with_effect_host</code>, and the facade's <code>AdvancedLashCoreBuilder::effect_host</code> configure the deployment effect host. Durable workflow adapters pass a handler-scoped controller through the scoped turn entrypoints so the workflow controller and stable turn identity are explicit for that run. After a crash or worker move, the workflow handler reruns and the durable host replays effect outcomes before Lash retries the final commit.</p>
+          <p><code>RuntimeHostConfig::new</code>, <code>RuntimeEnvironmentBuilder::with_effect_host</code>, <code>EmbeddedRuntimeBuilder::with_effect_host</code>, and the facade's <code>AdvancedLashCoreBuilder::effect_host</code> configure the deployment effect host. Durable workflow adapters pass a handler-scoped controller through the scoped turn entrypoints so the workflow controller and stable turn identity are explicit for that run. After a crash or worker move, the workflow handler reruns and the durable host replays effect outcomes before Lash retries the final commit. Restate is the first-party adapter; Temporal or another workflow engine can implement the same controller boundary.</p>
         </div>
 
         <div class="section">

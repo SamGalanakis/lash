@@ -25,7 +25,7 @@ impl RuntimeSessionServices {
         scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
-        let artifact = match {
+        let artifact_result = {
             let _phase = self.current.named_phase("rlm_process.load_artifact");
             self.current
                 .host
@@ -34,7 +34,8 @@ impl RuntimeSessionServices {
                 .lashlang_artifact_store
                 .get_module_artifact(&module_ref)
                 .await
-        } {
+        };
+        let artifact = match artifact_result {
             Ok(Some(artifact)) => artifact,
             Ok(None) => {
                 return process_lashlang_failure(

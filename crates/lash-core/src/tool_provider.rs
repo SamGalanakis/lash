@@ -498,6 +498,19 @@ impl<'run> ToolContext<'run> {
         self.replay_key.as_deref()
     }
 
+    /// Obtain the durable completion key for this call, required before returning
+    /// [`ToolResult::Pending`](crate::ToolResult::Pending).
+    ///
+    /// A tool that defers its outcome (waiting on a webhook, human approval, or another
+    /// service) calls this, hands the returned [`AwaitEventKey`](crate::AwaitEventKey)
+    /// to whatever will complete the work out-of-band, and then returns
+    /// `ToolResult::Pending(..)`. The key names the durable wait the runtime parks the
+    /// call on; the external resolver delivers the result against it later.
+    ///
+    /// The key is stored on the context and consumed by the dispatcher when the tool
+    /// returns `Pending`. Returning `Pending` without first calling this fails the call
+    /// with `pending_tool_missing_completion_key`. Calls made outside a prepared tool
+    /// invocation (no tool call id) fail with `tool_completion_key_missing_call_id`.
     pub async fn completion_key(&self) -> Result<crate::AwaitEventKey, crate::RuntimeError> {
         let tool_call_id = self.tool_call_id.clone().ok_or_else(|| {
             crate::RuntimeError::new(

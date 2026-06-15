@@ -63,18 +63,47 @@ impl TriggerStore for PostgresTriggerStore {
         &self,
         filter: TriggerSubscriptionFilter,
     ) -> Result<Vec<TriggerSubscriptionRecord>, PluginError> {
-        let rows = sqlx::query(
-            "SELECT record_json FROM lash_trigger_subscriptions
-             ORDER BY registrant_scope_id ASC, handle ASC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(plugin_sqlx_error)?;
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "SELECT subscription_id, record_json FROM lash_trigger_subscriptions WHERE TRUE",
+        );
+        if let Some(session_id) = filter.session_id.as_ref() {
+            query
+                .push(" AND registrant_scope_id = ")
+                .push_bind(session_registrant_scope_id(session_id));
+        }
+        if let Some(handle) = filter.handle.as_ref() {
+            query.push(" AND handle = ").push_bind(handle);
+        }
+        if let Some(source_type) = filter.source_type.as_ref() {
+            query.push(" AND source_type = ").push_bind(source_type);
+        }
+        if let Some(source_key) = filter.source_key.as_ref() {
+            query.push(" AND source_key = ").push_bind(source_key);
+        }
+        if let Some(enabled) = filter.enabled {
+            query.push(" AND enabled = ").push_bind(enabled);
+        }
+        query.push(" ORDER BY registrant_scope_id ASC, handle ASC");
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(plugin_sqlx_error)?;
         let mut records = Vec::new();
         for row in rows {
-            let json: String = row.get(0);
-            let record: TriggerSubscriptionRecord =
-                serde_json::from_str(&json).map_err(process_decode_error)?;
+            let subscription_id: String = row.get(0);
+            let json: String = row.get(1);
+            let record: TriggerSubscriptionRecord = match serde_json::from_str(&json) {
+                Ok(record) => record,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        subscription_id,
+                        "skipping malformed trigger subscription during listing"
+                    );
+                    continue;
+                }
+            };
             if filter.matches(&record) {
                 records.push(record);
             }
@@ -88,79 +117,77 @@ impl TriggerStore for PostgresTriggerStore {
         handle: &str,
     ) -> Result<bool, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        let rows = sqlx::query(
-            "SELECT record_json FROM lash_trigger_subscriptions
-             WHERE handle = $1
-             ORDER BY registrant_scope_id ASC
+        let registrant_scope_id = session_registrant_scope_id(session_id);
+        let row = sqlx::query(
+            "SELECT enabled, record_json FROM lash_trigger_subscriptions
+             WHERE registrant_scope_id = $1 AND handle = $2
              FOR UPDATE",
         )
+        .bind(&registrant_scope_id)
         .bind(handle)
-        .fetch_all(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(plugin_sqlx_error)?;
-        let mut json = None;
-        for row in rows {
-            let candidate: String = row.get(0);
-            let record: TriggerSubscriptionRecord =
-                serde_json::from_str(&candidate).map_err(process_decode_error)?;
-            if record.registrant_session_id() == Some(session_id) {
-                json = Some(candidate);
-                break;
-            }
-        }
-        let Some(json) = json else {
+        let Some(row) = row else {
             tx.commit().await.map_err(plugin_sqlx_error)?;
             return Ok(false);
         };
-        let mut record: TriggerSubscriptionRecord =
-            serde_json::from_str(&json).map_err(process_decode_error)?;
-        let changed = record.enabled;
-        record.enabled = false;
-        record.updated_at_ms = current_epoch_ms();
-        sqlx::query(
-            "UPDATE lash_trigger_subscriptions
-             SET enabled = $3, updated_at_ms = $4, record_json = $5
-             WHERE registrant_scope_id = $1 AND handle = $2",
-        )
-        .bind(record.registrant_scope_id())
-        .bind(handle)
-        .bind(record.enabled)
-        .bind(record.updated_at_ms as i64)
-        .bind(serde_json::to_string(&record).map_err(process_decode_error)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
+        let changed: bool = row.get(0);
+        let json: String = row.get(1);
+        let updated_at_ms = current_epoch_ms();
+        match serde_json::from_str::<TriggerSubscriptionRecord>(&json) {
+            Ok(mut record) => {
+                record.enabled = false;
+                record.updated_at_ms = updated_at_ms;
+                sqlx::query(
+                    "UPDATE lash_trigger_subscriptions
+                     SET enabled = $3, updated_at_ms = $4, record_json = $5
+                     WHERE registrant_scope_id = $1 AND handle = $2",
+                )
+                .bind(&registrant_scope_id)
+                .bind(handle)
+                .bind(record.enabled)
+                .bind(record.updated_at_ms as i64)
+                .bind(serde_json::to_string(&record).map_err(process_decode_error)?)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    registrant_scope_id,
+                    handle,
+                    "disabling malformed trigger subscription without rewriting record JSON"
+                );
+                sqlx::query(
+                    "UPDATE lash_trigger_subscriptions
+                     SET enabled = FALSE, updated_at_ms = $3
+                     WHERE registrant_scope_id = $1 AND handle = $2",
+                )
+                .bind(&registrant_scope_id)
+                .bind(handle)
+                .bind(updated_at_ms as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+            }
+        }
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(changed)
     }
 
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        let rows = sqlx::query(
-            "SELECT subscription_id, record_json
-             FROM lash_trigger_subscriptions
-             ORDER BY registrant_scope_id ASC, handle ASC
-             FOR UPDATE",
+        let registrant_scope_id = session_registrant_scope_id(session_id);
+        let deleted = sqlx::query(
+            "DELETE FROM lash_trigger_subscriptions WHERE registrant_scope_id = $1",
         )
-        .fetch_all(&mut *tx)
+        .bind(&registrant_scope_id)
+        .execute(&mut *tx)
         .await
-        .map_err(plugin_sqlx_error)?;
-        let mut deleted = 0usize;
-        for row in rows {
-            let subscription_id: String = row.get(0);
-            let json: String = row.get(1);
-            let record: TriggerSubscriptionRecord =
-                serde_json::from_str(&json).map_err(process_decode_error)?;
-            if record.registrant_session_id() != Some(session_id) {
-                continue;
-            }
-            sqlx::query("DELETE FROM lash_trigger_subscriptions WHERE subscription_id = $1")
-                .bind(&subscription_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(plugin_sqlx_error)?;
-            deleted = deleted.saturating_add(1);
-        }
+        .map_err(plugin_sqlx_error)?
+        .rows_affected() as usize;
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(deleted)
     }
@@ -246,7 +273,7 @@ impl TriggerStore for PostgresTriggerStore {
         let occurrence: TriggerOccurrenceRecord =
             serde_json::from_str(&occurrence_json).map_err(process_decode_error)?;
         let rows = sqlx::query(
-            "SELECT record_json FROM lash_trigger_subscriptions
+            "SELECT subscription_id, record_json FROM lash_trigger_subscriptions
              WHERE enabled = TRUE AND source_type = $1 AND source_key = $2
              ORDER BY registrant_scope_id ASC, handle ASC",
         )
@@ -257,9 +284,20 @@ impl TriggerStore for PostgresTriggerStore {
         .map_err(plugin_sqlx_error)?;
         let mut deliveries = Vec::new();
         for row in rows {
-            let json: String = row.get(0);
-            let subscription: TriggerSubscriptionRecord =
-                serde_json::from_str(&json).map_err(process_decode_error)?;
+            let subscription_id: String = row.get(0);
+            let json: String = row.get(1);
+            let subscription: TriggerSubscriptionRecord = match serde_json::from_str(&json) {
+                Ok(subscription) => subscription,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        subscription_id,
+                        occurrence_id = %occurrence.occurrence_id,
+                        "skipping malformed trigger subscription during delivery reservation"
+                    );
+                    continue;
+                }
+            };
             let process_id = lash_core::deterministic_delivery_process_id(
                 &occurrence.occurrence_id,
                 &subscription.subscription_id,
@@ -291,4 +329,8 @@ impl TriggerStore for PostgresTriggerStore {
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(deliveries)
     }
+}
+
+fn session_registrant_scope_id(session_id: &str) -> String {
+    lash_core::ProcessOriginator::session(lash_core::SessionScope::new(session_id)).scope_id()
 }

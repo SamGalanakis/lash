@@ -28,7 +28,7 @@
     <div class="section" id="whats-here">
       <div class="section-header">
         <h2>What's Here</h2>
-        <p>Both run from the repo root and reach OpenRouter through the OpenAI-compatible provider. Each example has a full walkthrough; this page is the at-a-glance map.</p>
+        <p>Both run from the repo root and reach OpenRouter through the OpenAI-compatible provider. They choose concrete first-party adapters (SQLite, Restate, local files) to stay runnable; the runtime interfaces also support host-provided stores and workflow hosts. Each example has a full walkthrough; this page is the at-a-glance map.</p>
       </div>
       <dl class="def-list">
         <dt><a href="./example-agent-service.html">agent service</a></dt>
@@ -41,13 +41,13 @@
     <div class="section" id="agent-service">
       <div class="section-header">
         <h2>Agent Service</h2>
-        <p>A SQLite-backed chat app that exercises the app-facing API in a realistic Axum host. Read it when checking whether an app wires the <code>lash</code> facade correctly.</p>
+        <p>A chat app that uses the first-party SQLite adapter to exercise the app-facing API in a realistic Axum host. Read it when checking whether an app wires the <code>lash</code> facade correctly.</p>
       </div>
       <div class="module-grid">
         <article class="panel"><h3>RLM + typed plugin</h3><p>Installs RLM with <code>ModePreset::rlm()</code> and activates a <code>DemoPlugin</code> per chat through <code>SessionBuilder::plugin::&lt;DemoPlugin&gt;(...)</code>.</p></article>
         <article class="panel"><h3>App-owned tools</h3><p>A tic-tac-toe board lives in the app's <code>chat_boards</code> table; the plugin's <code>ToolProvider</code> exposes <code>board.read</code> / <code>board.play</code> over it.</p></article>
         <article class="panel"><h3>Semantic stream</h3><p>The browser renders <code>TurnEvent</code>s — reasoning deltas, assistant prose, tool cards, usage, and the RLM <code>submit</code> value.</p></article>
-        <article class="panel"><h3>Optional Restate</h3><p>With the <code>restate</code> feature, browser turns run through Restate ingress with a handler-scoped effect controller; board state stays app-owned.</p></article>
+        <article class="panel"><h3>Optional Restate</h3><p>Built with the <code>restate</code> feature <em>and</em> run with <code>--durability restate</code> (or <code>AGENT_SERVICE_DURABILITY=restate</code>), browser turns run through Restate ingress with a handler-scoped effect controller; board state stays app-owned. Durability defaults to <code>local</code> otherwise.</p></article>
       </div>
       <pre data-lang="console"><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>
@@ -61,7 +61,7 @@
       </div>
       <div class="module-grid">
         <article class="panel"><h3>Background work</h3><p>The model starts named Lashlang <code>process</code>es and spawns subagents; the right rail polls the process registry for live runs.</p></article>
-        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences that start processes for matching trigger registrations.</p></article>
+        <article class="panel"><h3>Trigger buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences that start processes for matching trigger registrations.</p></article>
         <article class="panel"><h3>Restate cron</h3><p>A registered <code>cron.Schedule</code> source syncs to a <code>WorkbenchCronJob</code> Restate virtual object that fires <code>cron.Tick</code>s on its own timer.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel reads <code>TraceLashlangGraphStore</code> — a trace-derived view of foreground blocks, durable runs, and child links.</p></article>
       </div>

@@ -39,6 +39,26 @@ async fn rank(call: ToolCall<'_>) -> ToolResult {
 }
 // docs:end:direct-completion-tool
 
+async fn await_external_completion(call: ToolCall<'_>) -> ToolResult {
+    // docs:start:detached-tool
+    use lash::tools::PendingCompletion;
+
+    // Take the completion key BEFORE returning Pending, then hand it to whatever
+    // will deliver the result out-of-band — a webhook, a job queue, a human.
+    let key = match call.context.completion_key().await {
+        Ok(key) => key,
+        Err(err) => return ToolResult::err_fmt(format_args!("{err}")),
+    };
+    enqueue_external_work(key);
+
+    // Returning Pending without first taking the key fails the call with
+    // `pending_tool_missing_completion_key`.
+    ToolResult::pending(PendingCompletion::new())
+    // docs:end:detached-tool
+}
+
+fn enqueue_external_work(_key: lash::AwaitEventKey) {}
+
 fn serial_tool(
     input_schema: serde_json::Value,
     output_schema: serde_json::Value,
