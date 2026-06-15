@@ -870,14 +870,17 @@ impl<'ctx, 'run> ToolDurableEffects<'ctx, 'run> {
             .emit_request(request)
             .await
             .map_err(|err| {
-                crate::RuntimeError::new("durable_effect_process_event", err.to_string())
+                crate::RuntimeError::new(
+                    "durable_effect_process_event_append_failed",
+                    err.to_string(),
+                )
             })
             .and_then(|event| {
                 if event.process_id == process.process_id {
                     Ok(event)
                 } else {
                     Err(crate::RuntimeError::new(
-                        "durable_effect_process_event",
+                        "durable_effect_process_event_process_mismatch",
                         "process event append returned an event for a different process",
                     ))
                 }
@@ -1400,6 +1403,17 @@ mod tests {
         assert_eq!(
             event.invocation.replay_key(),
             Some("tool:call-process-event:durable-process-event:0")
+        );
+
+        let append_err = context
+            .durable_effects()
+            .expect("durable effects")
+            .emit_process_event("undeclared.event", serde_json::json!({}))
+            .await
+            .expect_err("undeclared event type must fail the append");
+        assert_eq!(
+            append_err.code.as_str(),
+            "durable_effect_process_event_append_failed"
         );
     }
 }

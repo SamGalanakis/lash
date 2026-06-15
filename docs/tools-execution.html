@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>tool execution · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=11">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=7" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#content">skip to content</a>
+<section class="opener">
+    <h1 class="opener__title">tool<span class="slash">/</span>execution</h1>
+    <p class="opener__lede">Scheduling, completion modes, durable tool effects, and output projection for tools that need more than a simple inline <code>ToolResult::ok(...)</code>.</p>
+  </section>
+
+  <main class="body" id="content">
+        <div class="section" id="tool-execution-modes">
+          <div class="section-header">
+            <h2>Tool Execution Modes</h2>
+            <p>When the model emits multiple tool calls in one assistant turn, the runtime can dispatch them concurrently or one-at-a-time. The choice is declared per tool via <code>ToolDefinition::with_scheduling</code>; the runtime groups the batch and runs each group accordingly.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>ToolScheduling::Parallel</code> (default)</h3>
+              <p>The tool's <code>execute()</code> may run concurrently with other parallel tools from the same batch. The dispatcher schedules them through <code>FuturesUnordered</code> and collects results as each completes. Right for pure reads, network fetches, file scans — anything safe to interleave.</p>
+            </article>
+            <article class="panel">
+              <h3><code>ToolScheduling::Serial</code></h3>
+              <p>The tool blocks the batch: the runtime runs serial tools one at a time in the order the model emitted them, and only after all parallel tools in the batch have finished. Right for tools that mutate shared state (write to a file, update a database, advance a state machine) where overlapping calls would corrupt outcomes.</p>
+            </article>
+          </div>
+          <pre data-lang="rust" data-snippet="plugins_tools#serial-tool"><code>use lash::tools::{ToolDefinition, ToolScheduling};
+
+ToolDefinition::raw_named(
+    "write_file",
+    "Replace a file's contents.",
+    input_schema,
+    output_schema,
+)
+.with_scheduling(ToolScheduling::Serial)</code></pre>
+          <p>Mixing parallel and serial tools in one batch is supported and common: a read-heavy plan emitting five <code>read_file</code> calls plus one <code>write_file</code> gets the reads concurrently and the write afterward. There is no model-visible distinction — the model sees the same JSON tool list regardless of dispatch mode.</p>
+        </div>
+
+        <div class="section" id="tool-completion-modes">
+          <div class="section-header">
+            <h2>Active vs. Deferred Completion</h2>
+            <p>A tool's <code>execute()</code> returns a <code>ToolResult</code>, and the variant it returns chooses how the call completes. Most tools finish inline; a tool that waits on out-of-band work parks the call and lets an external resolver deliver the result later.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>ToolResult::Done</code> (active await)</h3>
+              <p>The result is available inline and the runtime finalizes the call immediately. Build it with <code>ToolResult::ok</code>, <code>ToolResult::err</code>, <code>ToolResult::failure</code>, and friends.</p>
+            </article>
+            <article class="panel">
+              <h3><code>ToolResult::Pending</code> (deferred completion)</h3>
+              <p>The tool has launched out-of-band work — a webhook, a human approval, another service — and the real outcome is delivered later against a completion key. The runtime parks the call on a durable wait and resumes it when the key resolves.</p>
+            </article>
+          </div>
+          <p>Deferred completion has one hard rule: <strong>before returning <code>ToolResult::Pending</code>, the tool must first obtain a completion key</strong> by calling <code>call.context.completion_key().await</code>. That key names the durable wait and is what the external resolver later uses to deliver the result. Returning <code>Pending</code> without having taken a key fails the call with the internal error <code>pending_tool_missing_completion_key</code>.</p>
+          <pre data-lang="rust" data-snippet="plugins_tools#detached-tool"><code>use lash::tools::PendingCompletion;
+
+// Take the completion key BEFORE returning Pending, then hand it to whatever
+// will deliver the result out-of-band — a webhook, a job queue, a human.
+let key = match call.context.completion_key().await {
+    Ok(key) =&gt; key,
+    Err(err) =&gt; return ToolResult::err_fmt(format_args!("{err}")),
+};
+enqueue_external_work(key);
+
+// Returning Pending without first taking the key fails the call with
+// `pending_tool_missing_completion_key`.
+ToolResult::pending(PendingCompletion::new())</code></pre>
+          <p><code>PendingCompletion</code> configures the wait: an optional <code>deadline</code>, an <code>on_timeout</code> behavior (<code>ErrorAsResult</code> feeds a timeout result back to the model; <code>FailTurn</code> fails the whole turn), and an <code>on_cancel</code> hint (<code>CancelExternalWork</code> by default, or <code>Ignore</code> to leave the out-of-band work running). Adjust it with <code>PendingCompletion::new().with_deadline(..)</code> and <code>.fail_turn_on_timeout()</code>. The remote protocol carries tool grants only; execute tools through a normal <code>ToolProvider</code> at the host boundary.</p>
+        </div>
+
+        <div class="section" id="durable-tool-effects">
+          <div class="section-header">
+            <h2>Durable Tool Effects</h2>
+            <p>Durable tool effects are for advanced in-process tools that need to do nondeterministic work inside the caller's existing effect log. The tool borrows the boundary with <code>call.context.durable_effects()?</code>; Lash records JSON steps and waits without exposing Restate, Temporal, or any workflow-native context.</p>
+          </div>
+          <aside class="callout callout--note">
+            <strong>Use this when</strong>
+            <p>A normal tool is executing inside a durable turn or Lashlang process and the work must replay as one ordered log: create an external request once, emit a domain event once, wait for a resolver, then complete exactly once after resume. If the work can finish inline, return <code>ToolResult::ok(...)</code>. If another service owns the whole job and will return a final tool result later, use <a href="#tool-completion-modes">deferred completion</a> instead.</p>
+          </aside>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">availability</div>
+              <div class="listing__body"><p><code>durable_effects()</code> succeeds only for a prepared tool call with a non-empty call id, running under an effect controller that advertises durable-effects support. Otherwise it returns a clear runtime error such as <code>durable_effects_missing_call_id</code> or <code>durable_effects_unavailable</code>.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">journaled step</div>
+              <div class="listing__body"><p><code>run_json(step_id, input, run)</code> records one JSON step in the caller's effect log. <code>step_id</code> must be non-empty and unique within the tool invocation. The stable replay envelope includes the step id, the JSON input, and the invocation replay key, so replay can return the recorded value without re-running the local closure.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">external wait</div>
+              <div class="listing__body"><p><code>external_event_key(key)</code> returns a signed custom <code>AwaitEventKey</code>. Store the whole returned key if an external route will resolve it later; the string you passed in is not enough. <code>await_event_json(key)</code> parks through the existing <code>AwaitEvent</code> effect path and resumes with <code>Resolution::Ok</code>'s JSON value, or maps error, timeout, and cancellation resolutions into runtime errors.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">process event</div>
+              <div class="listing__body"><p><code>emit_process_event(event_type, payload)</code> appends a typed process event when the tool is executing inside a durable process. Calls outside a process fail with <code>durable_effect_process_event_unavailable</code>; use <code>context.process_events().emit(...)</code> only when you do not need the durable-effects facade.</p></div>
+            </div>
+          </div>
+          <h3>Journal a JSON Step</h3>
+          <p>Use <code>run_json</code> around the side effect that must not double-run after replay. The closure receives the JSON input that was recorded in the envelope; return a JSON value that is safe to store in the effect log.</p>
+          <pre data-lang="rust"><code>let durable = match call.context.durable_effects() {
+    Ok(durable) =&gt; durable,
+    Err(err) =&gt; return ToolResult::err_fmt(err),
+};
+
+let opened = match durable
+    .run_json(
+        "create-input-request",
+        serde_json::json!({ "question": call.args["question"].clone() }),
+        |input| async move {
+            // Create the external record, enqueue work, or call a service.
+            Ok(serde_json::json!({
+                "request_id": "request-1",
+                "question": input["question"].clone()
+            }))
+        },
+    )
+    .await
+{
+    Ok(value) =&gt; value,
+    Err(err) =&gt; return ToolResult::err_fmt(err),
+};</code></pre>
+          <h3>Wait On An External Resolver</h3>
+          <p>Generate the key before publishing the request, persist or emit the full key, then await that same key. Hosts resolve it through their effect host; the tool stays local and does not receive workflow-engine context.</p>
+          <pre data-lang="rust"><code>let key = match durable
+    .external_event_key(format!("input-request:{}", opened["request_id"]))
+    .await
+{
+    Ok(key) =&gt; key,
+    Err(err) =&gt; return ToolResult::err_fmt(err),
+};
+
+// Store or emit the complete key. The resolver needs the signed key, not just
+// the human-readable custom identity string used above.
+if let Err(err) = publish_input_request(opened.clone(), key.clone()).await {
+    return ToolResult::err_fmt(format_args!("{err}"));
+}
+
+let answer = match durable.await_event_json(key).await {
+    Ok(value) =&gt; value,
+    Err(err) =&gt; return ToolResult::err_fmt(err),
+};</code></pre>
+          <h3>Emit A Domain Process Event</h3>
+          <p>When the tool is running inside a Lashlang process, process event context is carried into the <code>ToolContext</code>. That lets ordinary tools append domain events from the same implementation path the model calls.</p>
+          <pre data-lang="rust"><code>if let Err(err) = durable
+    .emit_process_event(
+        "work.input_request.opened",
+        serde_json::json!({
+            "request_id": opened["request_id"].clone(),
+            "await_key_id": key.key_id,
+        }),
+    )
+    .await
+{
+    return ToolResult::err_fmt(err);
+}</code></pre>
+          <h3>Replay Rules</h3>
+          <ul class="bullets">
+            <li><strong>Step ids are local to one tool invocation.</strong> Reusing the same id in the same call fails before the closure runs. Use stable names such as <code>create</code> and <code>complete</code>, not random ids.</li>
+            <li><strong>Inputs are part of the envelope hash.</strong> Changing the JSON input changes the recorded effect identity, which protects replay from silently accepting a different side effect.</li>
+            <li><strong>Inline is not crash-durable.</strong> The inline effect controller supports the API for local runs and tests, but workflow adapters such as the Restate host are what persist outcomes across process crashes.</li>
+            <li><strong>Remote tool execution is not special-cased.</strong> A durable tool can call a remote service from inside <code>run_json</code>, but the runtime still sees a local <code>ToolProvider</code> and a local effect log.</li>
+          </ul>
+        </div>
+
+        <div class="section" id="tool-output-budget">
+          <div class="section-header">
+            <h2>Tool-Output Budgeting</h2>
+            <p>Large tool outputs blow up provider context, model context windows, and persistent history all at once. <code>ToolOutputBudgetPluginFactory</code> sits in the <code>runtime_plugin_stack()</code> by default and projects oversized outputs into shorter forms at three different sites — so the dispatch result, the model's next request, and the session graph each see an appropriately budgeted view.</p>
+          </div>
+          <pre data-lang="rust" data-snippet="plugins_tools#budget-stack"><code>use lash::plugins::{
+    ToolOutputBudgetConfig, ToolOutputBudgetPluginFactory, runtime_plugin_stack,
+};
+
+let config = ToolOutputBudgetConfig {
+    limit: 32 * 1024, // default: 16 * 1024 bytes
+    max_lines: 800,   // default: 400
+    ..ToolOutputBudgetConfig::default()
+};
+
+let plugins = runtime_plugin_stack().configure(|plugins| {
+    plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
+});</code></pre>
+          <p>Defaults are <strong>16 KiB and 400 lines per tool output</strong> (the size cap is bytes by default; <code>ToolOutputBudgetMode::Tokens</code> switches it to an approximate token count). Outputs under both caps pass through untouched; outputs over either cap keep a preview window wrapped in a "<code>...N bytes truncated...</code>" marker — the unit reads <code>bytes</code> (or <code>tokens</code>) when the size cap binds, <code>lines</code> when the line cap binds.</p>
+          <p>The plugin registers a tool-result projector that applies at three points:</p>
+          <ul class="bullets">
+            <li><strong>Dispatch projection</strong> — what the runtime returns to the calling code as the tool's immediate result.</li>
+            <li><strong>Model projection</strong> — what gets serialised into the next provider request's tool-result message.</li>
+            <li><strong>History projection</strong> — what's written to the session graph for replay and audit.</li>
+          </ul>
+          <p>RLM mode <code>print</code> observations go through the same projector — a Lashlang program that prints a 200 KiB blob sees the same trimmed view its next observation would carry. Replace the factory rather than appending; <code>reg.tool_results()</code> is exclusive (one projector per session). Plugins that need different projection logic should build on <code>ToolOutputBudgetConfig</code> rather than fight it.</p>
+        </div>
+        <div class="section" id="where-next">
+          <div class="section-header">
+            <h2>Where Next</h2>
+            <p>This page owns advanced execution behavior. Use the tools overview for registration, context capabilities, and registry state.</p>
+          </div>
+          <div data-related="tools.html plugins.html architecture/durability.html remote-protocol.html tracing.html"></div>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+  </div>
+</section>
+</body>
+</html>

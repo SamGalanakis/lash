@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
-<title>plugins · writing · lash docs</title>
+<title>plugins · lash docs</title>
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
 <link rel="icon" href="./favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
@@ -20,15 +20,15 @@
 <body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash-plugin-plan-mode</code>, <code>crates/lash</code>.">
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
-    <h1 class="opener__title">writing<span class="slash">/</span>plugins</h1>
-    <p class="opener__lede">Write a plugin when host behavior needs to join the Lash runtime: tools, prompt contributions, tool-catalog policy, turn hooks, runtime events, plugin state, or typed per-turn input.</p>
+    <h1 class="opener__title">plugins</h1>
+    <p class="opener__lede">Write a plugin when behavior needs to join the Lash runtime beyond a standalone callable tool: prompt contributions, tool-catalog policy, turn hooks, runtime events, resumable session state, or typed per-turn input.</p>
   </section>
 
   <main class="body" id="content">
     <div class="section" id="what-this-is">
       <div class="section-header">
         <h2>What This Is</h2>
-        <p>A plugin is a per-core factory that builds per-session behavior. It can register tools, prompts, hook closures, output transforms, runtime actions, protocol pieces, and durable plugin state.</p>
+        <p>A plugin is a per-core factory that builds per-session behavior. It can register tools, prompts, hook closures, output transforms, runtime actions, protocol pieces, and durable plugin state. If all you need is one callable operation, implement <code>ToolProvider</code> directly and use the <a href="./tools.html">Tools guide</a>.</p>
       </div>
       <dl class="def-list">
         <dt><code>PluginFactory</code></dt>
@@ -36,23 +36,23 @@
         <dt><code>SessionPlugin</code></dt>
         <dd>Per-session. Registers hooks through <code>PluginRegistrar</code> and optionally participates in snapshot/restore.</dd>
         <dt><code>ToolProvider</code></dt>
-        <dd>Optional. Advertises cheap manifests, resolves full contracts, prepares calls, and executes tool work.</dd>
+        <dd>Optional. A plugin may register one when the tool needs plugin state or hooks. Tool-only providers do not need a plugin.</dd>
       </dl>
     </div>
 
     <div class="section" id="runtime-boundary">
       <div class="section-header">
         <h2>Runtime Boundary</h2>
-        <p>A plugin is for behavior that should appear in the runtime surface. Keep ordinary host routing outside it.</p>
+        <p>A plugin is for behavior that should participate in the runtime lifecycle. Keep ordinary host routing and ordinary tool execution outside it.</p>
       </div>
       <div class="listing">
         <div class="listing__row">
           <div class="listing__label">inside plugin</div>
-          <div class="listing__body"><p>You need reusable tools, prompt contributions, stateful turn hooks, custom tool visibility, typed plugin input, or session-local state that resumes with Lash.</p></div>
+          <div class="listing__body"><p>You need prompt contributions, stateful turn hooks, custom tool visibility, typed plugin input, runtime event projection, or session-local state that resumes with Lash. Tools belong here only when they depend on that behavior.</p></div>
         </div>
         <div class="listing__row">
           <div class="listing__label">outside plugin</div>
-          <div class="listing__body"><p>Keep auth, HTTP routing, frontend persistence, and app database work in the host unless it needs to appear in model context or runtime hooks.</p></div>
+          <div class="listing__body"><p>Keep auth, HTTP routing, frontend persistence, app database work, and simple tool providers in the host unless they need to appear in model context, runtime hooks, or resumable plugin state.</p></div>
         </div>
       </div>
     </div>
@@ -87,7 +87,7 @@ let core = LashCore::rlm()
     <div class="section" id="worked-example">
       <div class="section-header">
         <h2>Worked Example</h2>
-        <p>The plan-mode plugin is a compact model: one factory, one session plugin, a session-local state object, one tool provider, and hooks that emit UI state after tool calls.</p>
+        <p>The plan-mode plugin is a compact model for a tool that really does need plugin behavior: one factory, one session plugin, a session-local state object, one tool provider, and hooks that emit UI state after tool calls.</p>
       </div>
 <pre data-lang="rust" data-snippet="plugins#update-plan-plugin"><code>use std::sync::Mutex;
 
@@ -176,9 +176,9 @@ fn update_plan_definition() -&gt; ToolDefinition {
         <table>
           <thead><tr><th>Task</th><th>Register</th><th>Canonical guide</th></tr></thead>
           <tbody>
-            <tr><td>Add host tools</td><td><code>reg.tools().provider(...)</code></td><td><a href="./plugins-tools.html">Tool plugins</a></td></tr>
+            <tr><td>Add host tools</td><td><code>LashCoreBuilder::tools(...)</code> or <code>reg.tools().provider(...)</code></td><td><a href="./tools.html">Tools</a></td></tr>
             <tr><td>Add prompt context</td><td><code>reg.prompt()</code></td><td><a href="./embedding-prompts.html">Prompts and bindings</a></td></tr>
-            <tr><td>Change visible tools</td><td><code>reg.tool_catalog()</code></td><td><a href="./plugins-tools.html">Tool plugins</a></td></tr>
+            <tr><td>Change visible tools</td><td><code>reg.tool_catalog()</code></td><td><a href="./tools.html">Tools</a></td></tr>
             <tr><td>React before/after turns</td><td><code>reg.turn()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
             <tr><td>React before/after tool calls</td><td><code>reg.tool_calls()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
             <tr><td>Expose host actions</td><td><code>reg.actions()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
@@ -212,9 +212,9 @@ fn update_plan_definition() -&gt; ToolDefinition {
     <div class="section" id="where-next">
       <div class="section-header">
         <h2>Where Next</h2>
-        <p>This page is the canonical plugin-writing guide. Use the references below for deeper contracts.</p>
+        <p>This page is the canonical guide for runtime/session plugins. Use the references below for the tool contract and deeper runtime hooks.</p>
       </div>
-      <div data-related="plugins-tools.html plugins-runtime.html embedding-prompts.html architecture/providers.html architecture/abstractions.html"></div>
+      <div data-related="tools.html plugins-runtime.html embedding-prompts.html architecture/providers.html architecture/abstractions.html"></div>
     </div>
   </main>
 

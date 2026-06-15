@@ -116,7 +116,7 @@
       <div class="stanza__body">
         <h2 class="stanza__title">one runtime boundary, the whole stack</h2>
         <p class="stanza__lede">An agent is a loop around a model, but a useful one needs more: durable state, code execution, subagents, background work. Assemble those from a workflow engine, a sandbox, and an orchestrator and you run several systems that never share a boundary.</p>
-        <p>lash is that whole stack in one runtime. Providers feed the turn loop, every effect crosses one typed boundary, the turn commits atomically, and the host composes the rest as plugins.</p>
+        <p>lash is that whole stack in one runtime. Providers feed the turn loop, tools expose callable host work, plugins add lifecycle behavior, every effect crosses one typed boundary, and the turn commits atomically.</p>
 
         <figure class="stack">
           <svg class="stack__svg" viewBox="0 0 1200 560" role="img" aria-labelledby="stack-title stack-desc">
@@ -257,19 +257,19 @@
       </div>
     </section>
 
-    <section class="stanza" id="plugins">
+    <section class="stanza" id="composition">
       <div class="stanza__rail">
         <div class="knot">
           <span class="knot__bead" aria-hidden="true"></span>
           <p class="knot__id">§ 02</p>
-          <p class="knot__name">plugins</p>
+          <p class="knot__name">composition</p>
         </div>
       </div>
       <div class="stanza__body">
-        <h2 class="stanza__title">compose the runtime</h2>
-        <p class="stanza__lede">The runtime is assembled from plugins. Tools, prompts, planning, memory, history transforms, UI activity, and tool-output budgeting hang off about eighteen typed hooks; a host composes only what it embeds.</p>
+        <h2 class="stanza__title">compose the runtime edges</h2>
+        <p class="stanza__lede">The runtime is assembled from explicit edges, not one extension bucket. Model providers feed LLM calls, <code>ToolProvider</code>s expose callable work, plugins contribute prompts, hooks, state, and catalog policy, and stores/effect hosts provide durability. A host composes only what it embeds.</p>
         <p>The execution mode is a plugin too. <code>standard</code> and <code>rlm</code> ship as separate protocol crates and install like anything else, so the loop's protocol is swappable.</p>
-        <p>Providers (Anthropic, OpenAI, Gemini, any OpenAI-compatible endpoint, and MCP servers) and observability sinks (JSONL traces, Lashlang execution graphs, OpenTelemetry) attach the same way.</p>
+        <p>Provider crates (Anthropic, OpenAI, Gemini, any OpenAI-compatible endpoint), MCP servers, and observability sinks (JSONL traces, Lashlang execution graphs, OpenTelemetry) each attach through their own narrow contract.</p>
       </div>
     </section>
 

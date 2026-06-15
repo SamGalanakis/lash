@@ -84,6 +84,21 @@ impl From<RemoteToolOutputContract> for lash_core::ToolOutputContract {
     }
 }
 
+impl From<lash_core::ToolOutputContract> for RemoteToolOutputContract {
+    fn from(value: lash_core::ToolOutputContract) -> Self {
+        match value {
+            lash_core::ToolOutputContract::Static => Self::Static,
+            lash_core::ToolOutputContract::FromInputSchema {
+                input_field,
+                default_schema,
+            } => Self::FromInputSchema {
+                input_field,
+                default_schema,
+            },
+        }
+    }
+}
+
 impl From<RemoteToolArgumentProjectionPolicy> for lash_core::ToolArgumentProjectionPolicy {
     fn from(value: RemoteToolArgumentProjectionPolicy) -> Self {
         match value {

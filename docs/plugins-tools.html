@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
-<title>plugins · tools · lash docs</title>
+<link rel="canonical" href="tools.html">
+<title>tools · moved · lash docs</title>
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
 <link rel="icon" href="./favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
@@ -18,222 +19,15 @@
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
-  <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
-    <h1 class="opener__title">plugin<span class="slash">/</span>tools</h1>
-    <p class="opener__lede">The <code>ToolCall&lt;'_&gt;</code> shape, <code>ToolContext</code> capabilities, parallel vs serial execution, active vs deferred completion, durable tool effects, and tool-output budgeting.</p>
+    <h1 class="opener__title">page<span class="slash">/</span>moved</h1>
+    <p class="opener__lede">Tool docs live at <code>docs/tools.html</code> now. Scheduling, deferred completion, durable effects, and output budgeting live at <code>docs/tools-execution.html</code>.</p>
+    <div class="opener__cta-row">
+      <a class="cta" href="./tools.html">continue to tools <span aria-hidden="true">→</span></a>
+      <a class="cta" href="./tools-execution.html#durable-tool-effects">durable tool effects <span aria-hidden="true">→</span></a>
+    </div>
   </section>
 
-  <main class="body" id="content">
-<div class="section" id="toolcall-shape">
-          <div class="section-header">
-            <h2>The <code>ToolCall&lt;'_&gt;</code> Shape</h2>
-            <p>Every <code>execute()</code> call receives a borrowed view of the invocation. Don't store the reference — copy what you need into owned types.</p>
-          </div>
-          <pre data-lang="rust"><code>pub struct ToolCall&lt;'a&gt; {
-    pub name: &amp;'a str,                           // Advertised tool name the model called
-    pub args: &amp;'a serde_json::Value,             // Deserialized JSON args
-    pub context: &amp;'a ToolContext&lt;'a&gt;,            // Explicit session/tool capabilities
-    pub progress: Option&lt;&amp;'a ProgressSender&gt;,    // For streaming progress updates
-}</code></pre>
-          <p>Tools receive plain JSON arguments. In RLM mode, host-projected Lashlang values are normalized through each tool's <code>ToolArgumentProjectionPolicy</code> before schema validation and before <code>execute()</code>; ordinary tools use the default materializing policy and should not know about the internal projection marker. Projection-aware RLM control tools declare <code>PreserveProjectedRefsInField { field: "seed" }</code>, so only root <code>seed</code> entries keep projected wrappers and ref-backed entries keep <code>{"__projection_ref__": ...}</code> for child or AgentFrames.</p>
-          <p>Typed per-turn input passed via <code>TurnBuilder::with_plugin_input</code> is read off the turn context, not the execute-time <code>ToolContext</code>: a tool's <code>prepare_tool_call</code> sees it through <code>ctx.plugin_input::&lt;MyInput&gt;("plugin_id")</code> on the <code>ToolPrepareContext</code>, and hooks read the same value from their <code>TurnContext</code>. See the <a href="./embedding-prompts.html#typed-plugin-input">Lash API · prompts</a> guide's "Typed Plugin Input" section for the matching <code>PluginBinding</code> pattern.</p>
-        </div>
-
-        <div class="section" id="tool-capabilities">
-          <div class="section-header">
-            <h2>Tool Capabilities</h2>
-            <p><code>ToolContext</code> exposes named capabilities instead of a broad runtime host handle. Tools ask for exactly the capability they need: the current model, the current session snapshot, the searchable tool catalog, dynamic tool availability, child-session client, process admin, process event append, borrowed durable effects, or a direct completion.</p>
-          </div>
-          <div class="table">
-            <table>
-              <thead><tr><th>Method</th><th>Use it for</th></tr></thead>
-              <tbody>
-                <tr><td><code>context.sessions().model().await?</code></td><td>Read the active session's concrete <code>model</code> and optional <code>model_variant</code>. Use this before building a <code>DirectRequest</code> that should match the current session.</td></tr>
-                <tr><td><code>context.sessions().snapshot_current().await?</code></td><td>Read the current session snapshot when a tool truly needs more than model selection.</td></tr>
-                <tr><td><code>context.sessions().snapshot(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
-                <tr><td><code>context.sessions().tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
-                <tr><td><code>context.sessions().set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
-                <tr><td><code>context.sessions()</code></td><td>Cloneable child-session client: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses process handles granted to sessions, not child-turn handles.</td></tr>
-                <tr><td><code>context.processes()</code></td><td>Session-scoped process admin: start a process from a tool, await its output, and list the process handles granted to the session.</td></tr>
-                <tr><td><code>context.process_events().emit(...).await?</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
-                <tr><td><code>context.durable_effects()?</code></td><td>Borrow the caller's durable effect boundary for advanced in-process tools. Use it only from prepared tool calls running under a controller that supports durable tool effects.</td></tr>
-                <tr><td><code>context.direct_completions().complete(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>caused_by</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect replay keys; set <code>DirectRequest::replay</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <pre data-lang="rust" data-snippet="plugins_tools#direct-completion-tool"><code>use lash::direct::{DirectOutputSpec, DirectRequest};
-
-async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
-    let model = match call.context.sessions().model().await {
-        Ok(model) =&gt; model,
-        Err(err) =&gt; return ToolResult::err_fmt(format_args!("{err}")),
-    };
-
-    let request = DirectRequest {
-        model: model.model,
-        model_variant: model.model_variant,
-        messages: vec![/* ... */],
-        attachments: Vec::new(),
-        output: DirectOutputSpec::Text,
-        generation: Default::default(),
-        stream_events: None,
-        session_id: None, // filled by ToolContext
-        caused_by: None,  // filled by ToolContext
-        replay: None,
-    };
-
-    match call
-        .context
-        .direct_completions()
-        .complete(request, "my_tool")
-        .await
-    {
-        Ok(completion) =&gt; ToolResult::ok(serde_json::json!({ "text": completion.text })),
-        Err(err) =&gt; ToolResult::err_fmt(format_args!("{err}")),
-    }
-}</code></pre>
-          <p><code>ToolContext</code> exposes no public <code>host()</code> escape hatch. Runtime host wiring stays inside <code>lash-core</code>; plugin-facing code uses explicit context capabilities. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
-        </div>
-
-        <div class="section" id="tool-registry-state">
-          <div class="section-header">
-            <h2>Tool Registry State</h2>
-            <p>The model sees a projected <code>ToolCatalog</code>, but the runtime owns a richer <code>ToolRegistry</code>: live tool sources, per-tool availability, source identity, and a serializable <code>ToolState</code> snapshot.</p>
-          </div>
-          <div class="listing">
-            <div class="listing__row">
-              <div class="listing__label">sources</div>
-              <div class="listing__body"><p>Static providers, plugin registrations, MCP providers, and host-added providers enter as registry sources. A source handle lets the host replace or remove one advertised surface without rebuilding the session.</p></div>
-            </div>
-            <div class="listing__row">
-              <div class="listing__label">projection</div>
-              <div class="listing__body"><p><code>ToolRegistry</code> resolves manifests and execution providers; <code>ToolCatalog</code> is the model-facing projection used by provider requests, discovery tools, and Lashlang host surfaces. Availability changes advance the registry generation and refresh the session catalog.</p></div>
-            </div>
-            <div class="listing__row">
-              <div class="listing__label">apply vs restore</div>
-              <div class="listing__body"><p><code>apply_state</code> is a generation-checked edit for a live registry. <code>restore_state</code> adopts a persisted generation during cold resume or worker rebuild; missing sources remain visible as orphaned, forced-Off tools until a matching source returns.</p></div>
-            </div>
-            <div class="listing__row">
-              <div class="listing__label">admin API</div>
-              <div class="listing__body"><p>App hosts normally use <code>LashCoreBuilder::tools(...)</code>, plugin registration, or <code>LashSession::tools()</code> / <code>LashSession::admin().tools()</code>. The advanced admin exposes raw <code>ToolState</code> only for hosts that need to persist, migrate, or inspect the full registry surface.</p></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="section" id="tool-execution-modes">
-          <div class="section-header">
-            <h2>Tool Execution Modes</h2>
-            <p>When the model emits multiple tool calls in one assistant turn, the runtime can dispatch them concurrently or one-at-a-time. The choice is declared per tool via <code>ToolDefinition::with_scheduling</code>; the runtime groups the batch and runs each group accordingly.</p>
-          </div>
-          <div class="two-col">
-            <article class="panel">
-              <h3><code>ToolScheduling::Parallel</code> (default)</h3>
-              <p>The tool's <code>execute()</code> may run concurrently with other parallel tools from the same batch. The dispatcher schedules them through <code>FuturesUnordered</code> and collects results as each completes. Right for pure reads, network fetches, file scans — anything safe to interleave.</p>
-            </article>
-            <article class="panel">
-              <h3><code>ToolScheduling::Serial</code></h3>
-              <p>The tool blocks the batch: the runtime runs serial tools one at a time in the order the model emitted them, and only after all parallel tools in the batch have finished. Right for tools that mutate shared state (write to a file, update a database, advance a state machine) where overlapping calls would corrupt outcomes.</p>
-            </article>
-          </div>
-          <pre data-lang="rust" data-snippet="plugins_tools#serial-tool"><code>use lash::tools::{ToolDefinition, ToolScheduling};
-
-ToolDefinition::raw_named(
-    "write_file",
-    "Replace a file's contents.",
-    input_schema,
-    output_schema,
-)
-.with_scheduling(ToolScheduling::Serial)</code></pre>
-          <p>Mixing parallel and serial tools in one batch is supported and common: a read-heavy plan emitting five <code>read_file</code> calls plus one <code>write_file</code> gets the reads concurrently and the write afterward. There is no model-visible distinction — the model sees the same JSON tool list regardless of dispatch mode.</p>
-        </div>
-
-        <div class="section" id="tool-completion-modes">
-          <div class="section-header">
-            <h2>Active vs. Deferred Completion</h2>
-            <p>A tool's <code>execute()</code> returns a <code>ToolResult</code>, and the variant it returns chooses how the call completes. Most tools finish inline; a tool that waits on out-of-band work parks the call and lets an external resolver deliver the result later.</p>
-          </div>
-          <div class="two-col">
-            <article class="panel">
-              <h3><code>ToolResult::Done</code> (active await)</h3>
-              <p>The result is available inline and the runtime finalizes the call immediately. Build it with <code>ToolResult::ok</code>, <code>ToolResult::err</code>, <code>ToolResult::failure</code>, and friends. Every example above returns <code>Done</code>.</p>
-            </article>
-            <article class="panel">
-              <h3><code>ToolResult::Pending</code> (deferred completion)</h3>
-              <p>The tool has launched out-of-band work — a webhook, a human approval, another service — and the real outcome is delivered later against a completion key. The runtime parks the call on a durable wait and resumes it when the key resolves.</p>
-            </article>
-          </div>
-          <p>Deferred completion has one hard rule: <strong>before returning <code>ToolResult::Pending</code>, the tool must first obtain a completion key</strong> by calling <code>call.context.completion_key().await</code>. That key names the durable wait and is what the external resolver later uses to deliver the result. Returning <code>Pending</code> without having taken a key fails the call with the internal error <code>pending_tool_missing_completion_key</code>.</p>
-          <pre data-lang="rust" data-snippet="plugins_tools#detached-tool"><code>use lash::tools::PendingCompletion;
-
-// Take the completion key BEFORE returning Pending, then hand it to whatever
-// will deliver the result out-of-band — a webhook, a job queue, a human.
-let key = match call.context.completion_key().await {
-    Ok(key) =&gt; key,
-    Err(err) =&gt; return ToolResult::err_fmt(format_args!("{err}")),
-};
-enqueue_external_work(key);
-
-// Returning Pending without first taking the key fails the call with
-// `pending_tool_missing_completion_key`.
-ToolResult::pending(PendingCompletion::new())</code></pre>
-          <p><code>PendingCompletion</code> configures the wait: an optional <code>deadline</code>, an <code>on_timeout</code> behavior (<code>ErrorAsResult</code> feeds a timeout result back to the model; <code>FailTurn</code> fails the whole turn), and an <code>on_cancel</code> hint (<code>CancelExternalWork</code> by default, or <code>Ignore</code> to leave the out-of-band work running). Adjust it with <code>PendingCompletion::new().with_deadline(..)</code> and <code>.fail_turn_on_timeout()</code>. The remote protocol carries tool grants only; execute tools through a normal <code>ToolProvider</code> at the host boundary.</p>
-        </div>
-
-        <div class="section" id="durable-tool-effects">
-          <div class="section-header">
-            <h2>Durable Tool Effects</h2>
-            <p>Advanced in-process tools can borrow the caller's effect boundary through <code>call.context.durable_effects()?</code>. The facade records JSON steps and waits in the active effect log without exposing Restate, Temporal, or any workflow-native context.</p>
-          </div>
-          <div class="listing">
-            <div class="listing__row">
-              <div class="listing__label">step</div>
-              <div class="listing__body"><p><code>run_json(step_id, input, run)</code> records one journaled JSON step. <code>step_id</code> must be non-empty and unique within one tool invocation; the replay envelope includes the step id, input, and invocation replay key.</p></div>
-            </div>
-            <div class="listing__row">
-              <div class="listing__label">external wait</div>
-              <div class="listing__body"><p><code>external_event_key(key)</code> returns a signed custom <code>AwaitEventKey</code>. Store the whole returned key when an external route will resolve it later, then call <code>await_event_json(key)</code> to resume with the resolved JSON payload.</p></div>
-            </div>
-            <div class="listing__row">
-              <div class="listing__label">process event</div>
-              <div class="listing__body"><p><code>emit_process_event(event_type, payload)</code> appends a typed process event when the tool is executing inside a durable process. Calls outside a process fail explicitly.</p></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="section" id="tool-output-budget">
-          <div class="section-header">
-            <h2>Tool-Output Budgeting</h2>
-            <p>Large tool outputs blow up provider context, model context windows, and persistent history all at once. <code>ToolOutputBudgetPluginFactory</code> sits in the <code>runtime_plugin_stack()</code> by default and projects oversized outputs into shorter forms at three different sites — so the dispatch result, the model's next request, and the session graph each see an appropriately budgeted view.</p>
-          </div>
-          <pre data-lang="rust" data-snippet="plugins_tools#budget-stack"><code>use lash::plugins::{
-    ToolOutputBudgetConfig, ToolOutputBudgetPluginFactory, runtime_plugin_stack,
-};
-
-let config = ToolOutputBudgetConfig {
-    limit: 32 * 1024, // default: 16 * 1024 bytes
-    max_lines: 800,   // default: 400
-    ..ToolOutputBudgetConfig::default()
-};
-
-let plugins = runtime_plugin_stack().configure(|plugins| {
-    plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
-});</code></pre>
-          <p>Defaults are <strong>16 KiB and 400 lines per tool output</strong> (the size cap is bytes by default; <code>ToolOutputBudgetMode::Tokens</code> switches it to an approximate token count). Outputs under both caps pass through untouched; outputs over either cap keep a preview window wrapped in a "<code>...N bytes truncated...</code>" marker — the unit reads <code>bytes</code> (or <code>tokens</code>) when the size cap binds, <code>lines</code> when the line cap binds.</p>
-          <p>The plugin registers a tool-result projector that applies at three points:</p>
-          <ul class="bullets">
-            <li><strong>Dispatch projection</strong> — what the runtime returns to the calling code as the tool's immediate result.</li>
-            <li><strong>Model projection</strong> — what gets serialised into the next provider request's tool-result message.</li>
-            <li><strong>History projection</strong> — what's written to the session graph for replay and audit.</li>
-          </ul>
-          <p>RLM mode <code>print</code> observations go through the same projector — a Lashlang program that prints a 200 KiB blob sees the same trimmed view its next observation would carry. Replace the factory rather than appending; <code>reg.tool_results()</code> is exclusive (one projector per session). Plugins that need different projection logic should build on <code>ToolOutputBudgetConfig</code> rather than fight it.</p>
-        </div>
-  </main>
-
-  <section class="pager" aria-label="chapter navigation">
-  <div class="pager__rail">read on &middot;</div>
-  <div class="pager__main">
-  </div>
-</section>
+  <main class="body" id="content"></main>
 </body>
 </html>

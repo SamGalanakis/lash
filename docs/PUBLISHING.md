@@ -95,6 +95,20 @@ regions byte-for-byte). To change a snippet, edit the `.rs` source and run
 README hero block). Display-only blocks (shell transcripts, Lashlang, API-shape
 excerpts) are marked `data-lang="..."` instead.
 
+## Docs search index
+
+The static site checks in its Pagefind bundle and generated index under
+`docs/pagefind/`. When adding, removing, or renaming docs pages, regenerate the
+index with the pinned Pagefind version used by the checked-in bundle:
+
+```bash
+rm -f docs/pagefind/fragment/*.pf_fragment docs/pagefind/index/*.pf_index docs/pagefind/pagefind.*.pf_meta
+npx -y pagefind@1.5.2 --site docs --output-path docs/pagefind
+```
+
+Run `python3 scripts/lint_docs.py` after regeneration; the linter verifies the
+hand-authored registry, links, snippets, and static pagers that Pagefind indexes.
+
 ## Auth
 
 The `publish-crates` job uses a `CARGO_REGISTRY_TOKEN` repository secret (a

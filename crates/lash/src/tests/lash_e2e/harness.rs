@@ -78,6 +78,8 @@ pub(super) async fn run_turn_case_without_success_assertions(
     session.processes().await_all().await?;
     let prompt_captures_snapshot = prompt_captures.lock().expect("prompt captures").clone();
     let final_process_list = all_host_process_summaries(&core).await?;
+    assert_remote_process_dto_surface(&core, process_registry.as_ref(), case.session_id).await;
+    assert_remote_process_summaries_round_trip(&final_process_list);
     let run = LashE2eRun {
         turn_output: Some(turn_output),
         streamed_events: events.snapshot().await,
@@ -159,6 +161,108 @@ fn observed_process_summary(
     .with_definition(lash_core::ProcessDefinitionSummary::from_input(
         &process.input,
     ))
+}
+
+async fn assert_remote_process_dto_surface(
+    core: &LashCore,
+    registry: &dyn lash_core::ProcessRegistry,
+    session_id: &str,
+) {
+    let filter = lash_core::ProcessListFilter {
+        definition: None,
+        status: lash_core::ProcessStatusFilter::Any,
+        waiting: None,
+    };
+
+    let observed = core
+        .processes()
+        .list(&filter)
+        .await
+        .expect("list observed processes for remote DTO round trip");
+    let remote_list = lash_remote_protocol::RemoteProcessListResponse::try_from(observed.clone())
+        .expect("observed process list should convert to remote DTO");
+    remote_list
+        .validate()
+        .expect("remote observed process list should validate");
+    let round_trip_observed: Vec<lash_core::ObservedProcess> = remote_list
+        .try_into()
+        .expect("remote observed process list should convert back");
+    let observed_ids = observed
+        .iter()
+        .map(|process| process.process_id.as_str())
+        .collect::<Vec<_>>();
+    let round_trip_ids = round_trip_observed
+        .iter()
+        .map(|process| process.process_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(round_trip_ids, observed_ids);
+
+    let snapshot = core
+        .processes()
+        .session_snapshot(session_id)
+        .await
+        .expect("capture process work snapshot for remote DTO round trip");
+    let remote_snapshot = lash_remote_protocol::RemoteProcessWorkSnapshot::try_from(snapshot)
+        .expect("process work snapshot should convert to remote DTO");
+    remote_snapshot
+        .validate()
+        .expect("remote process work snapshot should validate");
+    let round_trip_snapshot: lash_core::ProcessWorkSnapshot = remote_snapshot
+        .try_into()
+        .expect("remote process work snapshot should convert back");
+    assert_eq!(round_trip_snapshot.session_id, session_id);
+
+    let records = registry
+        .list_processes(&filter)
+        .await
+        .expect("list process records for remote DTO round trip");
+    for record in records {
+        let process_id = record.id.clone();
+        let remote_record = lash_remote_protocol::RemoteProcessRecord::try_from(record)
+            .expect("process record should convert to remote DTO");
+        remote_record
+            .validate("LashE2eProcessRecord")
+            .expect("remote process record should validate");
+        let round_trip_record: lash_core::ProcessRecord = remote_record
+            .try_into()
+            .expect("remote process record should convert back");
+        assert_eq!(round_trip_record.id, process_id);
+
+        let events = registry
+            .recent_events(&process_id, 32)
+            .await
+            .expect("load process event tail for remote DTO round trip");
+        let expected_tail = events
+            .iter()
+            .map(|event| (event.sequence, event.event_type.clone()))
+            .collect::<Vec<_>>();
+        let remote_events =
+            lash_remote_protocol::RemoteProcessEventsResponse::from((process_id.clone(), events));
+        remote_events
+            .validate()
+            .expect("remote process event tail should validate");
+        let (round_trip_process_id, round_trip_events): (String, Vec<lash_core::ProcessEvent>) =
+            remote_events
+                .try_into()
+                .expect("remote process event tail should convert back");
+        let round_trip_tail = round_trip_events
+            .iter()
+            .map(|event| (event.sequence, event.event_type.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(round_trip_process_id, process_id);
+        assert_eq!(round_trip_tail, expected_tail);
+    }
+}
+
+fn assert_remote_process_summaries_round_trip(summaries: &[lash_core::ProcessHandleSummary]) {
+    for summary in summaries {
+        let remote = lash_remote_protocol::RemoteProcessSummary::from(summary.clone());
+        remote
+            .validate("LashE2eProcessSummary")
+            .expect("remote process summary should validate");
+        let round_trip: lash_core::ProcessHandleSummary = remote.into();
+        assert_eq!(&round_trip, summary);
+    }
 }
 
 pub(super) async fn run_session_turn_process_case() -> Result<()> {
@@ -244,6 +348,8 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
 
     let prompt_captures_snapshot = prompt_captures.lock().expect("prompt captures").clone();
     let final_process_list = all_host_process_summaries(&core).await?;
+    assert_remote_process_dto_surface(&core, process_registry.as_ref(), session_id).await;
+    assert_remote_process_summaries_round_trip(&final_process_list);
     let run = LashE2eRun {
         turn_output: None,
         streamed_events: Vec::new(),
@@ -352,6 +458,8 @@ submit result.answer
     assert_eq!(tools.step_count(), 2);
 
     let final_process_list = all_host_process_summaries(&core).await?;
+    assert_remote_process_dto_surface(&core, process_registry.as_ref(), session_id).await;
+    assert_remote_process_summaries_round_trip(&final_process_list);
     assert_eq!(
         final_process_list.len(),
         1,

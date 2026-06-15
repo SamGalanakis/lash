@@ -4,7 +4,7 @@ A Rust runtime for durable LLM agents.
 
 Most agent stacks treat the LLM as the runtime and stitch state around it — a database for memory, a queue for retries, a sandbox for code. `lash` inverts that. The runtime is the durable end of the pair; the LLM is the variable call. Your app owns the outer boundaries — storage, auth, transport, product state. `lash` owns the turn — model calls, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.
 
-**Docs:** <https://lash.run/> — quickstart, embedding guide, plugins, persistence, durable-workflow integration, and architecture chapters.
+**Docs:** <https://lash.run/> — quickstart, embedding guide, tools, plugins, persistence, durable-workflow integration, and architecture chapters.
 
 > **Alpha:** works today, API still moving fast — pin to an exact `=0.1.0-alpha.N` version when you embed.
 
@@ -13,7 +13,7 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 - **Durable per-turn commits** — every completed turn lands as one atomic `RuntimeCommit` against a `SessionGraph`. Effects are the replay boundary; turns are the semantic commit boundary. → [persistence](https://lash.run/persistence.html)
 - **Workflow-host integration** — a sans-IO turn machine behind one `EffectHost` boundary. The default `InlineEffectHost` runs in-process; the first-party Restate adapter replays effects from host history and retries the final idempotent commit. → [durability](https://lash.run/architecture/durability.html)
 - **Two execution modes, one commit unit** — `standard` uses native provider tool-calling with concurrent dispatch; `rlm` runs `lashlang` programs in a sandboxed VM where every effect crosses the host. → [RLM](https://lash.run/rlm.html)
-- **Plugin architecture** — tools, prompts, planning, memory, subagents, history transforms, UI activity, and tool-output budgeting are all plugins; the execution mode is a plugin too. Hosts compose only what they embed. → [plugins](https://lash.run/plugins.html)
+- **Tool providers and plugins** — ordinary host operations are `ToolProvider`s; plugins add runtime/session behavior such as prompts, planning, memory, subagents, history transforms, UI activity, catalog policy, and tool-output budgeting. Hosts compose only what they embed. → [tools](https://lash.run/tools.html), [plugins](https://lash.run/plugins.html)
 - **Provider portability** — Anthropic, OpenAI Responses, any OpenAI-compatible Chat Completions endpoint, OpenAI Codex, and Google Gemini / Code Assist. MCP servers attach through `lash-plugin-mcp`. → [providers](https://lash.run/architecture/providers.html)
 - **Tracing as a first-class sink** — attach a `TraceSink` for structured turn, tool, LLM, prompt, and usage records. Bundled JSONL sink + self-contained HTML viewer; optional OpenTelemetry export. → [tracing](https://lash.run/tracing.html)
 
