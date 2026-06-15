@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::plugin::PluginError;
 
 #[derive(Clone)]
-pub struct ToolProcessControl<'run> {
+pub struct ToolSessionProcessAdmin<'run> {
     pub(super) session_id: String,
     pub(super) agent_frame_id: crate::AgentFrameId,
     pub(super) processes: Arc<dyn crate::ProcessService>,
@@ -14,7 +14,7 @@ pub struct ToolProcessControl<'run> {
     pub(super) execution_env_spec: crate::ProcessExecutionEnvSpec,
 }
 
-impl ToolProcessControl<'_> {
+impl ToolSessionProcessAdmin<'_> {
     fn process_scope(&self) -> crate::ProcessOpScope<'_> {
         crate::ProcessOpScope::new(self.effect_controller.scoped())
             .with_parent_invocation(self.parent_invocation.clone())

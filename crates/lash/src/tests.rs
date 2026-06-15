@@ -481,6 +481,41 @@ impl ToolProvider for AppTools {
     }
 }
 
+struct PendingAppTools {
+    key_tx: StdMutex<Option<oneshot::Sender<lash_core::AwaitEventKey>>>,
+}
+
+impl PendingAppTools {
+    fn new(key_tx: oneshot::Sender<lash_core::AwaitEventKey>) -> Self {
+        Self {
+            key_tx: StdMutex::new(Some(key_tx)),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for PendingAppTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![app_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(app_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        assert_eq!(call.name, "app_lookup");
+        let key = match call.context.completion_key().await {
+            Ok(key) => key,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        if let Some(tx) = self.key_tx.lock().expect("pending tool key tx").take() {
+            let _ = tx.send(key);
+        }
+        lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
+    }
+}
+
 struct AgentFrameSwitchTools;
 
 #[async_trait]
@@ -540,7 +575,7 @@ fn app_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "object" }),
     )
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
 }
 
 struct LongTextTools;
@@ -572,7 +607,7 @@ fn long_text_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "string" }),
     )
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
 }
 
 struct SurfacePluginFactory;
@@ -991,16 +1026,16 @@ fn standard_core() -> LashCore {
         .expect("standard core")
 }
 
-fn inline_scope(scope: lash_core::EffectScope) -> lash_core::ScopedEffectController<'static> {
+fn inline_scope(scope: lash_core::ExecutionScope) -> lash_core::ScopedEffectController<'static> {
     lash_core::ScopedEffectController::shared(
         Arc::new(lash_core::InlineRuntimeEffectController),
         scope,
     )
-    .expect("inline effect scope")
+    .expect("inline execution scope")
 }
 
 fn turn_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
-    inline_scope(lash_core::EffectScope::turn(
+    inline_scope(lash_core::ExecutionScope::turn(
         session_id,
         lash_core::TurnActivityId::fresh().0,
     ))
@@ -1009,11 +1044,11 @@ fn turn_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
 fn runtime_operation_scope(
     scope_id: impl Into<String>,
 ) -> lash_core::ScopedEffectController<'static> {
-    inline_scope(lash_core::EffectScope::runtime_operation(scope_id))
+    inline_scope(lash_core::ExecutionScope::runtime_operation(scope_id))
 }
 
 fn session_delete_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
-    inline_scope(lash_core::EffectScope::session_delete(session_id))
+    inline_scope(lash_core::ExecutionScope::session_delete(session_id))
 }
 
 fn explicit_ephemeral_facets(

@@ -18,22 +18,24 @@ impl RuntimeSessionServices {
         registry: Arc<dyn crate::ProcessRegistry>,
         module_ref: ::lashlang::ModuleRef,
         process_ref: ::lashlang::ProcessRef,
-        required_surface_ref: ::lashlang::RequiredSurfaceRef,
+        host_requirements_ref: ::lashlang::HostRequirementsRef,
         process_name: String,
         args: serde_json::Map<String, serde_json::Value>,
         execution_context: crate::ProcessExecutionContext,
         scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
-        let artifact = match self
-            .current
-            .host
-            .core
-            .durability
-            .lashlang_artifact_store
-            .get_module_artifact(&module_ref)
-            .await
-        {
+        let artifact_result = {
+            let _phase = self.current.named_phase("rlm_process.load_artifact");
+            self.current
+                .host
+                .core
+                .durability
+                .lashlang_artifact_store
+                .get_module_artifact(&module_ref)
+                .await
+        };
+        let artifact = match artifact_result {
             Ok(Some(artifact)) => artifact,
             Ok(None) => {
                 return process_lashlang_failure(
@@ -50,69 +52,84 @@ impl RuntimeSessionServices {
                 );
             }
         };
-        if artifact.required_surface_ref != required_surface_ref {
-            return process_lashlang_failure(
-                "process_required_surface_mismatch",
-                format!(
-                    "lashlang process `{process_name}` requested surface {}, artifact has {}",
-                    required_surface_ref, artifact.required_surface_ref
-                ),
-                None,
-            );
-        }
-        if artifact.process_ref(&process_name) != Some(&process_ref) {
-            return process_lashlang_failure(
-                "process_ref_mismatch",
-                format!(
-                    "lashlang module `{module_ref}` does not export process `{process_name}` as requested ref {:?}",
-                    process_ref
-                ),
-                None,
-            );
-        }
-        let tool_surface = match self.current.plugins.tool_surface(&self.current.session_id) {
-            Ok(surface) => surface,
-            Err(err) => {
+        let (tool_catalog, lashlang_abilities) = {
+            let _phase = self.current.named_phase("rlm_process.resolve_environment");
+            if artifact.host_requirements_ref != host_requirements_ref {
                 return process_lashlang_failure(
-                    "process_tool_surface_failed",
-                    err.to_string(),
+                    "process_host_requirements_mismatch",
+                    format!(
+                        "lashlang process `{process_name}` requested surface {}, artifact has {}",
+                        host_requirements_ref, artifact.host_requirements_ref
+                    ),
                     None,
                 );
             }
-        };
-        let lashlang_abilities = crate::runtime::builder::lashlang_abilities_for_process_registry(
-            self.current.plugins.lashlang_abilities(),
-            self.current.host.process_registry.is_some(),
-        );
-        let current_surface = crate::session::lashlang_surface_from_tool_surface(
-            &tool_surface,
-            lashlang_abilities,
-            self.current.plugins.lashlang_language_features(),
-            self.current.plugins.lashlang_resources(),
-        );
-        if let Err(err) =
-            lashlang_surface_satisfies_requirements(&artifact.required_surface, &current_surface)
-        {
-            return process_lashlang_failure(
-                "process_surface_incompatible",
-                format!(
-                    "lashlang process `{process_name}` is incompatible with this host surface: {err}"
-                ),
-                None,
+            if artifact.process_ref(&process_name) != Some(&process_ref) {
+                return process_lashlang_failure(
+                    "process_ref_mismatch",
+                    format!(
+                        "lashlang module `{module_ref}` does not export process `{process_name}` as requested ref {:?}",
+                        process_ref
+                    ),
+                    None,
+                );
+            }
+            let tool_catalog = match self
+                .current
+                .plugins
+                .resolved_tool_catalog(&self.current.session_id)
+            {
+                Ok(tool_catalog) => tool_catalog,
+                Err(err) => {
+                    return process_lashlang_failure(
+                        "process_tool_catalog_failed",
+                        err.to_string(),
+                        None,
+                    );
+                }
+            };
+            let lashlang_abilities =
+                crate::runtime::builder::lashlang_abilities_for_process_registry(
+                    self.current.plugins.lashlang_abilities(),
+                    self.current.host.process_registry.is_some(),
+                );
+            let current_environment = crate::session::lashlang_host_environment_from_tool_catalog(
+                &tool_catalog,
+                lashlang_abilities,
+                self.current.plugins.lashlang_language_features(),
+                self.current.plugins.lashlang_resources(),
             );
-        }
-        let compiled = match self
-            .current
-            .host
-            .core
-            .durability
-            .lashlang_process_cache
-            .lock()
-        {
-            Ok(mut cache) => cache.get_or_compile(&artifact, &process_ref, &required_surface_ref),
-            Err(_) => Err(::lashlang::RuntimeError::ValueError {
-                message: "lashlang compiled process cache lock poisoned".to_string(),
-            }),
+            if let Err(err) = lashlang_host_environment_satisfies_requirements(
+                &artifact.host_requirements,
+                &current_environment,
+            ) {
+                return process_lashlang_failure(
+                    "process_host_environment_incompatible",
+                    format!(
+                        "lashlang process `{process_name}` is incompatible with this host surface: {err}"
+                    ),
+                    None,
+                );
+            }
+            (tool_catalog, lashlang_abilities)
+        };
+        let compiled = {
+            let _phase = self.current.named_phase("rlm_process.compile");
+            match self
+                .current
+                .host
+                .core
+                .durability
+                .lashlang_process_cache
+                .lock()
+            {
+                Ok(mut cache) => {
+                    cache.get_or_compile(&artifact, &process_ref, &host_requirements_ref)
+                }
+                Err(_) => Err(::lashlang::RuntimeError::ValueError {
+                    message: "lashlang compiled process cache lock poisoned".to_string(),
+                }),
+            }
         };
         let compiled = match compiled {
             Ok(compiled) => compiled,
@@ -150,14 +167,17 @@ impl RuntimeSessionServices {
         }
         let mut state = ::lashlang::State::from_snapshot(::lashlang::Snapshot { globals });
 
-        let run_context = ProcessRunContext::builder(self)
-            .surface(tool_surface)
-            .scoped_effect_controller(scoped_effect_controller)
-            .causal_invocation(execution_context.causal_invocation.clone())
-            .build()
-            .map_err(|err| {
-                process_lashlang_failure("process_run_context_failed", err.to_string(), None)
-            });
+        let run_context = {
+            let _phase = self.current.named_phase("rlm_process.build_context");
+            ProcessRunContext::builder(self)
+                .tool_catalog(tool_catalog)
+                .scoped_effect_controller(scoped_effect_controller)
+                .causal_invocation(execution_context.causal_invocation.clone())
+                .build()
+                .map_err(|err| {
+                    process_lashlang_failure("process_run_context_failed", err.to_string(), None)
+                })
+        };
         let run_context = match run_context {
             Ok(run_context) => run_context,
             Err(output) => return output,
@@ -195,12 +215,14 @@ impl RuntimeSessionServices {
             queued_work_poke: self.current.host.queued_work_poke.clone(),
             sleep_sequence: AtomicU64::new(0),
             event_sequence: AtomicU64::new(0),
+            resource_tool_sequence: AtomicU64::new(0),
             signal_send_sequence: AtomicU64::new(0),
             signal_wait_ordinals: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let env = ::lashlang::ExecutionEnvironment::new(&host).process();
 
         let output = {
+            let _phase = self.current.named_phase("rlm_process.execute");
             tokio::select! {
                 _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process was cancelled"),
                 result = ::lashlang::execute(compiled.as_ref(), &mut state, &env) => {
@@ -212,17 +234,20 @@ impl RuntimeSessionServices {
                 }
             }
         };
-        drop(env);
-        drop(host);
-        run_context.shutdown().await;
-        emit_process_finished_trace(
-            lashlang_execution_trace,
-            &registration.id,
-            &module_ref,
-            &process_ref,
-            &process_name,
-            &output,
-        );
+        {
+            let _phase = self.current.named_phase("rlm_process.shutdown");
+            drop(env);
+            drop(host);
+            run_context.shutdown().await;
+            emit_process_finished_trace(
+                lashlang_execution_trace,
+                &registration.id,
+                &module_ref,
+                &process_ref,
+                &process_name,
+                &output,
+            );
+        }
         output
     }
 }
@@ -253,6 +278,7 @@ struct LashlangProcessHost<'run> {
     /// gets the same ordinal — and thus the same replay key — across a
     /// crash-recovery re-run, making the append idempotent on redelivery.
     event_sequence: AtomicU64,
+    resource_tool_sequence: AtomicU64,
     signal_send_sequence: AtomicU64,
     signal_wait_ordinals: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
@@ -287,6 +313,24 @@ impl LashlangProcessHost<'_> {
             &self.module_ref,
             &self.process_ref,
             &self.process_name,
+        )
+    }
+
+    fn resource_tool_call_id(
+        &self,
+        host_operation: &str,
+        call_site: Option<&::lashlang::LashlangExecutionCallSite>,
+    ) -> String {
+        if let Some(call_site) = call_site {
+            return format!(
+                "lashlang:{}:resource:{}:{}:{}",
+                self.process_id, host_operation, call_site.site.node_id, call_site.occurrence
+            );
+        }
+        let ordinal = self.resource_tool_sequence.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "lashlang:{}:resource:{}:ordinal:{}",
+            self.process_id, host_operation, ordinal
         )
     }
 }
@@ -326,6 +370,7 @@ impl LashlangProcessHost<'_> {
                 operation
             ))
         })?;
+        let call_id = self.resource_tool_call_id(&host_operation, call_site.as_ref());
         let call_site = call_site.and_then(|call_site| {
             self.lashlang_execution_sink.as_ref().map(|sink| {
                 crate::ToolLashlangExecutionCallSite::new(
@@ -338,7 +383,6 @@ impl LashlangProcessHost<'_> {
             })
         });
         let payload = self.resource_payload(&args)?;
-        let call_id = uuid::Uuid::new_v4().to_string();
         let reply = if let Some(call_site) = call_site {
             self.ctx
                 .call_tool_with_lashlang_execution_call_site(
@@ -946,9 +990,9 @@ fn process_id_from_lashlang_handle(
         })
 }
 
-fn lashlang_surface_satisfies_requirements(
-    required: &::lashlang::SurfaceRequirements,
-    current: &::lashlang::LashlangSurface,
+fn lashlang_host_environment_satisfies_requirements(
+    required: &::lashlang::HostRequirements,
+    current: &::lashlang::LashlangHostEnvironment,
 ) -> Result<(), String> {
     let abilities = required.abilities;
     let current_abilities = current.abilities;

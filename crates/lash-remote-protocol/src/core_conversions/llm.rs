@@ -1,0 +1,743 @@
+impl RemoteLlmRequest {
+    pub fn from_core(request_id: impl Into<String>, value: core_llm::LlmRequest) -> Self {
+        let core_llm::LlmRequest {
+            model,
+            messages,
+            attachments,
+            tools,
+            tool_choice,
+            model_variant,
+            generation,
+            session_id,
+            output_spec,
+            stream_events: _,
+            provider_trace: _,
+        } = value;
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            model_intent: RemoteModelIntent {
+                model,
+                variant: model_variant,
+                provider: None,
+                metadata: HashMap::new(),
+            },
+            messages: messages.into_iter().map(Into::into).collect(),
+            attachments: attachments.into_iter().map(Into::into).collect(),
+            tools: tools.iter().cloned().map(Into::into).collect(),
+            tool_choice: tool_choice.into(),
+            output_spec: output_spec.map(Into::into),
+            generation: generation.into(),
+            request_metadata: RemoteLlmRequestMetadata {
+                session_id,
+                idempotency_key: None,
+                trace_id: None,
+            },
+            metadata: HashMap::new(),
+        }
+    }
+}
+
+impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteLlmRequest) -> Result<Self, Self::Error> {
+        value.validate()?;
+        let RemoteLlmRequest {
+            protocol_version: _,
+            request_id: _,
+            model_intent,
+            messages,
+            attachments,
+            tools,
+            tool_choice,
+            output_spec,
+            generation,
+            request_metadata,
+            metadata: _,
+        } = value;
+        let RemoteModelIntent {
+            model,
+            variant,
+            provider: _,
+            metadata: _,
+        } = model_intent;
+        let RemoteLlmRequestMetadata {
+            session_id,
+            idempotency_key: _,
+            trace_id: _,
+        } = request_metadata;
+        Ok(Self {
+            model,
+            messages: messages.into_iter().map(Into::into).collect(),
+            attachments: attachments
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            tools: Arc::new(tools.into_iter().map(Into::into).collect()),
+            tool_choice: tool_choice.into(),
+            model_variant: variant,
+            generation: generation.try_into()?,
+            session_id,
+            output_spec: output_spec.map(Into::into),
+            stream_events: None,
+            provider_trace: None,
+        })
+    }
+}
+
+impl RemoteLlmResponse {
+    pub fn from_core(request_id: impl Into<String>, value: core_llm::LlmResponse) -> Self {
+        let core_llm::LlmResponse {
+            full_text,
+            parts,
+            usage,
+            terminal_reason,
+            terminal_diagnostic,
+            provider_usage,
+            request_body,
+            http_summary,
+        } = value;
+        let mut diagnostics = Vec::new();
+        if let Some(message) = terminal_diagnostic {
+            diagnostics.push(RemoteDiagnostic {
+                kind: "terminal".to_string(),
+                code: None,
+                message,
+                data: None,
+            });
+        }
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            full_text,
+            output_parts: parts.into_iter().map(Into::into).collect(),
+            usage: usage.into(),
+            terminal_reason: terminal_reason.into(),
+            diagnostics,
+            provider_metadata: RemoteProviderMetadata {
+                usage: provider_usage,
+                request_body,
+                http_summary,
+                data: HashMap::new(),
+            },
+        }
+    }
+}
+
+impl From<RemoteLlmResponse> for core_llm::LlmResponse {
+    fn from(value: RemoteLlmResponse) -> Self {
+        let RemoteLlmResponse {
+            protocol_version: _,
+            request_id: _,
+            full_text,
+            output_parts,
+            usage,
+            terminal_reason,
+            diagnostics,
+            provider_metadata,
+        } = value;
+        let RemoteProviderMetadata {
+            usage: provider_usage,
+            request_body,
+            http_summary,
+            data: _,
+        } = provider_metadata;
+        Self {
+            full_text,
+            parts: output_parts.into_iter().map(Into::into).collect(),
+            usage: usage.into(),
+            terminal_reason: terminal_reason.into(),
+            terminal_diagnostic: diagnostics.first().map(|diag| diag.message.clone()),
+            provider_usage,
+            request_body,
+            http_summary,
+        }
+    }
+}
+
+impl From<core_llm::GenerationOptions> for RemoteGenerationOptions {
+    fn from(value: core_llm::GenerationOptions) -> Self {
+        let core_llm::GenerationOptions { output_token_cap } = value;
+        Self {
+            output_token_cap: output_token_cap.map(|cap| cap.get() as u64),
+            temperature: None,
+            top_p: None,
+            stop: Vec::new(),
+            provider_options: HashMap::new(),
+        }
+    }
+}
+
+impl TryFrom<RemoteGenerationOptions> for core_llm::GenerationOptions {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteGenerationOptions) -> Result<Self, Self::Error> {
+        value.validate("RemoteGenerationOptions")?;
+        let RemoteGenerationOptions {
+            output_token_cap,
+            temperature: _,
+            top_p: _,
+            stop: _,
+            provider_options: _,
+        } = value;
+        Ok(Self {
+            output_token_cap: output_token_cap
+                .and_then(|cap| usize::try_from(cap).ok())
+                .and_then(NonZeroUsize::new),
+        })
+    }
+}
+
+impl From<core_llm::LlmMessage> for RemoteLlmMessage {
+    fn from(value: core_llm::LlmMessage) -> Self {
+        let core_llm::LlmMessage { role, blocks } = value;
+        Self {
+            role: role.into(),
+            content: blocks.iter().cloned().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<RemoteLlmMessage> for core_llm::LlmMessage {
+    fn from(value: RemoteLlmMessage) -> Self {
+        let RemoteLlmMessage { role, content } = value;
+        Self::new(role.into(), content.into_iter().map(Into::into).collect())
+    }
+}
+
+impl From<core_llm::LlmRole> for RemoteLlmRole {
+    fn from(value: core_llm::LlmRole) -> Self {
+        match value {
+            core_llm::LlmRole::User => Self::User,
+            core_llm::LlmRole::Assistant => Self::Assistant,
+            core_llm::LlmRole::System => Self::System,
+        }
+    }
+}
+
+impl From<RemoteLlmRole> for core_llm::LlmRole {
+    fn from(value: RemoteLlmRole) -> Self {
+        match value {
+            RemoteLlmRole::User => Self::User,
+            RemoteLlmRole::Assistant => Self::Assistant,
+            RemoteLlmRole::System => Self::System,
+        }
+    }
+}
+
+impl From<core_llm::LlmContentBlock> for RemoteLlmContentBlock {
+    fn from(value: core_llm::LlmContentBlock) -> Self {
+        match value {
+            core_llm::LlmContentBlock::Text {
+                text,
+                response_meta,
+                cache_breakpoint,
+            } => Self::Text {
+                text: text.to_string(),
+                response_meta: response_meta.map(Into::into),
+                cache_breakpoint,
+            },
+            core_llm::LlmContentBlock::Image { attachment_idx } => Self::ImageAttachment {
+                attachment_index: attachment_idx,
+            },
+            core_llm::LlmContentBlock::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay,
+            } => Self::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay: replay.map(Into::into),
+            },
+            core_llm::LlmContentBlock::ToolResult {
+                call_id,
+                content,
+                tool_name,
+            } => Self::ToolResult {
+                call_id,
+                content,
+                tool_name,
+            },
+            core_llm::LlmContentBlock::Reasoning { text, replay } => Self::Reasoning {
+                text,
+                replay: replay.map(Into::into),
+            },
+        }
+    }
+}
+
+impl From<RemoteLlmContentBlock> for core_llm::LlmContentBlock {
+    fn from(value: RemoteLlmContentBlock) -> Self {
+        match value {
+            RemoteLlmContentBlock::Text {
+                text,
+                response_meta,
+                cache_breakpoint,
+            } => Self::Text {
+                text: Arc::<str>::from(text),
+                response_meta: response_meta.map(Into::into),
+                cache_breakpoint,
+            },
+            RemoteLlmContentBlock::ImageAttachment { attachment_index } => Self::Image {
+                attachment_idx: attachment_index,
+            },
+            RemoteLlmContentBlock::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay,
+            } => Self::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay: replay.map(Into::into),
+            },
+            RemoteLlmContentBlock::ToolResult {
+                call_id,
+                content,
+                tool_name,
+            } => Self::ToolResult {
+                call_id,
+                content,
+                tool_name,
+            },
+            RemoteLlmContentBlock::Reasoning { text, replay } => Self::Reasoning {
+                text,
+                replay: replay.map(Into::into),
+            },
+        }
+    }
+}
+
+impl From<core_llm::ResponseTextMeta> for RemoteResponseTextMeta {
+    fn from(value: core_llm::ResponseTextMeta) -> Self {
+        let core_llm::ResponseTextMeta { id, status, phase } = value;
+        Self { id, status, phase }
+    }
+}
+
+impl From<RemoteResponseTextMeta> for core_llm::ResponseTextMeta {
+    fn from(value: RemoteResponseTextMeta) -> Self {
+        let RemoteResponseTextMeta { id, status, phase } = value;
+        Self { id, status, phase }
+    }
+}
+
+impl From<core_llm::ProviderReplayMeta> for RemoteProviderReplayMeta {
+    fn from(value: core_llm::ProviderReplayMeta) -> Self {
+        let core_llm::ProviderReplayMeta { item_id, opaque } = value;
+        Self { item_id, opaque }
+    }
+}
+
+impl From<RemoteProviderReplayMeta> for core_llm::ProviderReplayMeta {
+    fn from(value: RemoteProviderReplayMeta) -> Self {
+        let RemoteProviderReplayMeta { item_id, opaque } = value;
+        Self { item_id, opaque }
+    }
+}
+
+impl From<core_llm::ProviderReasoningReplay> for RemoteProviderReasoningReplay {
+    fn from(value: core_llm::ProviderReasoningReplay) -> Self {
+        let core_llm::ProviderReasoningReplay {
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
+        } = value;
+        Self {
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
+        }
+    }
+}
+
+impl From<RemoteProviderReasoningReplay> for core_llm::ProviderReasoningReplay {
+    fn from(value: RemoteProviderReasoningReplay) -> Self {
+        let RemoteProviderReasoningReplay {
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
+        } = value;
+        Self {
+            item_id,
+            encrypted_content,
+            signature,
+            redacted,
+            summary,
+        }
+    }
+}
+
+impl From<core_llm::LlmAttachment> for RemoteLlmAttachment {
+    fn from(value: core_llm::LlmAttachment) -> Self {
+        let core_llm::LlmAttachment {
+            mime,
+            data,
+            reference,
+        } = value;
+        Self {
+            id: reference.as_ref().map(|reference| reference.id.to_string()),
+            mime,
+            data_base64: (!data.is_empty())
+                .then(|| base64::engine::general_purpose::STANDARD.encode(data)),
+            reference: reference.map(Into::into),
+            metadata: HashMap::new(),
+        }
+    }
+}
+
+impl TryFrom<RemoteLlmAttachment> for core_llm::LlmAttachment {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteLlmAttachment) -> Result<Self, Self::Error> {
+        let RemoteLlmAttachment {
+            id,
+            mime,
+            data_base64,
+            reference,
+            metadata: _,
+        } = value;
+        let data = match data_base64 {
+            Some(encoded) => base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .map_err(|err| RemoteProtocolError::InvalidImageBlob {
+                    id: id.unwrap_or_else(|| "<inline>".to_string()),
+                    message: err.to_string(),
+                })?,
+            None => Vec::new(),
+        };
+        Ok(Self {
+            mime,
+            data,
+            reference: reference.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+impl From<lash_core::AttachmentRef> for RemoteAttachmentRef {
+    fn from(value: lash_core::AttachmentRef) -> Self {
+        let mime = value.canonical_mime().to_string();
+        let lash_core::AttachmentRef {
+            id,
+            media_type: _,
+            byte_len,
+            width,
+            height,
+            label,
+        } = value;
+        Self {
+            id: id.to_string(),
+            mime,
+            byte_len,
+            width,
+            height,
+            label,
+            metadata: HashMap::new(),
+        }
+    }
+}
+
+impl TryFrom<RemoteAttachmentRef> for lash_core::AttachmentRef {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteAttachmentRef) -> Result<Self, Self::Error> {
+        value.validate()?;
+        let RemoteAttachmentRef {
+            id,
+            mime,
+            byte_len,
+            width,
+            height,
+            label,
+            metadata: _,
+        } = value;
+        let media_type = lash_core::MediaType::from_mime(&mime).ok_or_else(|| {
+            RemoteProtocolError::InvalidAttachmentRef {
+                id: id.clone(),
+                message: format!("unsupported attachment mime `{mime}`"),
+            }
+        })?;
+        Ok(Self {
+            id: lash_core::AttachmentId::new(id),
+            media_type,
+            byte_len,
+            width,
+            height,
+            label,
+        })
+    }
+}
+
+impl From<core_llm::LlmToolSpec> for RemoteLlmToolSpec {
+    fn from(value: core_llm::LlmToolSpec) -> Self {
+        let core_llm::LlmToolSpec {
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections,
+            output_schema_projections,
+        } = value;
+        Self {
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections: input_schema_projections
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            output_schema_projections: output_schema_projections
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<RemoteLlmToolSpec> for core_llm::LlmToolSpec {
+    fn from(value: RemoteLlmToolSpec) -> Self {
+        let RemoteLlmToolSpec {
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections,
+            output_schema_projections,
+        } = value;
+        Self {
+            name,
+            description,
+            input_schema,
+            output_schema,
+            input_schema_projections: input_schema_projections
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            output_schema_projections: output_schema_projections
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<core_llm::LlmToolChoice> for RemoteLlmToolChoice {
+    fn from(value: core_llm::LlmToolChoice) -> Self {
+        match value {
+            core_llm::LlmToolChoice::Auto => Self::Auto,
+            core_llm::LlmToolChoice::None => Self::None,
+            core_llm::LlmToolChoice::Required => Self::Required,
+        }
+    }
+}
+
+impl From<RemoteLlmToolChoice> for core_llm::LlmToolChoice {
+    fn from(value: RemoteLlmToolChoice) -> Self {
+        match value {
+            RemoteLlmToolChoice::Auto => Self::Auto,
+            RemoteLlmToolChoice::None => Self::None,
+            RemoteLlmToolChoice::Required => Self::Required,
+        }
+    }
+}
+
+impl From<core_llm::LlmOutputSpec> for RemoteLlmOutputSpec {
+    fn from(value: core_llm::LlmOutputSpec) -> Self {
+        match value {
+            core_llm::LlmOutputSpec::JsonObject => Self::JsonObject,
+            core_llm::LlmOutputSpec::JsonSchema(core_llm::LlmJsonSchema {
+                name,
+                schema,
+                strict,
+            }) => Self::JsonSchema {
+                name,
+                schema,
+                strict,
+            },
+        }
+    }
+}
+
+impl From<RemoteLlmOutputSpec> for core_llm::LlmOutputSpec {
+    fn from(value: RemoteLlmOutputSpec) -> Self {
+        match value {
+            RemoteLlmOutputSpec::JsonObject => Self::JsonObject,
+            RemoteLlmOutputSpec::JsonSchema {
+                name,
+                schema,
+                strict,
+            } => Self::JsonSchema(core_llm::LlmJsonSchema {
+                name,
+                schema,
+                strict,
+            }),
+        }
+    }
+}
+
+impl From<core_llm::LlmOutputPart> for RemoteLlmOutputPart {
+    fn from(value: core_llm::LlmOutputPart) -> Self {
+        match value {
+            core_llm::LlmOutputPart::Text {
+                text,
+                response_meta,
+            } => Self::Text {
+                text,
+                response_meta: response_meta.map(Into::into),
+            },
+            core_llm::LlmOutputPart::Reasoning { text, replay } => Self::Reasoning {
+                text,
+                replay: replay.map(Into::into),
+            },
+            core_llm::LlmOutputPart::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay,
+            } => Self::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay: replay.map(Into::into),
+            },
+        }
+    }
+}
+
+impl From<RemoteLlmOutputPart> for core_llm::LlmOutputPart {
+    fn from(value: RemoteLlmOutputPart) -> Self {
+        match value {
+            RemoteLlmOutputPart::Text {
+                text,
+                response_meta,
+            } => Self::Text {
+                text,
+                response_meta: response_meta.map(Into::into),
+            },
+            RemoteLlmOutputPart::Reasoning { text, replay } => Self::Reasoning {
+                text,
+                replay: replay.map(Into::into),
+            },
+            RemoteLlmOutputPart::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay,
+            } => Self::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                replay: replay.map(Into::into),
+            },
+        }
+    }
+}
+
+impl From<core_llm::LlmTerminalReason> for RemoteLlmTerminalReason {
+    fn from(value: core_llm::LlmTerminalReason) -> Self {
+        match value {
+            core_llm::LlmTerminalReason::Stop => Self::Stop,
+            core_llm::LlmTerminalReason::ToolUse => Self::ToolUse,
+            core_llm::LlmTerminalReason::OutputLimit => Self::OutputLimit,
+            core_llm::LlmTerminalReason::ContextOverflow => Self::ContextOverflow,
+            core_llm::LlmTerminalReason::ContentFilter => Self::ContentFilter,
+            core_llm::LlmTerminalReason::ProviderError => Self::ProviderError,
+            core_llm::LlmTerminalReason::Cancelled => Self::Cancelled,
+            core_llm::LlmTerminalReason::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<RemoteLlmTerminalReason> for core_llm::LlmTerminalReason {
+    fn from(value: RemoteLlmTerminalReason) -> Self {
+        match value {
+            RemoteLlmTerminalReason::Stop => Self::Stop,
+            RemoteLlmTerminalReason::ToolUse => Self::ToolUse,
+            RemoteLlmTerminalReason::OutputLimit => Self::OutputLimit,
+            RemoteLlmTerminalReason::ContextOverflow => Self::ContextOverflow,
+            RemoteLlmTerminalReason::ContentFilter => Self::ContentFilter,
+            RemoteLlmTerminalReason::ProviderError => Self::ProviderError,
+            RemoteLlmTerminalReason::Cancelled => Self::Cancelled,
+            RemoteLlmTerminalReason::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<core_llm::LlmUsage> for RemoteUsage {
+    fn from(value: core_llm::LlmUsage) -> Self {
+        let core_llm::LlmUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        }
+    }
+}
+
+impl From<RemoteUsage> for core_llm::LlmUsage {
+    fn from(value: RemoteUsage) -> Self {
+        let RemoteUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        }
+    }
+}
+
+impl From<lash_core::TokenUsage> for RemoteUsage {
+    fn from(value: lash_core::TokenUsage) -> Self {
+        let lash_core::TokenUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        }
+    }
+}
+
+impl From<RemoteUsage> for lash_core::TokenUsage {
+    fn from(value: RemoteUsage) -> Self {
+        let RemoteUsage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        } = value;
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        }
+    }
+}

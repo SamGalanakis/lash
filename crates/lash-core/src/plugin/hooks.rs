@@ -27,8 +27,8 @@ pub type CheckpointHook =
     Arc<dyn Fn(CheckpointHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> PluginFuture<Vec<PromptContribution>> + Send + Sync>;
-pub type ToolSurfaceContributor =
-    Arc<dyn Fn(ToolSurfaceContext) -> Result<ToolSurfaceContribution, PluginError> + Send + Sync>;
+pub type ToolCatalogContributor =
+    Arc<dyn Fn(ToolCatalogContext) -> Result<ToolCatalogContribution, PluginError> + Send + Sync>;
 pub type ToolDiscoveryContributor = Arc<
     dyn Fn(ToolDiscoveryContext) -> Result<ToolDiscoveryContribution, PluginError> + Send + Sync,
 >;

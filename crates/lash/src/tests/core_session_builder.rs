@@ -98,7 +98,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
         .run()
         .await?;
     session
-        .control()
+        .admin()
         .config()
         .replace_prompt_slot(
             PromptSlot::Guidance,
@@ -110,7 +110,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
         .await?;
     session.turn(TurnInput::text("second")).run().await?;
     session
-        .control()
+        .admin()
         .config()
         .clear_prompt_slot(PromptSlot::Guidance)
         .await?;
@@ -159,7 +159,7 @@ async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Re
     assert_eq!(assistant_prose(&after_turn.activities), "session");
 
     session
-        .control()
+        .admin()
         .config()
         .update(SessionConfigPatch {
             provider: Some(text_provider(
@@ -236,7 +236,7 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
         .run()
         .await?;
     session
-        .control()
+        .admin()
         .config()
         .update(SessionConfigPatch {
             provider: Some(recording_text_provider(
@@ -386,7 +386,7 @@ async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()>
     );
 
     let err = session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("rlm-child-bad-extras".to_string()),
@@ -400,7 +400,7 @@ async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()>
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options,
             usage_source: None,
         })
@@ -421,7 +421,7 @@ async fn rlm_projection_errors_surface_from_protocol_extensions() -> Result<()> 
         .build()?;
     let session = core.session("rlm").open().await?;
     session
-        .control()
+        .admin()
         .mode()
         .apply_session_extension(lash_protocol_rlm::rlm_session_projection_extension(
             RlmProjectedBindings::new()
@@ -622,7 +622,7 @@ async fn persisted_provider_id_rebinds_to_live_provider_on_open() -> Result<()> 
         .build()?;
 
     let reopened = core.session("provider-rebind").open().await?;
-    let persisted = reopened.control().state().persist_current().await?;
+    let persisted = reopened.admin().state().persist_current().await?;
 
     assert_eq!(persisted.policy.recorded_provider_id(), "embed-test");
     assert!(
@@ -957,13 +957,13 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         "manual input"
     );
     opened
-        .control()
+        .admin()
         .tools()
         .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
-    let mut persisted = opened.control().state().persist_current().await?;
+    let mut persisted = opened.admin().state().persist_current().await?;
     let expected_generation = opened
-        .control()
+        .admin()
         .tools()
         .state()
         .await?
@@ -972,7 +972,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     persisted.tool_state_generation = Some(expected_generation);
     persisted.tool_state_snapshot = Some(
         opened
-            .control()
+            .admin()
             .tools()
             .state()
             .await?
@@ -985,7 +985,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         .store(Arc::clone(&store))
         .open_with_state(persisted)
         .await?;
-    let state = reopened.control().tools().state().await?;
+    let state = reopened.admin().tools().state().await?;
     assert_eq!(state.generation(), expected_generation);
     assert_eq!(
         state
@@ -1007,7 +1007,7 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
     let session = core.session("root-with-child-store").open().await?;
 
     session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("managed-child-store".to_string()),
@@ -1021,7 +1021,7 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
@@ -1052,7 +1052,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
     let session = core.session("root-store").open().await?;
 
     let err = session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("child-needs-own-store".to_string()),
@@ -1066,7 +1066,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
@@ -1096,7 +1096,7 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
         .await?;
 
     session
-        .control()
+        .admin()
         .children()
         .create_session(SessionCreateRequest {
             session_id: Some("explicit-root-child".to_string()),
@@ -1110,7 +1110,7 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
             initial_nodes: Vec::new(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_overlay: lash_core::SessionContextOverlay::default(),
             plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
@@ -1246,7 +1246,7 @@ fn turn_result_total_usage_sums_parent_and_children() {
 // - durable attachment store       => `lash::FileAttachmentStore`
 // - durable artifact store         => `lash_sqlite_store::Store`
 // - durable process registry       => `lash_sqlite_store::SqliteProcessRegistry`
-// - durable host event store       => `lash_sqlite_store::SqliteHostEventStore`
+// - durable trigger store       => `lash_sqlite_store::SqliteTriggerStore`
 //
 // Ephemeral peers are the named in-memory implementations.
 
@@ -1293,11 +1293,11 @@ async fn durable_artifact_store(
     )
 }
 
-async fn durable_host_event_store(dir: &std::path::Path) -> Arc<dyn lash_core::HostEventStore> {
+async fn durable_trigger_store(dir: &std::path::Path) -> Arc<dyn lash_core::TriggerStore> {
     Arc::new(
-        lash_sqlite_store::SqliteHostEventStore::open(&dir.join("host-events.db"))
+        lash_sqlite_store::SqliteTriggerStore::open(&dir.join("triggers.db"))
             .await
-            .expect("open durable host event store"),
+            .expect("open durable trigger store"),
     )
 }
 
@@ -1376,7 +1376,7 @@ async fn durable_process_registry_rejects_missing_durable_store_factory_at_build
 async fn all_durable_stores_build_successfully() -> Result<()> {
     // Positive control: a coherent durable wiring (durable session store +
     // durable attachment + durable artifact + durable process registry +
-    // durable host event store) builds without error.
+    // durable trigger store) builds without error.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
@@ -1388,14 +1388,14 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
-        .host_event_store(durable_host_event_store(dir.path()).await)
+        .trigger_store(durable_trigger_store(dir.path()).await)
         .process_registry(registry)
         .build()?;
     Ok(())
 }
 
 #[tokio::test]
-async fn durable_process_registry_rejects_ephemeral_host_event_store_at_build() {
+async fn durable_process_registry_rejects_ephemeral_trigger_store_at_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
@@ -1411,13 +1411,13 @@ async fn durable_process_registry_rejects_ephemeral_host_event_store_at_build() 
         .build();
     let err = expect_build_error(
         result,
-        "durable process registry without durable host event store must be rejected",
+        "durable process registry without durable trigger store must be rejected",
     );
 
     assert!(matches!(
         err,
         EmbedError::DurableStorePeerRequired {
-            facet: "host event store"
+            facet: "trigger store"
         }
     ));
 }
@@ -1443,7 +1443,7 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
         .child_store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
-        .host_event_store(durable_host_event_store(dir.path()).await)
+        .trigger_store(durable_trigger_store(dir.path()).await)
         .process_registry(registry)
         .build()?;
     Ok(())
@@ -1526,18 +1526,18 @@ async fn default_process_work_runner_spawns_when_registry_and_store_factory_pres
 async fn durable_process_worker_config_uses_core_process_registry() -> Result<()> {
     let registry =
         Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
-    let host_event_store = Arc::new(lash_core::InMemoryHostEventStore::default())
-        as Arc<dyn lash_core::HostEventStore>;
+    let trigger_store =
+        Arc::new(lash_core::InMemoryTriggerStore::default()) as Arc<dyn lash_core::TriggerStore>;
     let core = explicit_ephemeral_facets(peer_coherence_builder())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .host_event_store(Arc::clone(&host_event_store))
+        .trigger_store(Arc::clone(&trigger_store))
         .process_registry(Arc::clone(&registry))
         .build()?;
 
     assert!(core.processes().observer().is_ok());
     let config = core.durable_process_worker_config()?;
     assert!(Arc::ptr_eq(&config.process_registry, &registry));
-    assert!(Arc::ptr_eq(&config.host_event_store, &host_event_store));
+    assert!(Arc::ptr_eq(&config.trigger_store, &trigger_store));
     Ok(())
 }
 

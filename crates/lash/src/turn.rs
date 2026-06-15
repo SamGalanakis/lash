@@ -4,9 +4,9 @@ pub use lash_core::{AssistantOutput, TurnIssue};
 
 /// The two internal event sinks threaded through the turn-execution helpers.
 ///
-/// `events` is the raw `SessionEvent` stream (the lower-level escape hatch,
-/// reachable from app code only via [`TurnBuilder::advanced`]); `turn_events`
-/// is the semantic [`TurnActivity`] stream used by the primary builder API.
+/// `events` is the raw lower-level runtime event stream, reachable from app
+/// code only via [`TurnBuilder::advanced`]; `turn_events` is the semantic
+/// [`TurnActivity`] stream used by the primary builder API.
 /// Bundling them keeps the internal turn fns to a single sink parameter.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct TurnSinks<'a> {
@@ -215,8 +215,8 @@ impl TurnBuilder {
             .unwrap_or_else(fresh_turn_id)
     }
 
-    fn turn_scope(&self, turn_id: &str) -> lash_core::EffectScope {
-        lash_core::EffectScope::turn(self.runtime.observe().session_id(), turn_id)
+    fn turn_scope(&self, turn_id: &str) -> lash_core::ExecutionScope {
+        lash_core::ExecutionScope::turn(self.runtime.observe().session_id(), turn_id)
     }
 
     pub(crate) fn prepare(
@@ -395,12 +395,12 @@ impl<'run> ScopedTurnBuilder<'run> {
     }
 }
 
-/// Lower-level turn execution that exposes the raw `SessionEvent` stream.
+/// Lower-level turn execution that exposes the raw runtime event stream.
 ///
 /// Reachable via [`TurnBuilder::advanced`]. Most applications should use
 /// [`TurnBuilder::stream_to`] for semantic turn activity; benchmarks and
-/// diagnostics use this when they need the same session-event stream as the
-/// lower-level runtime trace.
+/// diagnostics use this when they need the same low-level event stream as the
+/// runtime trace.
 pub struct AdvancedTurn {
     builder: TurnBuilder,
 }
@@ -459,7 +459,7 @@ impl AdvancedTurn {
             .stream_with_scope(scoped_effect_controller, trace_turn_id)
     }
 
-    /// Run the turn while sending raw session events to `events`.
+    /// Run the turn while sending raw lower-level runtime events to `events`.
     pub async fn collect_session_events_with_scope(
         self,
         events: &dyn EventSink,
@@ -562,7 +562,7 @@ impl QueuedTurnBuilder {
     ) -> Result<Option<TurnResult>> {
         let drain_id = self.resolved_drain_id();
         let scope =
-            lash_core::EffectScope::queue_drain(self.runtime.observe().session_id(), drain_id);
+            lash_core::ExecutionScope::queue_drain(self.runtime.observe().session_id(), drain_id);
         let scoped_effect_controller = effect_host.scoped(scope)?;
         self.stream_to_with_scope(events, scoped_effect_controller)
             .await
@@ -575,7 +575,7 @@ impl QueuedTurnBuilder {
     ) -> Result<Option<TurnResult>> {
         let drain_id = self.resolved_drain_id();
         let scope =
-            lash_core::EffectScope::queue_drain(self.runtime.observe().session_id(), drain_id);
+            lash_core::ExecutionScope::queue_drain(self.runtime.observe().session_id(), drain_id);
         let scoped_effect_controller = ScopedEffectController::borrowed(controller, scope)?;
         self.stream_to_with_scope(events, scoped_effect_controller)
             .await
@@ -658,7 +658,7 @@ fn trace_turn_id_for_scope(
     scoped_effect_controller: &ScopedEffectController<'_>,
 ) -> Option<String> {
     if scoped_effect_controller
-        .effect_scope()
+        .execution_scope()
         .validates_turn_trace_id()
     {
         Some(

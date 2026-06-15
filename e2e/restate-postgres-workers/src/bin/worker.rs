@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use lash::durability::DurableProcessWorker;
 use lash::observe::SessionResume;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
-use lash_core::{EffectScope, ProcessEventAppendRequest};
+use lash_core::{ExecutionScope, ProcessEventAppendRequest};
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{LashProcessWorkflow, RestateProcessDeployment, RestateRuntimeEffectController};
 use restate_sdk::errors::{HandlerResult, TerminalError};
@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lash_restate_postgres_workers_e2e::{
-    DEFAULT_SESSION_ID, EXPECTED_FINAL_TEXT, HealthResponse, TurnRequest, TurnResponse,
-    TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
+    DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT, EXPECTED_FINAL_TEXT, HealthResponse, TurnRequest,
+    TurnResponse, TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
     default_session_originator_scope_id, ensure_e2e_schema, env, process_registry_from_storage,
     record_terminal_result, record_turn_activity, record_worker_event, required_env,
     s3_store_from_env,
@@ -40,6 +40,7 @@ struct AppState {
     storage: PostgresStorage,
     attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
     process_work_driver: lash::process::ProcessWorkDriver,
+    restate_ingress_url: String,
     mock_provider_base_url: String,
     trace_dir: Option<PathBuf>,
     fail_once: bool,
@@ -55,6 +56,7 @@ impl AppState {
         ensure_e2e_schema(storage.pool()).await?;
         let attachment_store =
             Arc::new(s3_store_from_env()?) as Arc<dyn lash::persistence::AttachmentStore>;
+        let restate_ingress_url = env("RESTATE_INGRESS_URL", "http://restate:8080");
         let mock_provider_base_url = env("MOCK_PROVIDER_BASE_URL", "http://mock-provider:18001");
         let trace_dir = std::env::var("LASH_E2E_TRACE_DIR").ok().map(PathBuf::from);
         if let Some(dir) = &trace_dir {
@@ -67,6 +69,7 @@ impl AppState {
             storage,
             attachment_store,
             process_work_driver,
+            restate_ingress_url,
             mock_provider_base_url,
             trace_dir,
             fail_once,
@@ -79,6 +82,7 @@ impl AppState {
             storage: self.storage.clone(),
             attachment_store: Arc::clone(&self.attachment_store),
             process_work_driver: self.process_work_driver.clone(),
+            restate_ingress_url: self.restate_ingress_url.clone(),
             mock_provider_base_url: self.mock_provider_base_url.clone(),
             trace_dir: self.trace_dir.clone(),
             fail_once: self.fail_once,
@@ -233,6 +237,7 @@ impl AppState {
                 TurnScenario::DrainQueued => "wake-consumed",
                 TurnScenario::SignalSuspend => "signal-suspend-started",
                 TurnScenario::SignalProcess => "signal-sent",
+                TurnScenario::AsyncCompletion => EXPECTED_ASYNC_TEXT,
             })
             .to_string();
         let response = TurnResponse {
@@ -282,7 +287,7 @@ impl AppState {
                 signal.process_id, signal.signal_name, signal.signal_id
             ));
         let scoped = controller
-            .scoped_effect_controller(EffectScope::runtime_operation(format!(
+            .scoped_effect_controller(ExecutionScope::runtime_operation(format!(
                 "e2e:{}:{}",
                 request.workflow_id, signal.signal_id
             )))
@@ -354,7 +359,7 @@ fn prompt_for_request(request: &TurnRequest) -> String {
             request.workflow_id, request.fail_once
         ),
         TurnScenario::TriggerSetup => format!(
-            "Register the E2E host event trigger through Lashlang. workflow_id={} trigger_setup=true",
+            "Register the E2E trigger through Lashlang. workflow_id={} trigger_setup=true",
             request.workflow_id
         ),
         TurnScenario::DrainQueued => format!(
@@ -367,6 +372,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         ),
         TurnScenario::SignalProcess => format!(
             "Signal the E2E process. workflow_id={} signal_process=true",
+            request.workflow_id
+        ),
+        TurnScenario::AsyncCompletion => format!(
+            "Run the E2E async host tool completion scenario. workflow_id={} async_completion=true",
             request.workflow_id
         ),
     }

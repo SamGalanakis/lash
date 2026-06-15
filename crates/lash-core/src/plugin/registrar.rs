@@ -85,9 +85,9 @@ fn register_singleton_hook<H>(
 #[derive(Clone, Default)]
 pub(crate) struct PluginContributions {
     pub(crate) tool_providers: Vec<Arc<dyn ToolProvider>>,
-    pub(crate) host_events: Vec<crate::HostEvent>,
+    pub(crate) triggers: Vec<crate::TriggerEvent>,
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
-    pub(crate) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
+    pub(crate) tool_catalog_contributors: Vec<RegisteredHook<ToolCatalogContributor>>,
     pub(crate) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
     pub(crate) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     pub(crate) before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
@@ -125,13 +125,13 @@ impl ToolRegistrations<'_> {
     }
 }
 
-pub struct HostEventRegistrations<'a> {
+pub struct TriggerEventRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
-impl HostEventRegistrations<'_> {
-    pub fn declare(self, event: crate::HostEvent) -> Result<(), PluginError> {
-        self.reg.add_host_event(event)
+impl TriggerEventRegistrations<'_> {
+    pub fn declare(self, event: crate::TriggerEvent) -> Result<(), PluginError> {
+        self.reg.add_trigger(event)
     }
 }
 
@@ -145,13 +145,13 @@ impl PromptRegistrations<'_> {
     }
 }
 
-pub struct SurfaceRegistrations<'a> {
+pub struct ToolCatalogRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
-impl SurfaceRegistrations<'_> {
-    pub fn contribute(self, contributor: ToolSurfaceContributor) {
-        self.reg.add_tool_surface_contributor(contributor);
+impl ToolCatalogRegistrations<'_> {
+    pub fn contribute(self, contributor: ToolCatalogContributor) {
+        self.reg.add_tool_catalog_contributor(contributor);
     }
 }
 
@@ -362,16 +362,16 @@ impl PluginRegistrar {
         ToolRegistrations { reg: self }
     }
 
-    pub fn host_events(&mut self) -> HostEventRegistrations<'_> {
-        HostEventRegistrations { reg: self }
+    pub fn triggers(&mut self) -> TriggerEventRegistrations<'_> {
+        TriggerEventRegistrations { reg: self }
     }
 
     pub fn prompt(&mut self) -> PromptRegistrations<'_> {
         PromptRegistrations { reg: self }
     }
 
-    pub fn surface(&mut self) -> SurfaceRegistrations<'_> {
-        SurfaceRegistrations { reg: self }
+    pub fn tool_catalog(&mut self) -> ToolCatalogRegistrations<'_> {
+        ToolCatalogRegistrations { reg: self }
     }
 
     pub fn discovery(&mut self) -> DiscoveryRegistrations<'_> {
@@ -427,19 +427,19 @@ impl PluginRegistrar {
         Ok(())
     }
 
-    fn add_host_event(&mut self, event: crate::HostEvent) -> Result<(), PluginError> {
+    fn add_trigger(&mut self, event: crate::TriggerEvent) -> Result<(), PluginError> {
         if self
             .contributions
-            .host_events
+            .triggers
             .iter()
             .any(|existing| existing.key() == event.key())
         {
             return Err(PluginError::Registration(format!(
-                "duplicate host event `{}.{}.{}`",
+                "duplicate trigger occurrence `{}.{}.{}`",
                 event.resource_type, event.alias, event.event
             )));
         }
-        self.contributions.host_events.push(event);
+        self.contributions.triggers.push(event);
         Ok(())
     }
 
@@ -451,9 +451,9 @@ impl PluginRegistrar {
         );
     }
 
-    fn add_tool_surface_contributor(&mut self, contributor: ToolSurfaceContributor) {
+    fn add_tool_catalog_contributor(&mut self, contributor: ToolCatalogContributor) {
         push_registered_hook(
-            &mut self.contributions.tool_surface_contributors,
+            &mut self.contributions.tool_catalog_contributors,
             &self.registering_plugin_id,
             contributor,
         );

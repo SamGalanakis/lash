@@ -415,7 +415,9 @@ impl ActivityState {
                 let child_output = if child_success {
                     lash_core::ToolCallOutput::success(child_result)
                 } else {
-                    lash_core::ToolResult::err(child_result).into_output()
+                    lash_core::ToolResult::err(child_result)
+                        .into_done_output()
+                        .expect("static failure output")
                 };
 
                 self.project_tool_output(&child_name, child_args, child_output, child_duration)
@@ -435,7 +437,9 @@ impl ActivityState {
         let output = if success {
             lash_core::ToolCallOutput::success(result)
         } else {
-            lash_core::ToolResult::err(result).into_output()
+            lash_core::ToolResult::err(result)
+                .into_done_output()
+                .expect("static failure output")
         };
         self.project_tool_output(name, args, output, duration_ms)
     }

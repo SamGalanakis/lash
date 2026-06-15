@@ -41,7 +41,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
             crate::ProcessInput::LashlangProcess {
                 module_ref,
                 process_ref,
-                required_surface_ref,
+                host_requirements_ref,
                 process_name,
                 args,
                 ..
@@ -51,7 +51,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                     registry,
                     module_ref.clone(),
                     process_ref.clone(),
-                    required_surface_ref.clone(),
+                    host_requirements_ref.clone(),
                     process_name.clone(),
                     args.clone(),
                     execution_context,

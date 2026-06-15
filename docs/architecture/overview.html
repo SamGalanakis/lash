@@ -49,7 +49,7 @@ flowchart TD
     Graph["SessionGraph<br/>durable event graph"]
     Read["SessionReadView<br/>public read seam"]
     Tools["Tool dispatch<br/>dynamic tools, built-ins"]
-    SQLite["lash-sqlite-store<br/>SQLite persistence"]
+    Stores["lash-sqlite-store / lash-postgres-store<br/>runtime persistence"]
     Trace["lash-trace<br/>JSONL trace records"]
   end
 
@@ -77,7 +77,7 @@ flowchart TD
   EffectController --> Env
   L --> LL
   L --> Graph
-  L --> SQLite
+  L --> Stores
   L --> Trace
   Graph --> Read
   L --> Tools
@@ -97,8 +97,8 @@ flowchart TD
           </div>
           <div class="stats">
             <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">42</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language, export, tracing, file-index, harness optimizer, examples, and the distributed E2E harness.</span></article>
-            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~279k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">635</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~281k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">723</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
             <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang and can switch to a fresh AgentFrame via <code>continue_as</code>.</span></article>
           </div>
         </div>
@@ -106,7 +106,7 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Authority Boundaries</h2>
-            <p>The durable source of truth is the session graph. Everything else is either an execution surface, an external transport, or a projection.</p>
+            <p>The durable source of truth is the session graph. Everything else is either an execution environment, an external transport, or a projection.</p>
           </div>
           <ol class="principle-list">
             <li>
@@ -124,7 +124,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Protocol plugins own protocol behavior.</h3>
-                <p><code>ProtocolBuildInput</code>, <code>TurnDriverPreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn. Runtime-owned <code>ProtocolBuildInput</code> carries the effective tool and Lashlang surfaces into the protocol plugin; RLM additionally projects read-only host bindings (e.g., <code>history</code>) into Lashlang scope through the <code>ProjectedBindings</code> seam.</p>
+                <p><code>ProtocolBuildInput</code>, <code>TurnDriverPreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn. Runtime-owned <code>ProtocolBuildInput</code> carries the effective tool and Lashlang host environments into the protocol plugin; RLM additionally projects read-only host bindings (e.g., <code>history</code>) into Lashlang scope through the <code>ProjectedBindings</code> seam.</p>
               </div>
             </li>
             <li>

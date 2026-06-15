@@ -297,7 +297,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     .with_argument_projection(
         ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
     )
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["agents"], "spawn"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["agents"], "spawn"))
     .with_output_from_input_schema("output", None)
 }
 

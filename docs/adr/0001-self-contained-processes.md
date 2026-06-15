@@ -3,7 +3,7 @@
 A Runtime Process is a standalone durable entity — id, input, captured execution
 environment, event log, status, leases. It never holds a live reference to the session
 that created it: the execution environment (plugin options, policy, lashlang
-module/surface refs) is captured at creation as immutable content-addressed references,
+module/host requirements refs) is captured at creation as immutable content-addressed references,
 and the durable worker always executes against an ephemeral runtime instantiated from
 that capture — it never rebuilds the originating session. Session relationships are
 explicit, orthogonal, optional edges (originator and caused_by as pure provenance, a
@@ -36,6 +36,6 @@ never cancels a process — orphans are reported and lifecycle is host policy.
 - A process-created session is an ordinary session recording `caused_by` (downstream
   provenance); its usage is its own — there is no live usage channel to the originator.
 - Wake fan-out is deliberately not a process feature (wake target is 0..1); the
-  host-event bus is the pub/sub path.
+  trigger bus is the pub/sub path.
 - Persisted process and trigger-subscription records from before this change do not
   deserialize (pre-1.0 break, no shims).

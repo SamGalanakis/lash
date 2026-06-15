@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use crate::{
     AppError, AppState, ButtonChoice, CRON_SCHEDULE_SOURCE_TYPE, ChannelTurnEvents, ModelSelection,
     TurnStreamState, apply_model_selection_to_session, assistant_text_for_display,
-    enqueue_button_host_event_command, enqueue_mail_received_host_event_command,
+    enqueue_button_trigger_command, enqueue_mail_received_trigger_command,
     model_spec_from_selection,
 };
 
@@ -610,12 +610,12 @@ async fn run_button_trigger(
     )
     .await?;
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "button-trigger:{}",
             request.operation_id
         )))
         .map_err(AppError::internal)?;
-    let receipt = enqueue_button_host_event_command(
+    let receipt = enqueue_button_trigger_command(
         &state,
         request.button,
         &request.pressed_at,
@@ -625,17 +625,17 @@ async fn run_button_trigger(
     .await
     .map_err(AppError::internal)?;
     state.trace(
-        "button_trigger.restate.host_event_occurrence",
+        "button_trigger.restate.trigger_occurrence",
         json!({
             "button": request.button,
             "occurrence_id": receipt.occurrence_id,
             "started_process_ids": receipt.started_process_ids,
         }),
     );
-    state.push_message("event", "button host event emitted");
-    // Host-event dispatch is the end of this client-initiated request. Emit a
-    // terminal Done so the UI clears its busy state even when no trigger
-    // matched (any process the event started streams its own turn separately).
+    state.push_message("event", "button trigger occurrence emitted");
+    // Trigger occurrence dispatch is the end of this client-initiated request.
+    // Emit a terminal Done so the UI clears its busy state even when no trigger
+    // matched (any process the occurrence started streams its own turn separately).
     state.publish(crate::StreamItem::Done);
     Ok(())
 }
@@ -655,12 +655,12 @@ async fn run_mail_received(
         .map_err(AppError::internal)?;
     apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "mail-received:{}",
             request.operation_id
         )))
         .map_err(AppError::internal)?;
-    let receipt = enqueue_mail_received_host_event_command(
+    let receipt = enqueue_mail_received_trigger_command(
         &state,
         &request.delivery,
         &request.operation_id,
@@ -669,7 +669,7 @@ async fn run_mail_received(
     .await
     .map_err(AppError::internal)?;
     state.trace(
-        "mail_received.restate.host_event_occurrence",
+        "mail_received.restate.trigger_occurrence",
         json!({
             "account": request.delivery.account,
             "title": request.delivery.title,
@@ -677,10 +677,10 @@ async fn run_mail_received(
             "started_process_ids": receipt.started_process_ids,
         }),
     );
-    state.push_message("event", "mail received host event queued");
-    // Host-event dispatch is the end of this client-initiated request. Emit a
-    // terminal Done so the UI clears its busy state even when no trigger
-    // matched (any process the event started streams its own turn separately).
+    state.push_message("event", "mail received trigger occurrence queued");
+    // Trigger occurrence dispatch is the end of this client-initiated request.
+    // Emit a terminal Done so the UI clears its busy state even when no trigger
+    // matched (any process the occurrence started streams its own turn separately).
     state.publish(crate::StreamItem::Done);
     Ok(())
 }
@@ -691,7 +691,7 @@ async fn run_session_delete(
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::session_delete(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::session_delete(
             &request.session_id,
         ))
         .map_err(AppError::internal)?;
@@ -751,6 +751,15 @@ async fn run_queued_turn(
         .await
         .map_err(AppError::internal)?
     else {
+        state.trace(
+            "queued_work.restate.empty",
+            json!({
+                "reason": request.reason,
+                "session_id": request.session_id,
+                "turn_id": request.turn_id,
+            }),
+        );
+        state.publish(crate::StreamItem::Done);
         return Ok(());
     };
     record_turn_output(&state, output, turn_state, "restate_queued_turn.completed");
@@ -876,7 +885,7 @@ async fn sync_cron_jobs_with_context(
     Ok(())
 }
 
-/// Idempotency key for one cron tick's host-event occurrence. Must be unique
+/// Idempotency key for one cron tick's trigger occurrence. Must be unique
 /// per (job, tick): `fired_at` is the journaled fire time, so retries of the
 /// same tick dedupe while the next tick gets a fresh occurrence. (A key
 /// without the tick component kills the schedule: the second tick conflicts,
@@ -892,16 +901,16 @@ async fn emit_cron_occurrence(
     controller: &lash_restate::RestateRuntimeEffectController<'_, ObjectContext<'_>>,
 ) -> HandlerResult<Json<CronEmitReport>> {
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "cron:{}:{fired_at}",
             controller.context().key()
         )))
         .map_err(|err| HandlerError::from(TerminalError::new(err.to_string())))?;
     let report = state
         .core
-        .host_events()
+        .triggers()
         .emit(
-            lash::host_events::HostEventOccurrenceRequest::new(
+            lash::triggers::TriggerOccurrenceRequest::new(
                 CRON_SCHEDULE_SOURCE_TYPE,
                 request.source_key.clone(),
                 json!({
@@ -995,17 +1004,17 @@ fn next_cron_time(
 
 fn cron_request_from_registration(
     session_id: &str,
-    registration: &lash::host_events::TriggerRegistration,
+    registration: &lash::triggers::TriggerRegistration,
 ) -> Result<(String, WorkbenchCronRequest), String> {
     let source_type = registration.source_type.as_str();
     if source_type != CRON_SCHEDULE_SOURCE_TYPE {
         return Err(format!("unexpected source type `{source_type}`"));
     }
     let source =
-        lashlang::HostValue::decode(&registration.source).map_err(|err| err.to_string())?;
+        lashlang::HostDescriptor::decode(&registration.source).map_err(|err| err.to_string())?;
     if source.source_type != source_type {
         return Err(format!(
-            "registration source type `{source_type}` does not match host value `{}`",
+            "registration source type `{source_type}` does not match host descriptor `{}`",
             source.source_type
         ));
     }
@@ -1084,7 +1093,7 @@ mod tests {
         let first = cron_occurrence_key(job, "2026-06-09T22:30:30+00:00");
         let second = cron_occurrence_key(job, "2026-06-09T22:31:00+00:00");
         // Two ticks of one job must not collide: a constant key makes the
-        // second tick fail its host-event emit with an idempotency conflict
+        // second tick fail its trigger emit with an idempotency conflict
         // before re-arming, killing the schedule after exactly one fire.
         assert_ne!(first, second);
         // A retried tick (same journaled fired_at) must dedupe.

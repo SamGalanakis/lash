@@ -165,7 +165,7 @@ pub enum Expr {
     ProcessRef {
         process: AstString,
     },
-    HostValueConstructor {
+    HostDescriptorConstructor {
         type_name: AstString,
         input: Box<Expr>,
     },
@@ -226,7 +226,7 @@ impl Expr {
     /// about the node's own kind) can fold over `children()` instead of
     /// re-spelling the full `match`. Leaf nodes (`Null`, `Bool`, `Number`,
     /// `String`, `Variable`, `Break`, `Continue`, `WaitSignal`,
-    /// `ResourceRef`, `ProcessRef`, `HostValueConstructor` metadata, and
+    /// `ResourceRef`, `ProcessRef`, `HostDescriptorConstructor` metadata, and
     /// `TypeLiteral`) yield nothing.
     ///
     /// `Assign` includes any dynamic index expressions in its `target` path
@@ -277,7 +277,7 @@ impl Expr {
                 buffer.push(body);
             }
             Expr::StartProcess(start) => buffer.extend(start.args.iter().map(|(_, value)| value)),
-            Expr::HostValueConstructor { input, .. } => buffer.push(input),
+            Expr::HostDescriptorConstructor { input, .. } => buffer.push(input),
             Expr::ReceiverCall { receiver, args, .. } => {
                 buffer.push(receiver);
                 buffer.extend(args.iter());
@@ -429,7 +429,7 @@ where
             Expr::StartProcess(start)
         }
         Expr::ProcessRef { process } => Expr::ProcessRef { process },
-        Expr::HostValueConstructor { type_name, input } => Expr::HostValueConstructor {
+        Expr::HostDescriptorConstructor { type_name, input } => Expr::HostDescriptorConstructor {
             type_name,
             input: Box::new(folder.fold_expr(*input)),
         },

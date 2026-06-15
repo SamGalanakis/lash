@@ -302,13 +302,13 @@ pub fn code_execution_context_with_lashlang_abilities(
 ) -> crate::RuntimeExecutionContext<'static> {
     code_execution_context_with_lashlang_abilities_and_resources(
         abilities,
-        lashlang::ResourceCatalog::new(),
+        lashlang::LashlangHostCatalog::new(),
     )
 }
 
 pub fn code_execution_context_with_lashlang_abilities_and_resources(
     abilities: lashlang::LashlangAbilities,
-    resources: lashlang::ResourceCatalog,
+    resources: lashlang::LashlangHostCatalog,
 ) -> crate::RuntimeExecutionContext<'static> {
     let session_id = "test-session".to_string();
     let plugin_host = crate::PluginHost::new(test_rlm_protocol_factories());
@@ -323,13 +323,13 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
     let attachment_store = Arc::new(crate::InMemoryAttachmentStore::new());
     let artifact_store: Arc<dyn lashlang::LashlangArtifactStore> =
         Arc::new(lashlang::InMemoryLashlangArtifactStore::new());
-    let host_event_store = Arc::new(crate::InMemoryHostEventStore::default());
+    let trigger_store = Arc::new(crate::InMemoryTriggerStore::default());
     let process_registry: Arc<dyn crate::ProcessRegistry> =
         Arc::new(crate::TestLocalProcessRegistry::default());
     let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
         plugins,
         tools: Arc::new(EmptyCodeExecutionTools),
-        surface: Arc::new(crate::ToolSurface::from_tools(
+        tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
             Vec::new(),
             std::collections::BTreeMap::new(),
         )),
@@ -338,8 +338,8 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: Some(crate::HostEventRouter::new(
-            host_event_store,
+        trigger_router: Some(crate::TriggerRouter::new(
+            trigger_store,
             Arc::clone(&artifact_store),
             Some(process_registry),
             None,
@@ -360,7 +360,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: attachment_store.clone(),
         turn_context: crate::TurnContext::default(),
     });
@@ -409,7 +409,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
 /// the snapshot, tool catalog, and turn outcome via the builder
 /// methods; mutations (`create_session`, `close_session`)
 /// are recorded so tests can assert against them.
-pub type RecordedSessionTurn = (String, String, Option<String>, crate::EffectScope);
+pub type RecordedSessionTurn = (String, String, Option<String>, crate::ExecutionScope);
 
 pub struct MockSessionManager {
     pub snapshot: SessionSnapshot,
@@ -540,7 +540,7 @@ impl crate::plugin::SessionLifecycleService for MockSessionManager {
             turn.session_id,
             turn.turn_id,
             turn.input.trace_turn_id,
-            scoped_effect_controller.effect_scope().clone(),
+            scoped_effect_controller.execution_scope().clone(),
         ));
         Ok(self.turn.clone())
     }
@@ -947,8 +947,8 @@ mod test_protocol_fakes {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_agent_surface(
-            crate::ToolAgentSurface::new(["tools"], "batch").with_aliases(["parallel_tools"]),
+        .with_lashlang_binding(
+            crate::LashlangToolBinding::new(["tools"], "batch").with_aliases(["parallel_tools"]),
         )
         .with_scheduling(crate::ToolScheduling::Parallel)
     }
@@ -1075,15 +1075,15 @@ mod test_protocol_fakes {
 
     impl ProtocolDriverPlugin for TestProtocolDriver {
         fn build_preamble(&self, input: ProtocolBuildInput) -> TurnDriverPreamble {
-            let tool_names = input.tool_surface.tool_names();
-            let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
+            let tool_names = input.tool_catalog.tool_names();
+            let tool_names_fingerprint = input.tool_catalog.tool_names_fingerprint();
             TurnDriverPreamble {
                 config: TurnDriverConfig::chat(
                     Arc::new(TestDriver),
                     false,
                     Arc::new(test_turn_limit_final_message),
                 ),
-                tool_specs: input.tool_surface.model_tool_specs(),
+                tool_specs: input.tool_catalog.model_tool_specs(),
                 tool_names,
                 tool_names_fingerprint,
                 omitted_tool_count: 0,

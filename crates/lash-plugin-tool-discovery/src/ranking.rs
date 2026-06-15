@@ -609,7 +609,7 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{ToolAgentSurface, ToolContract, ToolDefinition};
+    use lash_core::{LashlangToolBinding, ToolContract, ToolDefinition};
     use serde_json::{Value, json};
 
     fn catalog_tool(name: &str, description: &str) -> Value {
@@ -633,8 +633,8 @@ mod tests {
             ToolContract::default_input_schema(),
             json!({}),
         )
-        .with_agent_surface(
-            ToolAgentSurface::new(
+        .with_lashlang_binding(
+            LashlangToolBinding::new(
                 [module.unwrap_or(match name {
                     "read_file" => "files",
                     "search_web" => "web",
@@ -653,16 +653,16 @@ mod tests {
 
     fn catalog_tool_from_definition(tool: ToolDefinition) -> Value {
         let manifest = tool.manifest();
-        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
-        let call = agent_surface.call_path();
+        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
+        let call = lashlang_binding.call_path();
         json!({
             "id": manifest.id,
             "name": manifest.name,
-            "module_path": agent_surface.module_path.clone(),
-            "operation": agent_surface.operation.clone(),
+            "module_path": lashlang_binding.module_path.clone(),
+            "operation": lashlang_binding.operation.clone(),
             "call": call,
             "description": manifest.description,
-            "aliases": agent_surface.aliases.clone(),
+            "aliases": lashlang_binding.aliases.clone(),
             "availability": "searchable",
             "callable": false,
             "showcased": false,
@@ -741,8 +741,8 @@ mod tests {
                 "required": ["response"]
             }),
         )
-        .with_agent_surface(
-            ToolAgentSurface::new(["appworld"], "spotify_filter_songs")
+        .with_lashlang_binding(
+            LashlangToolBinding::new(["appworld"], "spotify_filter_songs")
                 .with_aliases(["spotify_filter_songs"]),
         );
         let show_song = ToolDefinition::raw_named(
@@ -782,8 +782,8 @@ mod tests {
                 "required": ["response"]
             }),
         )
-        .with_agent_surface(
-            ToolAgentSurface::new(["appworld"], "spotify_show_song")
+        .with_lashlang_binding(
+            LashlangToolBinding::new(["appworld"], "spotify_show_song")
                 .with_aliases(["spotify_show_song", "song_details"]),
         );
 

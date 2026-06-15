@@ -6,6 +6,6 @@ mod ranking;
 mod rerank;
 mod schema_index;
 mod service;
-mod surface;
+mod tool_catalog;
 
 pub use plugin::ToolDiscoveryPluginFactory;

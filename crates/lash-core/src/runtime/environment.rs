@@ -61,7 +61,7 @@ pub enum Residency {
 /// Cloning is cheap — every field is either `Arc`-wrapped or small.
 /// Default values build an embedded runtime without process lifecycle
 /// support. Hosts that want long-running tools, async handles, subagents,
-/// or process controls must provide a process registry explicitly.
+/// or process admins must provide a process registry explicitly.
 #[derive(Clone)]
 pub struct RuntimeEnvironment {
     // Shared plugin infrastructure. Created once; every session's
@@ -78,8 +78,8 @@ pub struct RuntimeEnvironment {
     // Host-owned process lifecycle and local execution support.
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
 
-    // Host-owned trigger subscription and host-event occurrence routing.
-    pub host_event_store: Option<Arc<dyn crate::HostEventStore>>,
+    // Host-owned trigger subscription and trigger occurrence routing.
+    pub trigger_store: Option<Arc<dyn crate::TriggerStore>>,
 
     // Store factory used by managed child sessions created from runtimes
     // built with this environment.
@@ -136,7 +136,7 @@ impl Default for RuntimeEnvironmentBuilder {
                 plugin_host: None,
                 residency: Residency::default(),
                 process_registry: None,
-                host_event_store: Some(Arc::new(crate::InMemoryHostEventStore::default())),
+                trigger_store: Some(Arc::new(crate::InMemoryTriggerStore::default())),
                 session_store_factory: None,
                 process_work_poke: None,
                 queued_work_poke: None,
@@ -171,8 +171,8 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_host_event_store(mut self, store: Arc<dyn crate::HostEventStore>) -> Self {
-        self.env.host_event_store = Some(store);
+    pub fn with_trigger_store(mut self, store: Arc<dyn crate::TriggerStore>) -> Self {
+        self.env.trigger_store = Some(store);
         self
     }
 
@@ -186,7 +186,7 @@ impl RuntimeEnvironmentBuilder {
 
     /// Set the poke handle that wakes the host's `ProcessWorkRunner`. Every
     /// `RuntimeHost` built from this environment carries the poke, so the
-    /// process control seam can make consumption prompt after a start.
+    /// process admin seam can make consumption prompt after a start.
     pub fn with_process_work_poke(mut self, poke: super::ProcessWorkPoke) -> Self {
         self.env.process_work_poke = Some(poke);
         self

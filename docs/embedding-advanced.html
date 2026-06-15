@@ -109,7 +109,7 @@ let core = LashCore::rlm()
     .residency(Residency::ActivePathOnly)
     .build()?;</code></pre>
           <p>Plugin background work — tasks tracked via <code>ToolContext::processes()</code>, post-turn observation summaries, MCP warm-ups — continues past turn return. To drain it before returning (one-shot processes that need observations persisted before exit):</p>
-          <pre data-lang="rust" data-snippet="embedding_advanced#await-all-processes"><code>session.process_control().await_all().await?;</code></pre>
+          <pre data-lang="rust" data-snippet="embedding_advanced#await-all-processes"><code>session.processes().await_all().await?;</code></pre>
           <p>Exposed by the CLI as <code>--await-background-work</code> on <code>lash --print</code>. Embedders rarely need it outside short-lived processes.</p>
         </div>
 
@@ -129,7 +129,7 @@ let core = LashCore::rlm()
             </div>
             <div class="listing__row">
               <div class="listing__label">observability</div>
-              <div class="listing__body"><p>Use <code>core.processes()</code> for host-level start/list/get/events/await/cancel/signal operations, <code>core.process_registry()</code> for registry-level integrations, and <code>session.process_control()</code> for grant-scoped in-session await/cancel/list operations.</p></div>
+              <div class="listing__body"><p>Use <code>core.processes()</code> for host-level start/list/get/events/await/cancel/signal operations, <code>core.process_registry()</code> for registry-level integrations, and <code>session.processes()</code> for grant-scoped in-session await/cancel/list operations.</p></div>
             </div>
           </div>
           <pre data-lang="rust" data-snippet="embedding_advanced#process-registry-core"><code>let core = LashCore::rlm()
@@ -150,7 +150,7 @@ let core = LashCore::rlm()
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects — expensive LLM calls, long tool calls, process control, mid-turn worker migration — wire an <code>EffectHost</code> on the builder and run each durable handler turn with <code>.turn_id(...).effects(&amp;controller).run()</code> or <code>.turn_id(...).effects(&amp;controller).stream_to(&amp;sink)</code>. The facade creates the turn <code>EffectScope</code> internally, while the handler still supplies the workflow controller explicitly. The <code>EffectHost</code> is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap; the default <code>InlineEffectHost</code> runs in process and is not in-flight durable.</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects — expensive LLM calls, long tool calls, process admin, mid-turn worker migration — wire an <code>EffectHost</code> on the builder and run each durable handler turn with <code>.turn_id(...).effects(&amp;controller).run()</code> or <code>.turn_id(...).effects(&amp;controller).stream_to(&amp;sink)</code>. The facade creates the turn <code>ExecutionScope</code> internally, while the handler still supplies the workflow controller explicitly. The <code>EffectHost</code> is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap; the default <code>InlineEffectHost</code> runs in process and is not in-flight durable.</p>
           </div>
           <p>Shape: the runtime driver polls <code>TurnMachine</code>. For each reply-producing turn effect it builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active <code>ScopedEffectController</code>, and feeds the returned outcome back as the matching response. The <code>InlineEffectHost</code> runs locally and is not in-flight durable. A durable workflow <code>EffectHost</code> such as Restate records effects in workflow history, uses durable timers for sleeps, and reruns the handler with the same turn id before Lash retries the final idempotent commit.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
@@ -245,7 +245,7 @@ let core = LashCore::rlm()
           <p>Tools appear as <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> with original schemas preserved. <code>attach_server</code> / <code>detach_server</code> mutate the live pool without rebuilding the core.</p>
           <h3>Lifecycle and failure isolation</h3>
           <p>Servers connect once at <code>McpPluginFactory::new(...)</code>. Built session plugins clone the shared <code>Arc&lt;McpConnectionPool&gt;</code>, so startup cost is one-per-process, not one-per-chat.</p>
-          <p>After <code>attach_server</code>, new tools are visible to sessions on their next tool-surface refresh (start of next turn). <code>detach_server</code> shuts the server down and removes its tools; in-flight calls fail rather than hang.</p>
+          <p>After <code>attach_server</code>, new tools are visible to sessions on their next tool-catalog refresh (start of next turn). <code>detach_server</code> shuts the server down and removes its tools; in-flight calls fail rather than hang.</p>
           <pre data-lang="rust" data-snippet="embedding_advanced#mcp-hot-swap"><code>// Hot-swap a server at runtime.
 mcp.attach_server(
     "new-tool".to_string(),

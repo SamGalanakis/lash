@@ -480,7 +480,8 @@ mod tests {
             Arc::new(super::super::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
         let scope = SessionScope::new("labels");
         let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
-        let surface_ref = lashlang::RequiredSurfaceRef::new(&lashlang::ContentHash::new("surface"));
+        let host_requirements_ref =
+            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("surface"));
         let process_ref = lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1);
         let mut child_request = SessionCreateRequest::child_session(
             "labels",
@@ -515,7 +516,7 @@ mod tests {
                 ProcessInput::LashlangProcess {
                     module_ref,
                     process_ref,
-                    required_surface_ref: surface_ref,
+                    host_requirements_ref: host_requirements_ref,
                     process_name: "remember".to_string(),
                     args: serde_json::Map::new(),
                 },

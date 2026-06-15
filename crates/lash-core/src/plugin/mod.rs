@@ -8,8 +8,8 @@ use crate::{
 };
 
 pub use lash_sansio::{
-    CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolSurfaceContribution,
-    ToolSurfaceOverride,
+    CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolCatalogContribution,
+    ToolCatalogOverride,
 };
 
 mod actions;
@@ -25,7 +25,7 @@ mod services;
 mod session_obj;
 mod session_types;
 mod snapshot;
-mod surface;
+mod tool_catalog;
 mod trigger_registry;
 
 pub(crate) use actions::RegisteredPluginAction;
@@ -46,9 +46,9 @@ pub use hooks::{
     CheckpointHookContext, PluginFuture, PluginLifecycleEvent, PluginLifecycleEventHook,
     PluginLifecycleFuture, PluginSessionTask, PromptContributor, PromptHookContext,
     SessionConfigChangedContext, SessionConfigMutator, SessionStateChangedContext,
-    ToolCallHookContext, ToolDiscoveryContributor, ToolResultHookContext,
-    ToolResultProjectionContext, ToolResultProjector, ToolSurfaceContributor, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary,
+    ToolCallHookContext, ToolCatalogContributor, ToolDiscoveryContributor, ToolResultHookContext,
+    ToolResultProjectionContext, ToolResultProjector, TurnHookContext, TurnResultHookContext,
+    TurnResultSummary,
 };
 pub use protocol::{
     AssistantProseProjectorPlugin, CodeExecutorPlugin, PluginOptions, ProtocolBeforeLlmCallContext,
@@ -56,10 +56,10 @@ pub use protocol::{
     ProtocolSessionPlugin,
 };
 pub use registrar::{
-    ContextRegistrations, ExecutionRegistrations, HostEventRegistrations, OutputRegistrations,
-    PluginActionRegistrations, PluginRegistrar, PromptRegistrations, ProtocolRegistrations,
-    SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations,
-    ToolResultRegistrations, TurnRegistrations,
+    ContextRegistrations, ExecutionRegistrations, OutputRegistrations, PluginActionRegistrations,
+    PluginRegistrar, PromptRegistrations, ProtocolRegistrations, SessionRegistrations,
+    ToolCallRegistrations, ToolCatalogRegistrations, ToolRegistrations, ToolResultRegistrations,
+    TriggerEventRegistrations, TurnRegistrations,
 };
 pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
@@ -78,7 +78,7 @@ pub use session_obj::PluginSession;
 pub use session_types::{
     AgentFrameAssignment, AgentFrameId, AgentFrameReason, AgentFrameRecord, AgentFrameStatus,
     OpenAgentFrameRequest, OpenAgentFrameResult, PluginOwned, SessionAppendNode,
-    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionPluginSource,
+    SessionContextOverlay, SessionCreateRequest, SessionHandle, SessionPluginSource,
     SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess, SubagentSessionContext,
 };
 pub(crate) use snapshot::{InMemorySnapshotReader, InMemorySnapshotWriter};
@@ -86,12 +86,12 @@ pub use snapshot::{
     PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
     SnapshotReader, SnapshotWriter,
 };
-pub use surface::{
-    CheckpointApplication, PluginAbort, PluginDirective, PrepareTurnRequest, ToolDiscoveryContext,
-    ToolDiscoveryContribution, ToolDiscoveryToolContribution, ToolSurfaceContext, TurnFinalization,
-    TurnPreparation,
+pub use tool_catalog::{
+    CheckpointApplication, PluginAbort, PluginDirective, PrepareTurnRequest, ToolCatalogContext,
+    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryToolContribution,
+    TurnFinalization, TurnPreparation,
 };
-pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
+pub(crate) use tool_catalog::{emit_plugin_runtime_events, plugin_runtime_session_events};
 pub(crate) use trigger_registry::{trigger_handle_json, validate_target_process};
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Protocol plugins must be registered by the embedder before calling
@@ -206,8 +206,8 @@ mod tests {
             "trigger_resource"
         }
 
-        fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
-            let mut resources = lashlang::ResourceCatalog::new();
+        fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
+            let mut resources = lashlang::LashlangHostCatalog::new();
             resources
                 .add_trigger_source_constructor(
                     ["clock", "Alarm"],
@@ -335,31 +335,31 @@ mod tests {
     }
 
     #[test]
-    fn declared_host_events_enter_session_lashlang_resources() {
-        struct HostEventOnlyFactory;
+    fn declared_triggers_enter_session_lashlang_resources() {
+        struct TriggerEventOnlyFactory;
 
-        impl PluginFactory for HostEventOnlyFactory {
+        impl PluginFactory for TriggerEventOnlyFactory {
             fn id(&self) -> &'static str {
-                "host_event_only"
+                "trigger_only"
             }
 
             fn build(
                 &self,
                 _ctx: &PluginSessionContext,
             ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-                Ok(Arc::new(HostEventOnlyPlugin))
+                Ok(Arc::new(TriggerEventOnlyPlugin))
             }
         }
 
-        struct HostEventOnlyPlugin;
+        struct TriggerEventOnlyPlugin;
 
-        impl SessionPlugin for HostEventOnlyPlugin {
+        impl SessionPlugin for TriggerEventOnlyPlugin {
             fn id(&self) -> &'static str {
-                "host_event_only"
+                "trigger_only"
             }
 
             fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-                reg.host_events().declare(crate::HostEvent::new(
+                reg.triggers().declare(crate::TriggerEvent::new(
                     "Button",
                     "ui.button",
                     "pressed",
@@ -376,7 +376,7 @@ mod tests {
             }
         }
 
-        let host = PluginHost::new(vec![Arc::new(HostEventOnlyFactory)]);
+        let host = PluginHost::new(vec![Arc::new(TriggerEventOnlyFactory)]);
 
         assert!(
             host.lashlang_resources()
@@ -386,7 +386,7 @@ mod tests {
         let session = host.build_session("root", None).expect("session");
         assert!(
             session
-                .host_events()
+                .triggers()
                 .get("Button", "ui.button", "pressed")
                 .is_some()
         );

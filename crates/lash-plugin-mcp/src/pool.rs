@@ -7,7 +7,7 @@
 //! background task retries with exponential backoff until it connects (or the
 //! server is detached). A connection that dies mid-life is detected on the
 //! next tool call and re-established the same way. Imported tool definitions
-//! are kept across a disconnect so the tool surface stays stable; calls to a
+//! are kept across a disconnect so the tool catalog stays stable; calls to a
 //! disconnected server fail loudly instead.
 //!
 //! The wire-level transport is provided by the official [`rmcp`] SDK.
@@ -192,7 +192,7 @@ impl McpConnectionPool {
     /// All advertised tools across every server, with `mcp__<server>__<tool>`
     /// prefixed names. Cheap — these are precomputed `ToolDefinition` clones.
     /// Includes tools of currently disconnected servers (last successful
-    /// discovery) so the tool surface stays stable across an outage.
+    /// discovery) so the tool catalog stays stable across an outage.
     pub fn advertised_tools(&self) -> Vec<ToolDefinition> {
         let guard = self.entries.read().expect("MCP pool entries lock poisoned");
         guard
@@ -438,7 +438,7 @@ impl McpEntry {
     }
 
     /// Drop the dead service and start reconnecting in the background. The
-    /// imported tool definitions are kept so the tool surface stays stable.
+    /// imported tool definitions are kept so the tool catalog stays stable.
     async fn mark_disconnected(self: &Arc<Self>) {
         self.connected.store(false, Ordering::SeqCst);
         let service = self.service.lock().await.take();
@@ -564,7 +564,7 @@ fn import_tools(
             .as_ref()
             .map(|s| Value::Object((**s).clone()))
             .unwrap_or_else(|| json!({}));
-        let (prefixed, agent_surface) =
+        let (prefixed, lashlang_binding) =
             naming::build_prefixed_name(server_name, &original_name, &mut used_names);
 
         let description = if description.is_empty() {
@@ -584,7 +584,7 @@ fn import_tools(
                     input_schema,
                     output_schema,
                 )
-                .with_agent_surface(agent_surface)
+                .with_lashlang_binding(lashlang_binding)
                 .with_scheduling(ToolScheduling::Parallel),
             },
         );

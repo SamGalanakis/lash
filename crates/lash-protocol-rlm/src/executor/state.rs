@@ -137,7 +137,7 @@ impl RlmExecutionState {
 mod bound_variable_value_tests {
     use super::*;
     use lashlang::{
-        ProjectedFuture, ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse,
+        ProjectedFuture, ProjectedHostDescriptor, ProjectedReadRequest, ProjectedReadResponse,
         ProjectedValue, Record as FlowRecord, Value as FlowValue,
     };
     use serde_json::json;
@@ -223,7 +223,7 @@ mod bound_variable_value_tests {
         render_count: AtomicUsize,
     }
 
-    impl ProjectedHostValue for CountingProjectedValue {
+    impl ProjectedHostDescriptor for CountingProjectedValue {
         fn type_name(&self) -> &str {
             "string"
         }

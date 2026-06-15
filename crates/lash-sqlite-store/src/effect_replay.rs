@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use lash_core::{
-    DurabilityTier, EffectHost, EffectScope, PluginError, ProcessCommand, ProcessEffectOutcome,
+    DurabilityTier, EffectHost, ExecutionScope, PluginError, ProcessCommand, ProcessEffectOutcome,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
     ScopedEffectController,
@@ -68,7 +68,7 @@ pub struct SqliteEffectHost {
 #[derive(Clone)]
 pub struct SqliteRuntimeEffectController {
     inner: Arc<SqliteEffectReplayInner>,
-    scope: EffectScope,
+    scope: ExecutionScope,
 }
 
 struct ClaimedEffect {
@@ -135,7 +135,7 @@ impl EffectHost for SqliteEffectHost {
 
     fn scoped<'run>(
         &'run self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<ScopedEffectController<'run>, RuntimeError> {
         let controller = SqliteRuntimeEffectController {
             inner: Arc::clone(&self.inner),
@@ -146,7 +146,7 @@ impl EffectHost for SqliteEffectHost {
 
     fn scoped_static(
         &self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
         let controller = SqliteRuntimeEffectController {
             inner: Arc::clone(&self.inner),
@@ -160,13 +160,13 @@ impl EffectHost for SqliteEffectHost {
 }
 
 impl SqliteRuntimeEffectController {
-    pub async fn open(path: &Path, scope: EffectScope) -> tokio_rusqlite::Result<Self> {
+    pub async fn open(path: &Path, scope: ExecutionScope) -> tokio_rusqlite::Result<Self> {
         Self::open_with_options(path, scope, SqliteEffectReplayOptions::default()).await
     }
 
     pub async fn open_with_options(
         path: &Path,
-        scope: EffectScope,
+        scope: ExecutionScope,
         options: SqliteEffectReplayOptions,
     ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
@@ -175,12 +175,12 @@ impl SqliteRuntimeEffectController {
         })
     }
 
-    pub async fn memory(scope: EffectScope) -> tokio_rusqlite::Result<Self> {
+    pub async fn memory(scope: ExecutionScope) -> tokio_rusqlite::Result<Self> {
         Self::memory_with_options(scope, SqliteEffectReplayOptions::default()).await
     }
 
     pub async fn memory_with_options(
-        scope: EffectScope,
+        scope: ExecutionScope,
         options: SqliteEffectReplayOptions,
     ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {

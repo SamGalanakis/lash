@@ -10,7 +10,7 @@ use lash_core::plugin::runtime_host::{
     SessionGraphService, SessionLifecycleService, SessionStateService,
 };
 use lash_core::plugin::{
-    PluginDirective, PluginError, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContext,
+    PluginDirective, PluginError, ToolCallHookContext, ToolCatalogContext, ToolResultHookContext,
 };
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
@@ -542,7 +542,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .collect::<std::collections::BTreeMap<_, _>>();
     let manifests = tools.into_iter().map(|tool| tool.manifest()).collect();
     let surface = session
-        .resolve_tool_surface(ToolSurfaceContext {
+        .resolve_tool_catalog(ToolCatalogContext {
             session_id: "root".to_string(),
             tools: manifests,
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
@@ -550,7 +550,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             subagent: None,
             lashlang_abilities: Default::default(),
         })
-        .expect("tool surface");
+        .expect("tool catalog");
     assert!(
         surface
             .tools

@@ -71,11 +71,11 @@ impl RuntimeTurnDriver<'_> {
                     self.handle_checkpoint_effect(&mut machine, id, checkpoint, &event_tx, &cancel)
                         .await?;
                 }
-                Effect::SyncExecutionSurface {
+                Effect::SyncExecutionEnvironment {
                     id,
                     update_machine_config,
                 } => {
-                    self.handle_execution_surface_sync_effect(
+                    self.handle_execution_environment_sync_effect(
                         &mut machine,
                         id,
                         update_machine_config,

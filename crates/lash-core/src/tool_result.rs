@@ -1,13 +1,117 @@
+/// What a pending tool call does when its `deadline` elapses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutBehavior {
+    /// Resolve the call as a timeout failure the model can observe and react to.
+    ErrorAsResult,
+    /// Fail the whole turn instead of feeding a timeout result back to the model.
+    FailTurn,
+}
+
+/// What a pending tool call signals about its out-of-band work when cancelled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelHint {
+    /// Leave the external work running; cancellation only drops the wait.
+    Ignore,
+    /// Request that the external work be cancelled along with the wait.
+    CancelExternalWork,
+}
+
+/// Configuration carried by a [`ToolResult::Pending`] result: how long the runtime
+/// waits for the deferred outcome, and what to do if it times out or is cancelled.
+///
+/// Defaults to no deadline, [`TimeoutBehavior::ErrorAsResult`], and
+/// [`CancelHint::CancelExternalWork`]. Build one with [`PendingCompletion::new`] and
+/// the `with_*` adjusters.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PendingCompletion {
+    /// Maximum time to wait for the deferred outcome. `None` waits indefinitely (until
+    /// the turn or process is otherwise cancelled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<std::time::Duration>,
+    /// What the runtime does when `deadline` elapses without a resolution.
+    pub on_timeout: TimeoutBehavior,
+    /// What the runtime signals about out-of-band work if the call is cancelled.
+    pub on_cancel: CancelHint,
+}
+
+impl Default for PendingCompletion {
+    fn default() -> Self {
+        Self {
+            deadline: None,
+            on_timeout: TimeoutBehavior::ErrorAsResult,
+            on_cancel: CancelHint::CancelExternalWork,
+        }
+    }
+}
+
+impl PendingCompletion {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub fn fail_turn_on_timeout(mut self) -> Self {
+        self.on_timeout = TimeoutBehavior::FailTurn;
+        self
+    }
+}
+
+/// The outcome a [`ToolProvider::execute`](crate::ToolProvider::execute) returns
+/// for a single call.
+///
+/// The variant a tool returns chooses its completion mode:
+///
+/// - [`ToolResult::Done`] — **active await**. The result is available inline and the
+///   runtime finalizes the call immediately. Construct it with [`ToolResult::ok`],
+///   [`ToolResult::err`], [`ToolResult::failure`], and friends.
+/// - [`ToolResult::Pending`] — **deferred / callback completion**. The tool has
+///   launched out-of-band work (a webhook, a human approval, another service) and the
+///   real outcome is delivered later against a completion key.
+///
+/// # The completion-key contract
+///
+/// Before returning [`ToolResult::Pending`], a tool **must** first obtain a completion
+/// key by calling [`ToolContext::completion_key`](crate::ToolContext::completion_key)
+/// (reachable through `call.context`). That key names the durable wait the runtime parks
+/// the call on, and is what an external resolver uses to deliver the outcome. Returning
+/// `Pending` *without* having taken a completion key fails the call with the internal
+/// error `pending_tool_missing_completion_key`.
+///
+/// ```ignore
+/// async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+///     // Take the key first, then hand it to whatever completes the work out-of-band.
+///     let key = match call.context.completion_key().await {
+///         Ok(key) => key,
+///         Err(err) => return ToolResult::err_fmt(err),
+///     };
+///     enqueue_external_work(key);
+///     ToolResult::pending(PendingCompletion::new())
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq)]
-pub struct ToolResult {
-    output: Box<crate::ToolCallOutput>,
+pub enum ToolResult {
+    /// Active await: the tool finished inline; this is its final output.
+    Done(Box<crate::ToolCallOutput>),
+    /// Deferred completion: the tool parked on a durable wait keyed by the
+    /// [`ToolContext::completion_key`](crate::ToolContext::completion_key) it took
+    /// before returning. The outcome arrives later through the resolve seam and is
+    /// shaped by the carried [`PendingCompletion`].
+    Pending(PendingCompletion),
 }
 
 impl ToolResult {
     pub fn from_output(output: crate::ToolCallOutput) -> Self {
-        Self {
-            output: Box::new(output),
-        }
+        Self::Done(Box::new(output))
+    }
+
+    pub fn pending(pending: PendingCompletion) -> Self {
+        Self::Pending(pending)
     }
 
     pub fn ok(result: serde_json::Value) -> Self {
@@ -61,16 +165,26 @@ impl ToolResult {
     }
 
     pub fn with_control(mut self, control: crate::ToolControl) -> Self {
-        self.output.as_mut().control = Some(control);
+        if let Self::Done(output) = &mut self {
+            output.as_mut().control = Some(control);
+        }
         self
     }
 
     pub fn is_success(&self) -> bool {
-        self.output.is_success()
+        matches!(self, Self::Done(output) if output.is_success())
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
     }
 
     pub fn value_for_projection(&self) -> serde_json::Value {
-        match &self.output.outcome {
+        match &self
+            .as_done_output()
+            .expect("pending tool result has no projection value")
+            .outcome
+        {
             crate::ToolCallOutcome::Success(value) => value.to_json_value(),
             crate::ToolCallOutcome::Failure(failure) => failure
                 .raw
@@ -85,12 +199,23 @@ impl ToolResult {
         }
     }
 
-    pub fn as_output(&self) -> &crate::ToolCallOutput {
-        self.output.as_ref()
+    pub fn as_done_output(&self) -> Option<&crate::ToolCallOutput> {
+        match self {
+            Self::Done(output) => Some(output.as_ref()),
+            Self::Pending(_) => None,
+        }
     }
 
-    pub fn into_output(self) -> crate::ToolCallOutput {
-        *self.output
+    pub fn as_output(&self) -> &crate::ToolCallOutput {
+        self.as_done_output()
+            .expect("pending tool result cannot be viewed as completed output")
+    }
+
+    pub fn into_done_output(self) -> Result<crate::ToolCallOutput, PendingCompletion> {
+        match self {
+            Self::Done(output) => Ok(*output),
+            Self::Pending(pending) => Err(pending),
+        }
     }
 }
 
@@ -107,6 +232,28 @@ where
             },
             Err(err) => Self::err_fmt(err),
         }
+    }
+}
+
+pub(crate) fn tool_output_from_completion_resolution(
+    resolution: crate::Resolution,
+) -> crate::ToolCallOutput {
+    match resolution {
+        crate::Resolution::Ok(value) => crate::ToolCallOutput::success(value),
+        crate::Resolution::Err(err) => {
+            let mut failure =
+                crate::ToolFailure::tool(crate::ToolFailureClass::Execution, err.code, err.message);
+            failure.raw = err.raw.map(crate::ToolValue::from);
+            crate::ToolCallOutput::failure(failure)
+        }
+        crate::Resolution::Timeout => crate::ToolCallOutput::failure(crate::ToolFailure::runtime(
+            crate::ToolFailureClass::Timeout,
+            "tool_completion_timeout",
+            "pending tool completion timed out",
+        )),
+        crate::Resolution::Cancelled => crate::ToolCallOutput::cancelled(
+            crate::ToolCancellation::runtime("pending tool completion cancelled"),
+        ),
     }
 }
 
@@ -157,5 +304,13 @@ mod tests {
             result.value_for_projection(),
             serde_json::json!("Failed to serialize tool result: boom")
         );
+    }
+
+    #[test]
+    fn pending_result_is_not_completed_output() {
+        let result = ToolResult::pending(PendingCompletion::new());
+        assert!(result.is_pending());
+        assert!(result.as_done_output().is_none());
+        assert!(result.into_done_output().is_err());
     }
 }

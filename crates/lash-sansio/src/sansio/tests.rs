@@ -24,7 +24,7 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
     TurnMachineConfig {
         protocol_driver,
         projector: Arc::new(ChatContextProjector),
-        sync_execution_surface: false,
+        sync_execution_environment: false,
         model: "test-model".to_string(),
         max_context_tokens: None,
         max_turns: None,
@@ -188,9 +188,9 @@ fn done_event_delta(effects: &[Effect]) -> Option<&[SessionEventRecord]> {
     })
 }
 
-fn find_execution_surface_sync(effects: &[Effect]) -> Option<(EffectId, bool)> {
+fn find_execution_environment_sync(effects: &[Effect]) -> Option<(EffectId, bool)> {
     effects.iter().find_map(|effect| match effect {
-        Effect::SyncExecutionSurface {
+        Effect::SyncExecutionEnvironment {
             id,
             update_machine_config,
         } => Some((*id, *update_machine_config)),
@@ -1189,18 +1189,18 @@ fn checkpoint_redelivers_waiting_exec_from_state_only() {
 }
 
 #[test]
-fn initial_execution_surface_sync_is_host_only() {
+fn initial_execution_environment_sync_is_host_only() {
     let mut config = test_config(Arc::new(ProseDriver));
-    config.sync_execution_surface = true;
+    config.sync_execution_environment = true;
     let mut machine =
         TurnMachine::new(config, vec![user_message("hello")], Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let (sync_id, update_machine_config) =
-        find_execution_surface_sync(&effects).expect("execution surface sync");
+        find_execution_environment_sync(&effects).expect("execution environment sync");
     assert!(!update_machine_config);
 
-    machine.handle_response(Response::ExecutionSurfaceSynced {
+    machine.handle_response(Response::ExecutionEnvironmentSynced {
         id: sync_id,
         result: Ok(None),
     });
@@ -1210,18 +1210,18 @@ fn initial_execution_surface_sync_is_host_only() {
 }
 
 #[test]
-fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
+fn iteration_execution_environment_sync_can_refresh_prompt_and_tools() {
     let mut config = test_config(Arc::new(SyncThenAdvanceDriver));
-    config.sync_execution_surface = true;
+    config.sync_execution_environment = true;
     config.system_prompt = Arc::from("initial prompt");
     let mut machine =
         TurnMachine::new(config, vec![user_message("hello")], Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let (initial_sync_id, update_machine_config) =
-        find_execution_surface_sync(&effects).expect("initial execution surface sync");
+        find_execution_environment_sync(&effects).expect("initial execution environment sync");
     assert!(!update_machine_config);
-    machine.handle_response(Response::ExecutionSurfaceSynced {
+    machine.handle_response(Response::ExecutionEnvironmentSynced {
         id: initial_sync_id,
         result: Ok(None),
     });
@@ -1249,13 +1249,13 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
     });
 
     let effects = drain_effects(&mut machine);
-    let (sync_id, update_machine_config) =
-        find_execution_surface_sync(&effects).expect("protocol_iteration execution surface sync");
+    let (sync_id, update_machine_config) = find_execution_environment_sync(&effects)
+        .expect("protocol_iteration execution environment sync");
     assert!(update_machine_config);
 
-    machine.handle_response(Response::ExecutionSurfaceSynced {
+    machine.handle_response(Response::ExecutionEnvironmentSynced {
         id: sync_id,
-        result: Ok(Some(ExecutionSurfaceSync {
+        result: Ok(Some(ExecutionEnvironmentSync {
             system_prompt: Arc::from("updated prompt"),
             tool_specs: Arc::new(vec![crate::llm::types::LlmToolSpec {
                 name: "new_tool".to_string(),

@@ -58,12 +58,15 @@ fn apply_tool_discovery_contributions(
 }
 
 impl PluginSession {
-    pub fn tool_surface(&self, session_id: &str) -> Result<Arc<crate::ToolSurface>, PluginError> {
+    pub fn resolved_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<crate::ToolCatalog>, PluginError> {
         let tools = self.tools.tool_manifests();
         let contract_provider = Arc::clone(&self.tools);
         let resolve_contract: lash_sansio::ToolContractResolver =
             Arc::new(move |name: &str| contract_provider.resolve_contract(name));
-        Ok(Arc::new(self.resolve_tool_surface(ToolSurfaceContext {
+        Ok(Arc::new(self.resolve_tool_catalog(ToolCatalogContext {
             session_id: session_id.to_string(),
             tools,
             resolve_contract: Some(Arc::clone(&resolve_contract)),
@@ -74,9 +77,9 @@ impl PluginSession {
     }
 
     pub fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
-        let surface = self.tool_surface(session_id)?;
+        let catalog = self.resolved_tool_catalog(session_id)?;
         let mut catalog =
-            crate::tool_registry::project_tool_catalog(surface.searchable_tools_iter().cloned());
+            crate::tool_registry::project_tool_catalog(catalog.searchable_tools_iter().cloned());
         let contributions = collect_owned_sync(
             &self.contributions.tool_discovery_contributors,
             ToolDiscoveryContext {
@@ -96,13 +99,13 @@ impl PluginSession {
         Ok(catalog)
     }
 
-    pub fn resolve_tool_surface(
+    pub fn resolve_tool_catalog(
         &self,
-        ctx: ToolSurfaceContext,
-    ) -> Result<crate::ToolSurface, PluginError> {
+        ctx: ToolCatalogContext,
+    ) -> Result<crate::ToolCatalog, PluginError> {
         let mut contributions = collect_owned_sync(
-            &self.contributions.tool_surface_contributors,
-            ToolSurfaceContext {
+            &self.contributions.tool_catalog_contributors,
+            ToolCatalogContext {
                 session_id: ctx.session_id.clone(),
                 tools: ctx.tools.clone(),
                 resolve_contract: ctx.resolve_contract.clone(),
@@ -115,7 +118,7 @@ impl PluginSession {
         .into_iter()
         .map(|owned| owned.value)
         .collect::<Vec<_>>();
-        contributions.push(self.tool_surface_overlay.clone());
+        contributions.push(self.tool_catalog_overlay.clone());
         let (tools, resolve_contract) = if ctx.tool_access.tools.is_empty() {
             (ctx.tools, ctx.resolve_contract)
         } else {
@@ -141,10 +144,10 @@ impl PluginSession {
             .map(|tool| tool.name.clone())
             .collect::<BTreeSet<_>>();
         if !authority_hidden_tools.is_empty() {
-            contributions.push(ToolSurfaceContribution {
+            contributions.push(ToolCatalogContribution {
                 overrides: authority_hidden_tools
                     .into_iter()
-                    .map(|tool_name| ToolSurfaceOverride {
+                    .map(|tool_name| ToolCatalogOverride {
                         tool_name,
                         availability: Some(crate::ToolAvailability::Off),
                     })
@@ -152,7 +155,7 @@ impl PluginSession {
                 ..Default::default()
             });
         }
-        Ok(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
+        Ok(crate::build_tool_catalog(crate::ToolCatalogBuildInput {
             tools,
             resolve_contract,
             contributions,

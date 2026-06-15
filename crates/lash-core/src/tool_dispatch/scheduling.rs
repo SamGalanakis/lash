@@ -41,7 +41,7 @@ pub(crate) fn resolve_tool_scheduling(
     tool_name: &str,
 ) -> ToolScheduling {
     context
-        .surface
+        .tool_catalog
         .tools
         .iter()
         .find(|def| def.manifest.name == tool_name)

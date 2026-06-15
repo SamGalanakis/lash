@@ -8,7 +8,7 @@ use serde_json::json;
 use lash_core::plugin::{
     PluginAction, PluginActionFailure, PluginActionKind, PluginDirective, PluginError,
     PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, SessionParam,
-    SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
+    SessionPlugin, SnapshotReader, SnapshotWriter, ToolCatalogContribution, ToolCatalogOverride,
 };
 use lash_core::{
     JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
@@ -738,37 +738,37 @@ impl SessionPlugin for PlanModePlugin {
             })
         }));
 
-        let tool_surface_state = Arc::clone(&self.state);
-        let tool_surface_config = self.config.clone();
-        reg.surface().contribute(Arc::new(move |ctx| {
-            let state = tool_surface_state
+        let tool_catalog_state = Arc::clone(&self.state);
+        let tool_catalog_config = self.config.clone();
+        reg.tool_catalog().contribute(Arc::new(move |ctx| {
+            let state = tool_catalog_state
                 .lock()
                 .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
             if !state.enabled {
-                return Ok(ToolSurfaceContribution::default());
+                return Ok(ToolCatalogContribution::default());
             }
 
             let mut overrides = ctx
                 .tools
                 .iter()
-                .filter(|tool| !tool_surface_config.allowed_tools.contains(&tool.name))
-                .map(|tool| ToolSurfaceOverride {
+                .filter(|tool| !tool_catalog_config.allowed_tools.contains(&tool.name))
+                .map(|tool| ToolCatalogOverride {
                     tool_name: tool.name.clone(),
                     availability: Some(lash_core::ToolAvailability::Off),
                 })
                 .collect::<Vec<_>>();
-            overrides.push(ToolSurfaceOverride {
+            overrides.push(ToolCatalogOverride {
                 tool_name: "plan_exit".to_string(),
                 availability: Some(lash_core::ToolAvailability::Showcased),
             });
-            if tool_surface_config.allowed_tools.contains("apply_patch") {
-                overrides.push(ToolSurfaceOverride {
+            if tool_catalog_config.allowed_tools.contains("apply_patch") {
+                overrides.push(ToolCatalogOverride {
                     tool_name: "apply_patch".to_string(),
                     availability: Some(lash_core::ToolAvailability::Showcased),
                 });
             }
 
-            Ok(ToolSurfaceContribution {
+            Ok(ToolCatalogContribution {
                 overrides,
                 tool_list_notes: vec![plan_mode_tool_note(state.plan_path().as_deref())],
             })

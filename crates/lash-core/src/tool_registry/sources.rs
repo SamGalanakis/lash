@@ -1,0 +1,194 @@
+struct ToolProviderSource {
+    id: String,
+    provider: Arc<dyn ToolProvider>,
+}
+
+impl ToolProviderSource {
+    fn new(id: impl Into<String>, provider: Arc<dyn ToolProvider>) -> Self {
+        Self {
+            id: id.into(),
+            provider,
+        }
+    }
+}
+
+struct ToolProviderGroupSource {
+    id: String,
+    tools: RwLock<BTreeMap<String, (ToolManifest, usize)>>,
+    providers: Vec<Arc<dyn ToolProvider>>,
+}
+
+impl ToolProviderGroupSource {
+    fn new(id: impl Into<String>, providers: Vec<Arc<dyn ToolProvider>>) -> Self {
+        let mut tools = BTreeMap::new();
+        for (provider_idx, provider) in providers.iter().enumerate() {
+            for manifest in provider.tool_manifests() {
+                tools.insert(manifest.name.clone(), (manifest, provider_idx));
+            }
+        }
+        Self {
+            id: id.into(),
+            tools: RwLock::new(tools),
+            providers,
+        }
+    }
+
+    fn read_advertised_tools(&self) -> Vec<ToolManifest> {
+        let mut tools = BTreeMap::new();
+        for (provider_idx, provider) in self.providers.iter().enumerate() {
+            for manifest in provider.tool_manifests() {
+                tools.insert(manifest.name.clone(), (manifest, provider_idx));
+            }
+        }
+        let manifests = tools
+            .values()
+            .map(|(manifest, _)| manifest.clone())
+            .collect::<Vec<_>>();
+        *self
+            .tools
+            .write()
+            .expect("tool provider group lock poisoned") = tools;
+        manifests
+    }
+
+    fn provider_index_for(&self, name: &str) -> Option<usize> {
+        self.resolve_manifest(name).and_then(|_| {
+            self.tools
+                .read()
+                .expect("tool provider group lock poisoned")
+                .get(name)
+                .map(|(_, provider_idx)| *provider_idx)
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolSourceExecutor for ToolProviderGroupSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn advertised_tools(&self) -> Vec<ToolManifest> {
+        self.read_advertised_tools()
+    }
+
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        if let Some((manifest, _)) = self
+            .tools
+            .read()
+            .expect("tool provider group lock poisoned")
+            .get(name)
+        {
+            return Some(manifest.clone());
+        }
+        for (provider_idx, provider) in self.providers.iter().enumerate() {
+            if let Some(manifest) = provider.resolve_manifest(name) {
+                self.tools
+                    .write()
+                    .expect("tool provider group lock poisoned")
+                    .insert(name.to_string(), (manifest.clone(), provider_idx));
+                return Some(manifest);
+            }
+        }
+        None
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        let provider_idx = self.provider_index_for(name)?;
+        self.providers[provider_idx].resolve_contract(name)
+    }
+
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        let name = call.pending.tool_name.clone();
+        let Some(provider_idx) = self.provider_index_for(&name) else {
+            return Err(ToolResult::err_fmt(format_args!("Unknown tool: {name}")));
+        };
+        self.providers[provider_idx].prepare_tool_call(call).await
+    }
+
+    async fn execute(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let Some(provider_idx) = self.provider_index_for(tool) else {
+            return ToolResult::err_fmt(format_args!("Unknown tool: {tool}"));
+        };
+        self.providers[provider_idx]
+            .execute(ToolCall {
+                name: tool,
+                args,
+                context,
+                progress,
+            })
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolSourceExecutor for ToolProviderSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn advertised_tools(&self) -> Vec<ToolManifest> {
+        self.provider.tool_manifests()
+    }
+
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        self.provider.resolve_manifest(name)
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.provider.resolve_contract(name)
+    }
+
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        self.provider.prepare_tool_call(call).await
+    }
+
+    async fn execute(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.provider
+            .execute(ToolCall {
+                name: tool,
+                args,
+                context,
+                progress,
+            })
+            .await
+    }
+}
+
+/// How a registry entry is connected to its tool source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolBinding {
+    /// Resolvable through the registered source with this id.
+    Bound(String),
+    /// Persisted in a session snapshot but not resolvable from any currently
+    /// registered source. Appears as `Off`; execution fails loudly; rebinds
+    /// when a source re-advertises the same (name, id).
+    Orphaned,
+}
+
+impl ToolBinding {
+    fn source_id(&self) -> Option<&str> {
+        match self {
+            Self::Bound(id) => Some(id),
+            Self::Orphaned => None,
+        }
+    }
+}

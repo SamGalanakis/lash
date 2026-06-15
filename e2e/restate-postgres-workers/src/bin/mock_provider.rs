@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
-    EXPECTED_FINAL_TEXT, EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call,
-    required_env,
+    EXPECTED_ASYNC_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_WAKE_TEXT, ensure_e2e_schema, env,
+    record_provider_call, required_env,
 };
 
 #[derive(Clone)]
@@ -59,6 +59,9 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
         MockScenario::TriggerSetup => ("trigger_setup", trigger_setup_script()),
         MockScenario::QueuedWake => ("queued_wake", queued_wake_script()),
         MockScenario::SignalSuspend => ("signal_suspend", signal_suspend_script(&workflow_id)),
+        MockScenario::AsyncCompletion => {
+            ("async_completion", async_completion_script(&workflow_id))
+        }
         MockScenario::KitchenSink => (
             "kitchen_sink",
             kitchen_sink_script(&workflow_id, full_text.contains("fail_once=true")),
@@ -159,10 +162,12 @@ enum MockScenario {
     QueuedWake,
     TriggerSetup,
     SignalSuspend,
+    AsyncCompletion,
 }
 
 fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     [
+        ("async_completion=true", MockScenario::AsyncCompletion),
         ("trigger_setup=true", MockScenario::TriggerSetup),
         ("signal_suspend=true", MockScenario::SignalSuspend),
         ("Background process wake", MockScenario::QueuedWake),
@@ -263,7 +268,7 @@ submit {{
 
 fn trigger_setup_script() -> String {
     r#"
-Register this host event trigger.
+Register this trigger.
 
 ```lashlang
 process on_button(event: ui.button.Pressed) {
@@ -316,6 +321,29 @@ Consume the queued wake.
 
 ```lashlang
 submit {{ wake_consumed: true, final: "{EXPECTED_WAKE_TEXT}" }}
+```
+"#
+    )
+}
+
+fn async_completion_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Exercise the async host tool completion path.
+
+```lashlang
+process async_child(tools: Tools, workflow_id: str) {{
+  lookup = await tools.async_lookup({{ workflow_id: workflow_id, key: "detached" }})?
+  finish lookup
+}}
+
+handle = start async_child(tools: tools, workflow_id: "{workflow_id}")
+result = (await handle)?
+submit {{
+  workflow_id: "{workflow_id}",
+  async: result,
+  final: "{EXPECTED_ASYNC_TEXT}"
+}}
 ```
 "#
     )

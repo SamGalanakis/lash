@@ -198,6 +198,43 @@ struct ParallelProbeTools {
     started: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Copy)]
+enum PendingProbeMode {
+    MissingKey,
+    PendingWithKey,
+    Done,
+}
+
+#[derive(Clone)]
+struct PendingProbeTools {
+    definition: crate::ToolDefinition,
+    attempts: Arc<AtomicUsize>,
+    mode: PendingProbeMode,
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for PendingProbeTools {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        manifests(vec![self.definition.clone()])
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == self.definition.name()).then(|| Arc::new(self.definition.contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        match self.mode {
+            PendingProbeMode::MissingKey => ToolResult::pending(crate::PendingCompletion::new()),
+            PendingProbeMode::PendingWithKey => {
+                call.context.completion_key().await.expect("completion key");
+                ToolResult::pending(crate::PendingCompletion::new())
+            }
+            PendingProbeMode::Done => ToolResult::ok(json!({ "done": true })),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ToolProvider for ParallelProbeTools {
     fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
@@ -300,17 +337,19 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::new(StrictMcpTools { executed }));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -326,7 +365,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -347,17 +386,19 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::new(MockTools));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -373,7 +414,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -401,17 +442,19 @@ fn projection_policy_dispatch_context(
     .build_session("root", None)
     .expect("plugin session");
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -427,7 +470,7 @@ fn projection_policy_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -558,20 +601,20 @@ fn lazy_contract_dispatch_context(
         executed,
     });
     let tools = Arc::clone(&provider);
-    let surface = Arc::new(crate::ToolSurface::from_tools(
+    let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
         provider.tool_manifests(),
         BTreeMap::new(),
     ));
     ToolDispatchContext {
         plugins: test_plugins(provider),
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -587,7 +630,7 @@ fn lazy_contract_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -597,17 +640,19 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::clone(&provider));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -623,7 +668,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -652,24 +697,55 @@ fn retry_dispatch_context(
     }))
 }
 
-fn parallel_dispatch_context(
-    barrier: Arc<Barrier>,
-    started: Arc<AtomicUsize>,
+fn pending_probe_tool(retry_policy: ToolRetryPolicy) -> crate::ToolDefinition {
+    named_beta_tool("pending_probe")
+        .with_scheduling(ToolScheduling::Parallel)
+        .with_retry_policy(retry_policy)
+}
+
+fn pending_dispatch_context(
+    mode: PendingProbeMode,
+    attempts: Arc<AtomicUsize>,
+    after_calls: Option<Arc<AtomicUsize>>,
+    retry_policy: ToolRetryPolicy,
 ) -> ToolDispatchContext<'static> {
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
+    let provider: Arc<dyn ToolProvider> = Arc::new(PendingProbeTools {
+        definition: pending_probe_tool(retry_policy),
+        attempts,
+        mode,
+    });
+    let mut spec = crate::PluginSpec::new().with_tool_provider(Arc::clone(&provider));
+    if let Some(after_calls) = after_calls {
+        let hook: crate::plugin::AfterToolCallHook = Arc::new(move |_ctx| {
+            let after_calls = Arc::clone(&after_calls);
+            Box::pin(async move {
+                after_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            })
+        });
+        spec = spec.with_after_tool_call(hook);
+    }
+    let plugins = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
+        "pending_probe_tools",
+        spec,
+    ))])
+    .build_session("root", None)
+    .expect("plugin session");
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -685,7 +761,67 @@ fn parallel_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
+        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        turn_context: crate::TurnContext::default(),
+    }
+}
+
+fn pending_prepared_call() -> crate::PreparedToolCall {
+    crate::PreparedToolCall::from_parts(
+        "pending-call",
+        "pending_probe",
+        json!({ "value": "runtime perf benchmark ok" }),
+        None,
+        serde_json::Value::Null,
+    )
+}
+
+fn tool_context_for_prepared<'run>(
+    context: &ToolDispatchContext<'run>,
+    prepared: &crate::PreparedToolCall,
+) -> ToolContext<'run> {
+    ToolContext::from_dispatch(Arc::new(context.clone()))
+        .prepared_call(prepared)
+        .build()
+}
+
+fn parallel_dispatch_context(
+    barrier: Arc<Barrier>,
+    started: Arc<AtomicUsize>,
+) -> ToolDispatchContext<'static> {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
+    let tools = plugins.tools();
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
+    ToolDispatchContext {
+        plugins,
+        tools,
+        tool_catalog,
+        sessions: Arc::new(MockSessionManager::default()),
+        session_lifecycle: Arc::new(MockSessionManager::default()),
+        session_graph: Arc::new(MockSessionManager::default()),
+        processes: Arc::new(crate::UnavailableProcessService),
+        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        trigger_router: None,
+        effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+            crate::InlineRuntimeEffectController,
+        )),
+        direct_completions: crate::DirectCompletionClient::unavailable(
+            "direct completions are unavailable in this test context",
+        ),
+        parent_invocation: None,
+        execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+            crate::PluginOptions::default(),
+            crate::SessionPolicy::default(),
+        ),
+        session_id: "session".to_string(),
+        agent_frame_id: String::new(),
+        event_tx,
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -721,6 +857,117 @@ async fn dispatch_resolves_contract_only_for_called_tool_before_execution() {
 }
 
 #[tokio::test]
+async fn pending_tool_without_completion_key_is_runtime_failure() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let context = pending_dispatch_context(
+        PendingProbeMode::MissingKey,
+        Arc::clone(&attempts),
+        None,
+        ToolRetryPolicy::Never,
+    );
+    let prepared = pending_prepared_call();
+    let tool_context = tool_context_for_prepared(&context, &prepared);
+
+    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+        &context,
+        prepared,
+        None,
+        tool_context,
+    )
+    .await;
+
+    let ToolCallLaunch::Done(outcome) = launch else {
+        panic!("missing completion key must fail launch synchronously");
+    };
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let ToolCallOutcome::Failure(failure) = &outcome.record.output.outcome else {
+        panic!("expected failure output");
+    };
+    assert_eq!(failure.code, "pending_tool_missing_completion_key");
+}
+
+#[tokio::test]
+async fn retry_policy_stops_after_pending_launch() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let context = pending_dispatch_context(
+        PendingProbeMode::PendingWithKey,
+        Arc::clone(&attempts),
+        None,
+        ToolRetryPolicy::safe(5, 0, 0),
+    );
+    let prepared = pending_prepared_call();
+    let tool_context = tool_context_for_prepared(&context, &prepared);
+
+    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+        &context,
+        prepared,
+        None,
+        tool_context,
+    )
+    .await;
+
+    let ToolCallLaunch::Pending(pending) = launch else {
+        panic!("tool should launch pending");
+    };
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(pending.tool_name, "pending_probe");
+    assert_eq!(
+        pending.key.wait,
+        crate::AwaitEventWaitIdentity::tool_completion("pending-call")
+    );
+}
+
+#[tokio::test]
+async fn after_tool_hook_runs_only_for_completed_tool_results() {
+    let after_calls = Arc::new(AtomicUsize::new(0));
+    let pending_attempts = Arc::new(AtomicUsize::new(0));
+    let pending_context = pending_dispatch_context(
+        PendingProbeMode::PendingWithKey,
+        pending_attempts,
+        Some(Arc::clone(&after_calls)),
+        ToolRetryPolicy::Never,
+    );
+    let prepared = pending_prepared_call();
+    let tool_context = tool_context_for_prepared(&pending_context, &prepared);
+
+    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+        &pending_context,
+        prepared,
+        None,
+        tool_context,
+    )
+    .await;
+
+    assert!(matches!(launch, ToolCallLaunch::Pending(_)));
+    assert_eq!(
+        after_calls.load(Ordering::SeqCst),
+        0,
+        "launch-time Pending is not a completed tool result"
+    );
+
+    let done_attempts = Arc::new(AtomicUsize::new(0));
+    let done_context = pending_dispatch_context(
+        PendingProbeMode::Done,
+        done_attempts,
+        Some(Arc::clone(&after_calls)),
+        ToolRetryPolicy::Never,
+    );
+    let prepared = pending_prepared_call();
+    let tool_context = tool_context_for_prepared(&done_context, &prepared);
+
+    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+        &done_context,
+        prepared,
+        None,
+        tool_context,
+    )
+    .await;
+
+    assert!(matches!(launch, ToolCallLaunch::Done(_)));
+    assert_eq!(after_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn before_tool_hook_receives_resolved_argument_projection_policy() {
     let captured = Arc::new(std::sync::Mutex::new(None));
     let outcome = dispatch_tool_call(
@@ -739,7 +986,7 @@ async fn before_tool_hook_receives_resolved_argument_projection_policy() {
 }
 
 #[tokio::test]
-async fn dispatch_exact_resolves_missing_surface_tool_and_executes_owner() {
+async fn dispatch_exact_resolves_missing_environment_tool_and_executes_owner() {
     let contracts_resolved = Arc::new(AtomicUsize::new(0));
     let executed = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
@@ -1292,17 +1539,19 @@ fn serial_dispatch_context(
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1318,7 +1567,7 @@ fn serial_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -1446,17 +1695,19 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
     let (event_tx, _event_rx) = mpsc::channel(8);
     let plugins = test_plugins(provider);
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     let context = Arc::new(ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1472,7 +1723,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });
@@ -1586,17 +1837,19 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
     });
     let plugins = test_plugins(provider);
     let tools = plugins.tools();
-    let surface = plugins.tool_surface("session").expect("tool surface");
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
     let context = Arc::new(ToolDispatchContext {
         plugins,
         tools,
-        surface,
+        tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        host_event_router: None,
+        trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1612,7 +1865,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });

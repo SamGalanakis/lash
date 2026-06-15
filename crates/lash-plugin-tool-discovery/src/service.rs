@@ -140,7 +140,7 @@ mod tests {
     };
     use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot};
     use lash_core::{
-        DirectCompletion, TokenUsage, ToolAgentSurface, ToolCall, ToolContract, ToolDefinition,
+        DirectCompletion, LashlangToolBinding, TokenUsage, ToolCall, ToolContract, ToolDefinition,
         ToolProvider,
     };
     use serde_json::json;
@@ -241,8 +241,8 @@ mod tests {
             ToolContract::default_input_schema(),
             json!({}),
         )
-        .with_agent_surface(
-            ToolAgentSurface::new(
+        .with_lashlang_binding(
+            LashlangToolBinding::new(
                 [module.unwrap_or(match name {
                     "read_file" => "files",
                     "search_web" => "web",
@@ -257,16 +257,16 @@ mod tests {
             .with_aliases(aliases),
         );
         let manifest = tool.manifest();
-        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
-        let call = agent_surface.call_path();
+        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
+        let call = lashlang_binding.call_path();
         json!({
             "id": manifest.id,
             "name": manifest.name,
-            "module_path": agent_surface.module_path.clone(),
-            "operation": agent_surface.operation.clone(),
+            "module_path": lashlang_binding.module_path.clone(),
+            "operation": lashlang_binding.operation.clone(),
             "call": call,
             "description": manifest.description,
-            "aliases": agent_surface.aliases.clone(),
+            "aliases": lashlang_binding.aliases.clone(),
             "availability": "searchable",
             "callable": false,
             "showcased": false,

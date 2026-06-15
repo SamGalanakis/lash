@@ -1,13 +1,13 @@
 use crate::plugin::{DirectCompletion, PluginError};
 
 #[derive(Clone)]
-pub struct ToolDirectCompletionControl<'run> {
+pub struct ToolDirectCompletionClient<'run> {
     pub(super) session_id: String,
     pub(super) tool_call_id: Option<String>,
     pub(super) direct_completions: crate::DirectCompletionClient<'run>,
 }
 
-impl ToolDirectCompletionControl<'_> {
+impl ToolDirectCompletionClient<'_> {
     pub async fn complete(
         &self,
         mut request: crate::DirectRequest,

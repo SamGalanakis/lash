@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use lash_core::plugin::StaticPluginFactory;
 use lash_core::{
-    PluginError, PluginFactory, PluginSpec, ToolAgentSurface, ToolCall, ToolContract,
+    LashlangToolBinding, PluginError, PluginFactory, PluginSpec, ToolCall, ToolContract,
     ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde_json::json;
@@ -164,8 +164,8 @@ fn ask_tool_definition() -> ToolDefinition {
                     .into(),
                 "await user.ask({ question: \"Which checks should I run?\", options: [\"unit\", \"lint\", \"e2e\"], selection_mode: \"multi\" })?".into(),
             ])
-            .with_agent_surface(
-                ToolAgentSurface::new(["user"], "ask")
+            .with_lashlang_binding(
+                LashlangToolBinding::new(["user"], "ask")
                     .with_aliases(["prompt_user", "request_input"]),
             )
             .with_scheduling(ToolScheduling::Parallel)

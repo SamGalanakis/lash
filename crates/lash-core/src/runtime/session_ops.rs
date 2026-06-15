@@ -17,7 +17,7 @@ impl LashRuntime {
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
             session.invalidate_runtime_caches();
-            // Restore the persisted tool surface so the live registry matches the
+            // Restore the persisted tool catalog so the live registry matches the
             // state being installed (mirrors `from_host_state`). Without this the
             // registry keeps its prior generation/tools and silently diverges from
             // `state`. `restore_state` adopts the snapshot's generation, so a
@@ -230,8 +230,8 @@ impl LashRuntime {
     pub async fn list_lashlang_trigger_registrations(
         &self,
     ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {
-        let store = self.host.host_event_store.as_ref().ok_or_else(|| {
-            SessionError::Protocol("host event store is unavailable in this runtime".to_string())
+        let store = self.host.trigger_store.as_ref().ok_or_else(|| {
+            SessionError::Protocol("trigger store is unavailable in this runtime".to_string())
         })?;
         let records = store
             .list_subscriptions(crate::TriggerSubscriptionFilter::for_session(
@@ -247,10 +247,10 @@ impl LashRuntime {
 
     pub async fn lashlang_trigger_registrations_by_source_type(
         &self,
-        source_type: impl Into<crate::TriggerSourceType>,
+        source_type: impl Into<crate::TriggerEventType>,
     ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {
-        let store = self.host.host_event_store.as_ref().ok_or_else(|| {
-            SessionError::Protocol("host event store is unavailable in this runtime".to_string())
+        let store = self.host.trigger_store.as_ref().ok_or_else(|| {
+            SessionError::Protocol("trigger store is unavailable in this runtime".to_string())
         })?;
         let mut filter =
             crate::TriggerSubscriptionFilter::for_session(self.state.session_id.clone());

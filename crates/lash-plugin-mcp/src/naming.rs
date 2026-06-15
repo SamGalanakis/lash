@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use lash_core::ToolAgentSurface;
+use lash_core::LashlangToolBinding;
 
 /// Normalise a server name or raw MCP tool name to lowercase ASCII
 /// alphanumeric and underscore. Collapses runs of non-alphanumeric characters
@@ -58,16 +58,16 @@ pub fn build_prefixed_name(
     server_name: &str,
     original_tool_name: &str,
     used_names: &mut BTreeSet<String>,
-) -> (String, ToolAgentSurface) {
+) -> (String, LashlangToolBinding) {
     let server_prefix = normalize_identifier(server_name);
     let normalized_tool = normalize_identifier(original_tool_name);
     let prefixed = unique_prefixed_name(
         &format!("mcp__{server_prefix}__{normalized_tool}"),
         used_names,
     );
-    let agent_surface = ToolAgentSurface::new([server_prefix], normalized_tool)
+    let lashlang_binding = LashlangToolBinding::new([server_prefix], normalized_tool)
         .with_aliases([original_tool_name.to_string()]);
-    (prefixed, agent_surface)
+    (prefixed, lashlang_binding)
 }
 
 #[cfg(test)]

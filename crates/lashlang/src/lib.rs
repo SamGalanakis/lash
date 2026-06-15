@@ -10,11 +10,11 @@ mod tracking;
 mod trigger;
 
 pub use artifact::{
-    ArtifactStoreError, ContentHash, DurabilityTier, InMemoryLashlangArtifactStore,
-    LASHLANG_COMPILER_VERSION, LASHLANG_SEMANTIC_HASH_VERSION, LASHLANG_VM_ABI_VERSION,
-    LashlangArtifactStore, ModuleArtifact, ModuleArtifactError, ModuleExports, ModuleRef,
-    ProcessRef, RequiredSurfaceRef, SurfaceRequirements, canonical_program_ir,
-    global_in_memory_lashlang_artifact_store, surface_requirements_for_program,
+    ArtifactStoreError, ContentHash, DurabilityTier, HostRequirements, HostRequirementsRef,
+    InMemoryLashlangArtifactStore, LASHLANG_COMPILER_VERSION, LASHLANG_SEMANTIC_HASH_VERSION,
+    LASHLANG_VM_ABI_VERSION, LashlangArtifactStore, ModuleArtifact, ModuleArtifactError,
+    ModuleExports, ModuleRef, ProcessRef, canonical_program_ir,
+    global_in_memory_lashlang_artifact_store, host_requirements_for_program,
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ExprFolder, ExprVisitor,
@@ -27,8 +27,8 @@ pub use graph::{
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
-    LashlangAbilities, LashlangLanguageFeatures, LashlangSurface, LinkError, LinkedModule,
-    NamedDataType, NamedDataTypeError, ResourceCatalog, ResourceCatalogError,
+    LashlangAbilities, LashlangHostCatalog, LashlangHostCatalogError, LashlangHostEnvironment,
+    LashlangLanguageFeatures, LinkError, LinkedModule, NamedDataType, NamedDataTypeError,
     ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
 };
 pub use parser::{ParseError, parse};
@@ -36,11 +36,12 @@ pub use runtime::{
     AbilityOp, AbilityResult, CompileStats, CompiledLinkedProgram, CompiledProcessCache,
     CompiledProcessCacheKey, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
     ExecutableProgram, ExecutionEnvironment, ExecutionHost, ExecutionHostError, ExecutionMode,
-    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY,
-    LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_REQUIRED_SURFACE_REF_KEY, LASH_TYPE_KEY,
+    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_HOST_DESCRIPTOR_TYPE_KEY,
+    LASH_HOST_DESCRIPTOR_VALUE_KEY, LASH_HOST_REQUIREMENTS_REF_KEY, LASH_MODULE_REF_KEY,
+    LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_TYPE_KEY,
     LinkedProgramCache, LinkedProgramCacheError, ListValue, ProcessEvent, ProcessEventKind,
     ProcessSignal, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
-    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+    ProjectedBindings, ProjectedFuture, ProjectedHostDescriptor, ProjectedReadRequest,
     ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation, RuntimeError,
     RuntimeFailure, Sleep, SleepKind, Snapshot, State, Value, compile, compile_linked,
     compile_linked_process, compile_module_artifact_process, compile_process, execute, from_json,
@@ -51,12 +52,12 @@ pub use tracking::{
     LashlangExecutionObservation, LashlangExecutionSite, ProcessBranchSelection, process_ref_key,
 };
 pub use trigger::{
-    HostValue, HostValueError, LASH_TRIGGER_EVENT_KEY, TriggerCancelRequest, TriggerHostOperation,
-    TriggerInputBinding, TriggerInputTemplate, TriggerListRequest, TriggerRegistrationRequest,
-    TriggerTargetIdentity, TriggerTargetValidation, TriggerTargetValidationError,
-    add_trigger_resource_operations, cancel_call_args, event_type_for_source,
-    is_trigger_resource_type, list_call_args, register_call_args, trigger_event_placeholder_expr,
-    validate_trigger_target,
+    HostDescriptor, HostDescriptorError, LASH_TRIGGER_EVENT_KEY, TriggerCancelRequest,
+    TriggerHostOperation, TriggerInputBinding, TriggerInputTemplate, TriggerListRequest,
+    TriggerRegistrationRequest, TriggerTargetIdentity, TriggerTargetValidation,
+    TriggerTargetValidationError, add_trigger_resource_operations, cancel_call_args,
+    event_type_for_source, is_trigger_resource_type, list_call_args, register_call_args,
+    trigger_event_placeholder_expr, validate_trigger_target,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
@@ -270,33 +271,33 @@ mod tests {
     }
 
     #[test]
-    fn linked_program_cache_reuses_source_when_surface_satisfies_requirements() {
+    fn linked_program_cache_reuses_source_when_host_environment_satisfies_requirements() {
         let source = r#"submit (await tools.read_file({ path: "." }))?"#;
-        let base_surface = LashlangSurface::new(
-            ResourceCatalog::tool_default(["read_file"]),
+        let base_environment = LashlangHostEnvironment::new(
+            LashlangHostCatalog::tool_default(["read_file"]),
             LashlangAbilities::default(),
         );
-        let extra_surface = LashlangSurface::new(
-            ResourceCatalog::tool_default(["read_file", "unrelated"]),
+        let extra_environment = LashlangHostEnvironment::new(
+            LashlangHostCatalog::tool_default(["read_file", "unrelated"]),
             LashlangAbilities::default(),
         );
         let mut cache = LinkedProgramCache::with_capacity(2);
 
         let first = cache
-            .get_or_compile(source, &base_surface)
+            .get_or_compile(source, &base_environment)
             .expect("compile first linked program");
         let second = cache
-            .get_or_compile(source, &base_surface)
+            .get_or_compile(source, &base_environment)
             .expect("reuse same surface");
         let extra = cache
-            .get_or_compile(source, &extra_surface)
+            .get_or_compile(source, &extra_environment)
             .expect("reuse when unrelated tools are added");
 
         assert!(std::sync::Arc::ptr_eq(&first, &second));
         assert!(std::sync::Arc::ptr_eq(&first, &extra));
         assert_eq!(
-            first.linked_module().required_surface_ref,
-            extra.linked_module().required_surface_ref
+            first.linked_module().host_requirements_ref,
+            extra.linked_module().host_requirements_ref
         );
 
         let stats = cache.stats();
@@ -307,13 +308,13 @@ mod tests {
     }
 
     #[test]
-    fn linked_program_cache_keeps_source_and_surface_requirements_distinct() {
+    fn linked_program_cache_keeps_source_and_host_requirements_distinct() {
         let source = r#"submit (await tools.read_file({ path: "." }))?"#;
-        let base_surface = LashlangSurface::new(
-            ResourceCatalog::tool_default(["read_file"]),
+        let base_environment = LashlangHostEnvironment::new(
+            LashlangHostCatalog::tool_default(["read_file"]),
             LashlangAbilities::default(),
         );
-        let mut changed_resources = ResourceCatalog::new();
+        let mut changed_resources = LashlangHostCatalog::new();
         changed_resources.add_module_operation(
             ["tools"],
             "Tools",
@@ -322,31 +323,32 @@ mod tests {
             TypeExpr::Any,
             TypeExpr::Any,
         );
-        let changed_surface = LashlangSurface::new(changed_resources, LashlangAbilities::default());
-        let missing_surface = LashlangSurface::new(
-            ResourceCatalog::tool_default(["echo"]),
+        let changed_environment =
+            LashlangHostEnvironment::new(changed_resources, LashlangAbilities::default());
+        let missing_environment = LashlangHostEnvironment::new(
+            LashlangHostCatalog::tool_default(["echo"]),
             LashlangAbilities::default(),
         );
         let mut cache = LinkedProgramCache::with_capacity(4);
 
         let first = cache
-            .get_or_compile(source, &base_surface)
+            .get_or_compile(source, &base_environment)
             .expect("compile first linked program");
         let newline = cache
-            .get_or_compile(&format!("{source}\n"), &base_surface)
+            .get_or_compile(&format!("{source}\n"), &base_environment)
             .expect("compile source-distinct linked program");
         let changed = cache
-            .get_or_compile(source, &changed_surface)
+            .get_or_compile(source, &changed_environment)
             .expect("compile changed surface requirement");
         let missing = cache
-            .get_or_compile(source, &missing_surface)
+            .get_or_compile(source, &missing_environment)
             .expect_err("missing resource operation should not reuse cached program");
 
         assert!(!std::sync::Arc::ptr_eq(&first, &newline));
         assert!(!std::sync::Arc::ptr_eq(&first, &changed));
         assert_ne!(
-            first.linked_module().required_surface_ref,
-            changed.linked_module().required_surface_ref
+            first.linked_module().host_requirements_ref,
+            changed.linked_module().host_requirements_ref
         );
         assert!(matches!(
             missing,
@@ -405,8 +407,8 @@ mod tests {
     async fn execute_success_path_uses_host() {
         let linked = LinkedModule::link(
             parse("v = await tools.anything({})? submit v").expect("source should parse"),
-            LashlangSurface::new(
-                ResourceCatalog::tool_default(["anything"]),
+            LashlangHostEnvironment::new(
+                LashlangHostCatalog::tool_default(["anything"]),
                 LashlangAbilities::default(),
             ),
         )

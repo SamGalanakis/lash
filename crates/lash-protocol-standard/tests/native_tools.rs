@@ -4,15 +4,15 @@ use lash_core::PluginHost;
 
 fn tool_names(session: &lash_core::PluginSession) -> Vec<String> {
     session
-        .tool_surface("root")
-        .expect("tool surface")
+        .resolved_tool_catalog("root")
+        .expect("tool catalog")
         .tool_names()
         .as_ref()
         .clone()
 }
 
 #[test]
-fn standard_protocol_owns_batch_not_process_controls() {
+fn standard_protocol_owns_batch_not_processess() {
     let session = PluginHost::new(vec![Arc::new(
         lash_protocol_standard::StandardProtocolPluginFactory,
     )])
@@ -26,9 +26,9 @@ fn standard_protocol_owns_batch_not_process_controls() {
 }
 
 #[test]
-fn process_controls_are_composed_with_standard_protocol() {
+fn processess_are_composed_with_standard_protocol() {
     let session = PluginHost::new(vec![
-        Arc::new(lash_plugin_process_controls::ProcessControlsPluginFactory::new()),
+        Arc::new(lash_plugin_process_controls::SessionProcessAdminPluginFactory::new()),
         Arc::new(lash_tools::shell::StandardShellPluginFactory::new()),
         Arc::new(lash_protocol_standard::StandardProtocolPluginFactory),
     ])

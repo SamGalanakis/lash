@@ -271,7 +271,7 @@ impl SessionBuilder {
         // Lazily spawn the default process work runner (Decision 3: deferred to
         // the first open so a tokio runtime is guaranteed; idempotent via the
         // shared once-guard) and thread its poke onto this session's host so the
-        // process control seam can wake the runner after a successful start.
+        // process admin seam can wake the runner after a successful start.
         env.process_work_poke = self.core.process_work_runner.poke().await;
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
         let handle = RuntimeHandle::with_live_replay_store(
@@ -284,6 +284,7 @@ impl SessionBuilder {
             mode,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
+            process_phase_probe_slot: self.core.process_work_runner.phase_probe_slot(),
             turn_cancels: crate::turn::TurnCancelRegistry::default(),
         })
     }
@@ -334,6 +335,7 @@ pub struct LashSession {
     pub(crate) mode: ModeId,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
+    pub(crate) process_phase_probe_slot: Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot>,
     pub(crate) turn_cancels: crate::turn::TurnCancelRegistry,
 }
 
@@ -422,35 +424,35 @@ impl LashSession {
         self.turn_cancels.cancel_all()
     }
 
-    pub fn control(&self) -> SessionControl {
-        SessionControl {
+    pub fn admin(&self) -> SessionAdmin {
+        SessionAdmin {
             runtime: self.runtime.clone(),
         }
     }
 
     pub async fn configure(&self, patch: SessionConfigPatch) -> Result<()> {
-        self.control().config().update(patch).await
+        self.admin().config().update(patch).await
     }
 
-    pub fn tools(&self) -> ToolsControl {
-        ToolsControl::new(self.control())
+    pub fn tools(&self) -> ToolAdmin {
+        ToolAdmin::new(self.admin())
     }
 
-    pub fn commands(&self) -> SessionCommandsControl {
-        self.control().commands()
+    pub fn commands(&self) -> SessionCommandAdmin {
+        self.admin().commands()
     }
 
-    pub fn triggers(&self) -> TriggersControl {
-        self.control().triggers()
+    pub fn triggers(&self) -> SessionTriggerAdmin {
+        self.admin().triggers()
     }
 
-    pub fn process_control(&self) -> ProcessControl {
-        ProcessControl::new(self.control())
+    pub fn processes(&self) -> SessionProcessAdmin {
+        SessionProcessAdmin::new(self.admin())
     }
 
     pub fn plugin_actions(&self) -> PluginActions {
         PluginActions {
-            control: self.control(),
+            control: self.admin(),
         }
     }
 
@@ -548,8 +550,20 @@ impl LashSession {
     ) {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
-        runtime.set_turn_phase_probe(probe);
+        runtime.set_turn_phase_probe(Arc::clone(&probe));
         self.runtime.publish_from(&runtime);
+        if let Some(slot) = &self.process_phase_probe_slot {
+            let observation = self.runtime.observe();
+            slot.set_for_session(observation.session_id(), Arc::clone(&probe));
+            let current_frame = observation.persisted_state.current_agent_frame_id.as_str();
+            if !current_frame.is_empty() {
+                let scope = lash_core::SessionScope::for_agent_frame(
+                    observation.session_id(),
+                    current_frame,
+                );
+                slot.set_for_scope(&scope, probe);
+            }
+        }
     }
 }
 

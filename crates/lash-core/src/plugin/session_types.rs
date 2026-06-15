@@ -309,13 +309,13 @@ pub struct OpenAgentFrameResult {
 }
 
 #[derive(Clone)]
-pub struct SessionContextSurface {
+pub struct SessionContextOverlay {
     pub include_base_tools: bool,
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub prompt_contributions: Vec<PromptContribution>,
 }
 
-impl Default for SessionContextSurface {
+impl Default for SessionContextOverlay {
     fn default() -> Self {
         Self {
             include_base_tools: true,
@@ -325,9 +325,9 @@ impl Default for SessionContextSurface {
     }
 }
 
-impl std::fmt::Debug for SessionContextSurface {
+impl std::fmt::Debug for SessionContextOverlay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SessionContextSurface")
+        f.debug_struct("SessionContextOverlay")
             .field("include_base_tools", &self.include_base_tools)
             .field("tool_provider_count", &self.tool_providers.len())
             .field(
@@ -379,7 +379,7 @@ pub struct SessionCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentSessionContext>,
     #[serde(skip)]
-    pub context_surface: SessionContextSurface,
+    pub context_overlay: SessionContextOverlay,
     /// Plugin-owned options that configure plugin behavior at session
     /// creation time. Each plugin decodes only the entry keyed by its id.
     #[serde(default)]
@@ -403,7 +403,7 @@ impl SessionCreateRequest {
             initial_nodes: Vec::new(),
             tool_access: SessionToolAccess::default(),
             subagent: None,
-            context_surface: SessionContextSurface::default(),
+            context_overlay: SessionContextOverlay::default(),
             plugin_options,
             usage_source: None,
         }
@@ -437,7 +437,7 @@ impl SessionCreateRequest {
             initial_nodes: Vec::new(),
             tool_access: SessionToolAccess::default(),
             subagent: None,
-            context_surface: SessionContextSurface::default(),
+            context_overlay: SessionContextOverlay::default(),
             plugin_options,
             usage_source: None,
         }
@@ -508,7 +508,7 @@ impl SessionCreateRequest {
             initial_nodes: Vec::new(),
             tool_access: SessionToolAccess::default(),
             subagent: None,
-            context_surface: SessionContextSurface::default(),
+            context_overlay: SessionContextOverlay::default(),
             plugin_options,
             usage_source: Some(usage_source.into()),
         }
@@ -549,8 +549,8 @@ impl SessionCreateRequest {
         self
     }
 
-    pub fn with_context_surface(mut self, context_surface: SessionContextSurface) -> Self {
-        self.context_surface = context_surface;
+    pub fn with_context_overlay(mut self, context_overlay: SessionContextOverlay) -> Self {
+        self.context_overlay = context_overlay;
         self
     }
 

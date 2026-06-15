@@ -55,7 +55,7 @@ pub mod conformance {
     {
         reopen_restores_trigger_registry_state(make()).await;
         worker_runs_trigger_started_lashlang_process_after_restart(make()).await;
-        host_event_triggered_process_wake_provenance_survives_restart(make()).await;
+        trigger_triggered_process_wake_provenance_survives_restart(make()).await;
         worker_recovers_tool_call_process_in_restarted_session(make()).await;
         worker_recovers_session_turn_process_in_restarted_session(make()).await;
     }
@@ -76,7 +76,7 @@ handle = await triggers.register({
 submit "registered"
 "#;
 
-    const HOST_EVENT_TRIGGER_SOURCE: &str = r#"
+    const BUTTON_TRIGGER_SOURCE: &str = r#"
 process remember_button(event: ui.button.Pressed) {
   wake { button: event.button, message: event.message }
   finish { button: event.button, ok: true }
@@ -157,8 +157,8 @@ submit "registered"
             rebuild_abilities()
         }
 
-        fn lashlang_resources(&self) -> crate::modes::ResourceCatalog {
-            let mut resources = crate::modes::ResourceCatalog::new();
+        fn lashlang_resources(&self) -> crate::modes::LashlangHostCatalog {
+            let mut resources = crate::modes::LashlangHostCatalog::new();
             resources
                 .add_trigger_source_constructor(
                     ["clock", "Alarm"],
@@ -196,13 +196,12 @@ submit "registered"
         }
 
         fn register(&self, reg: &mut PluginRegistrar) -> std::result::Result<(), PluginError> {
-            reg.host_events()
-                .declare(crate::host_events::HostEvent::new(
-                    "Button",
-                    "ui.button",
-                    "pressed",
-                    button_pressed_event_type(),
-                ))?;
+            reg.triggers().declare(crate::triggers::TriggerEvent::new(
+                "Button",
+                "ui.button",
+                "pressed",
+                button_pressed_event_type(),
+            ))?;
             Ok(())
         }
     }
@@ -255,8 +254,8 @@ submit "registered"
                 let rendered_messages = format!("{:?}", req.messages);
                 let text = if rendered_messages.contains("run child") {
                     "```lashlang\nsubmit \"child done\"\n```".to_string()
-                } else if rendered_messages.contains("register rebuild host event trigger") {
-                    format!("```lashlang\n{}\n```", HOST_EVENT_TRIGGER_SOURCE.trim())
+                } else if rendered_messages.contains("register rebuild button trigger") {
+                    format!("```lashlang\n{}\n```", BUTTON_TRIGGER_SOURCE.trim())
                 } else {
                     format!("```lashlang\n{}\n```", TRIGGER_SOURCE.trim())
                 };
@@ -382,21 +381,21 @@ submit "registered"
         );
     }
 
-    fn inline_host_event_scope(
+    fn inline_trigger_scope(
         scope_id: impl Into<String>,
     ) -> lash_core::ScopedEffectController<'static> {
         lash_core::ScopedEffectController::shared(
             Arc::new(lash_core::InlineRuntimeEffectController),
-            lash_core::EffectScope::runtime_operation(scope_id.into()),
+            lash_core::ExecutionScope::runtime_operation(scope_id.into()),
         )
-        .expect("inline host event effect scope")
+        .expect("inline trigger occurrence execution scope")
     }
 
     async fn emit_first_clock_alarm(
         core: &LashCore,
         session: &crate::LashSession,
         payload: serde_json::Value,
-    ) -> lash_core::HostEventEmitReport {
+    ) -> lash_core::TriggerEmitReport {
         let registrations = session
             .triggers()
             .by_source_type("clock.Alarm")
@@ -413,18 +412,18 @@ submit "registered"
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("occurrence")
         );
-        core.host_events()
+        core.triggers()
             .emit(
-                crate::host_events::HostEventOccurrenceRequest::new(
+                crate::triggers::TriggerOccurrenceRequest::new(
                     "clock.Alarm",
                     handle.source_key.clone(),
                     payload,
                     idempotency_key.clone(),
                 ),
-                inline_host_event_scope(format!("host-event:{idempotency_key}")),
+                inline_trigger_scope(format!("trigger:{idempotency_key}")),
             )
             .await
-            .expect("emit clock host event")
+            .expect("emit clock trigger occurrence")
     }
 
     /// Differential baseline: a live reopen restores the trigger registry route
@@ -479,26 +478,26 @@ submit "registered"
         await_success(&registry, &report.started_process_ids[0]).await;
     }
 
-    async fn host_event_triggered_process_wake_provenance_survives_restart(
+    async fn trigger_triggered_process_wake_provenance_survives_restart(
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
         let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
         open_mutate_and_restart_with_prompt(
             &core,
-            "register rebuild host event trigger",
+            "register rebuild button trigger",
             None,
             &registry,
         )
         .await;
 
-        let source_key = crate::host_events::empty_host_event_source_key("ui.button.pressed")
+        let source_key = crate::triggers::empty_trigger_source_key("ui.button.pressed")
             .expect("button source key");
-        let idempotency_key = "runtime-rebuild-host-event";
+        let idempotency_key = "runtime-rebuild-trigger";
         let report = core
-            .host_events()
+            .triggers()
             .emit(
-                crate::host_events::HostEventOccurrenceRequest::new(
+                crate::triggers::TriggerOccurrenceRequest::new(
                     "ui.button.pressed",
                     source_key,
                     serde_json::json!({
@@ -509,20 +508,20 @@ submit "registered"
                     idempotency_key,
                 )
                 .with_source(serde_json::json!({})),
-                inline_host_event_scope(format!("host-event:{idempotency_key}")),
+                inline_trigger_scope(format!("trigger:{idempotency_key}")),
             )
             .await
-            .expect("emit host event");
+            .expect("emit trigger occurrence");
         let process_records = registry
             .list_non_terminal()
             .await
-            .expect("host-event-triggered process records");
+            .expect("trigger-triggered process records");
         assert_eq!(process_records.len(), 1);
         let process_id = process_records[0].id.clone();
         let record = registry
             .get_process(&process_id)
             .await
-            .expect("host-event-triggered process record");
+            .expect("trigger-triggered process record");
         let process_caused_by = record
             .provenance
             .caused_by
@@ -530,7 +529,7 @@ submit "registered"
             .expect("triggered process cause");
         assert!(matches!(
             &process_caused_by,
-            lash_core::CausalRef::HostEvent { occurrence_id }
+            lash_core::CausalRef::TriggerOccurrence { occurrence_id }
                 if occurrence_id == &report.occurrence_id
         ));
 
@@ -549,7 +548,7 @@ submit "registered"
                 lash_core::runtime::QueuedWorkPayload::ProcessWake { wake } => Some(wake),
                 _ => None,
             })
-            .expect("process wake queued for host-event-triggered process");
+            .expect("process wake queued for trigger-triggered process");
         assert_eq!(wake.process_id, process_id);
         assert_eq!(wake.process_caused_by, Some(process_caused_by));
         assert!(matches!(

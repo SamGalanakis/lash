@@ -317,18 +317,23 @@ impl AppDb {
     ) -> AppResult<serde_json::Value> {
         let board = self.chat_board(chat_id)?;
         let output = apply_agent_move(&board, cell);
-        if output
+        if !output
             .get("accepted")
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
         {
-            let next_board_value = output
-                .get("board")
-                .ok_or_else(|| AppError::internal("accepted move missing board"))?;
-            let next_board: BoardState = serde_json::from_value(next_board_value.clone())
-                .map_err(|err| AppError::internal(err.to_string()))?;
-            self.upsert_chat_board(chat_id, &next_board)?;
+            let reason = output
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("agent move was rejected");
+            return Err(AppError::bad_request(reason));
         }
+        let next_board_value = output
+            .get("board")
+            .ok_or_else(|| AppError::internal("accepted move missing board"))?;
+        let next_board: BoardState = serde_json::from_value(next_board_value.clone())
+            .map_err(|err| AppError::internal(err.to_string()))?;
+        self.upsert_chat_board(chat_id, &next_board)?;
         Ok(output)
     }
 
@@ -776,5 +781,36 @@ fn compact_title(text: &str) -> String {
         "New chat".to_string()
     } else {
         title
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn apply_agent_move_errors_when_not_agent_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut db = AppDb::open(&temp.path().join("app.db")).expect("open db");
+        let chat = db
+            .create_chat("game", "mock-model", None)
+            .expect("create chat");
+        let board = BoardState {
+            cells: vec![None; 9],
+            turn: "X".to_string(),
+        };
+        db.upsert_chat_board(&chat.id, &board).expect("seed board");
+
+        let err = db
+            .apply_agent_move(&chat.id, 0)
+            .expect_err("agent move should fail while it is X's turn");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "It is not O's turn.");
+        let board = db.chat_board(&chat.id).expect("load board");
+        assert_eq!(board.turn, "X");
+        assert!(board.cells.iter().all(Option::is_none));
     }
 }

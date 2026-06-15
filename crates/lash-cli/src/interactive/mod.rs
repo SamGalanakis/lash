@@ -50,7 +50,7 @@ pub(crate) use self::runtime::injected_image_part_indices;
 #[cfg(test)]
 pub(crate) use self::runtime::make_injected_plugin_message;
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
-use self::runtime::{refresh_queued_work_snapshot, send_user_message, sync_runtime_tool_surface};
+use self::runtime::{refresh_queued_work_snapshot, send_user_message, sync_runtime_tool_catalog};
 
 use self::input_handling::{
     SessionCtx, dispatch_key_event, handle_mouse_event, handle_surface_input,
@@ -124,7 +124,7 @@ pub(crate) async fn run_app(
     let mut active_tool_state = runtime
         .as_ref()
         .expect("session initialized")
-        .control()
+        .admin()
         .tools()
         .state()
         .await?;
@@ -361,16 +361,16 @@ pub(crate) async fn run_app(
                         active_stream_id,
                         "runtime return received in interactive loop"
                     );
-                    if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
+                    if let Err(err) = sync_runtime_tool_catalog(&mut runtime).await {
                         push_system_message(
                             &mut app,
-                            format!("Failed to sync tool surface after turn: {err}"),
+                            format!("Failed to sync tool catalog after turn: {err}"),
                         );
                     }
                     if done.stream_id != active_stream_id || pending_clear_after_return {
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.policy_snapshot();
-                            rt.control()
+                            rt.admin()
                                 .state()
                                 .set_persisted(RuntimeSessionState::from_snapshot(
                                     cleared_session_state(preserved_policy),

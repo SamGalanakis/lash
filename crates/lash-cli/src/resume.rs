@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use lash::LashSession;
 use lash::ModeId;
-use lash::control::SessionConfigPatch;
+use lash::admin::SessionConfigPatch;
 use lash_core::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, fresh_message_id,
 };
@@ -51,7 +51,7 @@ async fn restore_execution_state_if_present<'a>(
         return;
     };
     match snapshot {
-        Some(snapshot) => match rt.control().state().restore_execution(snapshot).await {
+        Some(snapshot) => match rt.admin().state().restore_execution(snapshot).await {
             Ok(()) => {
                 app.timeline.push(UiTimelineItem::SystemMessage(
                     "Execution state restored from snapshot.".to_string(),
@@ -114,7 +114,7 @@ async fn restore_model_from_graph_config(
     app.usage.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
-            .control()
+            .admin()
             .config()
             .update(SessionConfigPatch {
                 model: Some(config.model.clone()),
@@ -166,12 +166,12 @@ async fn apply_graph_resume_state(
         // generation), not a generation-checked delta — a session whose tool
         // surface reached generation ≥ 2 would be rejected by `apply_state`.
         let _ = session
-            .control()
+            .admin()
             .tools()
             .advanced()
             .restore_state(tool_state)
             .await;
-        if let Ok(state) = session.control().tools().state().await {
+        if let Ok(state) = session.admin().tools().state().await {
             *active_tool_state = state;
         }
     }
@@ -212,7 +212,7 @@ async fn apply_graph_resume_state(
         .await;
 
     if let Some(rt) = runtime.as_mut() {
-        rt.control()
+        rt.admin()
             .config()
             .update(SessionConfigPatch {
                 provider: Some(provider.clone()),
@@ -226,9 +226,9 @@ async fn apply_graph_resume_state(
             .await
             .map_err(|err| err.to_string())?;
         let _ = rt
-            .control()
+            .admin()
             .commands()
-            .refresh_tool_surface("resume provider update", "resume-provider-update")
+            .refresh_tool_catalog("resume provider update", "resume-provider-update")
             .await;
     }
 

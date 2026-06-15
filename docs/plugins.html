@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">writing<span class="slash">/</span>plugins</h1>
-    <p class="opener__lede">Write a plugin when host behavior needs to join the Lash runtime: tools, prompt contributions, tool-surface policy, turn hooks, runtime events, plugin state, or typed per-turn input.</p>
+    <p class="opener__lede">Write a plugin when host behavior needs to join the Lash runtime: tools, prompt contributions, tool-catalog policy, turn hooks, runtime events, plugin state, or typed per-turn input.</p>
   </section>
 
   <main class="body" id="content">
@@ -178,7 +178,7 @@ fn update_plan_definition() -&gt; ToolDefinition {
           <tbody>
             <tr><td>Add host tools</td><td><code>reg.tools().provider(...)</code></td><td><a href="./plugins-tools.html">Tool plugins</a></td></tr>
             <tr><td>Add prompt context</td><td><code>reg.prompt()</code></td><td><a href="./embedding-prompts.html">Prompts and bindings</a></td></tr>
-            <tr><td>Change visible tools</td><td><code>reg.surface()</code></td><td><a href="./plugins-tools.html">Tool plugins</a></td></tr>
+            <tr><td>Change visible tools</td><td><code>reg.tool_catalog()</code></td><td><a href="./plugins-tools.html">Tool plugins</a></td></tr>
             <tr><td>React before/after turns</td><td><code>reg.turn()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
             <tr><td>React before/after tool calls</td><td><code>reg.tool_calls()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
             <tr><td>Expose host actions</td><td><code>reg.actions()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>

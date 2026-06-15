@@ -697,7 +697,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     let target_scope = crate::SessionScope::new("root");
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "root".to_string(),
-        node_id: "host-event:button".to_string(),
+        node_id: "trigger:button".to_string(),
     };
     registry
         .register_process(
@@ -869,7 +869,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
     let target_scope = crate::SessionScope::new("root");
     let process_caused_by = crate::CausalRef::SessionNode {
         session_id: "root".to_string(),
-        node_id: "host-event:button".to_string(),
+        node_id: "trigger:button".to_string(),
     };
     registry
         .register_process(
@@ -1164,7 +1164,7 @@ async fn session_manager_can_run_child_session_turn() {
     let turn_id = "child-lifecycle-turn";
     let scoped_effect_controller = crate::ScopedEffectController::shared(
         Arc::new(crate::InlineRuntimeEffectController),
-        crate::EffectScope::turn(&handle.session_id, turn_id),
+        crate::ExecutionScope::turn(&handle.session_id, turn_id),
     )
     .expect("scoped child turn");
     let request = crate::SessionTurnRequest::new(
@@ -1381,7 +1381,7 @@ async fn runtime_can_activate_managed_child_session() {
         },
         crate::ScopedEffectController::shared(
             Arc::new(crate::InlineRuntimeEffectController),
-            crate::EffectScope::turn("child", "activated-child-turn"),
+            crate::ExecutionScope::turn("child", "activated-child-turn"),
         )
         .expect("scoped activated child turn"),
     )

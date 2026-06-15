@@ -59,7 +59,7 @@ Example — two independent reads in one `batch` call:
 const BATCH_MAX_TOOL_CALLS: usize = 25;
 
 /// Plugin factory that installs the standard-protocol driver,
-/// session plugin, and native tool surface.
+/// session plugin, and native tool catalog.
 #[derive(Default)]
 pub struct StandardProtocolPluginFactory;
 
@@ -111,15 +111,15 @@ struct StandardProtocolDriver;
 
 impl ProtocolDriverPlugin for StandardProtocolDriver {
     fn build_preamble(&self, input: ProtocolBuildInput) -> TurnDriverPreamble {
-        let tool_names = input.tool_surface.tool_names();
-        let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
+        let tool_names = input.tool_catalog.tool_names();
+        let tool_names_fingerprint = input.tool_catalog.tool_names_fingerprint();
         TurnDriverPreamble {
             config: TurnDriverConfig::chat(
                 Arc::new(StandardDriver),
                 true,
                 Arc::new(turn_limit_exhausted_message),
             ),
-            tool_specs: input.tool_surface.model_tool_specs(),
+            tool_specs: input.tool_catalog.model_tool_specs(),
             tool_names,
             tool_names_fingerprint,
             omitted_tool_count: 0,

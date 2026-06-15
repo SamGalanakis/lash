@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
   <section class="opener">
     <h1 class="opener__title">agent<span class="slash">/</span>workbench</h1>
-    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes host-event button presses, and registers Restate-backed cron triggers. Restate is required — the bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
+    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes trigger button presses, and registers Restate-backed cron triggers. Restate is required — the bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
   </section>
 
   <main class="body" id="content">
@@ -44,29 +44,29 @@
         <dt><code>AGENT_WORKBENCH_DATA_DIR</code></dt>
         <dd>Persistence, plus the JSONL turn and Lashlang-execution traces. Defaults to <code>.agent-workbench</code>.</dd>
       </dl>
-      <p>The entrypoint also manages the Restate container ports (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, admin <code>19070</code>, node <code>19071</code>) and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 2&nbsp;MiB — override only when diagnosing stack regressions). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
+      <p>The entrypoint also manages the workbench's Restate endpoint bind (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, default <code>127.0.0.1:9081</code>), the Restate container ports (ingress <code>8080</code>, admin <code>19070</code>, node <code>19071</code>), and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 2&nbsp;MiB — override only when diagnosing stack regressions). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
     </div>
 
     <div class="section" id="demonstrates">
       <div class="section-header">
         <h2>What It Demonstrates</h2>
-        <p>The browser UI has three work areas: a left rail of host-event buttons, a cron schedule card, and per-turn model controls; a center pane that switches between the chat/event stream and a mock multi-account inbox; and a right rail that polls the process registry for the session's granted background work.</p>
+        <p>The browser UI has three work areas: a left rail of trigger buttons, a cron schedule card, and per-turn model controls; a center pane that switches between the chat/event stream and a mock multi-account inbox; and a right rail that polls the process registry for the session's granted background work.</p>
       </div>
       <div class="module-grid">
         <article class="panel"><h3>Background processes</h3><p>The model emits named Lashlang <code>process</code> declarations and <code>start name(...)</code>; started processes appear in the right-rail registry view.</p></article>
         <article class="panel"><h3>Subagents</h3><p><code>agents.spawn(...)</code> runs child sessions as background process work, observed through the same registry and graph panel.</p></article>
         <article class="panel"><h3>Web tools</h3><p><code>web.search(...)</code> and <code>web.fetch(...)</code> back onto Tavily, the same web tools the CLI exposes.</p></article>
-        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code>; a registered trigger wakes a process with the validated event payload.</p></article>
-        <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang surface as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
+        <article class="panel"><h3>Trigger buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences; a registered trigger wakes a process with the validated event payload.</p></article>
+        <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang host environment as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
         <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
-        <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>ProcessControl</code> facade.</p></article>
+        <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>SessionProcessAdmin</code> facade.</p></article>
       </div>
     </div>
 
-    <div class="section" id="host-events">
+    <div class="section" id="triggers">
       <div class="section-header">
-        <h2>Host-Event Buttons</h2>
-        <p>The buttons are a zero-config trigger source — the source config is <code>{}</code>, and red/blue selection arrives in the event payload. The model registers a trigger that wakes a process when a button is pressed.</p>
+        <h2>Button Trigger Occurrences</h2>
+        <p>The buttons emit a zero-config trigger source — the source config is <code>{}</code>, and red/blue selection arrives in the event payload. The model registers a trigger that wakes a process when a button is pressed.</p>
       </div>
       <pre data-lang="lashlang"><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
@@ -86,7 +86,7 @@ submit { handle: handle, registrations: registrations }</code></pre>
     <div class="section" id="cron">
       <div class="section-header">
         <h2>Cron Triggers</h2>
-        <p>The cron card is the schedule-reference integration: there is no Lashlang <code>schedule</code> syntax and no UI tick button. Restate owns the timer policy. The plugin declares the <code>cron.Schedule</code> source; Lashlang builds a <code>cron.Schedule</code> value and registers it with the runtime trigger registry.</p>
+        <p>The cron card is the schedule-reference integration: there is no Lashlang <code>schedule</code> syntax and no UI tick button. In this example, Restate owns the timer policy. The plugin declares the <code>cron.Schedule</code> source; Lashlang builds a <code>cron.Schedule</code> value and registers it with the runtime trigger registry.</p>
       </div>
       <pre data-lang="lashlang"><code>process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
@@ -101,16 +101,73 @@ handle = await triggers.register({
   name: "daily_digest"
 })?
 submit { handle: handle, registrations: await triggers.list({ target: daily_digest })? }</code></pre>
-      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that source key to <code>WorkbenchCronJob/{session_id}:{source_key}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler first schedules the next <code>run</code> with a delayed Restate send (so a tick that fails cannot kill the schedule), then emits a validated <code>cron.Tick</code> host-event occurrence whose idempotency key includes the journaled fire time — unique per tick, stable across retries of the same tick. A job whose session is no longer the live workbench session terminates itself on its next fire instead of ticking into a deleted session. Resetting the workbench cancels the old session's cron jobs derived from its durable trigger registrations (plus anything armed in-process), and an equal-request re-sync revives a chain whose stored next execution is already in the past. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code>, <code>agent_workbench.cron.restate.run</code>, and <code>agent_workbench.cron.restate.zombie_cancelled</code> events.</p>
+      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that source key to <code>WorkbenchCronJob/{session_id}:{source_key}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler first schedules the next <code>run</code> with a delayed Restate send (so a tick that fails cannot kill the schedule), then emits a validated <code>cron.Tick</code> trigger occurrence whose idempotency key includes the journaled fire time — unique per tick, stable across retries of the same tick. A job whose session is no longer the live workbench session terminates itself on its next fire instead of ticking into a deleted session. Resetting the workbench cancels the old session's cron jobs derived from its durable trigger registrations (plus anything armed in-process), and an equal-request re-sync revives a chain whose stored next execution is already in the past. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code>, <code>agent_workbench.cron.restate.run</code>, and <code>agent_workbench.cron.restate.zombie_cancelled</code> events.</p>
     </div>
 
     <div class="section" id="host-wiring">
       <div class="section-header">
         <h2>Host Wiring</h2>
-        <p>The host declares the trigger source constructors through the plugin's <code>lashlang_resources()</code> hook, and registers the button's event type through host-event registration. The button payload is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
+        <p>The host declares source constructors such as <code>cron.Schedule</code> and <code>mail.received</code> through the plugin's <code>lashlang_resources()</code> hook. The button source is zero-config and exposed from trigger registration, whose payload type is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
       </div>
-      <pre data-lang="rust" data-snippet="example_agent_workbench#workbench-resources"><code>fn workbench_lashlang_resources() -&gt; lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+      <pre data-lang="rust" data-snippet="example_agent_workbench#workbench-resources"><code>fn field(name: &amp;str, ty: lashlang::TypeExpr) -&gt; lashlang::TypeField {
+    lashlang::TypeField {
+        name: name.into(),
+        ty,
+        optional: false,
+    }
+}
+
+fn schedule_config_type() -&gt; lashlang::TypeExpr {
+    lashlang::TypeExpr::Object(vec![
+        field("expr", lashlang::TypeExpr::Str),
+        lashlang::TypeField {
+            name: "tz".into(),
+            ty: lashlang::TypeExpr::Str,
+            optional: true,
+        },
+    ])
+}
+
+fn cron_tick_event_type() -&gt; lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "cron.Tick",
+        vec![field("fired_at", lashlang::TypeExpr::Str)],
+    )
+    .expect("valid cron tick type")
+}
+
+fn button_trigger_event_type() -&gt; lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "ui.button.Pressed",
+        vec![
+            field(
+                "button",
+                lashlang::TypeExpr::Union(vec![
+                    lashlang::TypeExpr::Enum(vec!["Red".into()]),
+                    lashlang::TypeExpr::Enum(vec!["Blue".into()]),
+                ]),
+            ),
+            field("message", lashlang::TypeExpr::Str),
+            field("pressed_at", lashlang::TypeExpr::Str),
+        ],
+    )
+    .expect("valid button trigger event type")
+}
+
+fn mail_received_event_type() -&gt; lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "mail.Received",
+        vec![
+            field("account", lashlang::TypeExpr::Str),
+            field("title", lashlang::TypeExpr::Str),
+            field("text", lashlang::TypeExpr::Str),
+        ],
+    )
+    .expect("valid mail received event type")
+}
+
+fn workbench_lashlang_resources() -&gt; lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources
         .add_trigger_source_constructor(
             ["cron", "Schedule"],
@@ -120,16 +177,16 @@ submit { handle: handle, registrations: await triggers.list({ target: daily_dige
         .expect("valid cron trigger source");
     resources
         .add_trigger_source_constructor(
-            ["ui", "button", "pressed"],
+            ["mail", "received"],
             lashlang::TypeExpr::Object(vec![]),
-            button_trigger_event_type(),
+            mail_received_event_type(),
         )
-        .expect("valid button trigger source");
+        .expect("valid mail trigger source");
     resources
 }
 
 fn declare_button_event(reg: &amp;mut PluginRegistrar) -&gt; Result&lt;(), PluginError&gt; {
-    reg.host_events().declare(HostEvent::new(
+    reg.triggers().declare(TriggerEvent::new(
         "Button",
         "ui.button",
         "pressed",

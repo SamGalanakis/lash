@@ -75,7 +75,7 @@ pub(super) async fn run_turn_case_without_success_assertions(
         .turn(TurnInput::text(case.root_prompt))
         .stream_to(events.as_ref())
         .await?;
-    session.process_control().await_all().await?;
+    session.processes().await_all().await?;
     let prompt_captures_snapshot = prompt_captures.lock().expect("prompt captures").clone();
     let final_process_list = all_host_process_summaries(&core).await?;
     let run = LashE2eRun {
@@ -196,7 +196,7 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
     .with_session_id(child_session_id);
 
     let handle = session
-        .process_control()
+        .processes()
         .start(
             lash_core::ProcessStartRequest::new(
                 process_id,
@@ -214,11 +214,11 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
                     Some("child turn"),
                 ),
             })),
-            inline_scope(lash_core::EffectScope::process(process_id)),
+            inline_scope(lash_core::ExecutionScope::process(process_id)),
         )
         .await?;
     assert_eq!(handle.process_id, process_id);
-    session.process_control().await_all().await?;
+    session.processes().await_all().await?;
 
     let await_output = process_registry.await_process(process_id).await?;
     let lash_core::ProcessAwaitOutput::Success { value, .. } = await_output else {

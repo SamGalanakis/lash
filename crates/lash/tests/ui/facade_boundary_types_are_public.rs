@@ -16,12 +16,12 @@ use lash::persistence::{
 use lash::plugins::{
     AfterToolCallHook, BeforeToolCallHook, CompactionContext, ContextCompaction,
     ContextCompactor, ContextError, PluginDirective, PluginHost, PluginSpec, PluginSpecBuilder,
-    PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContribution,
-    ToolSurfaceOverride,
+    PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolCatalogContribution,
+    ToolCatalogOverride,
 };
 use lash::provider::{ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy};
 use lash::runtime::AdvancedLashCoreBuilder;
-use lash::tools::{ToolActivation, ToolAgentSurface, ToolCallRecord, ToolOutputContract};
+use lash::tools::{ToolActivation, LashlangToolBinding, ToolCallRecord, ToolOutputContract};
 use lash::turn::{AssistantOutput, TurnIssue};
 use lash::{ModelLimits, ModelSpec};
 
@@ -176,14 +176,14 @@ fn tool_contract_types_are_nameable(
     activation: ToolActivation,
     record: ToolCallRecord,
     contract: ToolOutputContract,
-    agent_surface: ToolAgentSurface,
+    lashlang_binding: LashlangToolBinding,
 ) {
-    let _ = (activation, record, contract, agent_surface);
+    let _ = (activation, record, contract, lashlang_binding);
 }
 
-fn tool_surface_types_are_nameable(
-    contribution: ToolSurfaceContribution,
-    override_: ToolSurfaceOverride,
+fn tool_catalog_types_are_nameable(
+    contribution: ToolCatalogContribution,
+    override_: ToolCatalogOverride,
 ) {
     let _ = (contribution, override_);
 }
@@ -234,16 +234,16 @@ fn observation_types_are_homed_in_observe(
     let _ = (cursor, observation, resume, revision);
 }
 
-fn host_event_types_are_homed_in_host_events(
-    event: lash::host_events::HostEvent,
-    report: lash::host_events::HostEventEmitReport,
-    registration: lash::host_events::TriggerRegistration,
-    source_type: lash::host_events::TriggerSourceType,
-    filter: lash::host_events::TriggerSubscriptionFilter,
-    target: lash::host_events::TriggerTargetSummary,
+fn trigger_types_are_homed_in_triggers(
+    event: lash::triggers::TriggerEvent,
+    report: lash::triggers::TriggerEmitReport,
+    registration: lash::triggers::TriggerRegistration,
+    source_type: lash::triggers::TriggerEventType,
+    filter: lash::triggers::TriggerSubscriptionFilter,
+    target: lash::triggers::TriggerTargetSummary,
 ) {
     let _ = (event, report, registration, source_type, filter, target);
-    let _ = lash::host_events::empty_host_event_source_key("ui.button.pressed");
+    let _ = lash::triggers::empty_trigger_source_key("ui.button.pressed");
 }
 
 async fn persistence_load_helpers_are_nameable(
@@ -267,14 +267,14 @@ fn main() {
     let _ = direct_payload_types_are_nameable;
     let _ = advanced_builder_accepts_runtime_host_config;
     let _ = tool_contract_types_are_nameable;
-    let _ = tool_surface_types_are_nameable;
+    let _ = tool_catalog_types_are_nameable;
     let _ = message_role_type_is_nameable;
     let _ = turn_result_detail_types_are_nameable;
     let _ = provider_reliability_types_are_nameable;
     let _ = model_spec_types_are_nameable;
     let _ = persistence_load_helpers_are_nameable;
     let _ = observation_types_are_homed_in_observe;
-    let _ = host_event_types_are_homed_in_host_events;
+    let _ = trigger_types_are_homed_in_triggers;
     let _ = cancellation_token_is_at_root;
     let _ = queued_work_wait_is_nameable;
 }

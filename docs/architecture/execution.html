@@ -58,7 +58,7 @@ flowchart TD
           </div>
           <div class="two-col">
             <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p>The Standard protocol interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches registered native tools first, then tools contributed by registered <code>ToolProvider</code>s.</p></article>
-            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>The RLM protocol extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. The prompt renderer uses the effective <code>LashlangSurface</code>, so disabled process and trigger abilities are not advertised and fail during linking if emitted anyway. <code>continue_as</code> is an RLM native control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>, appends a fresh AgentFrame inside the same session, and preserves turn index, trace continuity, process-scope decisions, and projected seed refs. App hosts call <code>session.turn(input).stream_to(&amp;sink)</code> or <code>.run()</code>; the facade follows AgentFrame switches and returns the final <code>TurnResult</code>.</p></article>
+            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>The RLM protocol extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. The prompt renderer uses the effective <code>LashlangHostEnvironment</code>, so disabled process and trigger abilities are not advertised and fail during linking if emitted anyway. <code>continue_as</code> is an RLM native control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>, appends a fresh AgentFrame inside the same session, and preserves turn index, trace continuity, process-scope decisions, and projected seed refs. App hosts call <code>session.turn(input).stream_to(&amp;sink)</code> or <code>.run()</code>; the facade follows AgentFrame switches and returns the final <code>TurnResult</code>.</p></article>
           </div>
           <p>Background work — subagents and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either protocol can spawn handles when a process registry is installed; RLM additionally discovers visible runs via <code>processes.list</code> and resolves handles with <code>await</code>.</p>
         </div>
@@ -90,7 +90,7 @@ flowchart LR
             <dt><code>ModePreset</code></dt>
             <dd><code>standard()</code>, <code>rlm()</code>, <code>rlm_with_config(...)</code>. Install multiple and pick a default with <code>default_mode</code>; override per session with <code>.standard()</code>, <code>.rlm()</code>, or <code>.mode(...)</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, <code>observe()</code>, and <code>control()</code>. Carries an optional parent session id.</dd>
+            <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, <code>observe()</code>, and <code>admin()</code>. Carries an optional parent session id.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn config: cancellation token, mode options, plugin input, RLM bindings. <code>.stream_to(&amp;sink)</code> drives against a <code>TurnActivitySink</code>; <code>.run()</code> returns a <code>TurnOutput</code> with terminal result and ordered activities.</dd>
             <dt><code>TurnInput</code></dt>
@@ -129,7 +129,7 @@ let result = session
             <div class="diagram-title">Subagent and process path</div>
             <div class="mermaid">
 flowchart LR
-  Rlm["RLM lashlang<br/>await agents.spawn / process ops"] --> Provider["spawn_agent_tool_definition<br/>+ lash_core process controls"]
+  Rlm["RLM lashlang<br/>await agents.spawn / process ops"] --> Provider["spawn_agent_tool_definition<br/>+ lash_core process admins"]
   Provider --> Host["ToolContext sessions/processes<br/>+ process events"]
   Host --> Manager["runtime session manager"]
   Manager --> Child["start_turn -> stream_turn"]
@@ -139,7 +139,7 @@ flowchart LR
   Child --> Parent["usage relay + final result"]
             </div>
           </div>
-          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. Generic process controls expose <code>processes.list</code> and <code>processes.cancel</code>, while <code>start &lt;tool&gt;</code> is the single way to run any ordinary tool as a durable process. A child can fail terminally with <code>await tools.submit_error({ reason: reason })?</code> (defined in <code>lash-subagents</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
+          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. Generic process admins expose <code>processes.list</code> and <code>processes.cancel</code>, while <code>start &lt;tool&gt;</code> is the single way to run any ordinary tool as a durable process. A child can fail terminally with <code>await tools.submit_error({ reason: reason })?</code> (defined in <code>lash-subagents</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
         </div>
 
         <div class="section">

@@ -159,6 +159,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
     const boardEl = document.querySelector('#board');
     const gameStatusEl = document.querySelector('#gameStatus');
     const gameHintEl = document.querySelector('#gameHint');
+    const resetBoardBtn = document.querySelector('#resetBoard');
     let chats = [];
     let activeChat = null;
     let settings = { default_model:'anthropic/claude-sonnet-4.6', default_model_variant:'high', model_variants:['low','medium','high'] };
@@ -220,6 +221,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
       });
       gameStatusEl.parentElement.classList.toggle('done', done);
       gameStatusEl.textContent = boardStatus(board);
+      resetBoardBtn.disabled = busy || !activeChat;
       gameHintEl.textContent = done
         ? `${terminalHint(board)} Reset the board to start another round.`
         : busy
@@ -272,10 +274,13 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
       });
       renderBoard();
     }
-    function resetBoard() {
+    async function resetBoard() {
+      if (busy) return;
+      if (!activeChat) await newChat();
       if (!activeChat) return;
       boards.set(activeChat, emptyBoard());
       renderBoard();
+      await sendText('I reset the board.');
     }
     function playHuman(index) {
       const board = currentBoard();

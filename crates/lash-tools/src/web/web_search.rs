@@ -134,7 +134,7 @@ fn web_search_tool_definition() -> ToolDefinition {
             .with_examples(vec![
                 "await web.search({ query: \"latest Rust release notes\", limit: 5 })?".into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["web"],
                 "search",
                 &["web_search"],

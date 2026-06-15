@@ -36,7 +36,7 @@ impl RuntimeSessionServices {
         let child_turn_id = registration.id.clone();
         let child_scoped_effect_controller = match crate::ScopedEffectController::borrowed(
             scoped_effect_controller.controller(),
-            crate::EffectScope::turn(&child_session_id, &child_turn_id),
+            crate::ExecutionScope::turn(&child_session_id, &child_turn_id),
         ) {
             Ok(controller) => controller,
             Err(err) => {
@@ -74,8 +74,7 @@ impl RuntimeSessionServices {
                 );
             }
         };
-        let turn = self.managed.start_turn(&self.current, &self.usage, request);
-        tokio::pin!(turn);
+        let mut turn = Box::pin(self.managed.start_turn(&self.current, &self.usage, request));
         let outcome = tokio::select! {
             _ = cancellation.cancelled() => {
                 let _ = self
@@ -88,7 +87,7 @@ impl RuntimeSessionServices {
                     ),
                 );
             }
-            outcome = &mut turn => outcome,
+            outcome = turn.as_mut() => outcome,
         };
         let _ = self
             .managed

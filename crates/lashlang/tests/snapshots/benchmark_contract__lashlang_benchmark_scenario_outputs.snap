@@ -6,7 +6,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
   "async_await": "alpha,beta,gamma",
   "baseline": "user=sam;attempt=3;active=alpha:1,gamma:3;total=6;count=3;seen=3;indexes=4",
   "cache_pressure": "alpha:3|beta:3|gamma:7|delta:6|epsilon:7|zeta:7",
-  "continue_as_seed_surface": {
+  "continue_as_seed_host_environment": {
     "frame_id": "frame:bench",
     "global_count": 4,
     "projected_count": 1,
@@ -20,7 +20,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "task": "continue from compact state"
   },
   "direct_unwrap": "alpha,alpha:beta",
-  "fanout_expression_surface": {
+  "fanout_expression_host_environment": {
     "batched_computed": 42,
     "computed": 42,
     "discarded": [
@@ -34,7 +34,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "second": "right"
   },
   "general_fanout": "alpha:3|beta:3",
-  "image_surface": {
+  "image_host_environment": {
     "descriptor_has_id": true,
     "descriptor_has_type": true,
     "dims": "640x480",
@@ -73,7 +73,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     },
     "summary": "alpha:3,beta:2,gamma:2,delta:1"
   },
-  "integer_range_surface": {
+  "integer_range_host_environment": {
     "backward": [
       7,
       5,
@@ -146,7 +146,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
       ]
     ]
   },
-  "language_surface": {
+  "language_host_environment": {
     "awaited": "awaited",
     "beta_index": 6,
     "direct": "sam",
@@ -323,7 +323,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "normal_title": "Snapshot Rules",
     "tags": "snapshot,projected,mixed"
   },
-  "syntax_text_surface": {
+  "syntax_text_host_environment": {
     "patch_head": "*** Begin Patch",
     "pieces": [
       109,
@@ -336,14 +336,14 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "plain_lines": 3,
     "script_head": "python3"
   },
-  "tool_control_surface": {
+  "tool_control_host_environment": {
     "first": "done:inspect auth",
     "llm": "benchmark summary",
     "probe": "app log",
     "second": "done:inspect api",
     "tools": 2
   },
-  "trigger_registry_surface": {
+  "trigger_registry_host_environment": {
     "button_handle": "trigger:ui.button.pressed:on_button",
     "cancelled": true,
     "daily_handle": "trigger:cron.Schedule:daily_digest",

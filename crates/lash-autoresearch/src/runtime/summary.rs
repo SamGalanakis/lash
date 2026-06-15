@@ -97,7 +97,10 @@ where
             result.value_for_projection().to_string(),
         ));
     }
-    serde_json::from_value(result.into_output().value_for_projection())
+    let output = result
+        .into_done_output()
+        .map_err(|_| PluginActionFailure::new("autoresearch tool returned pending output"))?;
+    serde_json::from_value(output.value_for_projection())
         .map_err(|err| PluginActionFailure::new(format!("invalid autoresearch output: {err}")))
 }
 

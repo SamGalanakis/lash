@@ -49,7 +49,7 @@ impl McpPluginFactory {
 
     /// Attach a new server at runtime. The new tools become visible to any
     /// session created after this call returns; existing sessions will see
-    /// the new tools after their next tool-surface refresh.
+    /// the new tools after their next tool-catalog refresh.
     pub async fn attach_server(
         &self,
         server_name: String,
@@ -98,7 +98,7 @@ impl SessionPlugin for McpSessionPlugin {
     }
 }
 
-/// The `ToolProvider` actually registered with each session's tool surface.
+/// The `ToolProvider` actually registered with each session's tool catalog.
 /// Delegates definitions and execution to the shared pool.
 pub struct McpToolProvider {
     pool: Arc<McpConnectionPool>,
@@ -276,15 +276,15 @@ mod tests {
         assert_eq!(defs.len(), 1, "expected one imported tool, got {defs:?}");
         assert_eq!(defs[0].name(), "mcp__docs__search_docs");
         assert_eq!(
-            defs[0].manifest.agent_surface.module_path,
+            defs[0].manifest.lashlang_binding.module_path,
             vec!["docs".to_string()]
         );
         assert_eq!(
-            defs[0].manifest.agent_surface.operation.as_deref(),
+            defs[0].manifest.lashlang_binding.operation.as_deref(),
             Some("search_docs")
         );
         assert_eq!(
-            defs[0].manifest.agent_surface.aliases,
+            defs[0].manifest.lashlang_binding.aliases,
             vec!["search-docs".to_string()]
         );
         assert_eq!(

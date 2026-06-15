@@ -16,7 +16,7 @@ pub struct LashCore {
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) live_replay_store: Arc<dyn LiveReplayStore>,
     /// Shared resolution of the process work runner. The poke it yields is
-    /// threaded onto every session's host so the process control seam can wake
+    /// threaded onto every session's host so the process admin seam can wake
     /// the runner after a successful start. Shared across `LashCore` clones so
     /// the default inline runner is spawned at most once (Decision 3).
     pub(crate) process_work_runner: Arc<ProcessWorkRunnerSlot>,
@@ -74,13 +74,21 @@ impl ProcessWorkSource {
 pub(crate) struct ProcessWorkRunnerSlot {
     setup: ProcessWorkRunnerSetup,
     poke: tokio::sync::OnceCell<Option<ProcessWorkPoke>>,
+    phase_probe_slot: Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot>,
 }
 
 impl ProcessWorkRunnerSlot {
     fn new(setup: ProcessWorkRunnerSetup) -> Self {
+        let phase_probe_slot = match &setup {
+            ProcessWorkRunnerSetup::LazyDefault { config } => {
+                Some(config.turn_phase_probe_slot.clone())
+            }
+            ProcessWorkRunnerSetup::None | ProcessWorkRunnerSetup::External { .. } => None,
+        };
         Self {
             setup,
             poke: tokio::sync::OnceCell::new(),
+            phase_probe_slot,
         }
     }
 
@@ -100,6 +108,10 @@ impl ProcessWorkRunnerSlot {
             })
             .await
             .clone()
+    }
+
+    pub(crate) fn phase_probe_slot(&self) -> Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot> {
+        self.phase_probe_slot.clone()
     }
 }
 
@@ -153,12 +165,16 @@ impl LashCore {
         }
     }
 
-    pub fn host_events(&self) -> crate::control::HostEventsControl {
-        crate::control::HostEventsControl { core: self.clone() }
+    pub fn triggers(&self) -> crate::admin::CoreTriggerAdmin {
+        crate::admin::CoreTriggerAdmin { core: self.clone() }
     }
 
-    pub fn processes(&self) -> crate::control::Processes {
-        crate::control::Processes { core: self.clone() }
+    pub fn processes(&self) -> crate::admin::Processes {
+        crate::admin::Processes { core: self.clone() }
+    }
+
+    pub fn completions(&self) -> crate::admin::Completions {
+        crate::admin::Completions { core: self.clone() }
     }
 
     pub fn effect_host(&self) -> Arc<dyn EffectHost> {
@@ -190,7 +206,7 @@ impl LashCore {
                             session_id: session_id.clone(),
                         }),
                     ),
-                    RuntimeEffectLocalExecutor::process_control(Arc::clone(process_registry)),
+                    RuntimeEffectLocalExecutor::processes(Arc::clone(process_registry)),
                 )
                 .await
                 .map_err(|err| EmbedError::SessionDeleteProcess {
@@ -214,8 +230,8 @@ impl LashCore {
         } else {
             None
         };
-        if let Some(host_event_store) = self.env.host_event_store.as_ref() {
-            host_event_store
+        if let Some(trigger_store) = self.env.trigger_store.as_ref() {
+            trigger_store
                 .delete_session_subscriptions(&session_id)
                 .await
                 .map_err(|err| EmbedError::SessionDeleteProcess {
@@ -223,6 +239,16 @@ impl LashCore {
                     message: err.to_string(),
                 })?;
         }
+        self.env
+            .core
+            .control
+            .effect_host
+            .revoke_await_events_for_session(&session_id)
+            .await
+            .map_err(|err| EmbedError::SessionDeleteProcess {
+                session_id: session_id.clone(),
+                message: err.to_string(),
+            })?;
         store_factory
             .delete_session(&session_id)
             .await
@@ -273,8 +299,8 @@ impl LashCore {
         )
         .with_session_policy(self.policy.clone())
         .with_residency(self.env.residency);
-        if let Some(host_event_store) = self.env.host_event_store.as_ref() {
-            config = config.with_host_event_store(Arc::clone(host_event_store));
+        if let Some(trigger_store) = self.env.trigger_store.as_ref() {
+            config = config.with_trigger_store(Arc::clone(trigger_store));
         }
         Ok(config)
     }
@@ -298,7 +324,7 @@ pub struct LashCoreBuilder {
     effect_host: Option<Arc<dyn EffectHost>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
     lashlang_artifact_store: Option<Arc<dyn lash_core::LashlangArtifactStore>>,
-    host_event_store: Option<Arc<dyn lash_core::HostEventStore>>,
+    trigger_store: Option<Arc<dyn lash_core::TriggerStore>>,
     // Benign core overrides applied on top of the resolved core.
     prompt: Option<PromptLayer>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
@@ -560,8 +586,8 @@ impl LashCoreBuilder {
             .lashlang_artifact_store
             .as_ref()
             .map(|store| store.durability_tier());
-        let host_event_store_tier = self
-            .host_event_store
+        let trigger_store_tier = self
+            .trigger_store
             .as_ref()
             .map(|store| store.durability_tier());
 
@@ -584,14 +610,14 @@ impl LashCoreBuilder {
             if session_store_tier != Some(DurabilityTier::Durable) {
                 return Err(EmbedError::DurableProcessRegistryRequiresStoreFactory);
             }
-            if host_event_store_tier != Some(DurabilityTier::Durable) {
+            if trigger_store_tier != Some(DurabilityTier::Durable) {
                 return Err(EmbedError::DurableStorePeerRequired {
-                    facet: "host event store",
+                    facet: "trigger store",
                 });
             }
         }
 
-        if host_event_store_tier == Some(DurabilityTier::Durable) {
+        if trigger_store_tier == Some(DurabilityTier::Durable) {
             if session_store_tier != Some(DurabilityTier::Durable) {
                 return Err(EmbedError::DurableStorePeerRequired {
                     facet: "session store factory",
@@ -694,7 +720,7 @@ impl LashCoreBuilder {
                 .or(self.store_factory.as_ref()),
             &policy,
             self.residency.unwrap_or_default(),
-            self.host_event_store.as_ref(),
+            self.trigger_store.as_ref(),
         )?;
 
         let mut env_builder = RuntimeEnvironment::builder()
@@ -713,8 +739,8 @@ impl LashCoreBuilder {
         {
             env_builder = env_builder.with_session_store_factory(Arc::clone(child_store_factory));
         }
-        if let Some(host_event_store) = self.host_event_store.as_ref() {
-            env_builder = env_builder.with_host_event_store(Arc::clone(host_event_store));
+        if let Some(trigger_store) = self.trigger_store.as_ref() {
+            env_builder = env_builder.with_trigger_store(Arc::clone(trigger_store));
         }
         if let Some(queued_work_poke) = self.queued_work_poke.clone() {
             env_builder = env_builder.with_queued_work_poke(queued_work_poke);
@@ -752,7 +778,7 @@ impl LashCoreBuilder {
         store_factory: Option<&Arc<dyn SessionStoreFactory>>,
         policy: &SessionPolicy,
         residency: lash_core::Residency,
-        host_event_store: Option<&Arc<dyn lash_core::HostEventStore>>,
+        trigger_store: Option<&Arc<dyn lash_core::TriggerStore>>,
     ) -> Result<ProcessWorkRunnerSetup> {
         let process_registry = match process_work_source {
             ProcessWorkSource::None => return Ok(ProcessWorkRunnerSetup::None),
@@ -776,6 +802,7 @@ impl LashCoreBuilder {
         // the preset factory (added per-mode by `build_plugin_host_for_mode`), so
         // a worker built from them would fail to rebuild a runtime ("missing
         // protocol session capability").
+        let phase_probe_slot = lash_core::runtime::RuntimeTurnPhaseProbeSlot::default();
         let config = Box::new(
             DurableProcessWorkerConfig::new(
                 Arc::new(worker_plugin_host.clone()),
@@ -784,12 +811,13 @@ impl LashCoreBuilder {
                 process_registry,
             )
             .with_session_policy(policy.clone())
-            .with_host_event_store(
-                host_event_store
+            .with_trigger_store(
+                trigger_store
                     .cloned()
-                    .unwrap_or_else(|| Arc::new(lash_core::InMemoryHostEventStore::default())),
+                    .unwrap_or_else(|| Arc::new(lash_core::InMemoryTriggerStore::default())),
             )
-            .with_residency(residency),
+            .with_residency(residency)
+            .with_turn_phase_probe_slot(phase_probe_slot),
         );
         Ok(ProcessWorkRunnerSetup::LazyDefault { config })
     }
@@ -805,8 +833,8 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn host_event_store(mut self, store: Arc<dyn lash_core::HostEventStore>) -> Self {
-        self.host_event_store = Some(store);
+    pub fn trigger_store(mut self, store: Arc<dyn lash_core::TriggerStore>) -> Self {
+        self.trigger_store = Some(store);
         self
     }
 

@@ -403,7 +403,7 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
             RestateEffectExecution::JournaledRun,
         ),
         (
-            RuntimeEffectCommand::SyncExecutionSurface {
+            RuntimeEffectCommand::SyncExecutionEnvironment {
                 update_machine_config: true,
             },
             RestateEffectExecution::JournaledRun,
@@ -525,7 +525,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
     fn await_event<'run>(
         &'run self,
         _key: String,
-    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+    ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
@@ -650,7 +650,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
     fn await_event<'run>(
         &'run self,
         _key: String,
-    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+    ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
@@ -725,6 +725,64 @@ async fn restate_controller_routes_sleep_only_through_timer() {
     assert!(context.runs.lock().expect("runs lock").is_empty());
 }
 
+#[tokio::test]
+async fn restate_handler_resolves_process_await_events_through_workflow_handler() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = RuntimeEffectController::await_event_key(
+        &host,
+        &ExecutionScope::process("process-await"),
+        AwaitEventWaitIdentity::tool_completion("tool-call"),
+    )
+    .await
+    .expect("await event key");
+    let resolution = Resolution::Ok(serde_json::json!({ "done": true }));
+
+    let outcome = RuntimeEffectController::resolve_await_event(&host, &key, resolution.clone())
+        .await
+        .expect("resolve await event");
+
+    assert_eq!(outcome, ResolveOutcome::Accepted);
+    let resolved = context
+        .resolved_events
+        .lock()
+        .expect("resolved events lock");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].process_id, "process-await");
+    assert_eq!(resolved[0].key, key.promise_key());
+    assert_eq!(resolved[0].resolution, resolution);
+}
+
+#[tokio::test]
+async fn restate_handler_reports_non_process_await_event_resolution_unknown() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = RuntimeEffectController::await_event_key(
+        &host,
+        &ExecutionScope::turn("session", "turn"),
+        AwaitEventWaitIdentity::tool_completion("tool-call"),
+    )
+    .await
+    .expect("await event key");
+
+    let outcome = RuntimeEffectController::resolve_await_event(
+        &host,
+        &key,
+        Resolution::Ok(serde_json::json!({ "done": true })),
+    )
+    .await
+    .expect("resolve await event");
+
+    assert_eq!(outcome, ResolveOutcome::UnknownOrRevoked);
+    assert!(
+        context
+            .resolved_events
+            .lock()
+            .expect("resolved events lock")
+            .is_empty()
+    );
+}
+
 fn replay_test_policy(session_id: &str) -> lash_core::SessionPolicy {
     let mut policy = lash_core::testing::mock_session_policy();
     policy.session_id = Some(session_id.to_string());
@@ -775,7 +833,7 @@ async fn run_restate_replay_turn(
 ) -> lash_core::AssembledTurn {
     let controller = RestateRuntimeEffectController::new(context);
     let scoped_effect_controller = controller
-        .scoped_effect_controller(EffectScope::turn(session_id, turn_id))
+        .scoped_effect_controller(ExecutionScope::turn(session_id, turn_id))
         .expect("scoped restate controller");
     runtime
         .stream_turn(
@@ -903,7 +961,7 @@ async fn restate_controller_schedules_process_workflow_without_running_executor(
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("start");
@@ -974,10 +1032,10 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     let registry = process_registry();
     let module = lashlang::parse("process scan(root: str) { finish root }")
         .expect("lashlang process module");
-    let catalog = lashlang::ResourceCatalog::new();
+    let catalog = lashlang::LashlangHostCatalog::new();
     let linked_module = lashlang::LinkedModule::link(
         module.clone(),
-        lashlang::LashlangSurface::new(catalog, lashlang::LashlangAbilities::all()),
+        lashlang::LashlangHostEnvironment::new(catalog, lashlang::LashlangAbilities::all()),
     )
     .expect("link lashlang module");
     let process_ref = linked_module
@@ -992,7 +1050,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
         ProcessInput::LashlangProcess {
             module_ref: linked_module.module_ref.clone(),
             process_ref: process_ref.clone(),
-            required_surface_ref: linked_module.required_surface_ref.clone(),
+            host_requirements_ref: linked_module.host_requirements_ref.clone(),
             process_name: "scan".to_string(),
             args: args.clone(),
         },
@@ -1017,7 +1075,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("start");
@@ -1050,7 +1108,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     let ProcessInput::LashlangProcess {
         module_ref,
         process_ref: sent_process_ref,
-        required_surface_ref,
+        host_requirements_ref,
         process_name,
         args: sent_args,
         ..
@@ -1060,7 +1118,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     };
     assert_eq!(module_ref, &linked_module.module_ref);
     assert_eq!(sent_process_ref, &process_ref);
-    assert_eq!(required_surface_ref, &linked_module.required_surface_ref);
+    assert_eq!(host_requirements_ref, &linked_module.host_requirements_ref);
     assert_eq!(process_name, "scan");
     assert_eq!(sent_args, &args);
     assert_eq!(
@@ -1109,7 +1167,7 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
                     mode: lash_core::ProcessListMode::Live,
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("list");
@@ -1132,7 +1190,7 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
                     process_ids: vec!["task-list".to_string()],
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("transfer");
@@ -1196,7 +1254,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     process_id: "task-await-signal".to_string(),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("await");
@@ -1229,7 +1287,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     .with_replay_key("signal:notify"),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("signal");
@@ -1253,7 +1311,10 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
             resolved[0].key,
             lash_core::process_signal_wait_key("task-signal", "notify", 1)
         );
-        assert_eq!(resolved[0].payload, serde_json::json!({ "signal": "notify" }));
+        assert_eq!(
+            resolved[0].resolution,
+            Resolution::Ok(serde_json::json!({ "signal": "notify" }))
+        );
     }
 
     let outcome = host
@@ -1271,7 +1332,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     .with_replay_key("signal:notify-2"),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("second signal");
@@ -1310,7 +1371,7 @@ async fn restate_controller_cancel_requests_call_workflow_cancel() {
                     reason: Some("user requested".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry),
+            RuntimeEffectLocalExecutor::processes(registry),
         )
         .await
         .expect("cancel");
@@ -1336,7 +1397,7 @@ struct RecordedProcessRun {
     process_id: String,
     wake_target_session_id: Option<String>,
     tool_effect_id: Option<String>,
-    effect_scope_id: String,
+    execution_scope_id: String,
     controller_tier: lash_core::DurabilityTier,
 }
 
@@ -1366,7 +1427,7 @@ impl RestateProcessRunner for RecordingRunner {
                 tool_effect_id: execution_context
                     .causal_invocation
                     .and_then(|invocation| invocation.effect_id().map(str::to_string)),
-                effect_scope_id: scoped_effect_controller.scope_id().to_string(),
+                execution_scope_id: scoped_effect_controller.scope_id().to_string(),
                 controller_tier: scoped_effect_controller.controller().durability_tier(),
             });
         Ok(ProcessAwaitOutput::Success {
@@ -1418,7 +1479,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
                     execution_context: Box::new(execution_context),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone()),
         )
         .await
         .expect("start through endpoint smoke");
@@ -1467,7 +1528,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
             process_id: "task-smoke".to_string(),
             wake_target_session_id: Some("wake-smoke".to_string()),
             tool_effect_id: Some("tool-smoke".to_string()),
-            effect_scope_id: "task-smoke".to_string(),
+            execution_scope_id: "task-smoke".to_string(),
             controller_tier: lash_core::DurabilityTier::Durable,
         }]
     );
@@ -1481,7 +1542,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
                     reason: Some("stop-smoke".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(registry),
+            RuntimeEffectLocalExecutor::processes(registry),
         )
         .await
         .expect("cancel through endpoint smoke");
@@ -1692,7 +1753,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_a)),
+            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_a)),
         )
         .await
         .expect("schedule and run process through Restate endpoint");
@@ -1766,7 +1827,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                     reason: Some("post-rebuild cancel probe".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_b)),
+            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_b)),
         )
         .await
         .expect("cancel through reopened process workflow");
@@ -1782,9 +1843,9 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
 
 /// Build a durable registration for a trigger-started lashlang process.
 ///
-/// A trigger/host-event-started process carries a [`ProcessInput::LashlangProcess`]
+/// A trigger/trigger-started process carries a [`ProcessInput::LashlangProcess`]
 /// (the trigger route's process body) and provenance whose `caused_by` is the
-/// host event that fired it — distinct from a turn-started process, whose
+/// trigger occurrence that fired it — distinct from a turn-started process, whose
 /// provenance traces to a live turn/tool call. The module artifact is stored
 /// in the process-global in-memory artifact store, mirroring how a trigger
 /// route's linked module is published before the process runs; that store
@@ -1795,8 +1856,8 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
             .expect("lashlang trigger module");
     let linked_module = lashlang::LinkedModule::link(
         module,
-        lashlang::LashlangSurface::new(
-            lashlang::ResourceCatalog::new(),
+        lashlang::LashlangHostEnvironment::new(
+            lashlang::LashlangHostCatalog::new(),
             lashlang::LashlangAbilities::all(),
         ),
     )
@@ -1820,7 +1881,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
         ProcessInput::LashlangProcess {
             module_ref: linked_module.module_ref,
             process_ref,
-            required_surface_ref: linked_module.required_surface_ref,
+            host_requirements_ref: linked_module.host_requirements_ref,
             process_name: "notify".to_string(),
             args,
         },
@@ -1830,7 +1891,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
         )
         .with_caused_by(Some(lash_core::CausalRef::SessionNode {
             session_id: "root".to_string(),
-            node_id: "host-event:resource.updated".to_string(),
+            node_id: "trigger:resource.updated".to_string(),
         })),
     )
     .with_extra_event_types(lash_core::lashlang_process_event_types())
@@ -1843,8 +1904,8 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
 /// durable re-execution guarantee a turn-started process has (invariant 3).
 ///
 /// Mirrors `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
-/// but the process is started by a trigger/host event (a `LashlangProcess` row
-/// with host-event provenance), not by a live turn's tool call. It also pins
+/// but the process is started by a trigger/trigger occurrence (a `LashlangProcess` row
+/// with trigger provenance), not by a live turn's tool call. It also pins
 /// the lease single-owner / fencing contract: an active lease fences a
 /// competing owner and a superseded (stale) writer is rejected (invariant 4).
 #[tokio::test]
@@ -2147,7 +2208,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
             execution_context,
             lash_core::ScopedEffectController::shared(
                 Arc::new(lash_core::InlineRuntimeEffectController),
-                lash_core::EffectScope::process("task-workflow"),
+                lash_core::ExecutionScope::process("task-workflow"),
             )
             .expect("inline process scope"),
         )
@@ -2168,7 +2229,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
             process_id: "task-workflow".to_string(),
             wake_target_session_id: Some("wake-session".to_string()),
             tool_effect_id: Some("tool-effect".to_string()),
-            effect_scope_id: "task-workflow".to_string(),
+            execution_scope_id: "task-workflow".to_string(),
             controller_tier: lash_core::DurabilityTier::Inline,
         }]
     );

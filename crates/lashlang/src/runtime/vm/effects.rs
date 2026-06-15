@@ -119,13 +119,13 @@ impl<H: ExecutionHost> Vm<'_, H> {
                         ),
                     })?;
                 let child_module_ref = module_context.module_ref.clone();
-                let child_required_surface_ref = module_context.required_surface_ref.clone();
+                let child_host_requirements_ref = module_context.host_requirements_ref.clone();
                 let value = self
                     .host
                     .perform(AbilityOp::StartProcess(Box::new(ProcessStart {
                         module_ref: child_module_ref.clone(),
                         process_ref: process_ref.clone(),
-                        required_surface_ref: child_required_surface_ref,
+                        host_requirements_ref: child_host_requirements_ref,
                         process_name: process_name.clone(),
                         args,
                     })))
@@ -230,12 +230,12 @@ impl<H: ExecutionHost> Vm<'_, H> {
             }
             VmEffect::Print => {
                 let value = self.pop_stack()?;
-                let host_value = match &value {
+                let host_descriptor = match &value {
                     Value::Projected(projected) => Value::String(projected.render().await.into()),
                     _ => value.clone(),
                 };
                 self.host
-                    .perform(AbilityOp::Print(host_value))
+                    .perform(AbilityOp::Print(host_descriptor))
                     .await
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("print failed: {err}"),

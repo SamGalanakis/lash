@@ -77,7 +77,7 @@
         {
           title: "Advanced runtime",
           href: "embedding-advanced.html",
-          summary: "Session lifecycle, durable effect scopes, subagents, MCP servers, and advanced host controls.",
+          summary: "Session lifecycle, durable execution scopes, subagents, MCP servers, and advanced host controls.",
           kind: "guide",
         },
         {
@@ -152,7 +152,7 @@
     },
     {
       label: "Extend lash",
-      summary: "Add host tools, plugins, prompt hooks, runtime hooks, providers, and tool-surface policies.",
+      summary: "Add host tools, plugins, prompt hooks, runtime hooks, providers, and tool-catalog policies.",
       href: "plugins.html",
       items: [
         {
@@ -164,7 +164,7 @@
         {
           title: "Tool plugins",
           href: "plugins-tools.html",
-          summary: "Advertise manifests, resolve contracts, validate args, execute tools, and expose tool surfaces.",
+          summary: "Advertise manifests, resolve contracts, validate args, execute tools, and expose tool catalogs.",
           kind: "guide",
         },
         {
@@ -235,9 +235,9 @@
           kind: "internal",
         },
         {
-          title: "Host events",
-          href: "architecture/host-events.html",
-          summary: "Session-agnostic ingress: declare, emit, match by source_type, idempotent delivery, and the wake that is the only session-ordered step. Timers and cron as host-event sources.",
+          title: "Triggers",
+          href: "architecture/triggers.html",
+          summary: "Session-agnostic ingress: declare, emit, match by source_type, idempotent delivery, and the wake that is the only session-ordered step. Timers and cron as trigger sources.",
           kind: "internal",
         },
         {

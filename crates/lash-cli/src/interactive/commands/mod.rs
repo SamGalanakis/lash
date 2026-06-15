@@ -4,12 +4,12 @@ mod session;
 pub(crate) use session::switch_to_session_identifier;
 
 use super::runtime::send_queued_work;
-use super::runtime::sync_runtime_tool_surface;
+use super::runtime::sync_runtime_tool_catalog;
 use super::*;
 use crate::SkillCatalog;
 use crate::info::{controls_document, help_document, info_document};
 use crate::turn_runner::make_turn_input;
-use lash_core::runtime::{EffectScope, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
+use lash_core::runtime::{ExecutionScope, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 
 #[derive(Clone)]
 pub(super) enum ParsedSlashCommand {
@@ -91,8 +91,8 @@ async fn handle_ui_command(
         .await
     {
         Ok(effects) => {
-            if let Err(err) = sync_runtime_tool_surface(runtime).await {
-                push_system_message(app, format!("Failed to sync tool surface: {err}"));
+            if let Err(err) = sync_runtime_tool_catalog(runtime).await {
+                push_system_message(app, format!("Failed to sync tool catalog: {err}"));
             }
             apply_ui_host_effects(app, effects)
         }
@@ -306,7 +306,7 @@ async fn handle_slash_command(
         }
         command::Command::Info => {
             if let Some(session) = runtime.as_ref()
-                && let Ok(state) = session.control().tools().state().await
+                && let Ok(state) = session.admin().tools().state().await
             {
                 *active_tool_state = state;
                 *toolset_hash = hash12(
@@ -429,7 +429,7 @@ async fn handle_slash_command(
                 return Ok(false);
             };
             let effect_host = rt.effect_host();
-            let scoped_effect_controller = effect_host.scoped(EffectScope::runtime_operation(
+            let scoped_effect_controller = effect_host.scoped(ExecutionScope::runtime_operation(
                 format!("cli-compact:{}:{}", rt.session_id(), uuid::Uuid::new_v4()),
             ));
             let scoped_effect_controller = match scoped_effect_controller {
@@ -440,7 +440,7 @@ async fn handle_slash_command(
                 }
             };
             match rt
-                .control()
+                .admin()
                 .state()
                 .compact_context(argument, scoped_effect_controller)
                 .await

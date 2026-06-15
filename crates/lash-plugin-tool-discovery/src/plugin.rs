@@ -7,11 +7,11 @@ use lash_core::plugin::{
 };
 
 use crate::service::tool_discovery_provider;
-use crate::surface::rlm_tool_surface;
+use crate::tool_catalog::rlm_tool_catalog;
 
-/// Plugin factory for the `search_tools` discovery surface.
+/// Plugin factory for the `search_tools` discovery catalog.
 ///
-/// Declares its provider and tool-surface contribution through a
+/// Declares its provider and tool-catalog contribution through a
 /// [`PluginSpec`] driven by [`StaticPluginFactory`], so it does not
 /// hand-roll the `SessionPlugin` + `register` ceremony.
 pub struct ToolDiscoveryPluginFactory {
@@ -22,7 +22,7 @@ impl ToolDiscoveryPluginFactory {
     pub fn new() -> Self {
         let spec = PluginSpec::new()
             .with_tool_provider(Arc::new(tool_discovery_provider()) as Arc<dyn ToolProvider>)
-            .with_tool_surface_contributor(Arc::new(rlm_tool_surface));
+            .with_tool_catalog_contributor(Arc::new(rlm_tool_catalog));
         Self {
             inner: StaticPluginFactory::new("tool_discovery", spec),
         }

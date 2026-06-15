@@ -33,7 +33,7 @@ submit {
             .turn(TurnInput::text("run stack budget process fanout"))
             .stream_to(&events)
             .await?;
-        session.process_control().await_all().await?;
+        session.processes().await_all().await?;
 
         assert_eq!(
             turn.submitted_value(),

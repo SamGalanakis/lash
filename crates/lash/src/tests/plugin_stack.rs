@@ -38,7 +38,7 @@ async fn embedded_sessions_always_expose_tool_state() -> Result<()> {
     let core = standard_core();
     let session = core.session("dynamic-default").open().await?;
 
-    let state = session.control().tools().state().await?;
+    let state = session.admin().tools().state().await?;
 
     assert!(state.generation() > 0);
     Ok(())
@@ -53,7 +53,7 @@ async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
         .build()?;
     let session = core.session("static-tools").open().await?;
 
-    let state = session.control().tools().state().await?;
+    let state = session.admin().tools().state().await?;
 
     assert!(state.contains("app_lookup"));
     Ok(())
@@ -69,11 +69,11 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     let session = core.session("tool-state").open().await?;
 
     let generation = session
-        .control()
+        .admin()
         .tools()
         .set_availability_many(&[("app_lookup", ToolAvailability::Showcased)])
         .await?;
-    let showcased = session.control().tools().state().await?;
+    let showcased = session.admin().tools().state().await?;
 
     assert_eq!(showcased.generation(), generation);
     assert_eq!(
@@ -84,11 +84,11 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     );
 
     let generation = session
-        .control()
+        .admin()
         .tools()
         .clear_availability_override("app_lookup")
         .await?;
-    let cleared = session.control().tools().state().await?;
+    let cleared = session.admin().tools().state().await?;
 
     assert_eq!(cleared.generation(), generation);
     assert_eq!(
@@ -99,11 +99,11 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     );
 
     let generation = session
-        .control()
+        .admin()
         .tools()
         .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
-    let off = session.control().tools().state().await?;
+    let off = session.admin().tools().state().await?;
 
     assert_eq!(off.generation(), generation);
     assert_eq!(
@@ -117,12 +117,12 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
         .set_availability("app_lookup", Some(ToolAvailability::Callable))
         .expect("app tool");
     let generation = session
-        .control()
+        .admin()
         .tools()
         .advanced()
         .apply_state(callable)
         .await?;
-    let callable = session.control().tools().state().await?;
+    let callable = session.admin().tools().state().await?;
 
     assert_eq!(callable.generation(), generation);
     assert_eq!(
@@ -143,11 +143,11 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         .build()?;
     let session = core.session("persisted-tools").open().await?;
     session
-        .control()
+        .admin()
         .tools()
         .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
-    let persisted_tool_state = session.control().tools().state().await?.with_generation(9);
+    let persisted_tool_state = session.admin().tools().state().await?.with_generation(9);
     let state = RuntimeSessionState {
         session_id: "persisted-tools".to_string(),
         policy: lash_core::SessionPolicy {
@@ -168,7 +168,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         .build()?;
 
     let reopened = reopened_core.session("persisted-tools").open().await?;
-    let state = reopened.control().tools().state().await?;
+    let state = reopened.admin().tools().state().await?;
     assert_eq!(state.generation(), 9);
 
     assert_eq!(

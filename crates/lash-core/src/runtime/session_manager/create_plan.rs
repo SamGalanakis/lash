@@ -9,7 +9,7 @@ pub(in crate::runtime::session_manager) struct SessionCreatePlan {
     pub(in crate::runtime::session_manager) plugin_authority:
         crate::plugin::SessionAuthorityContext,
     pub(in crate::runtime::session_manager) plugin_source: crate::SessionPluginSource,
-    pub(in crate::runtime::session_manager) context_surface: crate::SessionContextSurface,
+    pub(in crate::runtime::session_manager) context_overlay: crate::SessionContextOverlay,
     pub(in crate::runtime::session_manager) protocol_request: SessionCreateRequest,
     pub(in crate::runtime::session_manager) usage_source: Option<String>,
 }
@@ -51,7 +51,7 @@ pub(in crate::runtime::session_manager) async fn resolve_session_create_plan(
         initial_runtime_state,
         plugin_authority,
         plugin_source: request.plugin_source,
-        context_surface: request.context_surface.clone(),
+        context_overlay: request.context_overlay.clone(),
         usage_source: request.usage_source.clone(),
         protocol_request: request,
     })

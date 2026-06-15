@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash::control::PluginAction;
+use lash::admin::PluginAction;
 use lash::{PluginActions, TurnEvent};
 use lash_tui::{Frame, InputEvent, TermCapabilities};
 

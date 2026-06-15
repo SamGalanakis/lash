@@ -43,7 +43,7 @@
         <div class="section" id="snapshots">
           <div class="section-header">
             <h2>Snapshots And Durability</h2>
-            <p>A session that uses a <code>SessionStoreFactory</code> (see <a href="./persistence.html">Persistence</a>) survives process restarts: the runtime parks its in-memory state into the store on shutdown and rehydrates it on the next open. Plugins participate by implementing two optional <code>SessionPlugin</code> methods:</p>
+            <p>A session that uses a <code>SessionStoreFactory</code> (see <a href="./persistence.html">Persistence</a>) survives process restarts: runtime and plugin snapshots are persisted during committed turn/runtime writes and rehydrated when the session opens again. Plugins participate by implementing two optional <code>SessionPlugin</code> methods:</p>
           </div>
           <pre data-lang="rust"><code>fn snapshot(&amp;self, _writer: &amp;mut dyn SnapshotWriter) -&gt; Result&lt;PluginSnapshotMeta, PluginError&gt; { /* default: empty meta */ }
 fn restore(&amp;self, _meta: &amp;PluginSnapshotMeta, _reader: &amp;dyn SnapshotReader) -&gt; Result&lt;(), PluginError&gt; { Ok(()) }</code></pre>

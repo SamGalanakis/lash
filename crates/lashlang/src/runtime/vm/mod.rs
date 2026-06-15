@@ -34,7 +34,7 @@ use super::schema::{
 use super::value::ProjectedValue;
 use super::{
     Chunk, ExecutionHost, ExecutionScratch, Instruction, InstructionProfileTag, IntrinsicOp,
-    LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY, LASH_TYPE_KEY, ListValue, Name,
+    LASH_HOST_DESCRIPTOR_TYPE_KEY, LASH_HOST_DESCRIPTOR_VALUE_KEY, LASH_TYPE_KEY, ListValue, Name,
     ProfileAccumulator, ProfileReport, ProjectedBindings, RuntimeError, Value,
     add_assign_index_number, add_values, as_number, assign_path, eval_binary_values,
     eval_compare_values, eval_number_binary_values, eval_number_compare_values,
@@ -721,7 +721,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             }
             Instruction::ProcessWaitSignal { name } => {
                 if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess {
+                    return Err(RuntimeError::SessionProcessAdminOutsideProcess {
                         keyword: "wait_signal",
                     });
                 }
@@ -735,7 +735,9 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             }
             Instruction::ProcessYield => {
                 if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "yield" });
+                    return Err(RuntimeError::SessionProcessAdminOutsideProcess {
+                        keyword: "yield",
+                    });
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::ProcessEvent(
                     ProcessEventKind::Yield,
@@ -743,7 +745,9 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             }
             Instruction::ProcessWake => {
                 if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "wake" });
+                    return Err(RuntimeError::SessionProcessAdminOutsideProcess {
+                        keyword: "wake",
+                    });
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::ProcessEvent(
                     ProcessEventKind::Wake,
@@ -751,13 +755,17 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             }
             Instruction::ProcessFinish => {
                 if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "finish" });
+                    return Err(RuntimeError::SessionProcessAdminOutsideProcess {
+                        keyword: "finish",
+                    });
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::Finish)));
             }
             Instruction::ProcessFail => {
                 if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "fail" });
+                    return Err(RuntimeError::SessionProcessAdminOutsideProcess {
+                        keyword: "fail",
+                    });
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::Fail)));
             }
@@ -1216,14 +1224,14 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
                 self.stack.push(Value::Record(Arc::new(wrapper)));
             }
-            Instruction::WrapHostValue(type_name) => {
+            Instruction::WrapHostDescriptor(type_name) => {
                 let value = self.pop_stack()?;
                 let mut wrapper = record_with_capacity(2);
                 wrapper.insert(
-                    LASH_HOST_VALUE_TYPE_KEY.to_string(),
+                    LASH_HOST_DESCRIPTOR_TYPE_KEY.to_string(),
                     Value::String(self.chunk.names[type_name].text.as_ref().into()),
                 );
-                wrapper.insert(LASH_HOST_VALUE_KEY.to_string(), value);
+                wrapper.insert(LASH_HOST_DESCRIPTOR_VALUE_KEY.to_string(), value);
                 self.stack.push(Value::Record(Arc::new(wrapper)));
             }
             // Every remaining opcode is fully handled by `step_instruction_fast`

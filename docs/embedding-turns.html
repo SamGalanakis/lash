@@ -96,7 +96,7 @@ pub enum TurnFinish {
           </div>
           <div class="callout">
             <strong>Three event types — only one is for your app.</strong>
-            <p>Apps consume <code>TurnActivity</code>: <code>id</code>, <code>correlation_id</code>, and a <code>TurnEvent</code> payload. <code>SessionEvent</code> is a deeper runtime/debug enum inside the graph; hosts do not subscribe to it. There is no app-facing <code>SessionEvent::Message { kind: "final" }</code> contract. Sinks match only on <code>TurnEvent</code>.</p>
+            <p>Apps consume <code>TurnActivity</code>: <code>id</code>, <code>correlation_id</code>, and a <code>TurnEvent</code> payload. Hosts do not subscribe to lower-level runtime/debug graph events. There is no app-facing final-message event enum contract. Sinks match only on <code>TurnEvent</code>.</p>
           </div>
           <div class="callout">
             <strong>Turn streams are not reconnect cursors.</strong>

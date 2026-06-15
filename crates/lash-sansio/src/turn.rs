@@ -37,7 +37,10 @@ pub fn build_turn<M: TurnProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
         TurnMachineConfig {
             protocol_driver: input.turn_driver_preamble.config.protocol.clone(),
             projector: input.turn_driver_preamble.config.projector.clone(),
-            sync_execution_surface: input.turn_driver_preamble.config.sync_execution_surface,
+            sync_execution_environment: input
+                .turn_driver_preamble
+                .config
+                .sync_execution_environment,
             model: input.model,
             max_context_tokens: input.max_context_tokens,
             max_turns: input.max_turns,
@@ -141,7 +144,7 @@ mod tests {
 
     #[test]
     fn build_turn_creates_machine_with_rendered_system_prompt() {
-        let tool_surface = Arc::new(crate::ToolSurface::from_tool_definitions(vec![tool(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tool_definitions(vec![tool(
             "read_file",
         )]));
         let turn_driver_preamble = Arc::new(TurnDriverPreamble {
@@ -150,9 +153,9 @@ mod tests {
                 false,
                 Arc::new(test_turn_limit_final_message),
             ),
-            tool_specs: tool_surface.model_tool_specs(),
-            tool_names: tool_surface.tool_names(),
-            tool_names_fingerprint: tool_surface.tool_names_fingerprint(),
+            tool_specs: tool_catalog.model_tool_specs(),
+            tool_names: tool_catalog.tool_names(),
+            tool_names_fingerprint: tool_catalog.tool_names_fingerprint(),
             omitted_tool_count: 0,
             execution_prompt: Arc::from("test prompt"),
             prompt_contributions: Vec::new(),

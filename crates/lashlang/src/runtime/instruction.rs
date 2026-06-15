@@ -232,7 +232,7 @@ pub(crate) enum Instruction {
     EndIter,
     ResolveTypeRef(usize),
     WrapTypeLiteral,
-    WrapHostValue(usize),
+    WrapHostDescriptor(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -325,7 +325,7 @@ impl Instruction {
             | Instruction::AwaitHandleUnwrap
             | Instruction::ProcessWaitSignal { .. } => InstructionProfileTag::AwaitHandle,
             Instruction::SleepFor | Instruction::SleepUntil => InstructionProfileTag::Sleep,
-            Instruction::ProcessSignalRun { .. } => InstructionProfileTag::ProcessControl,
+            Instruction::ProcessSignalRun { .. } => InstructionProfileTag::SessionProcessAdmin,
             Instruction::CancelHandle => InstructionProfileTag::CancelHandle,
             Instruction::Intrinsic(_) => InstructionProfileTag::Intrinsic,
             Instruction::AddAssign(_)
@@ -339,7 +339,7 @@ impl Instruction {
             Instruction::ProcessYield
             | Instruction::ProcessWake
             | Instruction::ProcessFinish
-            | Instruction::ProcessFail => InstructionProfileTag::ProcessControl,
+            | Instruction::ProcessFail => InstructionProfileTag::SessionProcessAdmin,
             Instruction::ObserveStep => InstructionProfileTag::ObserveStep,
             Instruction::Pop => InstructionProfileTag::Pop,
             Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. } => {
@@ -348,7 +348,7 @@ impl Instruction {
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
             Instruction::ResolveTypeRef(_) => InstructionProfileTag::ResolveTypeRef,
-            Instruction::WrapTypeLiteral | Instruction::WrapHostValue(_) => {
+            Instruction::WrapTypeLiteral | Instruction::WrapHostDescriptor(_) => {
                 InstructionProfileTag::WrapTypeLiteral
             }
         }
@@ -453,7 +453,7 @@ pub(crate) enum InstructionProfileTag {
     Print,
     Submit,
     Sleep,
-    ProcessControl,
+    SessionProcessAdmin,
     ObserveStep,
     Pop,
     BeginIter,
@@ -557,7 +557,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "print",
     "submit",
     "sleep",
-    "process_control",
+    "processes",
     "observe_step",
     "pop",
     "begin_iter",

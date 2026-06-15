@@ -166,9 +166,9 @@ impl<'run> SessionTurnRequest<'run> {
                 "session turn `{turn_id}` requires an effect turn scope with the same id"
             )));
         }
-        if scoped_effect_controller.effect_scope().session_id() != Some(session_id.as_str()) {
+        if scoped_effect_controller.execution_scope().session_id() != Some(session_id.as_str()) {
             return Err(PluginError::Session(format!(
-                "session turn `{turn_id}` requires an effect scope for session `{session_id}`"
+                "session turn `{turn_id}` requires an execution scope for session `{session_id}`"
             )));
         }
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()

@@ -52,6 +52,7 @@ pub(in crate::runtime) struct CurrentSessionCapability {
     pub(in crate::runtime) host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+    turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }
 
 #[derive(Clone)]
@@ -165,7 +166,12 @@ impl CurrentSessionCapability {
             host: runtime.host.clone(),
             plugins,
             store: runtime.services.store.clone(),
+            turn_phase_probe: runtime.turn_phase_probe.clone(),
         }
+    }
+
+    fn named_phase(&self, phase: &'static str) -> RuntimeNamedPhase {
+        RuntimeNamedPhase::begin(self.turn_phase_probe.clone(), phase)
     }
 
     fn resolve_policy(&self) -> Result<RuntimeSessionPolicy, crate::PluginError> {
@@ -253,11 +259,9 @@ impl RuntimeSessionServices {
         DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id)
     }
 
-    pub(in crate::runtime) fn host_event_router(
-        self: &Arc<Self>,
-    ) -> Option<crate::HostEventRouter> {
-        self.current.host.host_event_store.as_ref().map(|store| {
-            crate::HostEventRouter::new(
+    pub(in crate::runtime) fn trigger_router(self: &Arc<Self>) -> Option<crate::TriggerRouter> {
+        self.current.host.trigger_store.as_ref().map(|store| {
+            crate::TriggerRouter::new(
                 Arc::clone(store),
                 Arc::clone(&self.current.host.core.durability.lashlang_artifact_store),
                 self.current.host.process_registry.clone(),

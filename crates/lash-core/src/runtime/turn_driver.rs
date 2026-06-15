@@ -8,7 +8,7 @@ mod handlers;
 mod lease;
 mod machine;
 mod streaming;
-mod surface;
+mod tool_catalog;
 mod tools;
 mod trace;
 

@@ -42,10 +42,10 @@
           <h3 id="lazy-projected-values">Lazy projected values</h3>
           <dl class="def-list">
             <dt><code>ProjectionRef</code>, <code>ProjectionResolver</code>, <code>ProjectionRegistry</code></dt>
-            <dd>Stable lookup path for lazy host values. A resolver turns a ref into an <code>Arc&lt;dyn ProjectedHostValue&gt;</code> immediately before execution. The default registry supports memory refs via <code>register_memory</code>; those refs are only valid while the registry instance lives, and missing refs fail clearly.</dd>
+            <dd>Stable lookup path for lazy host descriptors. A resolver turns a ref into an <code>Arc&lt;dyn ProjectedHostDescriptor&gt;</code> immediately before execution. The default registry supports memory refs via <code>register_memory</code>; those refs are only valid while the registry instance lives, and missing refs fail clearly.</dd>
             <dt><code>ProjectedValue</code></dt>
-            <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing). Custom values may carry opaque projection-ref metadata so snapshots and seeds can rehydrate them without materializing the content.</dd>
-            <dt><code>ProjectedHostValue</code></dt>
+            <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostDescriptor&gt;</code> for non-trivial shapes (lazy field access, length, indexing). Custom values may carry opaque projection-ref metadata so snapshots and seeds can rehydrate them without materializing the content.</dd>
+            <dt><code>ProjectedHostDescriptor</code></dt>
             <dd>Trait that lets the host serve <code>read_one</code>/<code>read_many</code> queries on demand: each is a <code>ProjectedReadRequest</code> (such as <code>Field</code>, <code>Index</code>, <code>Len</code>, <code>Render</code>, or <code>Materialize</code>) answered with a <code>ProjectedReadResponse</code>, so large host-side structures need not be cloned into Lashlang values.</dd>
           </dl>
 
@@ -67,15 +67,15 @@
         <div class="section" id="host-provided-modules">
           <div class="section-header">
             <h2>Host-Provided Modules</h2>
-            <p>Lashlang does not ship a global tool namespace. The current turn's <code>RuntimeExecutionContext::lashlang_surface()</code> builds the effective language surface by translating callable <code>ToolSurface</code> entries into module operations and then extending that catalog with plugin-provided Lashlang resources. Linking and prompt rendering both use this surface, so examples in the prompt are executable against the same host contract.</p>
+            <p>Lashlang does not ship a global tool namespace. The current turn's <code>RuntimeExecutionContext::lashlang_host_environment()</code> builds the effective language surface by translating callable <code>ToolCatalog</code> entries into module operations and then extending that catalog with plugin-provided Lashlang resources. Linking and prompt rendering both use this surface, so examples in the prompt are executable against the same host contract.</p>
           </div>
           <dl class="def-list">
-            <dt><code>ToolAgentSurface</code></dt>
-            <dd>Tool manifests choose the authored call path. <code>ToolAgentSurface::new(["board"], "play")</code> maps the tool to <code>board.play</code>; leaving it empty falls back to <code>tools.&lt;tool_name&gt;</code>. Module path segments must be lowercase ASCII identifiers, and duplicate callable paths are rejected when the tool surface is built.</dd>
-            <dt><code>ResourceCatalog</code></dt>
-            <dd>The catalog records module instances, resource authority types, receiver operations, pure constructors, named host data types, and trigger-source event metadata. Trigger and host-event payloads are validated named object types such as <code>cron.Tick</code>; source values such as <code>cron.Schedule</code> remain opaque host identities.</dd>
+            <dt><code>LashlangToolBinding</code></dt>
+            <dd>Tool manifests choose the authored call path. <code>LashlangToolBinding::new(["board"], "play")</code> maps the tool to <code>board.play</code>; leaving it empty falls back to <code>tools.&lt;tool_name&gt;</code>. Module path segments must be lowercase ASCII identifiers, and duplicate callable paths are rejected when the tool catalog is built.</dd>
+            <dt><code>LashlangHostCatalog</code></dt>
+            <dd>The catalog records module instances, resource authority types, receiver operations, pure constructors, named host data types, and trigger-source event metadata. Trigger and trigger payloads are validated named object types such as <code>cron.Tick</code>; source values such as <code>cron.Schedule</code> remain opaque host identities.</dd>
             <dt><code>PluginFactory::lashlang_resources</code></dt>
-            <dd>Plugins use this hook for language resources that are not ordinary tools: trigger registry operations, <code>cron.Schedule(...)</code>, <code>ui.button.pressed(...)</code>, or any other typed host value constructor. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
+            <dd>Plugins use this hook for language resources that are not ordinary tools: configured trigger-source constructors such as <code>cron.Schedule(...)</code>, typed resource constructors, and other host descriptor constructors. Zero-config trigger sources such as <code>ui.button.pressed({})</code> are added to the session catalog from <code>reg.triggers().declare(...)</code>. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
             <dt><code>LashlangAbilities</code></dt>
             <dd>The host enables process starts, sleep, process signals, and trigger registry operations explicitly. A configured process registry derives process/lifecycle availability for sessions; plugins such as the built-in session-trigger plugin contribute trigger operations and resources.</dd>
             <dt><code>LashlangLanguageFeatures</code></dt>
@@ -83,11 +83,11 @@
           </dl>
           <pre><code>fn read_board_tool() -&gt; ToolDefinition {
   ToolDefinition::raw("tool:read_board", "read_board", "...", input, output)
-    .with_agent_surface(ToolAgentSurface::new(["board"], "read"))
+    .with_lashlang_binding(LashlangToolBinding::new(["board"], "read"))
 }
 
-fn lashlang_resources(&self) -&gt; lashlang::ResourceCatalog {
-  let mut resources = lashlang::ResourceCatalog::new();
+fn lashlang_resources(&self) -&gt; lashlang::LashlangHostCatalog {
+  let mut resources = lashlang::LashlangHostCatalog::new();
   resources.add_trigger_source_constructor(
     ["cron", "Schedule"],
     schedule_config_type(),
@@ -103,7 +103,7 @@ fn lashlang_resources(&self) -&gt; lashlang::ResourceCatalog {
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Resource Operations And Process Handles</h2>
-            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. In RLM, <code>HostBridge</code> dispatches ordinary module operations to the callable tool surface, trigger registry operations to the runtime host-event store, process starts to the process service, and sleep through the runtime effect controller. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangHostEnvironment</code> enables them, and the RLM prompt is rendered from that same effective surface. In RLM, <code>HostBridge</code> dispatches ordinary module operations to the callable tool catalog, trigger registry operations to the runtime trigger store, process starts to the process service, and sleep through the runtime effect controller. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
           </div>
           <h3 id="resource-operations">Resource operations</h3>
           <dl class="def-list">
@@ -139,7 +139,7 @@ submit { line_count: len(lines), notes: notes, items: items }</code></pre>
             <dt><code>cancel</code></dt>
             <dd><code>cancel handle</code> asks the host to stop a live process run. Cancellation is best-effort and uses the run handle identity.</dd>
           </dl>
-          <p>Process definitions describe reusable background work; process runs are concrete invocations created by <code>start</code> or by matched host-event occurrences. Results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. If <code>label_annotations</code> is enabled, <code>@label</code> titles and descriptions can appear in trace process maps without affecting execution.</p>
+          <p>Process definitions describe reusable background work; process runs are concrete invocations created by <code>start</code> or by matched trigger occurrences. Results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. If <code>label_annotations</code> is enabled, <code>@label</code> titles and descriptions can appear in trace process maps without affecting execution.</p>
 
           <h3 id="await-handles">Awaiting handles</h3>
           <dl class="def-list">
@@ -181,7 +181,7 @@ submit {
         <div class="section" id="triggers">
           <div class="section-header">
             <h2>Triggers</h2>
-          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value, a process definition, and explicit <code>inputs</code> to awaited registry operations such as <code>triggers.register</code>, <code>triggers.list</code>, and <code>triggers.cancel</code>. Every process param is mapped exactly once; <code>trigger.event</code> is the direct whole-event placeholder inside <code>inputs</code>. A trigger registration is a durable rule; a matched runtime host-event occurrence starts the target process.</p>
+          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code>; zero-config trigger sources such as <code>ui.button.pressed({})</code> are exposed from the session's declared <code>TriggerEvent</code>s. In both cases the catalog records protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value, a process definition, and explicit <code>inputs</code> to awaited registry operations such as <code>triggers.register</code>, <code>triggers.list</code>, and <code>triggers.cancel</code>. Every process param is mapped exactly once; <code>trigger.event</code> is the direct whole-event placeholder inside <code>inputs</code>. A trigger registration is a durable rule; a matched runtime trigger occurrence starts the target process.</p>
           </div>
           <pre><code>process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
@@ -203,7 +203,7 @@ registrations = await triggers.list({ target: daily_digest })?
 broad_registrations = await triggers.list({})?
 
 submit handle</code></pre>
-          <p>A host event source uses the same registry. The workbench registers a typed UI button event whose source config is empty; the selected button arrives in the matched occurrence payload:</p>
+          <p>A trigger source uses the same registry. The workbench declares a typed UI button trigger event; the runtime exposes <code>ui.button.pressed({})</code> as a zero-config source constructor, and the selected button arrives in the matched occurrence payload:</p>
           <pre><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
@@ -216,7 +216,7 @@ handle = await triggers.register({
   name: "button watcher"
 })?
 submit handle</code></pre>
-          <p>The matching host contract exposes constructors, trigger-source relations, and optionally typed host events. Source owners list source registrations by source type/key, keep their own source-specific schedules, and emit declared host-event occurrences that validate payloads and fan out to matching routes:</p>
+          <p>The matching host contract exposes configured constructors, trigger-source relations, and typed trigger declarations. Source owners list source registrations by source type/key, keep their own source-specific schedules, and emit declared trigger occurrences that validate payloads and fan out to matching routes:</p>
           <pre><code>let cron_tick = NamedDataType::object(
     "cron.Tick",
     vec![TypeField { name: "fired_at".into(), ty: TypeExpr::Str, optional: false }],
@@ -235,48 +235,42 @@ resources.add_trigger_source_constructor(
     schedule_config_type(),
     cron_tick,
 )?;
-resources.add_trigger_source_constructor(
-    ["ui", "button", "pressed"],
-    TypeExpr::Object(vec![]),
-    button_pressed.clone(),
-)?;
-
-reg.host_events().declare(
-    HostEvent::new("Button", "ui.button", "pressed", button_pressed),
+reg.triggers().declare(
+    TriggerEvent::new("Button", "ui.button", "pressed", button_pressed),
 )?;
 
 let cron_subscriptions = core
-    .host_events()
+    .triggers()
     .subscriptions(TriggerSubscriptionFilter::for_source_type("cron.Schedule"))
     .await?;
 let source_key = cron_subscriptions[0].source_key.clone();
-let cron_effect_scope = runtime_effect_controller.scoped_effect_controller(
-    EffectScope::runtime_operation("cron:daily-digest:2026-06-08T08:00:00Z"),
+let cron_execution_scope = runtime_effect_controller.scoped_effect_controller(
+    ExecutionScope::runtime_operation("cron:daily-digest:2026-06-08T08:00:00Z"),
 )?;
-core.host_events()
+core.triggers()
     .emit(
-        HostEventOccurrenceRequest::new(
+        TriggerOccurrenceRequest::new(
             "cron.Schedule",
             source_key,
             tick_payload,
             "cron:daily-digest:2026-06-08T08:00:00Z",
         ),
-        cron_effect_scope,
+        cron_execution_scope,
     )
     .await?;
 
-let button_effect_scope = runtime_effect_controller.scoped_effect_controller(
-    EffectScope::runtime_operation("button:red:2026-06-08T12:00:00Z"),
+let button_execution_scope = runtime_effect_controller.scoped_effect_controller(
+    ExecutionScope::runtime_operation("button:red:2026-06-08T12:00:00Z"),
 )?;
-core.host_events()
+core.triggers()
     .emit(
-        HostEventOccurrenceRequest::new(
+        TriggerOccurrenceRequest::new(
             "ui.button.pressed",
-            empty_host_event_source_key("ui.button.pressed")?,
+            empty_trigger_source_key("ui.button.pressed")?,
             button_payload,
             "button:red:2026-06-08T12:00:00Z",
         ),
-        button_effect_scope,
+        button_execution_scope,
     )
     .await?;</code></pre>
         </div>

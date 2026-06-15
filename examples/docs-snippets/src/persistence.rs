@@ -72,7 +72,7 @@ async fn postgres_core(database_url: String) -> anyhow::Result<()> {
     let core = LashCore::builder()
         .store_factory(Arc::new(storage.session_store_factory()))
         .process_registry(Arc::new(storage.process_registry()))
-        .host_event_store(Arc::new(storage.host_event_store()))
+        .trigger_store(Arc::new(storage.trigger_store()))
         .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
         .attachment_store(Arc::new(attachments))
         // provider, mode, model, effect host...
@@ -88,7 +88,7 @@ fn audit_process_cleanup(_report: lash::process::ProcessSessionDeleteReport) -> 
 async fn delete_session(core: &LashCore, chat_id: &str) -> anyhow::Result<()> {
     // docs:start:delete-session
     let effect_host = core.effect_host();
-    let scope = effect_host.scoped(lash::runtime::EffectScope::runtime_operation(format!(
+    let scope = effect_host.scoped(lash::runtime::ExecutionScope::runtime_operation(format!(
         "delete-session:{chat_id}"
     )))?;
     let report = core.delete_session(chat_id, scope).await?;
@@ -104,10 +104,7 @@ fn persist(_turn: TurnOutput) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn retry_or_surface(
-    _err: lash::runtime::RuntimeError,
-    _session: LashSession,
-) -> anyhow::Result<()> {
+fn retry_or_report(_err: lash::runtime::RuntimeError, _session: LashSession) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -125,7 +122,7 @@ async fn commit_conflict_retry(
         Err(lash::EmbedError::Runtime(err)) if err.code == RuntimeErrorCode::StoreCommitFailed => {
             // Another writer won the head-revision race: reload and retry.
             let session = core.session(chat_id).open().await?;
-            retry_or_surface(err, session)?;
+            retry_or_report(err, session)?;
         }
         Err(other) => bail!(other),
     }

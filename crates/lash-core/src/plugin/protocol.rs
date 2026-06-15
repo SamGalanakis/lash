@@ -194,7 +194,7 @@ pub trait AssistantProseProjectorPlugin: Send + Sync {
 }
 
 /// Singleton plugin slot that owns the `ProtocolDriverHandle` and
-/// associated preamble (prompt text, tool surface, sync/async flag)
+/// associated preamble (prompt text, tool catalog, sync/async flag)
 /// for this session. Plugin stack construction must install exactly one
 /// implementation.
 pub trait ProtocolDriverPlugin: Send + Sync {

@@ -53,13 +53,13 @@ pub fn build_rlm_preamble(
     input: ProtocolBuildInput,
     config: RlmProjectorConfig,
 ) -> TurnDriverPreamble {
-    let tool_surface = input.tool_surface.as_ref();
-    let omitted_tool_count = tool_surface.omitted_tool_count();
-    let tool_names = tool_surface.tool_names();
-    let tool_names_fingerprint = tool_surface.tool_names_fingerprint();
+    let tool_catalog = input.tool_catalog.as_ref();
+    let omitted_tool_count = tool_catalog.omitted_tool_count();
+    let tool_names = tool_catalog.tool_names();
+    let tool_names_fingerprint = tool_catalog.tool_names_fingerprint();
     let mut prompt_contributions = Vec::new();
 
-    let tool_docs = tool_surface.prompt_tool_docs();
+    let tool_docs = tool_catalog.prompt_tool_docs();
     if !tool_docs.trim().is_empty() {
         prompt_contributions.push(PromptContribution::execution("Showcased Tools", tool_docs));
     }
@@ -73,16 +73,16 @@ pub fn build_rlm_preamble(
                 max_budget_tokens: config.max_budget_tokens,
                 last_prompt_usage: config.last_prompt_usage,
             }),
-            sync_execution_surface: true,
+            sync_execution_environment: true,
             turn_limit_final_message: Arc::new(crate::protocol::turn_limit_final_message),
         },
         tool_specs: Arc::new(Vec::new()),
         tool_names,
         tool_names_fingerprint,
         omitted_tool_count,
-        execution_prompt: Arc::from(crate::protocol::rlm_execution_section_for_surface(
+        execution_prompt: Arc::from(crate::protocol::rlm_execution_section_for_host_environment(
             config.prompt_features,
-            &input.lashlang_surface,
+            &input.lashlang_host_environment,
         )),
         prompt_contributions,
     }
@@ -111,13 +111,13 @@ mod catalogue_tests {
     }
 
     #[test]
-    fn rlm_preamble_uses_resolved_tool_surface_without_search_tool_special_cases() {
+    fn rlm_preamble_uses_resolved_tool_catalog_without_search_tool_special_cases() {
         let definitions = vec![tool("search_tools"), tool("grep")];
         let contracts = definitions
             .iter()
             .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
-        let surface = lash_core::ToolSurface::from_tools(
+        let surface = lash_core::ToolCatalog::from_tools(
             definitions
                 .into_iter()
                 .map(|tool| tool.manifest())
@@ -127,9 +127,9 @@ mod catalogue_tests {
 
         let preamble = build_rlm_preamble(
             lash_core::ProtocolBuildInput {
-                tool_surface: Arc::new(surface),
-                lashlang_surface: lashlang::LashlangSurface::new(
-                    lashlang::ResourceCatalog::tool_default(["search_tools", "grep"]),
+                tool_catalog: Arc::new(surface),
+                lashlang_host_environment: lashlang::LashlangHostEnvironment::new(
+                    lashlang::LashlangHostCatalog::tool_default(["search_tools", "grep"]),
                     lashlang::LashlangAbilities::all(),
                 ),
                 extra_prompt_contributions: Vec::new(),
@@ -150,13 +150,13 @@ mod catalogue_tests {
     }
 
     #[test]
-    fn rlm_preamble_uses_lashlang_surface_abilities() {
+    fn rlm_preamble_uses_lashlang_host_environment_abilities() {
         let definitions = vec![tool("grep")];
         let contracts = definitions
             .iter()
             .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
-        let surface = lash_core::ToolSurface::from_tools(
+        let surface = lash_core::ToolCatalog::from_tools(
             definitions
                 .into_iter()
                 .map(|tool| tool.manifest())
@@ -166,9 +166,9 @@ mod catalogue_tests {
 
         let preamble = build_rlm_preamble(
             lash_core::ProtocolBuildInput {
-                tool_surface: Arc::new(surface),
-                lashlang_surface: lashlang::LashlangSurface::new(
-                    lashlang::ResourceCatalog::tool_default(["grep"]),
+                tool_catalog: Arc::new(surface),
+                lashlang_host_environment: lashlang::LashlangHostEnvironment::new(
+                    lashlang::LashlangHostCatalog::tool_default(["grep"]),
                     lashlang::LashlangAbilities::default(),
                 ),
                 extra_prompt_contributions: Vec::new(),

@@ -9,38 +9,37 @@ use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, T
 mod execution_context;
 pub(crate) mod process_handles;
 mod tool_execution;
-pub(crate) mod triggers;
 
 pub use execution_context::RuntimeExecutionContext;
-pub(crate) use execution_context::lashlang_surface_from_tool_surface;
+pub(crate) use execution_context::lashlang_host_environment_from_tool_catalog;
 pub use tool_execution::{ToolInvocation, ToolInvocationReply};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ToolSurfaceCacheKey {
+struct ToolCatalogCacheKey {
     include_base_tools: bool,
-    context_surface_revision: u64,
+    context_overlay_revision: u64,
     tool_generation: u64,
     plugin_revision: u64,
     lashlang_language_features: lashlang::LashlangLanguageFeatures,
 }
 
 #[derive(Debug, Default)]
-struct ToolSurfaceDerived {
+struct ToolCatalogDerived {
     catalog: OnceLock<Arc<Vec<serde_json::Value>>>,
 }
 
-struct ToolSurfaceArtifact {
-    surface: Arc<crate::ToolSurface>,
+struct ToolCatalogArtifact {
+    tool_catalog: Arc<crate::ToolCatalog>,
     preamble: Arc<crate::TurnDriverPreamble>,
-    derived: ToolSurfaceDerived,
+    derived: ToolCatalogDerived,
 }
 
 #[derive(Clone)]
-pub(crate) struct ToolSurfaceHandle(Arc<ToolSurfaceArtifact>);
+pub(crate) struct ToolCatalogHandle(Arc<ToolCatalogArtifact>);
 
-impl ToolSurfaceHandle {
-    fn surface(&self) -> Arc<crate::ToolSurface> {
-        Arc::clone(&self.0.surface)
+impl ToolCatalogHandle {
+    fn tool_catalog(&self) -> Arc<crate::ToolCatalog> {
+        Arc::clone(&self.0.tool_catalog)
     }
 
     fn preamble(&self) -> Arc<crate::TurnDriverPreamble> {
@@ -50,7 +49,7 @@ impl ToolSurfaceHandle {
     fn catalog(&self) -> Arc<Vec<serde_json::Value>> {
         Arc::clone(self.0.derived.catalog.get_or_init(|| {
             Arc::new(crate::tool_registry::project_tool_catalog(
-                self.0.surface.searchable_tools_iter().cloned(),
+                self.0.tool_catalog.searchable_tools_iter().cloned(),
             ))
         }))
     }
@@ -101,14 +100,14 @@ pub struct Session {
     session_id: String,
     services: RuntimeServices,
     include_base_tools: bool,
-    context_surface_revision: u64,
+    context_overlay_revision: u64,
     context_tools: Vec<Arc<dyn ToolProvider>>,
     tool_registry: Arc<crate::ToolRegistry>,
     context_prompt_contributions: Vec<PromptContribution>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
-    tool_surface_cache: std::sync::Mutex<Vec<(ToolSurfaceCacheKey, ToolSurfaceHandle)>>,
+    tool_catalog_cache: std::sync::Mutex<Vec<(ToolCatalogCacheKey, ToolCatalogHandle)>>,
     /// Memoizes the rendered system prompt across turns. Most consecutive
-    /// turns reuse the same template + context surface, so the cache hits
+    /// turns reuse the same template + context overlay, so the cache hits
     /// and we skip the section/Vec-join work in
     /// `lash_sansio::PromptTemplate::render`.
     prompt_cache: Arc<lash_sansio::PromptCache>,
@@ -121,12 +120,12 @@ impl Session {
             session_id: session_id.to_string(),
             services,
             include_base_tools: true,
-            context_surface_revision: 0,
+            context_overlay_revision: 0,
             context_tools: Vec::new(),
             tool_registry,
             context_prompt_contributions: Vec::new(),
             message_tx: None,
-            tool_surface_cache: std::sync::Mutex::new(Vec::new()),
+            tool_catalog_cache: std::sync::Mutex::new(Vec::new()),
             prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
         };
 
@@ -160,7 +159,7 @@ impl Session {
         &self.services.plugins
     }
 
-    pub fn set_context_surface(
+    pub fn set_context_overlay(
         &mut self,
         tool_providers: Vec<Arc<dyn ToolProvider>>,
         prompt_contributions: Vec<PromptContribution>,
@@ -182,19 +181,19 @@ impl Session {
             .services
             .plugins
             .tool_registry()
-            .compose_session_surface(include_base_tools, tool_providers.clone())
+            .compose_session_catalog(include_base_tools, tool_providers.clone())
             .map(Arc::new)
             .map_err(|err| {
                 crate::PluginError::Session(format!("failed to build session tool registry: {err}"))
             })?;
         self.include_base_tools = include_base_tools;
-        self.context_surface_revision = self.context_surface_revision.wrapping_add(1);
+        self.context_overlay_revision = self.context_overlay_revision.wrapping_add(1);
         self.context_tools = tool_providers;
         self.tool_registry = registry;
         self.context_prompt_contributions = prompt_contributions;
-        self.tool_surface_cache
+        self.tool_catalog_cache
             .lock()
-            .expect("tool surface cache lock")
+            .expect("tool catalog cache lock")
             .clear();
         Ok(())
     }
@@ -211,27 +210,27 @@ impl Session {
         self.services.store.clone()
     }
 
-    fn tool_surface_cache_key(&self) -> ToolSurfaceCacheKey {
-        ToolSurfaceCacheKey {
+    fn tool_catalog_cache_key(&self) -> ToolCatalogCacheKey {
+        ToolCatalogCacheKey {
             include_base_tools: self.include_base_tools,
-            context_surface_revision: self.context_surface_revision,
+            context_overlay_revision: self.context_overlay_revision,
             tool_generation: self.tool_registry.generation(),
             plugin_revision: self.plugins().snapshot_revision_fingerprint(),
             lashlang_language_features: self.plugins().lashlang_language_features(),
         }
     }
 
-    fn build_tool_surface_entry(
+    fn build_tool_catalog_entry(
         &self,
         session_id: &str,
-    ) -> Result<ToolSurfaceHandle, crate::PluginError> {
+    ) -> Result<ToolCatalogHandle, crate::PluginError> {
         let provider = self.tools();
         let tools = provider.tool_manifests();
         let contract_provider = Arc::clone(&provider);
         let resolve_contract: lash_sansio::ToolContractResolver =
             Arc::new(move |name: &str| contract_provider.resolve_contract(name));
-        let surface = Arc::new(self.plugins().resolve_tool_surface(
-            crate::plugin::ToolSurfaceContext {
+        let tool_catalog = Arc::new(self.plugins().resolve_tool_catalog(
+            crate::plugin::ToolCatalogContext {
                 session_id: session_id.to_string(),
                 tools,
                 resolve_contract: Some(Arc::clone(&resolve_contract)),
@@ -241,60 +240,61 @@ impl Session {
             },
         )?);
         let input = crate::ProtocolBuildInput {
-            tool_surface: Arc::clone(&surface),
-            lashlang_surface: execution_context::lashlang_surface_from_tool_surface(
-                &surface,
-                self.plugins().lashlang_abilities(),
-                self.plugins().lashlang_language_features(),
-                self.plugins().lashlang_resources(),
-            ),
+            tool_catalog: Arc::clone(&tool_catalog),
+            lashlang_host_environment:
+                execution_context::lashlang_host_environment_from_tool_catalog(
+                    &tool_catalog,
+                    self.plugins().lashlang_abilities(),
+                    self.plugins().lashlang_language_features(),
+                    self.plugins().lashlang_resources(),
+                ),
             extra_prompt_contributions: self.protocol_extra_prompt_contributions(),
         };
         let driver = self.plugins().protocol_driver();
         let preamble = driver.build_preamble(input);
-        Ok(ToolSurfaceHandle(Arc::new(ToolSurfaceArtifact {
-            surface,
+        Ok(ToolCatalogHandle(Arc::new(ToolCatalogArtifact {
+            tool_catalog,
             preamble: Arc::new(preamble),
-            derived: ToolSurfaceDerived::default(),
+            derived: ToolCatalogDerived::default(),
         })))
     }
 
-    fn tool_surface_cache_entry(
+    fn tool_catalog_cache_entry(
         &self,
         session_id: &str,
-    ) -> Result<ToolSurfaceHandle, crate::PluginError> {
-        let key = self.tool_surface_cache_key();
+    ) -> Result<ToolCatalogHandle, crate::PluginError> {
+        let key = self.tool_catalog_cache_key();
         let mut cache = self
-            .tool_surface_cache
+            .tool_catalog_cache
             .lock()
-            .expect("tool surface cache lock");
+            .expect("tool catalog cache lock");
         if let Some((_, entry)) = cache.iter().find(|(entry_key, _)| *entry_key == key) {
             return Ok(entry.clone());
         }
-        let entry = self.build_tool_surface_entry(session_id)?;
+        let entry = self.build_tool_catalog_entry(session_id)?;
         cache.push((key, entry.clone()));
         Ok(entry)
     }
 
-    pub fn tool_surface(
+    pub fn resolved_tool_catalog(
         &self,
         session_id: &str,
-    ) -> Result<Arc<crate::ToolSurface>, crate::PluginError> {
-        Ok(self.tool_surface_cache_entry(session_id)?.surface())
+    ) -> Result<Arc<crate::ToolCatalog>, crate::PluginError> {
+        Ok(self.tool_catalog_cache_entry(session_id)?.tool_catalog())
     }
 
     pub(crate) fn turn_driver_preamble(
         &self,
         session_id: &str,
     ) -> Result<Arc<crate::TurnDriverPreamble>, crate::PluginError> {
-        Ok(self.tool_surface_cache_entry(session_id)?.preamble())
+        Ok(self.tool_catalog_cache_entry(session_id)?.preamble())
     }
 
     pub(crate) fn shared_tool_catalog(
         &self,
         session_id: &str,
     ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
-        Ok(self.tool_surface_cache_entry(session_id)?.catalog())
+        Ok(self.tool_catalog_cache_entry(session_id)?.catalog())
     }
 
     pub fn tool_catalog(
@@ -319,7 +319,7 @@ impl Session {
         process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         direct_completions: crate::DirectCompletionClient<'run>,
-        host_event_router: Option<crate::HostEventRouter>,
+        trigger_router: Option<crate::TriggerRouter>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
@@ -330,13 +330,13 @@ impl Session {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
             tools: self.tools(),
-            surface: self.tool_surface(session_id)?,
+            tool_catalog: self.resolved_tool_catalog(session_id)?,
             sessions,
             session_lifecycle,
             session_graph,
             processes,
             process_cancel_ability,
-            host_event_router,
+            trigger_router,
             effect_controller,
             direct_completions: direct_completions.clone(),
             parent_invocation: None,
@@ -345,7 +345,7 @@ impl Session {
             agent_frame_id: agent_frame_id.to_string(),
             event_tx,
             checkpoint_messages,
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::clone(&self.services.attachment_store),
             turn_context: turn_context.clone(),
         });
@@ -374,24 +374,24 @@ impl Session {
     }
 
     pub fn invalidate_runtime_caches(&self) {
-        self.tool_surface_cache
+        self.tool_catalog_cache
             .lock()
-            .expect("tool surface cache lock")
+            .expect("tool catalog cache lock")
             .clear();
         self.prompt_cache.clear();
     }
 
-    pub async fn refresh_tool_surface(&mut self) -> Result<(), SessionError> {
+    pub async fn refresh_tool_catalog(&mut self) -> Result<(), SessionError> {
         self.tool_registry = self
             .services
             .plugins
             .tool_registry()
-            .compose_session_surface(self.include_base_tools, self.context_tools.clone())
+            .compose_session_catalog(self.include_base_tools, self.context_tools.clone())
             .map(Arc::new)
             .map_err(|err| SessionError::Protocol(format!("tool reconfigure failed: {err}")))?;
-        self.tool_surface_cache
+        self.tool_catalog_cache
             .lock()
-            .expect("tool surface cache lock")
+            .expect("tool catalog cache lock")
             .clear();
         Ok(())
     }

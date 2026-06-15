@@ -1,7 +1,7 @@
 //! Mocked multi-account inbox world for the workbench demo.
 //!
 //! The host owns a small in-memory set of named inboxes. Each is projected into
-//! the RLM Lashlang surface as a typed module authority of type `Inbox` at
+//! the RLM Lashlang host environment as a typed module authority of type `Inbox` at
 //! module path `inbox.<slug>`, exposing three operations:
 //!
 //! - `send({ title, text })` — add a message to that inbox
@@ -14,18 +14,19 @@
 //! the point of the multi-account showcase.
 //!
 //! Accounts are added at runtime from the UI. The provider reads the live
-//! account set in [`MockMailProvider::definitions`], and the runtime rebuilds
-//! the tool surface on the next opened turn, so newly added accounts appear as
-//! authorities without any explicit refresh.
+//! account set in [`MockMailProvider::definitions`], and route handlers enqueue
+//! a durable tool-catalog refresh so the next opened turn sees the updated
+//! `inbox.<slug>` authority set.
 
 use std::sync::{Arc, RwLock};
 
-use crate::{MAIL_EVENT_ALIAS, MAIL_EVENT_EVENT, MAIL_EVENT_RESOURCE};
+use crate::MAIL_RECEIVED_SOURCE_TYPE;
 use async_trait::async_trait;
 use lash::tools::{
-    ToolAgentSurface, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
+    LashlangToolBinding, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
     ToolResult, ToolScheduling,
 };
+use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -46,7 +47,7 @@ impl MailMessage {
     }
 }
 
-/// One delivered mock message, used to build the `mail.received` host event.
+/// One delivered mock message, used to build the `mail.received` trigger occurrence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MailDelivery {
     pub account: String,
@@ -329,8 +330,8 @@ fn definition_for(slug: &str, display_name: &str, operation: &str) -> ToolDefini
         input_schema,
         json!({ "type": "object" }),
     )
-    .with_agent_surface(
-        ToolAgentSurface::new(["inbox", slug], operation).with_authority_type("Inbox"),
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["inbox", slug], operation).with_authority_type("Inbox"),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -411,14 +412,28 @@ impl ToolProvider for MockMailProvider {
                         Ok(payload) => payload,
                         Err(err) => return ToolResult::err_fmt(err.to_string()),
                     };
+                    let source_key = match empty_trigger_source_key(MAIL_RECEIVED_SOURCE_TYPE) {
+                        Ok(source_key) => source_key,
+                        Err(err) => return ToolResult::err_fmt(err.to_string()),
+                    };
+                    let Some(replay_key) = call.context.replay_key() else {
+                        return ToolResult::err_fmt(
+                            "mail send trigger emission requires a replay key",
+                        );
+                    };
+                    let idempotency_key =
+                        format!("{replay_key}:mail.received:{}", delivered.message.id);
                     if let Err(err) = call
                         .context
-                        .host_events()
+                        .triggers()
                         .emit(
-                            MAIL_EVENT_RESOURCE,
-                            MAIL_EVENT_ALIAS,
-                            MAIL_EVENT_EVENT,
-                            payload,
+                            TriggerOccurrenceRequest::new(
+                                MAIL_RECEIVED_SOURCE_TYPE,
+                                source_key,
+                                payload,
+                                idempotency_key,
+                            )
+                            .with_source(json!({})),
                         )
                         .await
                     {
@@ -509,7 +524,7 @@ mod tests {
             .into_iter()
             .find(|manifest| manifest.name == "inbox__work__send")
             .expect("work send manifest");
-        let surface = manifest.agent_surface.executable_for(&manifest.name);
+        let surface = manifest.lashlang_binding.executable_for(&manifest.name);
         assert_eq!(surface.call_path(), "inbox.work.send");
         assert_eq!(surface.authority_type, "Inbox");
 

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lash_sansio::llm::types::ProviderReplayMeta;
 use serde::{Deserialize, Serialize};
@@ -11,18 +11,18 @@ use crate::{AttachmentStore, ToolContract, ToolManifest, ToolResult};
 mod attachments;
 mod direct_completion;
 mod dispatch;
-mod host_events;
 mod process;
 pub(crate) mod process_events;
 mod session;
+mod triggers;
 
-pub use attachments::ToolAttachmentControl;
-pub use direct_completion::ToolDirectCompletionControl;
-pub use dispatch::ToolDispatchControl;
-pub use host_events::ToolHostEventControl;
-pub use process::ToolProcessControl;
-pub use process_events::ToolProcessEventControl;
-pub use session::{ToolSessionControl, ToolSessionModel};
+pub use attachments::ToolAttachmentClient;
+pub use direct_completion::ToolDirectCompletionClient;
+pub use dispatch::ToolDispatchClient;
+pub use process::ToolSessionProcessAdmin;
+pub use process_events::ToolProcessEventClient;
+pub use session::{ToolSessionAdmin, ToolSessionModel};
+pub use triggers::ToolTriggerClient;
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -34,6 +34,39 @@ pub struct SandboxMessage {
 
 /// Sender for streaming progress messages from tools (e.g. live bash output).
 pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
+
+#[derive(Clone, Default)]
+pub(crate) struct ToolCompletionState {
+    key: Arc<Mutex<Option<crate::AwaitEventKey>>>,
+}
+
+impl ToolCompletionState {
+    fn store(
+        &self,
+        key: crate::AwaitEventKey,
+    ) -> Result<crate::AwaitEventKey, crate::RuntimeError> {
+        let mut guard = self.key.lock().map_err(|_| {
+            crate::RuntimeError::new(
+                "tool_completion_state_poisoned",
+                "tool completion key state lock poisoned",
+            )
+        })?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(key.clone());
+        Ok(key)
+    }
+
+    pub(crate) fn take(&self) -> Result<Option<crate::AwaitEventKey>, crate::RuntimeError> {
+        self.key.lock().map(|mut guard| guard.take()).map_err(|_| {
+            crate::RuntimeError::new(
+                "tool_completion_state_poisoned",
+                "tool completion key state lock poisoned",
+            )
+        })
+    }
+}
 
 /// Per-call environment for [`ToolProvider::execute`]. Fields are sealed so
 /// the runtime can add capabilities without breaking tool authors.
@@ -49,6 +82,7 @@ pub struct ToolContext<'run> {
     pub(crate) runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_process_id: Option<String>,
+    pub(crate) runtime_process_id: Option<String>,
     pub(crate) process_events: Option<ToolProcessEventContext>,
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
@@ -58,6 +92,7 @@ pub struct ToolContext<'run> {
     pub(crate) attempt_number: u32,
     pub(crate) max_attempts: u32,
     pub(crate) replay_key: Option<String>,
+    pub(crate) completion: ToolCompletionState,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
     pub(crate) execution_env_spec: crate::ProcessExecutionEnvSpec,
     pub(crate) lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
@@ -112,11 +147,13 @@ pub(crate) struct ToolContextBuilder<'run> {
     runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
     async_process_id: Option<String>,
+    runtime_process_id: Option<String>,
     process_events: Option<ToolProcessEventContext>,
     attachment_store: Arc<dyn AttachmentStore>,
     direct_completions: crate::DirectCompletionClient<'run>,
     prepared_payload: serde_json::Value,
     tool_call_id: Option<String>,
+    completion: ToolCompletionState,
     parent_invocation: Option<crate::RuntimeInvocation>,
     execution_env_spec: crate::ProcessExecutionEnvSpec,
     lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
@@ -138,11 +175,13 @@ impl<'run> ToolContextBuilder<'run> {
             runtime_dispatch: Some(Arc::clone(&dispatch)),
             cancellation_token: None,
             async_process_id: None,
+            runtime_process_id: None,
             process_events: None,
             attachment_store: Arc::clone(&dispatch.attachment_store),
             direct_completions: dispatch.direct_completions.clone(),
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
+            completion: ToolCompletionState::default(),
             parent_invocation: dispatch.parent_invocation.clone(),
             execution_env_spec: dispatch.execution_env_spec.clone(),
             lashlang_execution_call_site: None,
@@ -166,6 +205,11 @@ impl<'run> ToolContextBuilder<'run> {
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Self {
         self.cancellation_token = cancellation_token;
+        self
+    }
+
+    pub(crate) fn runtime_process_id(mut self, process_id: Option<String>) -> Self {
+        self.runtime_process_id = process_id;
         self
     }
 
@@ -223,6 +267,7 @@ impl<'run> ToolContextBuilder<'run> {
             runtime_dispatch: self.runtime_dispatch,
             cancellation_token: self.cancellation_token,
             async_process_id: self.async_process_id,
+            runtime_process_id: self.runtime_process_id,
             process_events: self.process_events,
             attachment_store: self.attachment_store,
             direct_completions: self.direct_completions,
@@ -231,6 +276,7 @@ impl<'run> ToolContextBuilder<'run> {
             attempt_number: 1,
             max_attempts: 1,
             replay_key: None,
+            completion: self.completion,
             parent_invocation: self.parent_invocation,
             execution_env_spec: self.execution_env_spec,
             lashlang_execution_call_site: self.lashlang_execution_call_site,
@@ -267,11 +313,13 @@ impl<'run> ToolContext<'run> {
             runtime_dispatch: None,
             cancellation_token: None,
             async_process_id: None,
+            runtime_process_id: None,
             process_events: None,
             attachment_store,
             direct_completions,
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
+            completion: ToolCompletionState::default(),
             parent_invocation: None,
             execution_env_spec: crate::ProcessExecutionEnvSpec::new(
                 crate::PluginOptions::default(),
@@ -295,8 +343,8 @@ impl<'run> ToolContext<'run> {
         &self.agent_frame_id
     }
 
-    pub fn sessions(&self) -> ToolSessionControl<'run> {
-        ToolSessionControl {
+    pub fn sessions(&self) -> ToolSessionAdmin<'run> {
+        ToolSessionAdmin {
             session_id: self.session_id.clone(),
             sessions: Arc::clone(&self.sessions),
             session_lifecycle: Arc::clone(&self.session_lifecycle),
@@ -304,20 +352,20 @@ impl<'run> ToolContext<'run> {
         }
     }
 
-    pub fn dispatch(&self) -> ToolDispatchControl<'run> {
-        ToolDispatchControl {
+    pub fn dispatch(&self) -> ToolDispatchClient<'run> {
+        ToolDispatchClient {
             context: self.clone(),
         }
     }
 
-    pub fn host_events(&self) -> ToolHostEventControl<'run> {
-        ToolHostEventControl {
+    pub fn triggers(&self) -> ToolTriggerClient<'run> {
+        ToolTriggerClient {
             context: self.clone(),
         }
     }
 
-    pub fn processes(&self) -> ToolProcessControl<'run> {
-        ToolProcessControl {
+    pub fn processes(&self) -> ToolSessionProcessAdmin<'run> {
+        ToolSessionProcessAdmin {
             session_id: self.session_id.clone(),
             agent_frame_id: self.agent_frame_id.clone(),
             processes: Arc::clone(&self.processes),
@@ -384,22 +432,22 @@ impl<'run> ToolContext<'run> {
         );
     }
 
-    pub fn direct_completions(&self) -> ToolDirectCompletionControl<'run> {
-        ToolDirectCompletionControl {
+    pub fn direct_completions(&self) -> ToolDirectCompletionClient<'run> {
+        ToolDirectCompletionClient {
             session_id: self.session_id.clone(),
             tool_call_id: self.tool_call_id.clone(),
             direct_completions: self.direct_completions.clone(),
         }
     }
 
-    pub fn attachments(&self) -> ToolAttachmentControl {
-        ToolAttachmentControl {
+    pub fn attachments(&self) -> ToolAttachmentClient {
+        ToolAttachmentClient {
             store: Arc::clone(&self.attachment_store),
         }
     }
 
-    pub fn process_events(&self) -> ToolProcessEventControl {
-        ToolProcessEventControl {
+    pub fn process_events(&self) -> ToolProcessEventClient {
+        ToolProcessEventClient {
             context: self.process_events.clone(),
         }
     }
@@ -410,6 +458,17 @@ impl<'run> ToolContext<'run> {
 
     pub fn async_process_id(&self) -> Option<&str> {
         self.async_process_id.as_deref()
+    }
+
+    pub fn runtime_process_id(&self) -> Option<&str> {
+        self.async_process_id
+            .as_deref()
+            .or(self.runtime_process_id.as_deref())
+            .or_else(|| {
+                self.process_events
+                    .as_ref()
+                    .map(|context| context.process_id.as_str())
+            })
     }
 
     pub fn tool_call_id(&self) -> Option<&str> {
@@ -439,12 +498,50 @@ impl<'run> ToolContext<'run> {
         self.replay_key.as_deref()
     }
 
+    /// Obtain the durable completion key for this call, required before returning
+    /// [`ToolResult::Pending`](crate::ToolResult::Pending).
+    ///
+    /// A tool that defers its outcome (waiting on a webhook, human approval, or another
+    /// service) calls this, hands the returned [`AwaitEventKey`](crate::AwaitEventKey)
+    /// to whatever will complete the work out-of-band, and then returns
+    /// `ToolResult::Pending(..)`. The key names the durable wait the runtime parks the
+    /// call on; the external resolver delivers the result against it later.
+    ///
+    /// The key is stored on the context and consumed by the dispatcher when the tool
+    /// returns `Pending`. Returning `Pending` without first calling this fails the call
+    /// with `pending_tool_missing_completion_key`. Calls made outside a prepared tool
+    /// invocation (no tool call id) fail with `tool_completion_key_missing_call_id`.
+    pub async fn completion_key(&self) -> Result<crate::AwaitEventKey, crate::RuntimeError> {
+        let tool_call_id = self.tool_call_id.clone().ok_or_else(|| {
+            crate::RuntimeError::new(
+                "tool_completion_key_missing_call_id",
+                "completion keys require a prepared tool call id",
+            )
+        })?;
+        let scoped = self.effect_controller.scoped();
+        let key = scoped
+            .controller()
+            .await_event_key(
+                scoped.execution_scope(),
+                crate::AwaitEventWaitIdentity::tool_completion(tool_call_id),
+            )
+            .await?;
+        self.completion.store(key)
+    }
+
+    pub(crate) fn take_completion_key(
+        &self,
+    ) -> Result<Option<crate::AwaitEventKey>, crate::RuntimeError> {
+        self.completion.take()
+    }
+
     pub fn with_async_process(
         mut self,
         process_id: impl Into<String>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         self.async_process_id = Some(process_id.into());
+        self.runtime_process_id = self.async_process_id.clone();
         self.cancellation_token = Some(cancellation_token);
         self
     }

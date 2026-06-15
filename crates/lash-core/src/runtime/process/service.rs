@@ -539,9 +539,9 @@ mod tests {
         ProcessOpScope::new(
             crate::ScopedEffectController::shared(
                 Arc::new(crate::InlineRuntimeEffectController),
-                crate::EffectScope::runtime_operation(id),
+                crate::ExecutionScope::runtime_operation(id),
             )
-            .expect("test effect scope"),
+            .expect("test execution scope"),
         )
     }
 

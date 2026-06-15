@@ -81,11 +81,13 @@ pub use causal::process_event_invocation;
 pub(crate) use causal::tool_retry_sleep_invocation;
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    CausalRef, EffectHost, EffectScope, InlineEffectHost, InlineRuntimeEffectController,
-    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
+    AwaitEventKey, AwaitEventWaitIdentity, CausalRef, EffectHost, ExecutionScope,
+    ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController, LlmAttachmentSpec,
+    LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, Resolution, ResolveOutcome,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
+    ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
@@ -113,14 +115,13 @@ pub use process::{
     ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease,
     ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
     ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessSpawnProvenance, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
-    ProcessStatusFilter,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver,
-    ProcessWorkSnapshot, SessionScope, SessionScopeId, UnavailableProcessService, WaitKind,
-    WaitState, current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
-    lashlang_process_signal_event_types, load_process_execution_env,
+    ProcessRegistry, ProcessService, ProcessSessionDeleteReport, ProcessSpawnProvenance,
+    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+    ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+    UnavailableProcessService, WaitKind, WaitState, current_epoch_ms, epoch_ms_from_system_time,
+    lashlang_process_event_types, lashlang_process_signal_event_types, load_process_execution_env,
     materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
@@ -174,6 +175,71 @@ pub trait RuntimeTurnPhaseProbe: Send + Sync {
     fn end(&self, phase: RuntimeTurnPhase);
     fn begin_named(&self, _phase: &str) {}
     fn end_named(&self, _phase: &str) {}
+}
+
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct RuntimeTurnPhaseProbeSlot {
+    probes: Arc<StdMutex<HashMap<crate::SessionScopeId, Arc<dyn RuntimeTurnPhaseProbe>>>>,
+}
+
+impl RuntimeTurnPhaseProbeSlot {
+    pub fn set_for_session(
+        &self,
+        session_id: impl Into<String>,
+        probe: Arc<dyn RuntimeTurnPhaseProbe>,
+    ) {
+        self.set_for_scope(&crate::SessionScope::new(session_id), probe);
+    }
+
+    pub fn set_for_scope(
+        &self,
+        scope: &crate::SessionScope,
+        probe: Arc<dyn RuntimeTurnPhaseProbe>,
+    ) {
+        self.probes
+            .lock()
+            .expect("runtime phase probe slot")
+            .insert(scope.id(), probe);
+    }
+
+    pub fn get_for_scope(
+        &self,
+        scope: &crate::SessionScope,
+    ) -> Option<Arc<dyn RuntimeTurnPhaseProbe>> {
+        let probes = self.probes.lock().expect("runtime phase probe slot");
+        probes.get(&scope.id()).cloned().or_else(|| {
+            probes
+                .get(&crate::SessionScope::new(&scope.session_id).id())
+                .cloned()
+        })
+    }
+}
+
+#[doc(hidden)]
+pub struct RuntimeNamedPhase {
+    probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+    phase: &'static str,
+}
+
+impl RuntimeNamedPhase {
+    pub fn begin(
+        probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+        phase: &'static str,
+    ) -> RuntimeNamedPhase {
+        if let Some(probe) = probe.as_ref() {
+            probe.begin_named(phase);
+        }
+        RuntimeNamedPhase { probe, phase }
+    }
+}
+
+impl Drop for RuntimeNamedPhase {
+    fn drop(&mut self) {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.end_named(self.phase);
+        }
+    }
 }
 
 /// Host-provided per-turn input.
@@ -597,7 +663,7 @@ impl Default for TerminationPolicy {
     }
 }
 
-/// Host event sink for low-level streaming runtime events.
+/// Host application sink for low-level streaming runtime events.
 /// `SessionEvent` is protocol-specific preview/progress data.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
@@ -788,7 +854,7 @@ impl TurnActivitySink for NoopTurnActivitySink {
 /// `stream_turn_with_agent_frames`).
 ///
 /// Construct via [`TurnOptions::new`] and chain `with_*` builders. Event sinks
-/// default to no-op sinks. Effect scope is explicit and required at every
+/// default to no-op sinks. Execution scope is explicit and required at every
 /// runtime boundary that can execute nondeterministic work.
 pub struct TurnOptions<'a> {
     events: Option<&'a dyn EventSink>,
@@ -828,7 +894,7 @@ impl<'a> TurnOptions<'a> {
         self.turn_events.unwrap_or(&NOOP_TURN_ACTIVITY_SINK)
     }
 
-    pub(crate) fn effect_scope_id(&self) -> &str {
+    pub(crate) fn execution_scope_id(&self) -> &str {
         self.scoped_effect_controller.scope_id()
     }
 

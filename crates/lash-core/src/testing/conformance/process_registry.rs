@@ -313,7 +313,7 @@ async fn custom_wake_events_preserve_typed_provenance_and_replay(
     let target_scope_id = target_scope.id();
     let process_caused_by = CausalRef::SessionNode {
         session_id: "target-session".to_string(),
-        node_id: "host-event:button".to_string(),
+        node_id: "trigger:button".to_string(),
     };
     let event_type = wake_event_type_with(
         "producer.custom_wake",
@@ -1042,7 +1042,11 @@ async fn count_and_recent_events_match_the_log(registry: Arc<dyn ProcessRegistry
         .recent_events("proc-event-queries", 100)
         .await
         .expect("generous limit");
-    assert_eq!(generous.len(), full.len(), "limit above log length is the whole log");
+    assert_eq!(
+        generous.len(),
+        full.len(),
+        "limit above log length is the whole log"
+    );
 }
 
 async fn list_processes_filters_by_status_and_waiting(registry: Arc<dyn ProcessRegistry>) {

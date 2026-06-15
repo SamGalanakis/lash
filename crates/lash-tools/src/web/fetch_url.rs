@@ -111,7 +111,7 @@ fn fetch_url_tool_definition() -> ToolDefinition {
                 }),
             )
             .with_examples(vec!["await web.fetch({ url: \"https://www.rust-lang.org/\" })?".into()])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["web"],
                 "fetch",
                 &["fetch", "open_url"],

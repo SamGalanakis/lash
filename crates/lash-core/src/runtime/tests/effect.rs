@@ -60,7 +60,7 @@ fn scoped_test_turn<'a>(
 ) -> ScopedEffectController<'a> {
     ScopedEffectController::borrowed(
         controller,
-        EffectScope::turn("effect-test-session", turn_id),
+        ExecutionScope::turn("effect-test-session", turn_id),
     )
     .expect("scoped effect controller")
 }
@@ -159,20 +159,22 @@ impl RuntimeEffectController for RecordingEffectController {
             RuntimeEffectCommand::ToolCall { call } => {
                 let output = crate::ToolCallOutput::success(serde_json::json!({"ok": true}));
                 Ok(RuntimeEffectOutcome::ToolCall {
-                    result: crate::sansio::CompletedToolCall {
-                        call_id: call.call_id.clone(),
-                        tool_name: call.tool_name.clone(),
-                        args: call.args,
-                        model_return: crate::ModelToolReturn {
-                            call_id: call.call_id,
-                            tool_name: call.tool_name,
-                            parts: vec![crate::ModelToolReturnPart::text("ok")],
+                    launch: crate::ToolCallLaunch::Done {
+                        result: crate::sansio::CompletedToolCall {
+                            call_id: call.call_id.clone(),
+                            tool_name: call.tool_name.clone(),
+                            args: call.args,
+                            model_return: crate::ModelToolReturn {
+                                call_id: call.call_id,
+                                tool_name: call.tool_name,
+                                parts: vec![crate::ModelToolReturnPart::text("ok")],
+                            },
+                            output,
+                            duration_ms: 0,
+                            replay: call.replay,
                         },
-                        output,
-                        duration_ms: 0,
-                        replay: call.replay,
                     },
-                    host_events: Vec::new(),
+                    triggers: Vec::new(),
                 })
             }
             RuntimeEffectCommand::Process { .. } => Err(RuntimeEffectControllerError::new(
@@ -182,8 +184,8 @@ impl RuntimeEffectController for RecordingEffectController {
             RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
                 result: Ok(crate::CheckpointDelivery::default()),
             }),
-            RuntimeEffectCommand::SyncExecutionSurface { .. } => {
-                Ok(RuntimeEffectOutcome::SyncExecutionSurface { result: Ok(None) })
+            RuntimeEffectCommand::SyncExecutionEnvironment { .. } => {
+                Ok(RuntimeEffectOutcome::SyncExecutionEnvironment { result: Ok(None) })
             }
             RuntimeEffectCommand::ExecCode { .. } => Ok(RuntimeEffectOutcome::ExecCode {
                 result: Ok(crate::ExecResponse {
@@ -199,7 +201,7 @@ impl RuntimeEffectController for RecordingEffectController {
             }),
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
             RuntimeEffectCommand::AwaitEvent { .. } => Ok(RuntimeEffectOutcome::AwaitEvent {
-                payload: serde_json::json!(null),
+                resolution: crate::Resolution::Ok(serde_json::json!(null)),
             }),
             RuntimeEffectCommand::Direct { request, .. } => {
                 // Both the text-only (`direct_completion`) and full-response
@@ -529,9 +531,9 @@ async fn controller_rejection_fails_turn_explicitly() {
             CancellationToken::new(),
             ScopedEffectController::shared(
                 controller,
-                EffectScope::turn("root", "rejecting-controller"),
+                ExecutionScope::turn("root", "rejecting-controller"),
             )
-            .expect("rejecting effect scope"),
+            .expect("rejecting execution scope"),
         )
         .await
         .expect("turn");
@@ -565,9 +567,9 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
             CancellationToken::new(),
             ScopedEffectController::shared(
                 controller,
-                EffectScope::turn("root", "wrong-outcome-controller"),
+                ExecutionScope::turn("root", "wrong-outcome-controller"),
             )
-            .expect("wrong outcome effect scope"),
+            .expect("wrong outcome execution scope"),
         )
         .await
         .expect("turn");
@@ -586,8 +588,11 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
 async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
     let recorder = RecordingEffectController::default();
     assert!(
-        ScopedEffectController::borrowed(&recorder, EffectScope::turn("effect-test-session", ""))
-            .is_err()
+        ScopedEffectController::borrowed(
+            &recorder,
+            ExecutionScope::turn("effect-test-session", "")
+        )
+        .is_err()
     );
     let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
@@ -915,7 +920,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
 }
 
 #[tokio::test]
-async fn tool_emitted_host_event_is_serialized_without_appending_session_node() {
+async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
     #[derive(Clone, Default)]
     struct CapturingToolReplayController {
         llm_calls: Arc<Mutex<usize>>,
@@ -950,8 +955,8 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
                     *llm_calls += 1;
                     let parts = if *llm_calls == 1 {
                         vec![LlmOutputPart::ToolCall {
-                            call_id: "host-event-call".to_string(),
-                            tool_name: "host_event_tool".to_string(),
+                            call_id: "trigger-call".to_string(),
+                            tool_name: "trigger_tool".to_string(),
                             input_json: serde_json::json!({}).to_string(),
                             replay: None,
                         }]
@@ -991,13 +996,13 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
         }
     }
 
-    struct HostEventTool;
+    struct TriggerEventTool;
 
-    fn host_event_tool_definition() -> crate::ToolDefinition {
+    fn trigger_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
-            "tool:host_event_tool",
-            "host_event_tool",
-            "Emit a test host event.",
+            "tool:trigger_tool",
+            "trigger_tool",
+            "Emit a test trigger occurrence.",
             serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -1008,26 +1013,37 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     }
 
     #[async_trait::async_trait]
-    impl crate::ToolProvider for HostEventTool {
+    impl crate::ToolProvider for TriggerEventTool {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-            vec![host_event_tool_definition().manifest()]
+            vec![trigger_tool_definition().manifest()]
         }
 
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-            (name == "host_event_tool").then(|| Arc::new(host_event_tool_definition().contract()))
+            (name == "trigger_tool").then(|| Arc::new(trigger_tool_definition().contract()))
         }
 
         async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            let source_type = crate::trigger_event_type("ui.button", "pressed");
+            let source_key =
+                crate::empty_trigger_source_key(&source_type).expect("empty trigger source key");
+            let idempotency_key = call
+                .context
+                .replay_key()
+                .map(|key| format!("{key}:trigger:button-pressed"))
+                .unwrap_or_else(|| "test-trigger:button-pressed".to_string());
             call.context
-                .host_events()
+                .triggers()
                 .emit(
-                    "Button",
-                    "ui.button",
-                    "pressed",
-                    serde_json::json!({ "pressed": true }),
+                    crate::TriggerOccurrenceRequest::new(
+                        source_type,
+                        source_key,
+                        serde_json::json!({ "pressed": true }),
+                        idempotency_key,
+                    )
+                    .with_source(serde_json::json!({})),
                 )
                 .await
-                .expect("emit tool host event");
+                .expect("emit tool trigger occurrence");
             crate::ToolResult::ok(serde_json::json!({ "emitted": true }))
         }
     }
@@ -1037,7 +1053,7 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
         mock_provider(Vec::new()).into_handle(),
     ));
-    let host_event = crate::HostEvent::new(
+    let trigger = crate::TriggerEvent::new(
         "Button",
         "ui.button",
         "pressed",
@@ -1045,10 +1061,10 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     );
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         vec![Arc::new(StaticPluginFactory::new(
-            "button-host-events",
-            crate::PluginSpec::new().with_host_event(host_event),
+            "button-triggers",
+            crate::PluginSpec::new().with_trigger_event(trigger),
         ))],
-        Arc::new(HostEventTool),
+        Arc::new(TriggerEventTool),
         mock_provider(Vec::new()),
         EmbeddedRuntimeHost::new(config),
     )
@@ -1056,14 +1072,14 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
 
     let turn = runtime
         .stream_turn(
-            TurnInput::text("emit host event from tool"),
+            TurnInput::text("emit trigger from tool"),
             TurnOptions::new(
                 CancellationToken::new(),
                 ScopedEffectController::shared(
                     Arc::new(controller.clone()),
-                    EffectScope::turn("root", "host-event-tool"),
+                    ExecutionScope::turn("root", "trigger-tool"),
                 )
-                .expect("capturing effect scope"),
+                .expect("capturing execution scope"),
             )
             .with_events(&NoopEventSink),
         )
@@ -1075,34 +1091,34 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     assert_eq!(tool_outcomes.len(), 1);
     assert_eq!(tool_outcomes[0]["type"], "tool_call");
     assert_eq!(
-        tool_outcomes[0]["host_events"][0]["source_type"],
+        tool_outcomes[0]["triggers"][0]["source_type"],
         serde_json::json!("ui.button.pressed")
     );
     assert_eq!(
-        tool_outcomes[0]["host_events"][0]["payload"],
+        tool_outcomes[0]["triggers"][0]["payload"],
         serde_json::json!({ "pressed": true })
     );
     assert!(
-        tool_outcomes[0]["host_events"][0]["occurrence_id"]
+        tool_outcomes[0]["triggers"][0]["occurrence_id"]
             .as_str()
             .is_some_and(|value| !value.is_empty())
     );
 
-    let host_event_nodes = turn
+    let trigger_nodes = turn
         .state
         .session_graph
         .active_path_nodes()
         .into_iter()
         .filter_map(|node| match &node.payload {
             crate::SessionNodePayload::Plugin { plugin_type, body }
-                if plugin_type == "lash.host_event" =>
+                if plugin_type == "lash.trigger" =>
             {
                 Some(body.as_ref().clone())
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(host_event_nodes.is_empty());
+    assert!(trigger_nodes.is_empty());
 }
 
 #[tokio::test]
@@ -1294,7 +1310,7 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
 }
 
 #[tokio::test]
-async fn exec_and_execution_surface_effects_cross_controller_once() {
+async fn exec_and_execution_environment_effects_cross_controller_once() {
     let recorder = RecordingEffectController::default();
     let policy = SessionPolicy {
         provider_id: "mock".to_string(),
@@ -1337,7 +1353,7 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     assert_eq!(
-        recorder.count_kind(RuntimeEffectKind::SyncExecutionSurface),
+        recorder.count_kind(RuntimeEffectKind::SyncExecutionEnvironment),
         1
     );
     assert_eq!(recorder.count_kind(RuntimeEffectKind::ExecCode), 1);
@@ -1867,9 +1883,9 @@ impl ProtocolDriverPlugin for EffectControllerTestProtocolDriver {
                 true,
                 Arc::new(effect_controller_turn_limit_final_message),
             ),
-            tool_specs: input.tool_surface.model_tool_specs(),
-            tool_names: input.tool_surface.tool_names(),
-            tool_names_fingerprint: input.tool_surface.tool_names_fingerprint(),
+            tool_specs: input.tool_catalog.model_tool_specs(),
+            tool_names: input.tool_catalog.tool_names(),
+            tool_names_fingerprint: input.tool_catalog.tool_names_fingerprint(),
             omitted_tool_count: 0,
             execution_prompt: Arc::from(""),
             prompt_contributions: input.extra_prompt_contributions,

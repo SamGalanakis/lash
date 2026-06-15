@@ -13,27 +13,27 @@ fn main() {
 
     request.validate().unwrap();
 
-    let host_event = lash::remote::RemoteHostEventOccurrenceRequest::new(
+    let trigger = lash::remote::RemoteTriggerOccurrenceRequest::new(
         "ui.button.pressed",
         "source-key",
         serde_json::json!({ "button": "Blue" }),
         "button-blue-1",
     );
-    host_event.validate().unwrap();
+    trigger.validate().unwrap();
 
     let filter = lash::remote::RemoteTriggerSubscriptionFilter::for_source_type(
         "ui.button.pressed",
     );
     filter.validate().unwrap();
 
-    let report = lash::remote::RemoteHostEventEmitReport {
+    let report = lash::remote::RemoteTriggerEmitReport {
         protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
         occurrence_id: "occurrence:1".to_string(),
         started_process_ids: Vec::new(),
     };
     report.validate().unwrap();
 
-    let _cause = lash::remote::RemoteCausalRef::HostEvent {
+    let _cause = lash::remote::RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
     };
 

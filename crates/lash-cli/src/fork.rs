@@ -12,7 +12,7 @@ use crate::startup::session::SessionBootstrap;
 
 async fn persist_parent_root_snapshot(session: &lash::LashSession, store: &Store) -> Result<()> {
     let mut state = session
-        .control()
+        .admin()
         .state()
         .persist_current()
         .await

@@ -8,8 +8,8 @@ use crate::llm::types::{
     LlmToolChoice, LlmToolSpec,
 };
 use crate::runtime::ProcessHandleGrantEntry;
-use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
-use crate::tool_dispatch::ToolHostEventEffectOutcome;
+use crate::sansio::{CompletedToolCall, ExecutionEnvironmentSync, LlmCallError};
+use crate::tool_dispatch::ToolTriggerEffectOutcome;
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
     ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
@@ -29,7 +29,7 @@ pub enum RuntimeEffectKind {
     Process,
     ExecCode,
     Checkpoint,
-    SyncExecutionSurface,
+    SyncExecutionEnvironment,
     Sleep,
     AwaitEvent,
 }
@@ -43,7 +43,7 @@ impl RuntimeEffectKind {
             Self::Process => "process",
             Self::ExecCode => "exec_code",
             Self::Checkpoint => "checkpoint",
-            Self::SyncExecutionSurface => "sync_execution_surface",
+            Self::SyncExecutionEnvironment => "sync_execution_environment",
             Self::Sleep => "sleep",
             Self::AwaitEvent => "await_event",
         }
@@ -122,9 +122,11 @@ impl RuntimeInvocation {
                 process_id: process_id.clone(),
                 sequence: *sequence,
             }),
-            RuntimeSubject::HostEvent { occurrence_id } => Some(CausalRef::HostEvent {
-                occurrence_id: occurrence_id.clone(),
-            }),
+            RuntimeSubject::TriggerOccurrence { occurrence_id } => {
+                Some(CausalRef::TriggerOccurrence {
+                    occurrence_id: occurrence_id.clone(),
+                })
+            }
             RuntimeSubject::SessionNode { node_id } => Some(CausalRef::SessionNode {
                 session_id: self.scope.session_id.clone(),
                 node_id: node_id.clone(),
@@ -189,7 +191,7 @@ pub enum RuntimeSubject {
         sequence: u64,
         event_type: String,
     },
-    HostEvent {
+    TriggerOccurrence {
         occurrence_id: String,
     },
     SessionNode {
@@ -292,14 +294,14 @@ pub enum RuntimeEffectCommand {
     Checkpoint {
         checkpoint: CheckpointKind,
     },
-    SyncExecutionSurface {
+    SyncExecutionEnvironment {
         update_machine_config: bool,
     },
     Sleep {
         duration_ms: u64,
     },
     AwaitEvent {
-        key: String,
+        key: crate::AwaitEventKey,
     },
 }
 
@@ -318,14 +320,14 @@ impl RuntimeEffectCommand {
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
-            Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
+            Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep { .. } => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }
     }
 }
 
-/// Serializable operation against the process control plane.
+/// Serializable operation against the process admin plane.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ProcessCommand {
@@ -438,9 +440,22 @@ pub enum ProcessEffectOutcome {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallEffectOutcome {
-    pub result: CompletedToolCall,
+    pub launch: ToolCallLaunch,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub host_events: Vec<ToolHostEventEffectOutcome>,
+    pub triggers: Vec<ToolTriggerEffectOutcome>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolCallLaunch {
+    Done {
+        result: CompletedToolCall,
+    },
+    Pending {
+        key: crate::AwaitEventKey,
+        pending: crate::PendingCompletion,
+        duration_ms: u64,
+    },
 }
 
 /// Serializable result of a runtime effect command.
@@ -455,9 +470,9 @@ pub enum RuntimeEffectOutcome {
         result: Result<LlmResponse, LlmCallError>,
     },
     ToolCall {
-        result: CompletedToolCall,
+        launch: ToolCallLaunch,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        host_events: Vec<ToolHostEventEffectOutcome>,
+        triggers: Vec<ToolTriggerEffectOutcome>,
     },
     Process {
         result: ProcessEffectOutcome,
@@ -468,12 +483,12 @@ pub enum RuntimeEffectOutcome {
     Checkpoint {
         result: CheckpointOutcome,
     },
-    SyncExecutionSurface {
-        result: Result<Option<ExecutionSurfaceSync>, String>,
+    SyncExecutionEnvironment {
+        result: Result<Option<ExecutionEnvironmentSync>, String>,
     },
     Sleep,
     AwaitEvent {
-        payload: serde_json::Value,
+        resolution: crate::Resolution,
     },
 }
 
@@ -638,7 +653,17 @@ impl RuntimeEffectOutcome {
 
     pub fn into_tool_call(self) -> Result<CompletedToolCall, RuntimeEffectControllerError> {
         match self {
-            Self::ToolCall { result, .. } => Ok(result),
+            Self::ToolCall {
+                launch: ToolCallLaunch::Done { result },
+                ..
+            } => Ok(result),
+            Self::ToolCall {
+                launch: ToolCallLaunch::Pending { .. },
+                ..
+            } => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_tool_call_pending",
+                "tool call launch is pending and has no completed output yet",
+            )),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ToolCall,
                 other.kind(),
@@ -650,13 +675,7 @@ impl RuntimeEffectOutcome {
         self,
     ) -> Result<ToolCallEffectOutcome, RuntimeEffectControllerError> {
         match self {
-            Self::ToolCall {
-                result,
-                host_events,
-            } => Ok(ToolCallEffectOutcome {
-                result,
-                host_events,
-            }),
+            Self::ToolCall { launch, triggers } => Ok(ToolCallEffectOutcome { launch, triggers }),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ToolCall,
                 other.kind(),
@@ -696,21 +715,22 @@ impl RuntimeEffectOutcome {
         }
     }
 
-    pub fn into_sync_execution_surface(
+    pub fn into_sync_execution_environment(
         self,
-    ) -> Result<Result<Option<ExecutionSurfaceSync>, String>, RuntimeEffectControllerError> {
+    ) -> Result<Result<Option<ExecutionEnvironmentSync>, String>, RuntimeEffectControllerError>
+    {
         match self {
-            Self::SyncExecutionSurface { result } => Ok(result),
+            Self::SyncExecutionEnvironment { result } => Ok(result),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
-                RuntimeEffectKind::SyncExecutionSurface,
+                RuntimeEffectKind::SyncExecutionEnvironment,
                 other.kind(),
             )),
         }
     }
 
-    pub fn into_await_event(self) -> Result<serde_json::Value, RuntimeEffectControllerError> {
+    pub fn into_await_event(self) -> Result<crate::Resolution, RuntimeEffectControllerError> {
         match self {
-            Self::AwaitEvent { payload } => Ok(payload),
+            Self::AwaitEvent { resolution } => Ok(resolution),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::AwaitEvent,
                 other.kind(),
@@ -726,7 +746,7 @@ impl RuntimeEffectOutcome {
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
-            Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
+            Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
         }

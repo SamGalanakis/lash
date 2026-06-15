@@ -118,9 +118,9 @@ impl Default for RlmPromptFeatures {
     }
 }
 
-pub fn rlm_execution_section_for_surface(
+pub fn rlm_execution_section_for_host_environment(
     features: RlmPromptFeatures,
-    surface: &lashlang::LashlangSurface,
+    surface: &lashlang::LashlangHostEnvironment,
 ) -> String {
     let has_operations = surface.resources.has_operations();
     let mut sections = Vec::new();
@@ -131,7 +131,7 @@ pub fn rlm_execution_section_for_surface(
         &surface.abilities,
         &surface.language_features,
     ));
-    if let Some(section) = render_host_surface_section(surface) {
+    if let Some(section) = render_host_environment_section(surface) {
         sections.push(section);
     }
     sections.push(if features.images {
@@ -154,7 +154,7 @@ pub fn rlm_execution_section_for_surface(
     sections.join("\n\n")
 }
 
-fn render_host_surface_section(surface: &lashlang::LashlangSurface) -> Option<String> {
+fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) -> Option<String> {
     let mut operation_lines = Vec::new();
     for (_, module) in surface.resources.module_instances() {
         if let Some(resource_type) =
@@ -341,7 +341,7 @@ fn render_language_section(
             forms.push("`payload = wait_signal(\"name\")`");
         }
         let trigger_process_note = if abilities.triggers {
-            " matching host-event occurrences can also create process runs through registered triggers."
+            " matching trigger occurrences can also create process runs through registered triggers."
         } else {
             ""
         };
@@ -365,7 +365,7 @@ fn render_language_section(
         let trigger_register = lashlang::TriggerHostOperation::Register.host_operation();
         let trigger_list = lashlang::TriggerHostOperation::List.host_operation();
         let trigger_cancel = lashlang::TriggerHostOperation::Cancel.host_operation();
-        bullets.push(format!("- Trigger registry: a trigger registration connects a typed source value to a process definition plus explicit inputs. Register with `handle = await {trigger_register}({{ source: source, target: daily_digest, inputs: {{ tick: trigger.event }}, name: \"daily_digest\" }})?`. Constructors build source values; the host/plugin that owns the source lists stored subscriptions by source type/key and emits host-event occurrences when source-specific events happen. `target` is a process definition value. `inputs` is required and maps every process param exactly once. `trigger.event` is the direct whole-event value inside `inputs`; fixed inputs can pass concrete authorities like `gmail.work` or `agents` for account-parametric processes. Use `await {trigger_list}({{}})?` to discover visible registrations, or filter with `{{ target: daily_digest }}`, `{{ name: \"daily_digest\" }}`, `{{ source_type: \"cron.Schedule\" }}`, and `{{ enabled: true }}`. Use `await {trigger_cancel}({{ handle: handle }})?` to disable future occurrence delivery for that registration."));
+        bullets.push(format!("- Trigger registry: a trigger registration connects a typed source value to a process definition plus explicit inputs. Register with `handle = await {trigger_register}({{ source: source, target: daily_digest, inputs: {{ tick: trigger.event }}, name: \"daily_digest\" }})?`. Constructors build source values; the host/plugin that owns the source lists stored subscriptions by source type/key and emits trigger occurrences when source-specific events happen. `target` is a process definition value. `inputs` is required and maps every process param exactly once. `trigger.event` is the direct whole-event value inside `inputs`; fixed inputs can pass concrete authorities like `gmail.work` or `agents` for account-parametric processes. Use `await {trigger_list}({{}})?` to discover visible registrations, or filter with `{{ target: daily_digest }}`, `{{ name: \"daily_digest\" }}`, `{{ source_type: \"cron.Schedule\" }}`, and `{{ enabled: true }}`. Use `await {trigger_cancel}({{ handle: handle }})?` to disable future occurrence delivery for that registration."));
     }
     if has_operations {
         let scheduling = if abilities.processes {

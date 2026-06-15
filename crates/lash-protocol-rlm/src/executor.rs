@@ -71,10 +71,13 @@ async fn execute_code_inner(
     projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> ExecResponse {
     state.dirty = true;
-    let cached_program = match state
-        .linked_programs
-        .get_or_compile(code, ctx.lashlang_surface())
-    {
+    let compile_result = {
+        let _phase = ctx.named_phase("rlm_lashlang.compile_link");
+        state
+            .linked_programs
+            .get_or_compile(code, ctx.lashlang_host_environment())
+    };
+    let cached_program = match compile_result {
         Ok(program) => program,
         Err(lashlang::LinkedProgramCacheError::Parse(err)) => {
             return ExecResponse {
@@ -107,10 +110,12 @@ async fn execute_code_inner(
             .stored_lashlang_modules
             .contains(&linked_module.module_ref)
     {
-        if let Err(err) = ctx
-            .put_lashlang_module_artifact(&linked_module.artifact)
-            .await
-        {
+        let stored = {
+            let _phase = ctx.named_phase("rlm_lashlang.store_module_artifact");
+            ctx.put_lashlang_module_artifact(&linked_module.artifact)
+                .await
+        };
+        if let Err(err) = stored {
             return ExecResponse {
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),
@@ -128,9 +133,11 @@ async fn execute_code_inner(
     }
     let compiled = cached_program.compiled_program();
 
-    if let Err(err) =
+    let rehydrated = {
+        let _phase = ctx.named_phase("rlm_lashlang.rehydrate_projected_globals");
         rehydrate_projected_globals(&mut state.rlm, Arc::clone(&projection_resolver)).await
-    {
+    };
+    if let Err(err) = rehydrated {
         return ExecResponse {
             observations: Vec::new(),
             observation_truncation: Vec::new(),
@@ -143,7 +150,8 @@ async fn execute_code_inner(
         };
     }
 
-    let projected =
+    let projected = {
+        let _phase = ctx.named_phase("rlm_lashlang.resolve_projected_bindings");
         match projected_bindings(&ctx, session_projected_bindings, projection_resolver).await {
             Ok(projected) => projected,
             Err(err) => {
@@ -158,7 +166,8 @@ async fn execute_code_inner(
                     terminal_finish: None,
                 };
             }
-        };
+        }
+    };
     let projected_names = projected.names().collect::<Vec<_>>();
     prune_projected_binding_names(&mut state.rlm, projected_names.iter().map(String::as_str));
     let tool_result_projectors = tool_result_projectors(&ctx);
@@ -168,7 +177,7 @@ async fn execute_code_inner(
         emit_foreground_execution_started(trace, &linked_module.artifact);
     }
     let host = HostBridge::new(
-        ctx,
+        ctx.clone(),
         state.observe_projection.clone(),
         tool_result_projectors,
         lashlang_execution_trace.clone(),
@@ -177,7 +186,10 @@ async fn execute_code_inner(
         .traced()
         .with_scratch(std::mem::take(&mut state.scratch))
         .with_projected_bindings(projected);
-    let result = Box::pin(lashlang::execute(compiled, &mut state.rlm, &env)).await;
+    let result = {
+        let _phase = ctx.named_phase("rlm_lashlang.execute");
+        Box::pin(lashlang::execute(compiled, &mut state.rlm, &env)).await
+    };
     state.scratch = env.take_recycled_scratch().unwrap_or_default();
     let runtime_failure = env.take_runtime_failure();
     if let Some(trace) = &lashlang_execution_trace {
@@ -389,7 +401,7 @@ mod tests {
     use lash_rlm_types::PROJECTED_JSON_TAG;
     use lashlang::{
         AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
-        ExecutionOutcome, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
+        ExecutionOutcome, ProjectedBindings, ProjectedFuture, ProjectedHostDescriptor,
         ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record as FlowRecord,
         Value as FlowValue,
     };
@@ -439,7 +451,7 @@ mod tests {
         render_count: AtomicUsize,
     }
 
-    impl ProjectedHostValue for SnapshotProjectedToolText {
+    impl ProjectedHostDescriptor for SnapshotProjectedToolText {
         fn type_name(&self) -> &str {
             "string"
         }
@@ -466,7 +478,7 @@ mod tests {
         }
     }
 
-    impl ProjectedHostValue for TestProjectedValue {
+    impl ProjectedHostDescriptor for TestProjectedValue {
         fn type_name(&self) -> &str {
             "list"
         }
@@ -510,13 +522,18 @@ mod tests {
         code: &str,
         abilities: lashlang::LashlangAbilities,
     ) -> ExecResponse {
-        execute_with_lashlang_surface(code, abilities, lashlang::ResourceCatalog::new()).await
+        execute_with_lashlang_host_environment(
+            code,
+            abilities,
+            lashlang::LashlangHostCatalog::new(),
+        )
+        .await
     }
 
-    async fn execute_with_lashlang_surface(
+    async fn execute_with_lashlang_host_environment(
         code: &str,
         abilities: lashlang::LashlangAbilities,
-        resources: lashlang::ResourceCatalog,
+        resources: lashlang::LashlangHostCatalog,
     ) -> ExecResponse {
         let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
         let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
@@ -551,7 +568,7 @@ mod tests {
                 state,
                 lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
                     lashlang::LashlangAbilities::default(),
-                    lashlang::ResourceCatalog::new(),
+                    lashlang::LashlangHostCatalog::new(),
                 ),
                 request(),
                 RlmProjectedBindings::default(),
@@ -569,7 +586,7 @@ mod tests {
                 state,
                 lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
                     lashlang::LashlangAbilities::default(),
-                    lashlang::ResourceCatalog::new(),
+                    lashlang::LashlangHostCatalog::new(),
                 ),
                 request(),
                 RlmProjectedBindings::default(),
@@ -599,7 +616,7 @@ mod tests {
             let context = || {
                 lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
                     lashlang::LashlangAbilities::default().with_processes(),
-                    lashlang::ResourceCatalog::new(),
+                    lashlang::LashlangHostCatalog::new(),
                 )
             };
 
@@ -632,8 +649,8 @@ mod tests {
         });
     }
 
-    fn timer_trigger_resources() -> lashlang::ResourceCatalog {
-        let mut resources = lashlang::ResourceCatalog::new();
+    fn timer_trigger_resources() -> lashlang::LashlangHostCatalog {
+        let mut resources = lashlang::LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["timer", "Schedule"],
@@ -663,8 +680,8 @@ mod tests {
         resources
     }
 
-    async fn execute_with_trigger_surface(code: &str) -> ExecResponse {
-        execute_with_lashlang_surface(
+    async fn execute_with_trigger_environment(code: &str) -> ExecResponse {
+        execute_with_lashlang_host_environment(
             code,
             lashlang::LashlangAbilities::default()
                 .with_processes()
@@ -677,7 +694,7 @@ mod tests {
     #[test]
     fn trigger_registry_operations_execute_foreground_code() {
         block_on(async {
-            let response = execute_with_trigger_surface(
+            let response = execute_with_trigger_environment(
                 r#"
                 process remember(tick: timer.Tick) {
                   finish true
@@ -715,7 +732,7 @@ mod tests {
     #[test]
     fn trigger_cancel_disables_future_registry_entries() {
         block_on(async {
-            let response = execute_with_trigger_surface(
+            let response = execute_with_trigger_environment(
                 r#"
                 process remember(tick: timer.Tick) {
                   finish true
@@ -746,7 +763,7 @@ mod tests {
     #[test]
     fn trigger_registration_failure_prevents_foreground_execution() {
         block_on(async {
-            let response = execute_with_trigger_surface(
+            let response = execute_with_trigger_environment(
                 r#"
                 process remember(tick: str) {
                   finish tick
@@ -797,7 +814,7 @@ mod tests {
             name: &'static str,
             code: &'static str,
             abilities: lashlang::LashlangAbilities,
-            resources: fn() -> lashlang::ResourceCatalog,
+            resources: fn() -> lashlang::LashlangHostCatalog,
             feature: &'static str,
         }
 
@@ -806,35 +823,35 @@ mod tests {
                 name: "process declaration",
                 code: "process worker() { finish null }",
                 abilities: lashlang::LashlangAbilities::default(),
-                resources: lashlang::ResourceCatalog::new,
+                resources: lashlang::LashlangHostCatalog::new,
                 feature: "processes",
             },
             DisabledCase {
                 name: "process start",
                 code: "start worker()",
                 abilities: lashlang::LashlangAbilities::default(),
-                resources: lashlang::ResourceCatalog::new,
+                resources: lashlang::LashlangHostCatalog::new,
                 feature: "processes",
             },
             DisabledCase {
                 name: "sleep",
                 code: r#"sleep for "1s""#,
                 abilities: lashlang::LashlangAbilities::default(),
-                resources: lashlang::ResourceCatalog::new,
+                resources: lashlang::LashlangHostCatalog::new,
                 feature: "sleep",
             },
             DisabledCase {
                 name: "wait_signal",
                 code: "process worker() signals { ready: any } { payload = wait_signal(\"ready\") }",
                 abilities: lashlang::LashlangAbilities::default().with_processes(),
-                resources: lashlang::ResourceCatalog::new,
+                resources: lashlang::LashlangHostCatalog::new,
                 feature: "process signals",
             },
             DisabledCase {
                 name: "signal_run",
                 code: "process worker(target: any) { signal_run(target, \"ready\", null) }",
                 abilities: lashlang::LashlangAbilities::default().with_processes(),
-                resources: lashlang::ResourceCatalog::new,
+                resources: lashlang::LashlangHostCatalog::new,
                 feature: "process signals",
             },
             DisabledCase {
@@ -858,9 +875,12 @@ mod tests {
             for case in cases {
                 lashlang::parse(case.code)
                     .unwrap_or_else(|err| panic!("{} should parse: {err}", case.name));
-                let response =
-                    execute_with_lashlang_surface(case.code, case.abilities, (case.resources)())
-                        .await;
+                let response = execute_with_lashlang_host_environment(
+                    case.code,
+                    case.abilities,
+                    (case.resources)(),
+                )
+                .await;
                 let error = response
                     .error
                     .as_deref()

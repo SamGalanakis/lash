@@ -1,0 +1,10 @@
+error[E0624]: method `tool_state` is private
+ --> tests/ui/session_admin_flat_methods_are_not_public.rs:2:21
+  |
+2 |     let _ = control.tool_state().await;
+  |                     ^^^^^^^^^^ private method
+  |
+ ::: src/admin.rs
+  |
+  |     async fn tool_state(&self) -> Result<ToolState> {
+  |     ----------------------------------------------- private method defined here

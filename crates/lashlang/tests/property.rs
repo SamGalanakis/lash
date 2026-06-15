@@ -72,11 +72,12 @@ async fn execute<H: ExecutionHost>(
 ) -> Result<ExecutionOutcome, ExecuteError> {
     let compiled = if source.contains("tools.") {
         let program = parse(source)?;
-        let linked = lashlang::LinkedModule::link(program, property_surface()).map_err(|err| {
-            ExecuteError::Runtime(lashlang::RuntimeError::ValueError {
-                message: err.to_string(),
-            })
-        })?;
+        let linked =
+            lashlang::LinkedModule::link(program, property_host_environment()).map_err(|err| {
+                ExecuteError::Runtime(lashlang::RuntimeError::ValueError {
+                    message: err.to_string(),
+                })
+            })?;
         lashlang::compile_linked(&linked)
     } else {
         lashlang::compile(source)?
@@ -86,8 +87,8 @@ async fn execute<H: ExecutionHost>(
         .map_err(ExecuteError::Runtime)
 }
 
-fn property_surface() -> lashlang::LashlangSurface {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn property_host_environment() -> lashlang::LashlangHostEnvironment {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources.add_module_operation(
         ["tools"],
         "Tools",
@@ -104,7 +105,7 @@ fn property_surface() -> lashlang::LashlangSurface {
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    lashlang::LashlangSurface::new(resources, lashlang::LashlangAbilities::all())
+    lashlang::LashlangHostEnvironment::new(resources, lashlang::LashlangAbilities::all())
 }
 
 #[derive(Clone, Debug)]

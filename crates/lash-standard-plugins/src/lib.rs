@@ -6,7 +6,7 @@ use lash_core::plugin::{PluginSpec, StaticPluginFactory};
 use lash_core::{PluginStack, ToolProvider};
 pub use lash_plugin_observational_memory::ObservationalMemoryConfig;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
-use lash_plugin_process_controls::ProcessControlsPluginFactory;
+use lash_plugin_process_controls::SessionProcessAdminPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
 use lash_tools::apply_patch::apply_patch_provider;
@@ -100,12 +100,12 @@ fn push_standard_context_tools(
 }
 
 fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: bool) {
-    let process_controls = if include_cancel_process {
-        ProcessControlsPluginFactory::new()
+    let processess = if include_cancel_process {
+        SessionProcessAdminPluginFactory::new()
     } else {
-        ProcessControlsPluginFactory::without_cancel_process()
+        SessionProcessAdminPluginFactory::without_cancel_process()
     };
-    stack.push(Arc::new(process_controls));
+    stack.push(Arc::new(processess));
     stack.push(Arc::new(StandardShellPluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
         "apply_patch",
@@ -176,8 +176,8 @@ mod tests {
             .build_session(session_id.clone(), None)
             .expect("session");
         session
-            .tool_surface(&session_id)
-            .expect("tool surface")
+            .resolved_tool_catalog(&session_id)
+            .expect("tool catalog")
             .tool_names()
             .as_ref()
             .clone()

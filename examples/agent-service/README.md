@@ -29,19 +29,24 @@ feature-gated and uses these local defaults:
 | App run | `127.0.0.1:3000` | `127.0.0.1:9080` | `127.0.0.1:8080` | `127.0.0.1:9070` |
 | Live E2E | in-process test | `127.0.0.1:19080` | `127.0.0.1:18080` | `127.0.0.1:19070` |
 
-For the app run, start Restate, run the feature-gated binary, then register the
-endpoint:
+For the app run, start Restate on the host network, run the feature-gated binary,
+then register the endpoint:
 
 ```bash
-docker run --rm -p 8080:8080 -p 9070:9070 -p 9071:9071 restatedev/restate:1.6.2
+docker run --rm --network host restatedev/restate:1.6.2
 OPENROUTER_API_KEY=... \
 AGENT_SERVICE_DURABILITY=restate \
 AGENT_SERVICE_RESTATE_ADDR=127.0.0.1:9080 \
 RESTATE_INGRESS_URL=http://127.0.0.1:8080 \
 cargo run -p agent-service --features restate -- --durability restate
 
-restate deployments register http://host.docker.internal:9080
+restate deployments register http://127.0.0.1:9080
 ```
+
+If you run Restate in Docker bridge mode instead, bind the app endpoint to a
+container-reachable interface such as `AGENT_SERVICE_RESTATE_ADDR=0.0.0.0:9080`
+and register `http://host.docker.internal:9080` (or add
+`--add-host=host.docker.internal:host-gateway` on Linux).
 
 For the live E2E, use the one-command recipe. It starts the agent-service
 Restate endpoint in-process, registers it through the Restate Admin API, submits
@@ -126,7 +131,7 @@ already visible through assistant prose deltas.
 
 In lashlang, the model calls the demo tools through their host-declared module
 surface. `DemoPlugin` maps the underlying `read_board` tool to `board.read`
-and `play_move` to `board.play` with `ToolAgentSurface`:
+and `play_move` to `board.play` with `LashlangToolBinding`:
 
 ```lashlang
 board = await board.read({})?

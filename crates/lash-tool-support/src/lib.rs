@@ -249,12 +249,13 @@ pub fn filesystem_entries_output_schema() -> serde_json::Value {
     })
 }
 
-pub fn agent_surface(
+pub fn lashlang_binding(
     module_path: impl IntoIterator<Item = impl Into<String>>,
     operation: impl Into<String>,
     aliases: &[&str],
-) -> lash_core::ToolAgentSurface {
-    lash_core::ToolAgentSurface::new(module_path, operation).with_aliases(aliases.iter().copied())
+) -> lash_core::LashlangToolBinding {
+    lash_core::LashlangToolBinding::new(module_path, operation)
+        .with_aliases(aliases.iter().copied())
 }
 
 /// Run blocking filesystem work off the async runtime.

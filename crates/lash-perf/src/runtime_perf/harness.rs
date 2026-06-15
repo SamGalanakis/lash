@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
-    BenchmarkEchoTool, BenchmarkLargeToolSurface, benchmark_provider, benchmark_stream_profile,
+    BenchmarkEchoTool, BenchmarkLargeToolCatalog, benchmark_provider, benchmark_stream_profile,
 };
 use super::scenarios::RuntimePerfScenario;
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
@@ -141,7 +141,7 @@ impl BenchmarkRuntime {
         let session = self.session.as_ref().expect("benchmark session");
         let effect_host = session.effect_host();
         let scoped_effect_controller = effect_host
-            .scoped(lash::runtime::EffectScope::turn(
+            .scoped(lash::runtime::ExecutionScope::turn(
                 session.session_id(),
                 lash_core::TurnActivityId::fresh().0,
             ))
@@ -158,7 +158,7 @@ impl BenchmarkRuntime {
             .map_err(anyhow::Error::from)
     }
 
-    pub(crate) async fn run_turn_with_effect_scope(
+    pub(crate) async fn run_turn_with_execution_scope(
         &self,
         input: lash::TurnInput,
         cancel: tokio_util::sync::CancellationToken,
@@ -180,7 +180,7 @@ impl BenchmarkRuntime {
         self.session
             .as_ref()
             .expect("benchmark session")
-            .process_control()
+            .processes()
             .await_all()
             .await?;
         Ok(())
@@ -190,7 +190,7 @@ impl BenchmarkRuntime {
         self.session
             .as_ref()
             .expect("benchmark session")
-            .control()
+            .admin()
             .state()
             .export()
             .await
@@ -464,11 +464,11 @@ pub(crate) async fn build_runtime_with_store(
     }
     if matches!(
         scenario,
-        RuntimePerfScenario::RlmLargeToolSurface | RuntimePerfScenario::ToolDiscoverySearch
+        RuntimePerfScenario::RlmLargeToolCatalog | RuntimePerfScenario::ToolDiscoverySearch
     ) {
         plugin_stack.push(Arc::new(StaticPluginFactory::new(
-            "runtime_perf_large_tool_surface",
-            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface::default())),
+            "runtime_perf_large_tool_catalog",
+            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolCatalog::default())),
         )));
     }
     let mut builder = explicit_ephemeral_facets(LashCore::builder())
@@ -486,7 +486,7 @@ pub(crate) async fn build_runtime_with_store(
         }
         builder = builder.trace_level(config.trace_level);
     }
-    // RlmGlobals carries per-turn host values that are intentionally live-only.
+    // RlmGlobals carries per-turn host descriptors that are intentionally live-only.
     // Store-backed turns reject those extensions because they cannot be
     // checkpointed/resumed, and this scenario does not exercise process handles,
     // so leave the durable process registry absent as well.
@@ -497,7 +497,7 @@ pub(crate) async fn build_runtime_with_store(
     if scenario.execution_mode() == ModeId::rlm() {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
-    // RlmGlobals carries per-turn host values that are intentionally live-only.
+    // RlmGlobals carries per-turn host descriptors that are intentionally live-only.
     // Store-backed turns reject those extensions because they cannot be
     // checkpointed/resumed.
     if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
@@ -546,7 +546,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     let artifacts_db = root.join("artifacts.db");
     let effects_db = root.join("effects.db");
     let process_db = root.join("processes.db");
-    let host_events_db = root.join("host-events.db");
+    let triggers_db = root.join("triggers.db");
     let mut builder = LashCore::builder()
         .install_mode(mode_preset(&mode_id)?)
         .default_mode(mode_id.clone())
@@ -570,8 +570,8 @@ pub(crate) async fn build_runtime_with_sqlite_store(
                 .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
-        .host_event_store(Arc::new(
-            lash_sqlite_store::SqliteHostEventStore::open(&host_events_db)
+        .trigger_store(Arc::new(
+            lash_sqlite_store::SqliteTriggerStore::open(&triggers_db)
                 .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
@@ -630,7 +630,7 @@ pub(crate) async fn seed_runtime_state(
         .session
         .as_ref()
         .expect("benchmark session")
-        .control()
+        .admin()
         .state()
         .append_messages(messages)
         .await
@@ -658,7 +658,7 @@ pub(crate) async fn seed_runtime_state(
             .session
             .as_ref()
             .expect("benchmark session")
-            .control()
+            .admin()
             .state()
             .append_plugin_body(
                 OM_ACTIVE_STATE_PLUGIN_TYPE,
@@ -757,8 +757,8 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
-        RuntimePerfScenario::RlmLargeToolSurface => format!(
-            "Turn {} in RLM mode with a Gmail-sized callable tool surface. Do not call a Gmail tool; reply with exactly: {}",
+        RuntimePerfScenario::RlmLargeToolCatalog => format!(
+            "Turn {} in RLM mode with a Gmail-sized callable tool catalog. Do not call a Gmail tool; reply with exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -773,8 +773,24 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
+        RuntimePerfScenario::RlmAsyncToolCompletion => format!(
+            "Turn {} in RLM mode. Exercise the pending benchmark_async tool completion path, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
         RuntimePerfScenario::StandardToolCalls => format!(
             "Turn {} in standard mode. Use the batch tool to exercise parallel benchmark_echo calls, then reply with exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::StandardAsyncToolCompletion => format!(
+            "Turn {} in standard mode. Launch the async benchmark tool completion, then reply with exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -803,6 +819,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::RlmProcessHandles => format!(
             "Turn {} in RLM mode. Exercise start/await/cancel process handles, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => format!(
+            "Turn {} in RLM mode. Exercise pending benchmark_async completion inside a started process, then submit exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

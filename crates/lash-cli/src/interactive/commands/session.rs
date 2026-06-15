@@ -52,13 +52,13 @@ async fn activate_opened_session(
         return Err("opened session was not installed".to_string());
     };
     session
-        .control()
+        .admin()
         .commands()
-        .refresh_tool_surface("interactive session open", "interactive-session-open")
+        .refresh_tool_catalog("interactive session open", "interactive-session-open")
         .await
         .map_err(|err| err.to_string())?;
     *active_tool_state = session
-        .control()
+        .admin()
         .tools()
         .state()
         .await
@@ -134,9 +134,9 @@ pub(super) async fn handle_clear(
         return Err(anyhow::anyhow!("opened session was not installed"));
     };
     if let Some(rt) = runtime.as_ref() {
-        rt.control()
+        rt.admin()
             .commands()
-            .refresh_tool_surface("interactive session switch", "interactive-session-switch")
+            .refresh_tool_catalog("interactive session switch", "interactive-session-switch")
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let session_id = rt.session_id();
@@ -144,7 +144,7 @@ pub(super) async fn handle_clear(
         *current_model_variant = rt.policy_snapshot().model.variant;
     }
     app.session_name = opened.bootstrap.session_name();
-    *active_tool_state = session.control().tools().state().await?;
+    *active_tool_state = session.admin().tools().state().await?;
     history.clear();
     *turn_counter = 0;
     *last_turn = None;
@@ -176,7 +176,7 @@ pub(super) async fn handle_retry(
     if let Some(previous) = last_turn.clone() {
         let definitions = match runtime.as_ref() {
             Some(session) => session
-                .control()
+                .admin()
                 .tools()
                 .active_manifests()
                 .await

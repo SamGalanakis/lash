@@ -13,36 +13,36 @@
 mod attachment_store;
 mod effect_host;
 mod helpers;
-mod host_event_store;
 mod lashlang_artifact_store;
 mod live_replay;
 mod process_registry;
 mod runtime_persistence;
+mod trigger_store;
 
 pub use attachment_store::*;
 pub use effect_host::*;
 pub use helpers::*;
-pub use host_event_store::*;
 pub use lashlang_artifact_store::*;
 pub use live_replay::*;
 pub use process_registry::*;
 pub use runtime_persistence::*;
+pub use trigger_store::*;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, CausalRef, DeliveryPolicy,
-    EffectHost, EffectScope, LiveReplayGapReason, LiveReplayResult, LiveReplayStore,
-    LiveReplayStoreError, LiveReplaySubscribeResult, MergeKey, ModelSpec, PluginSessionSnapshot,
-    ProtocolEvent, ProtocolTurnOptions, QueuedWorkBatch, QueuedWorkBatchDraft,
-    QueuedWorkClaimBoundary, QueuedWorkPayload, RuntimeCommit, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimePersistence, RuntimeScope, RuntimeSessionState, RuntimeSubject, RuntimeTurnCommitStamp,
-    ScopedEffectController, SessionMeta, SessionNodePayload, SessionNodeRecord,
-    SessionObservationEvent, SessionObservationEventPayload, SessionPolicy,
+    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, AwaitEventWaitIdentity,
+    CausalRef, DeliveryPolicy, EffectHost, ExecutionScope, LiveReplayGapReason, LiveReplayResult,
+    LiveReplayStore, LiveReplayStoreError, LiveReplaySubscribeResult, MergeKey, ModelSpec,
+    PluginSessionSnapshot, ProtocolEvent, ProtocolTurnOptions, QueuedWorkBatch,
+    QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload, Resolution, ResolveOutcome,
+    RuntimeCommit, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeInvocation, RuntimePersistence, RuntimeScope, RuntimeSessionState, RuntimeSubject,
+    RuntimeTurnCommitStamp, ScopedEffectController, SessionMeta, SessionNodePayload,
+    SessionNodeRecord, SessionObservationEvent, SessionObservationEventPayload, SessionPolicy,
     SessionProcessEventKind, SessionQueueEventKind, SessionReadScope, SessionRelation,
     SessionRevision, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnActivity,
     TurnEvent, TurnInput,
@@ -56,8 +56,8 @@ use crate::{
     ProcessEventType, ProcessExternalRef, ProcessHandleDescriptor, ProcessInput,
     ProcessLeaseCompletion, ProcessListFilter, ProcessProvenance, ProcessRecord,
     ProcessRegistration, ProcessRegistry, ProcessStatusFilter, ProcessTerminalState,
-    ProcessValueSelector, ProcessWakeDedupeKey,
-    ProcessWakeDelivery, ProcessWakeSpec, SessionScope, SessionScopeId, WaitKind, WaitState,
+    ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, SessionScope,
+    SessionScopeId, WaitKind, WaitState,
 };
 use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
 
@@ -87,9 +87,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_host_event_store_satisfies_conformance() {
-        host_event_store(
-            || Arc::new(crate::InMemoryHostEventStore::default()) as Arc<dyn crate::HostEventStore>,
+    async fn in_memory_trigger_store_satisfies_conformance() {
+        trigger_store(
+            || Arc::new(crate::InMemoryTriggerStore::default()) as Arc<dyn crate::TriggerStore>,
             DurabilityTier::Inline,
         )
         .await;
@@ -131,19 +131,20 @@ mod tests {
     #[tokio::test]
     async fn inline_effect_host_satisfies_conformance() {
         effect_host(|| Arc::new(crate::InlineEffectHost::default())).await;
+        effect_host_await_events(|| Arc::new(crate::InlineEffectHost::default())).await;
     }
 
     #[tokio::test]
     async fn recording_effect_host_records_selected_scope_and_envelope() {
         let host = RecordingEffectHost::default();
-        let scope = EffectScope::runtime_operation("host-event:button-1");
+        let scope = ExecutionScope::runtime_operation("trigger:button-1");
         let scoped = host.scoped(scope.clone()).expect("scoped controller");
         let envelope = RuntimeEffectEnvelope::new(
             crate::RuntimeInvocation::effect(
                 RuntimeScope::new("session-1"),
                 "sleep-effect",
                 RuntimeEffectKind::Sleep,
-                "host-event:button-1:sleep-effect",
+                "trigger:button-1:sleep-effect",
             ),
             RuntimeEffectCommand::Sleep { duration_ms: 0 },
         );
@@ -158,13 +159,13 @@ mod tests {
         assert_eq!(host.selected_scopes(), vec![scope.clone()]);
         let records = host.records();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].effect_scope, scope);
+        assert_eq!(records[0].execution_scope, scope);
         assert_eq!(records[0].runtime_scope, RuntimeScope::new("session-1"));
         assert_eq!(records[0].effect_id, "sleep-effect");
         assert_eq!(records[0].effect_kind, RuntimeEffectKind::Sleep);
         assert_eq!(
             records[0].replay_key.as_deref(),
-            Some("host-event:button-1:sleep-effect")
+            Some("trigger:button-1:sleep-effect")
         );
     }
 

@@ -8,11 +8,14 @@ pub(crate) enum RuntimePerfScenario {
     Standard,
     Rlm,
     StandardToolCalls,
+    StandardAsyncToolCompletion,
     RlmToolCalls,
+    RlmAsyncToolCompletion,
     RlmProcessHandles,
+    RlmProcessAsyncToolCompletion,
     RlmLlmQuery,
     RlmGlobals,
-    RlmLargeToolSurface,
+    RlmLargeToolCatalog,
     ObservationalMemory,
     ObservationalMemoryMaintenance,
     OpenAiCompatStream,
@@ -33,15 +36,18 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 25] = [
+    pub(crate) const DEFAULTS: [Self; 28] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
+        Self::StandardAsyncToolCompletion,
         Self::RlmToolCalls,
+        Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
+        Self::RlmProcessAsyncToolCompletion,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
-        Self::RlmLargeToolSurface,
+        Self::RlmLargeToolCatalog,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
@@ -60,15 +66,18 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
     ];
-    pub(crate) const KNOWN: [Self; 25] = [
+    pub(crate) const KNOWN: [Self; 28] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
+        Self::StandardAsyncToolCompletion,
         Self::RlmToolCalls,
+        Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
+        Self::RlmProcessAsyncToolCompletion,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
-        Self::RlmLargeToolSurface,
+        Self::RlmLargeToolCatalog,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
@@ -93,11 +102,14 @@ impl RuntimePerfScenario {
             "standard" => Some(Self::Standard),
             "rlm" => Some(Self::Rlm),
             "standard_tool_calls" => Some(Self::StandardToolCalls),
+            "standard_async_tool_completion" => Some(Self::StandardAsyncToolCompletion),
             "rlm_tool_calls" => Some(Self::RlmToolCalls),
+            "rlm_async_tool_completion" => Some(Self::RlmAsyncToolCompletion),
             "rlm_process_handles" => Some(Self::RlmProcessHandles),
+            "rlm_process_async_tool_completion" => Some(Self::RlmProcessAsyncToolCompletion),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
             "rlm_globals" => Some(Self::RlmGlobals),
-            "rlm_large_tool_surface" => Some(Self::RlmLargeToolSurface),
+            "rlm_large_tool_catalog" => Some(Self::RlmLargeToolCatalog),
             "observational_memory" => Some(Self::ObservationalMemory),
             "observational_memory_maintenance" => Some(Self::ObservationalMemoryMaintenance),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
@@ -124,11 +136,14 @@ impl RuntimePerfScenario {
             Self::Standard => "standard",
             Self::Rlm => "rlm",
             Self::StandardToolCalls => "standard_tool_calls",
+            Self::StandardAsyncToolCompletion => "standard_async_tool_completion",
             Self::RlmToolCalls => "rlm_tool_calls",
+            Self::RlmAsyncToolCompletion => "rlm_async_tool_completion",
             Self::RlmProcessHandles => "rlm_process_handles",
+            Self::RlmProcessAsyncToolCompletion => "rlm_process_async_tool_completion",
             Self::RlmLlmQuery => "rlm_llm_query",
             Self::RlmGlobals => "rlm_globals",
-            Self::RlmLargeToolSurface => "rlm_large_tool_surface",
+            Self::RlmLargeToolCatalog => "rlm_large_tool_catalog",
             Self::ObservationalMemory => "observational_memory",
             Self::ObservationalMemoryMaintenance => "observational_memory_maintenance",
             Self::OpenAiCompatStream => "openai_compat_stream",
@@ -153,6 +168,7 @@ impl RuntimePerfScenario {
         match self {
             Self::Standard
             | Self::StandardToolCalls
+            | Self::StandardAsyncToolCompletion
             | Self::ObservationalMemory
             | Self::ObservationalMemoryMaintenance
             | Self::OpenAiCompatStream
@@ -170,10 +186,12 @@ impl RuntimePerfScenario {
             | Self::TraceJsonlStandard => ModeId::standard(),
             Self::Rlm
             | Self::RlmToolCalls
+            | Self::RlmAsyncToolCompletion
             | Self::RlmProcessHandles
+            | Self::RlmProcessAsyncToolCompletion
             | Self::RlmLlmQuery
             | Self::RlmGlobals
-            | Self::RlmLargeToolSurface
+            | Self::RlmLargeToolCatalog
             | Self::EmbedRlm
             | Self::TraceJsonlExtended => ModeId::rlm(),
         }

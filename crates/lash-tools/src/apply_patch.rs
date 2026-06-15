@@ -158,7 +158,7 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                 "await files.patch({ input: \"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\" })?"
                     .into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["files"],
                 "patch",
                 &["patch", "edit_file"],

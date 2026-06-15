@@ -9,7 +9,7 @@ use crate::ast::{
     AssignPathStep, BinaryOp, Declaration, Expr, LabelMetadata, ProcessDecl, Program,
     ResourceRefExpr, TypeExpr, UnaryOp,
 };
-use crate::linker::{LashlangAbilities, LashlangLanguageFeatures, ResourceCatalog};
+use crate::linker::{LashlangAbilities, LashlangHostCatalog, LashlangLanguageFeatures};
 
 pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v2";
 pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -91,11 +91,11 @@ impl ProcessRef {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct RequiredSurfaceRef(String);
+pub struct HostRequirementsRef(String);
 
-impl RequiredSurfaceRef {
+impl HostRequirementsRef {
     pub fn new(hash: &ContentHash) -> Self {
-        Self(format!("lashlang-surface:v1:sha256:{hash}"))
+        Self(format!("lashlang-host-requirements:v1:sha256:{hash}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -103,16 +103,16 @@ impl RequiredSurfaceRef {
     }
 }
 
-impl std::fmt::Display for RequiredSurfaceRef {
+impl std::fmt::Display for HostRequirementsRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SurfaceRequirements {
+pub struct HostRequirements {
     #[serde(default)]
-    pub resources: ResourceCatalog,
+    pub resources: LashlangHostCatalog,
     #[serde(default)]
     pub abilities: LashlangAbilities,
     #[serde(default)]
@@ -128,8 +128,8 @@ pub struct ModuleExports {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModuleArtifact {
     pub module_ref: ModuleRef,
-    pub required_surface_ref: RequiredSurfaceRef,
-    pub required_surface: SurfaceRequirements,
+    pub host_requirements_ref: HostRequirementsRef,
+    pub host_requirements: HostRequirements,
     pub exports: ModuleExports,
     pub canonical_ir: Program,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,13 +139,13 @@ pub struct ModuleArtifact {
 impl ModuleArtifact {
     pub fn from_program(program: Program) -> Result<Self, ModuleArtifactError> {
         let canonical_ir = canonical_program_ir(program);
-        let requirements = surface_requirements_for_program(&canonical_ir);
+        let requirements = host_requirements_for_program(&canonical_ir);
         Self::from_canonical_ir_and_requirements(canonical_ir, requirements)
     }
 
     pub(crate) fn from_program_with_requirements(
         program: Program,
-        requirements: SurfaceRequirements,
+        requirements: HostRequirements,
     ) -> Result<Self, ModuleArtifactError> {
         let canonical_ir = canonical_program_ir(program);
         Self::from_canonical_ir_and_requirements(canonical_ir, requirements)
@@ -153,15 +153,15 @@ impl ModuleArtifact {
 
     fn from_canonical_ir_and_requirements(
         canonical_ir: Program,
-        requirements: SurfaceRequirements,
+        requirements: HostRequirements,
     ) -> Result<Self, ModuleArtifactError> {
-        let required_surface_ref = required_surface_ref(&requirements);
+        let host_requirements_ref = host_requirements_ref(&requirements);
         let exports = module_exports(&canonical_ir);
-        let module_ref = module_ref(&canonical_ir, &required_surface_ref, &exports);
+        let module_ref = module_ref(&canonical_ir, &host_requirements_ref, &exports);
         Ok(Self {
             module_ref,
-            required_surface_ref,
-            required_surface: requirements,
+            host_requirements_ref,
+            host_requirements: requirements,
             exports,
             canonical_ir,
             dependencies: Vec::new(),
@@ -182,7 +182,7 @@ impl ModuleArtifact {
     pub fn verify(&self) -> Result<(), ModuleArtifactError> {
         let rebuilt = Self::from_program_with_requirements(
             self.canonical_ir.clone(),
-            self.required_surface.clone(),
+            self.host_requirements.clone(),
         )?;
         if rebuilt.module_ref != self.module_ref {
             return Err(ModuleArtifactError::HashMismatch {
@@ -191,11 +191,11 @@ impl ModuleArtifact {
                 actual: self.module_ref.to_string(),
             });
         }
-        if rebuilt.required_surface_ref != self.required_surface_ref {
+        if rebuilt.host_requirements_ref != self.host_requirements_ref {
             return Err(ModuleArtifactError::HashMismatch {
-                field: "required_surface_ref",
-                expected: rebuilt.required_surface_ref.to_string(),
-                actual: self.required_surface_ref.to_string(),
+                field: "host_requirements_ref",
+                expected: rebuilt.host_requirements_ref.to_string(),
+                actual: self.host_requirements_ref.to_string(),
             });
         }
         if rebuilt.exports != self.exports {
@@ -355,7 +355,7 @@ impl LashlangArtifactStore for InMemoryLashlangArtifactStore {
 #[derive(Clone)]
 pub(crate) struct CompiledModuleContext {
     pub(crate) module_ref: ModuleRef,
-    pub(crate) required_surface_ref: RequiredSurfaceRef,
+    pub(crate) host_requirements_ref: HostRequirementsRef,
     pub(crate) process_refs: BTreeMap<String, ProcessRef>,
 }
 
@@ -363,7 +363,7 @@ impl From<&ModuleArtifact> for CompiledModuleContext {
     fn from(value: &ModuleArtifact) -> Self {
         Self {
             module_ref: value.module_ref.clone(),
-            required_surface_ref: value.required_surface_ref.clone(),
+            host_requirements_ref: value.host_requirements_ref.clone(),
             process_refs: value.exports.processes.clone(),
         }
     }
@@ -375,14 +375,14 @@ pub fn canonical_program_ir(mut program: Program) -> Program {
     program
 }
 
-pub fn surface_requirements_for_program(program: &Program) -> SurfaceRequirements {
+pub fn host_requirements_for_program(program: &Program) -> HostRequirements {
     RequirementsCollector::new(program).collect()
 }
 
-pub(crate) fn surface_requirements_for_program_with_catalog(
+pub(crate) fn host_requirements_for_program_with_catalog(
     program: &Program,
-    catalog: &ResourceCatalog,
-) -> SurfaceRequirements {
+    catalog: &LashlangHostCatalog,
+) -> HostRequirements {
     RequirementsCollector::new(program)
         .with_resource_catalog(catalog)
         .collect()
@@ -405,24 +405,24 @@ fn module_exports(program: &Program) -> ModuleExports {
 
 fn module_ref(
     program: &Program,
-    required_surface_ref: &RequiredSurfaceRef,
+    host_requirements_ref: &HostRequirementsRef,
     exports: &ModuleExports,
 ) -> ModuleRef {
     let mut writer = HashWriter::new();
     writer.atom(LASHLANG_SEMANTIC_HASH_VERSION);
     writer.atom("module");
-    writer.atom(required_surface_ref.as_str());
+    writer.atom(host_requirements_ref.as_str());
     write_exports(&mut writer, exports);
     write_program(&mut writer, program);
     ModuleRef::new(&writer.finish())
 }
 
-fn required_surface_ref(requirements: &SurfaceRequirements) -> RequiredSurfaceRef {
+fn host_requirements_ref(requirements: &HostRequirements) -> HostRequirementsRef {
     let mut writer = HashWriter::new();
     writer.atom(LASHLANG_SEMANTIC_HASH_VERSION);
-    writer.atom("required-surface");
-    write_surface_requirements(&mut writer, requirements);
-    RequiredSurfaceRef::new(&writer.finish())
+    writer.atom("host-requirements");
+    write_host_requirements(&mut writer, requirements);
+    HostRequirementsRef::new(&writer.finish())
 }
 
 fn process_component_hash(process: &ProcessDecl) -> ContentHash {
@@ -444,7 +444,7 @@ fn write_exports(writer: &mut HashWriter, exports: &ModuleExports) {
     }
 }
 
-fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceRequirements) {
+fn write_host_requirements(writer: &mut HashWriter, requirements: &HostRequirements) {
     writer.atom("abilities");
     writer.bool(requirements.abilities.processes);
     writer.bool(requirements.abilities.sleep);
@@ -718,7 +718,7 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
             writer.atom("process-ref");
             writer.atom(process.as_str());
         }
-        Expr::HostValueConstructor { type_name, input } => {
+        Expr::HostDescriptorConstructor { type_name, input } => {
             writer.atom("host-value-constructor");
             writer.atom(type_name.as_str());
             write_expr(writer, input, normalizer);
@@ -994,9 +994,9 @@ enum RequirementBinding {
 
 struct RequirementsCollector<'program> {
     program: &'program Program,
-    resource_catalog: Option<&'program ResourceCatalog>,
+    resource_catalog: Option<&'program LashlangHostCatalog>,
     type_names: BTreeSet<String>,
-    requirements: SurfaceRequirements,
+    requirements: HostRequirements,
 }
 
 impl<'program> RequirementsCollector<'program> {
@@ -1013,16 +1013,16 @@ impl<'program> RequirementsCollector<'program> {
             program,
             resource_catalog: None,
             type_names,
-            requirements: SurfaceRequirements::default(),
+            requirements: HostRequirements::default(),
         }
     }
 
-    fn with_resource_catalog(mut self, catalog: &'program ResourceCatalog) -> Self {
+    fn with_resource_catalog(mut self, catalog: &'program LashlangHostCatalog) -> Self {
         self.resource_catalog = Some(catalog);
         self
     }
 
-    fn collect(mut self) -> SurfaceRequirements {
+    fn collect(mut self) -> HostRequirements {
         for declaration in &self.program.declarations {
             match declaration {
                 Declaration::Type(type_decl) => self.collect_type(&type_decl.ty),
@@ -1219,7 +1219,7 @@ impl<'program> RequirementsCollector<'program> {
                 self.requirements.abilities.processes = true;
                 Some(RequirementBinding::Value)
             }
-            Expr::HostValueConstructor { type_name, input } => {
+            Expr::HostDescriptorConstructor { type_name, input } => {
                 if let Some(catalog) = self.resource_catalog
                     && let Some(constructor) = catalog
                         .value_constructors()

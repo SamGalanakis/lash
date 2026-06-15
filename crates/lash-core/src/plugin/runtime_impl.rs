@@ -9,7 +9,7 @@ pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     lashlang_abilities: lashlang::LashlangAbilities,
     lashlang_language_features: lashlang::LashlangLanguageFeatures,
-    lashlang_resources: lashlang::ResourceCatalog,
+    lashlang_resources: lashlang::LashlangHostCatalog,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -17,7 +17,7 @@ struct BuildPluginSessionRequest<'a> {
     session_id: String,
     parent_session_id: Option<String>,
     snapshot: Option<&'a PluginSessionSnapshot>,
-    tool_surface_overlay: ToolSurfaceContribution,
+    tool_catalog_overlay: ToolCatalogContribution,
     tool_snapshot: Option<crate::ToolState>,
     authority: SessionAuthorityContext,
 }
@@ -51,7 +51,7 @@ impl PluginHost {
             |features, factory| features.union(factory.lashlang_language_features()),
         );
         let lashlang_resources = all_factories.iter().fold(
-            lashlang::ResourceCatalog::new(),
+            lashlang::LashlangHostCatalog::new(),
             |mut resources, factory| {
                 resources.extend(factory.lashlang_resources());
                 resources
@@ -79,7 +79,7 @@ impl PluginHost {
         self
     }
 
-    pub fn with_lashlang_resources(mut self, resources: lashlang::ResourceCatalog) -> Self {
+    pub fn with_lashlang_resources(mut self, resources: lashlang::LashlangHostCatalog) -> Self {
         self.lashlang_resources = resources;
         self
     }
@@ -102,7 +102,7 @@ impl PluginHost {
         self.lashlang_language_features
     }
 
-    pub fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+    pub fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
         self.lashlang_resources.clone()
     }
 
@@ -115,10 +115,10 @@ impl PluginHost {
         session_id: impl Into<String>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session_with_surface(
+        self.build_session_with_overlay(
             session_id,
             snapshot,
-            ToolSurfaceContribution::default(),
+            ToolCatalogContribution::default(),
             None,
         )
     }
@@ -135,22 +135,22 @@ impl PluginHost {
         snapshot: Option<&PluginSessionSnapshot>,
         authority: SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session_with_parent_and_surface(
+        self.build_session_with_parent_and_overlay(
             session_id,
             parent_session_id,
             snapshot,
-            ToolSurfaceContribution::default(),
+            ToolCatalogContribution::default(),
             None,
             authority,
         )
     }
 
-    pub fn build_session_with_parent_and_surface(
+    pub fn build_session_with_parent_and_overlay(
         &self,
         session_id: impl Into<String>,
         parent_session_id: Option<String>,
         snapshot: Option<&PluginSessionSnapshot>,
-        tool_surface_overlay: ToolSurfaceContribution,
+        tool_catalog_overlay: ToolCatalogContribution,
         tool_snapshot: Option<crate::ToolState>,
         authority: SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
@@ -158,24 +158,24 @@ impl PluginHost {
             session_id: session_id.into(),
             parent_session_id,
             snapshot,
-            tool_surface_overlay,
+            tool_catalog_overlay,
             tool_snapshot,
             authority,
         })
     }
 
-    pub fn build_session_with_surface(
+    pub fn build_session_with_overlay(
         &self,
         session_id: impl Into<String>,
         snapshot: Option<&PluginSessionSnapshot>,
-        tool_surface_overlay: ToolSurfaceContribution,
+        tool_catalog_overlay: ToolCatalogContribution,
         tool_snapshot: Option<crate::ToolState>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_inner(BuildPluginSessionRequest {
             session_id: session_id.into(),
             parent_session_id: None,
             snapshot,
-            tool_surface_overlay,
+            tool_catalog_overlay,
             tool_snapshot,
             authority: SessionAuthorityContext::default(),
         })
@@ -189,7 +189,7 @@ impl PluginHost {
             session_id,
             parent_session_id,
             snapshot,
-            tool_surface_overlay,
+            tool_catalog_overlay,
             tool_snapshot,
             authority,
         } = request;
@@ -234,12 +234,12 @@ impl PluginHost {
         contributions
             .context_compactors
             .sort_by_key(|entry| std::cmp::Reverse(entry.0));
-        let host_events = crate::HostEventCatalog::from_events(contributions.host_events.clone())
+        let triggers = crate::TriggerEventCatalog::from_events(contributions.triggers.clone())
             .map_err(|message| {
-            PluginError::Registration(format!("invalid host event catalog: {message}"))
-        })?;
+                PluginError::Registration(format!("invalid trigger event catalog: {message}"))
+            })?;
         let mut lashlang_resources = self.lashlang_resources.clone();
-        for event in host_events.events() {
+        for event in triggers.events() {
             lashlang_resources
                 .add_trigger_source_constructor(
                     event.source_type().split('.'),
@@ -248,7 +248,7 @@ impl PluginHost {
                 )
                 .map_err(|err| {
                     PluginError::Registration(format!(
-                        "invalid host event trigger source `{}.{}`: {err}",
+                        "invalid trigger source `{}.{}`: {err}",
                         event.alias, event.event
                     ))
                 })?;
@@ -281,13 +281,13 @@ impl PluginHost {
             plugins,
             tools,
             tool_registry: registry,
-            tool_surface_overlay,
+            tool_catalog_overlay,
             tool_access: authority.tool_access,
             subagent: authority.subagent,
             lashlang_abilities: self.lashlang_abilities,
             lashlang_language_features: self.lashlang_language_features,
             lashlang_resources,
-            host_events,
+            triggers,
             contributions,
         });
         self.register_session(&session_id, &session)?;

@@ -375,7 +375,7 @@ mod tests {
             .build_session("root", None)
             .expect("plugin session");
         let tools = Arc::clone(&provider);
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -384,13 +384,13 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
             processes: host.clone(),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -406,7 +406,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -477,7 +477,7 @@ mod tests {
         let plugins = PluginHost::empty()
             .build_session("root", None)
             .expect("plugin session");
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -507,13 +507,13 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: provider,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
             processes: host.clone(),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -529,7 +529,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -583,7 +583,7 @@ mod tests {
         let plugins = PluginHost::empty()
             .build_session("root", None)
             .expect("plugin session");
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -602,13 +602,13 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: provider,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
             processes: host.clone(),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -624,7 +624,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -677,7 +677,7 @@ mod tests {
         let plugins = PluginHost::empty()
             .build_session("root", None)
             .expect("plugin session");
-        let surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_catalog = Arc::new(crate::ToolCatalog::from_tools(
             provider.tool_manifests(),
             BTreeMap::new(),
         ));
@@ -687,13 +687,13 @@ mod tests {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools: provider,
-            surface,
+            tool_catalog,
             sessions: host.clone(),
             session_lifecycle: host.clone(),
             session_graph: host,
             processes: Arc::new(crate::UnavailableProcessService),
             process_cancel_ability: ability.clone(),
-            host_event_router: None,
+            trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -709,7 +709,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });

@@ -146,7 +146,7 @@ fn ls_tool_definition() -> ToolDefinition {
                 r#"await files.list({ path: ".", depth: 1, limit: 100 })?"#.into(),
                 r#"await files.list({ path: "crates/lash/src/tools", with_lines: true })?"#.into(),
             ])
-            .with_agent_surface(lash_tool_support::agent_surface(
+            .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["files"],
                 "list",
                 &["list_files", "list_directory"],

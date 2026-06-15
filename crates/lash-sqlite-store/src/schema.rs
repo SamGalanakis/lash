@@ -201,12 +201,12 @@ CREATE TABLE IF NOT EXISTS process_leases (
 
 pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 6;
 
-pub(crate) const HOST_EVENT_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS host_event_subscription_seq (
+pub(crate) const TRIGGER_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS trigger_subscription_seq (
     id INTEGER PRIMARY KEY AUTOINCREMENT
 );
 
-CREATE TABLE IF NOT EXISTS host_event_trigger_subscriptions (
+CREATE TABLE IF NOT EXISTS trigger_subscriptions (
     subscription_id      TEXT PRIMARY KEY,
     registrant_scope_id  TEXT NOT NULL,
     handle               TEXT NOT NULL,
@@ -219,13 +219,13 @@ CREATE TABLE IF NOT EXISTS host_event_trigger_subscriptions (
     UNIQUE(registrant_scope_id, handle)
 );
 
-CREATE INDEX IF NOT EXISTS idx_host_event_trigger_subscriptions_registrant
-    ON host_event_trigger_subscriptions(registrant_scope_id, handle);
+CREATE INDEX IF NOT EXISTS idx_trigger_subscriptions_registrant
+    ON trigger_subscriptions(registrant_scope_id, handle);
 
-CREATE INDEX IF NOT EXISTS idx_host_event_trigger_subscriptions_source
-    ON host_event_trigger_subscriptions(source_type, source_key, enabled);
+CREATE INDEX IF NOT EXISTS idx_trigger_subscriptions_source
+    ON trigger_subscriptions(source_type, source_key, enabled);
 
-CREATE TABLE IF NOT EXISTS host_event_occurrences (
+CREATE TABLE IF NOT EXISTS trigger_occurrences (
     occurrence_id    TEXT PRIMARY KEY,
     idempotency_key  TEXT NOT NULL UNIQUE,
     request_hash     TEXT NOT NULL,
@@ -235,24 +235,24 @@ CREATE TABLE IF NOT EXISTS host_event_occurrences (
     record_json      TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_host_event_occurrences_source
-    ON host_event_occurrences(source_type, source_key, occurred_at_ms);
+CREATE INDEX IF NOT EXISTS idx_trigger_occurrences_source
+    ON trigger_occurrences(source_type, source_key, occurred_at_ms);
 
-CREATE TABLE IF NOT EXISTS host_event_deliveries (
+CREATE TABLE IF NOT EXISTS trigger_deliveries (
     occurrence_id    TEXT NOT NULL,
     subscription_id  TEXT NOT NULL,
     process_id       TEXT NOT NULL,
     created_at_ms    INTEGER NOT NULL,
     PRIMARY KEY (occurrence_id, subscription_id),
-    FOREIGN KEY (occurrence_id) REFERENCES host_event_occurrences(occurrence_id) ON DELETE CASCADE,
-    FOREIGN KEY (subscription_id) REFERENCES host_event_trigger_subscriptions(subscription_id) ON DELETE CASCADE
+    FOREIGN KEY (occurrence_id) REFERENCES trigger_occurrences(occurrence_id) ON DELETE CASCADE,
+    FOREIGN KEY (subscription_id) REFERENCES trigger_subscriptions(subscription_id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_host_event_deliveries_process
-    ON host_event_deliveries(process_id);
+CREATE INDEX IF NOT EXISTS idx_trigger_deliveries_process
+    ON trigger_deliveries(process_id);
 ";
 
-pub(crate) const HOST_EVENT_SCHEMA_VERSION: i32 = 1;
+pub(crate) const TRIGGER_SCHEMA_VERSION: i32 = 1;
 
 pub(crate) const EFFECT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS runtime_effect_replay (
@@ -311,12 +311,12 @@ pub(crate) async fn ensure_process_schema(conn: &SqliteConnection) -> rusqlite::
     .await
 }
 
-pub(crate) async fn ensure_host_event_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {
+pub(crate) async fn ensure_trigger_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {
     ensure_versioned_schema(
         conn,
-        "host event router",
-        HOST_EVENT_SCHEMA,
-        HOST_EVENT_SCHEMA_VERSION,
+        "trigger store",
+        TRIGGER_SCHEMA,
+        TRIGGER_SCHEMA_VERSION,
     )
     .await
 }

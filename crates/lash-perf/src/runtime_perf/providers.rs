@@ -9,8 +9,8 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    ToolAgentSurface, ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolManifest,
-    ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    LashlangToolBinding, Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract,
+    ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use super::scenarios::RuntimePerfScenario;
@@ -79,27 +79,27 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
 pub(crate) struct BenchmarkEchoTool;
 
 #[derive(Clone)]
-pub(crate) struct BenchmarkLargeToolSurface {
-    cache: Arc<BenchmarkLargeToolSurfaceCache>,
+pub(crate) struct BenchmarkLargeToolCatalog {
+    cache: Arc<BenchmarkLargeToolCatalogCache>,
 }
 
-struct BenchmarkLargeToolSurfaceCache {
+struct BenchmarkLargeToolCatalogCache {
     manifests: Vec<ToolManifest>,
     contracts: HashMap<String, Arc<ToolContract>>,
 }
 
-impl Default for BenchmarkLargeToolSurface {
+impl Default for BenchmarkLargeToolCatalog {
     fn default() -> Self {
         Self {
-            cache: Arc::clone(large_tool_surface_cache()),
+            cache: Arc::clone(large_tool_catalog_cache()),
         }
     }
 }
 
-fn large_tool_surface_cache() -> &'static Arc<BenchmarkLargeToolSurfaceCache> {
-    static CACHE: OnceLock<Arc<BenchmarkLargeToolSurfaceCache>> = OnceLock::new();
+fn large_tool_catalog_cache() -> &'static Arc<BenchmarkLargeToolCatalogCache> {
+    static CACHE: OnceLock<Arc<BenchmarkLargeToolCatalogCache>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let definitions = BenchmarkLargeToolSurface::build_tool_definitions();
+        let definitions = BenchmarkLargeToolCatalog::build_tool_definitions();
         let manifests = definitions
             .iter()
             .map(ToolDefinition::manifest)
@@ -113,7 +113,7 @@ fn large_tool_surface_cache() -> &'static Arc<BenchmarkLargeToolSurfaceCache> {
                 )
             })
             .collect::<HashMap<_, _>>();
-        Arc::new(BenchmarkLargeToolSurfaceCache {
+        Arc::new(BenchmarkLargeToolCatalogCache {
             manifests,
             contracts,
         })
@@ -126,6 +126,7 @@ impl ToolProvider for BenchmarkEchoTool {
         vec![
             benchmark_echo_tool_definition().manifest(),
             benchmark_slow_tool_definition().manifest(),
+            benchmark_async_tool_definition().manifest(),
         ]
     }
 
@@ -137,6 +138,9 @@ impl ToolProvider for BenchmarkEchoTool {
             "benchmark_slow" => Some(std::sync::Arc::new(
                 benchmark_slow_tool_definition().contract(),
             )),
+            "benchmark_async" => Some(std::sync::Arc::new(
+                benchmark_async_tool_definition().contract(),
+            )),
             _ => None,
         }
     }
@@ -145,6 +149,7 @@ impl ToolProvider for BenchmarkEchoTool {
         match call.name {
             "benchmark_echo" => execute_benchmark_echo(call).await,
             "benchmark_slow" => execute_benchmark_slow(call).await,
+            "benchmark_async" => execute_benchmark_async(call).await,
             _ => ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name)),
         }
     }
@@ -176,6 +181,39 @@ async fn execute_benchmark_slow(call: lash_core::ToolCall<'_>) -> ToolResult {
         "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
         "delay_ms": delay_ms,
     }))
+}
+
+async fn execute_benchmark_async(call: lash_core::ToolCall<'_>) -> ToolResult {
+    let key = match call.context.completion_key().await {
+        Ok(key) => key,
+        Err(err) => return ToolResult::err_fmt(err),
+    };
+    let delay_ms = call
+        .args
+        .get("delay_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    let value = call
+        .args
+        .get("value")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    tokio::spawn(async move {
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        let _ = lash_core::InlineRuntimeEffectController
+            .resolve_await_event(
+                &key,
+                Resolution::Ok(serde_json::json!({
+                    "value": value,
+                    "mode": "pending_completion",
+                    "delay_ms": delay_ms
+                })),
+            )
+            .await;
+    });
+    ToolResult::pending(lash_core::PendingCompletion::new())
 }
 
 fn benchmark_echo_tool_definition() -> ToolDefinition {
@@ -235,8 +273,36 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
     .with_scheduling(ToolScheduling::Parallel)
 }
 
+fn benchmark_async_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "tool:benchmark_async",
+        "benchmark_async",
+        "Return asynchronously through the host AwaitEvent completion path.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": ["string", "number", "boolean", "object", "array", "null"] },
+                "delay_ms": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["value"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": {},
+                "mode": { "type": "string" },
+                "delay_ms": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["value", "mode", "delay_ms"],
+            "additionalProperties": false
+        }),
+    )
+    .with_scheduling(ToolScheduling::Parallel)
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for BenchmarkLargeToolSurface {
+impl ToolProvider for BenchmarkLargeToolCatalog {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
         self.cache.manifests.clone()
     }
@@ -258,7 +324,7 @@ impl ToolProvider for BenchmarkLargeToolSurface {
     }
 }
 
-impl BenchmarkLargeToolSurface {
+impl BenchmarkLargeToolCatalog {
     fn build_tool_definitions() -> Vec<ToolDefinition> {
         GMAIL_LIKE_TOOL_NAMES
             .iter()
@@ -285,8 +351,8 @@ fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
             r#"call {name} {{ user_id: "me", query: "from:alerts@example.com newer_than:7d", limit: 25 }}"#
         ),
     ])
-    .with_agent_surface(
-        ToolAgentSurface::new(
+    .with_lashlang_binding(
+        LashlangToolBinding::new(
             ["gmail"],
             name.trim_start_matches("GMAIL_").to_ascii_lowercase(),
         )
@@ -756,6 +822,19 @@ fn benchmark_stream_profile_for_request(
                 )
             }
         }
+        RuntimePerfScenario::StandardAsyncToolCompletion => {
+            if request_has_tool_result(request) {
+                text_profile("runtime perf benchmark ok")
+            } else {
+                tool_call_profile(
+                    "standard-async-completion-call",
+                    "benchmark_async",
+                    serde_json::json!({
+                        "value": "runtime perf benchmark ok"
+                    }),
+                )
+            }
+        }
         RuntimePerfScenario::StandardShellOutput => {
             if request_has_tool_result(request) {
                 text_profile("runtime perf benchmark ok")
@@ -787,7 +866,7 @@ fn benchmark_stream_profile_for_request(
             }
         }
         RuntimePerfScenario::Rlm
-        | RuntimePerfScenario::RlmLargeToolSurface
+        | RuntimePerfScenario::RlmLargeToolCatalog
         | RuntimePerfScenario::EmbedRlm
         | RuntimePerfScenario::TraceJsonlExtended => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
@@ -845,6 +924,15 @@ submit first.value
                 .to_string();
             text_profile(text)
         }
+        RuntimePerfScenario::RlmAsyncToolCompletion => {
+            let text = r#"```lashlang
+first = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
+second = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
+submit first.value
+```"#
+                .to_string();
+            text_profile(text)
+        }
         RuntimePerfScenario::RlmProcessHandles => {
             let text = r#"```lashlang
 process benchmark_echo_process(tool: Tools, value: str, ordinal: int) {
@@ -862,6 +950,22 @@ second = start benchmark_echo_process(tool: tools, value: "runtime perf benchmar
 slow = start benchmark_slow_process(tool: tools, value: "cancelled", delay_ms: 50)
 live = await processes.list({})?
 cancel slow
+first_result = (await first)?
+second_result = (await second)?
+submit first_result.value
+```"#
+                .to_string();
+            text_profile(text)
+        }
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => {
+            let text = r#"```lashlang
+process benchmark_async_process(tool: Tools, value: str) {
+  result = await tool.benchmark_async({ value: value, delay_ms: 0 })?
+  finish result
+}
+
+first = start benchmark_async_process(tool: tools, value: "runtime perf benchmark ok")
+second = start benchmark_async_process(tool: tools, value: "runtime perf benchmark ok")
 first_result = (await first)?
 second_result = (await second)?
 submit first_result.value
@@ -938,17 +1042,17 @@ fn empty_request() -> LlmRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{ToolAvailability, ToolSurfaceBuildInput, build_tool_surface};
+    use lash_core::{ToolAvailability, ToolCatalogBuildInput, build_tool_catalog};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn large_tool_surface_fixture_matches_gmail_sized_callable_catalog() {
-        let defs = BenchmarkLargeToolSurface::build_tool_definitions();
+    fn large_tool_catalog_fixture_matches_gmail_sized_callable_catalog() {
+        let defs = BenchmarkLargeToolCatalog::build_tool_definitions();
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
             def.manifest.availability.base == ToolAvailability::Callable
-                && def.manifest.agent_surface.module_path == vec!["gmail".to_string()]
+                && def.manifest.lashlang_binding.module_path == vec!["gmail".to_string()]
                 && !def.contract.input_schema["properties"]
                     .as_object()
                     .expect("object schema")
@@ -982,8 +1086,8 @@ mod tests {
     }
 
     #[test]
-    fn rlm_large_tool_surface_does_not_resolve_nested_schema_contracts_without_tool_calls() {
-        let definitions = BenchmarkLargeToolSurface::build_tool_definitions();
+    fn rlm_large_tool_catalog_does_not_resolve_nested_schema_contracts_without_tool_calls() {
+        let definitions = BenchmarkLargeToolCatalog::build_tool_definitions();
         let manifests = definitions
             .iter()
             .map(|definition| definition.manifest())
@@ -991,7 +1095,7 @@ mod tests {
         let contract_resolutions = Arc::new(AtomicUsize::new(0));
         let resolver_count = Arc::clone(&contract_resolutions);
 
-        let surface = build_tool_surface(ToolSurfaceBuildInput {
+        let surface = build_tool_catalog(ToolCatalogBuildInput {
             tools: manifests,
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);

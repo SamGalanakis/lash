@@ -9,21 +9,23 @@ durable work queue, and a `ProcessWorkRunner` drains them **on poke, on a poll
 tick, and once at startup**. So the *first* run of an out-of-turn start is itself
 lease-protected and prompt (a poke fires after the start), not merely eventually
 recovered by the next restart's sweep. This closes the turn-vs-trigger asymmetry
-— processes started by matched host-event occurrences run durably and recover on
+— processes started by matched trigger occurrences run durably and recover on
 crash, exactly like turn-started ones — and removes the double-execution window
 the startup-only sweep left open. Timers and recurring jobs are host-owned
-scheduling sources: a source owner emits a host-event occurrence with a stored
+scheduling sources: a source owner emits a trigger occurrence with a stored
 `source_key`, and every matched subscription starts a deterministic process run
 with the same lease-protected execution + recovery. This note records the design
 and principle; the *Implementation* section below maps it to the code that
-shipped.
+shipped. Restate references name the first-party adapter and the regression this
+design fixed; the boundary applies to any workflow host that supplies a scoped
+effect controller and durable timers.
 
 ## Problem (the asymmetry this resolved)
 
 A background `process` can be started two ways:
 
 - **in a turn** — the model emits `start name(...)` while a turn runs;
-- **by a host-event occurrence** — a host-owned source emits an occurrence
+- **by a trigger occurrence** — a host-owned source emits an occurrence
   through the runtime router, which matches stored trigger subscriptions by
   `source_type` and `source_key`.
 
@@ -32,10 +34,10 @@ deployment, and the asymmetry was silent.
 
 Durability of execution used to be borrowed from the **turn-local effect
 scope**. A turn run through the old scope-taking `stream(&sink, scope)` facade threaded the
-Restate-backed scoped controller into process control via a silent
+Restate-backed scoped controller into process admin via a silent
 `effect_controller.unwrap_or(current.host.core.effect_controller)` fallback, so a
 turn's `start name(...)` scheduled a `LashProcessWorkflow` invocation that
-Restate re-invoked on crash — but host-event emission runs **outside** a turn.
+Restate re-invoked on crash — but trigger emission runs **outside** a turn.
 It cannot borrow a turn-scoped controller, so process starts must use the
 host-supplied runtime effect controller for the occurrence emission. Before the
 cutover, the old session-coupled trigger path hit the **build-time** inline effect host in a
@@ -51,7 +53,7 @@ sweep on another node or after a restart could re-run a process already running
 it. Registry rows — record, events, grants, wake inbox — survived a restart; the
 *execution* was either off-lease or merely eventually-recovered.
 
-The fix removes that silent fallback **and** the off-lease spawn. Process control
+The fix removes that silent fallback **and** the off-lease spawn. Process admin
 now routes through the controller the host **explicitly wired** for the path, and
 a `Start` only *registers* the durable row; the lease-protected
 `DurableProcessWorker` — driven promptly by a `ProcessWorkRunner` — is the single
@@ -62,11 +64,13 @@ holding its `ProcessLease`.
 ## Principle
 
 lash's thesis is that **the runtime is the durable end** for committed session
-state and process control records, while the active effect host owns in-flight
-effect replay. Restate supplies durable handler history and timers for turn
-effects; SQLite supplies the committed session store and process registry.
-Process execution follows that split: **lash owns the process durability logic;
-the host supplies the backend.**
+state and process admin records, while the active effect host owns in-flight
+effect replay. A durable workflow host supplies handler history and timers for
+turn effects; the configured store supplies committed session state and process
+registry rows. SQLite and Postgres are first-party store adapters, but the
+contract is the store trait, not a specific database. Process execution follows
+that split: **lash owns the process durability logic; the host supplies the
+backend.**
 
 ## What the OpenAI Agents SDK does — and why it is the wrong template
 
@@ -102,11 +106,11 @@ clean worker-owns-execution-durability model belongs.
 ## Design: separate intent from execution
 
 **1. Start = durable intent, full stop.** `start name(...)` in a turn and a
-matched host-event delivery each do one thing: write a durable process record
+matched trigger delivery each do one thing: write a durable process record
 (carrying the captured execution-environment ref the worker will execute
 against — see `docs/adr/0001-self-contained-processes.md`) plus any handle
 grant to the registry. The rows survive restart. Turn starts carry turn
-causality; host-event deliveries carry `CausalRef::HostEvent { occurrence_id }`.
+causality; trigger deliveries carry `CausalRef::TriggerOccurrence { occurrence_id }`.
 Neither path carries a borrowed execution scope or a live session binding.
 
 **2. Execution = a lash-owned durable worker with a per-process lease +
@@ -170,14 +174,14 @@ A generalization of code that already existed for turns — not a new subsystem:
   handle fences-submits `LashProcessWorkflow/{process_id}` per non-terminal row.
   The control seam pokes after every successful `Start` — idempotently, since the
   runner skips leased/terminal rows and the durable submit is keyed-idempotent —
-  so in-turn-inline, host-event delivery, and other explicit out-of-turn starts
+  so in-turn-inline, trigger delivery, and other explicit out-of-turn starts
   are all driven the same way.
   The poke handle lives on the runtime host, not the trait-object controller.
 
 ## Idempotency
 
 Two layers, both in place. **Start-idempotency**: the registry's `process_id`
-uniqueness is the replay boundary for process control issued outside a turn
+uniqueness is the replay boundary for process admin issued outside a turn
 lease — `ProcessCommandRunner::run` (`process_runners/control.rs`) routes every
 command through the explicitly selected controller and pokes the work runner
 after a successful `Start`, and a duplicate `Start` re-registers the same row
@@ -188,7 +192,7 @@ one owner. Process execution identity is the persisted `process_id` end-to-end
 retry — a Restate `run` re-invocation or a recovery sweep — must present that
 stable id, and an empty/fresh id is rejected loudly
 (`DurableProcessWorker::ensure_stable_process_id`), mirroring how
-`EffectScope::turn` rejects an empty turn id when scoped controller creation
+`ExecutionScope::turn` rejects an empty turn id when scoped controller creation
 validates it.
 
 ## Non-goals
@@ -219,9 +223,9 @@ the boundary where the tier is known:
   peer-coherence only — the per-invocation durable controller is not visible at
   build, so build checks the stores against each other (durable session store
   ⇒ durable attachment + artifact store; durable process registry ⇒ durable
-  session store factory + durable host-event store), never the controller.
+  session store factory + durable trigger store), never the controller.
 
-Out-of-turn starts (host-event deliveries; facade `start`; `api.rs`) write
+Out-of-turn starts (trigger deliveries; facade `start`; `api.rs`) write
 durable intent and execute via the worker. The silent
 `effect_controller.unwrap_or(...)` fallback at `process_runners/control.rs` is
 gone — out of turn there is no turn-scoped controller, so the host's explicitly

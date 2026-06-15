@@ -56,7 +56,7 @@ async fn projected_bindings(session: &LashSession, task: Task, board: Board) -> 
 
     // Session-wide: applies to every turn the session runs.
     session
-        .control()
+        .admin()
         .mode()
         .apply_session_extension(rlm_session_projection_extension(
             RlmProjectedBindings::new()
@@ -77,7 +77,7 @@ async fn projected_bindings(session: &LashSession, task: Task, board: Board) -> 
 
 struct MyDocsProjection;
 
-impl lashlang::ProjectedHostValue for MyDocsProjection {
+impl lashlang::ProjectedHostDescriptor for MyDocsProjection {
     fn type_name(&self) -> &str {
         "Docs"
     }
@@ -103,7 +103,7 @@ async fn lazy_projection() -> anyhow::Result<()> {
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
-    // `my_docs_projection` implements `lashlang::ProjectedHostValue`.
+    // `my_docs_projection` implements `lashlang::ProjectedHostDescriptor`.
     let docs_ref = registry.register_memory(Arc::new(my_docs_projection));
     let input = TurnInput::text("Answer using docs only when needed.")
         .rlm_project(RlmProjectedBindings::new().bind_lazy("docs", docs_ref)?)?;

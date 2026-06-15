@@ -67,7 +67,7 @@ impl ClbenchProject {
             parent_id: None,
             mutable_components: BTreeMap::new(),
             immutable_context: BTreeMap::from([(
-                "tool_surface".to_string(),
+                "tool_catalog".to_string(),
                 json!([
                     "llm_query",
                     "spawn_agent",

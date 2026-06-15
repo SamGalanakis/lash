@@ -1,10 +1,10 @@
-//! Private helpers for the RLM subagent tool surface.
+//! Private helpers for the RLM subagent tool catalog.
 
 use lash_core::plugin::PluginError;
 use lash_core::{
     AssembledTurn, CausalRef, InputItem, SessionCreateRequest, SessionSnapshot, SessionSpec,
-    SessionToolAccess, SubagentSessionContext, ToolDefinition, ToolResult, ToolScheduling,
-    ToolSurfaceContribution, TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    SessionToolAccess, SubagentSessionContext, ToolCatalogContribution, ToolDefinition, ToolResult,
+    ToolScheduling, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 use serde_json::{Value, json};
 
@@ -228,7 +228,7 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
         }),
         submit_error_output_schema(),
     )
-    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "submit_error"))
+    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "submit_error"))
     .with_scheduling(ToolScheduling::Serial)
 }
 
@@ -253,14 +253,14 @@ pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {
     })
 }
 
-/// Apply the spawned subagent's tool authority as a tool surface override.
-pub(crate) fn subagent_surface_contribution(
-    ctx: lash_core::plugin::ToolSurfaceContext,
-) -> Result<ToolSurfaceContribution, PluginError> {
+/// Apply the spawned subagent's tool authority as a tool catalog override.
+pub(crate) fn sublashlang_binding_contribution(
+    ctx: lash_core::plugin::ToolCatalogContext,
+) -> Result<ToolCatalogContribution, PluginError> {
     let Some(authority) = ctx.subagent else {
-        return Ok(ToolSurfaceContribution::default());
+        return Ok(ToolCatalogContribution::default());
     };
-    Ok(ToolSurfaceContribution {
+    Ok(ToolCatalogContribution {
         tool_list_notes: vec![format!(
             "Subagent capability: {}. Depth: {}/{}.",
             authority.capability, authority.depth, authority.max_depth

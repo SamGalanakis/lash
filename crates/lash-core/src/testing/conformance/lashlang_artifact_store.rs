@@ -47,7 +47,7 @@ async fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
         .expect("artifact present after put");
 
     assert_eq!(loaded.module_ref, artifact.module_ref);
-    assert_eq!(loaded.required_surface_ref, artifact.required_surface_ref);
+    assert_eq!(loaded.host_requirements_ref, artifact.host_requirements_ref);
     assert_eq!(loaded.exports, artifact.exports);
     assert_eq!(
         loaded.to_store_bytes().expect("re-encode loaded artifact"),
@@ -92,6 +92,6 @@ async fn lashlang_artifact_store_survives_reopen(factory: ReopenableLashlangArti
         .expect("get module artifact after reopen")
         .expect("artifact present after reopen");
     assert_eq!(loaded.module_ref, artifact.module_ref);
-    assert_eq!(loaded.required_surface_ref, artifact.required_surface_ref);
+    assert_eq!(loaded.host_requirements_ref, artifact.host_requirements_ref);
     assert_eq!(loaded.exports, artifact.exports);
 }

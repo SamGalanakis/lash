@@ -1,5 +1,5 @@
 //! `LashRuntime` configuration mutators: provider, model spec, session id,
-//! and tool-surface refresh.
+//! and tool-catalog refresh.
 //!
 //! Extracted from `runtime/mod.rs`. This file re-opens `impl LashRuntime`;
 //! no types live here and no public API is changed.
@@ -97,8 +97,8 @@ impl LashRuntime {
         self.update_session_config(None, None, Some(prompt)).await;
     }
 
-    /// Re-register the current tool surface in the live RLM session.
-    pub async fn refresh_session_tool_surface(&mut self) -> Result<(), SessionError> {
+    /// Re-register the current tool catalog in the live RLM session.
+    pub async fn refresh_session_tool_catalog(&mut self) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
@@ -109,7 +109,7 @@ impl LashRuntime {
             .tool_registry()
             .refresh_sources()
             .map_err(|err| SessionError::Protocol(format!("tool refresh failed: {err}")))?;
-        session.refresh_tool_surface().await?;
+        session.refresh_tool_catalog().await?;
         self.stamp_live_plugin_state();
         Ok(())
     }
@@ -128,7 +128,7 @@ impl LashRuntime {
             .tool_registry()
             .apply_state(snapshot)
             .map_err(|err| SessionError::Protocol(format!("tool reconfigure failed: {err}")))?;
-        session.refresh_tool_surface().await?;
+        session.refresh_tool_catalog().await?;
         self.stamp_live_plugin_state();
         Ok(generation)
     }
@@ -165,7 +165,7 @@ impl LashRuntime {
                  resolves them; they are Off until their source returns"
             );
         }
-        session.refresh_tool_surface().await?;
+        session.refresh_tool_catalog().await?;
         self.stamp_live_plugin_state();
         Ok(report)
     }

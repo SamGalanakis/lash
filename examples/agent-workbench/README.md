@@ -1,7 +1,7 @@
 # Agent Workbench
 
 A standalone RLM chat demo for background processes, subagents, web tools,
-button host events, and Restate-backed cron triggers.
+button triggers, and Restate-backed cron triggers.
 
 Restate is required. Run the example from the repo root with the bundled
 entrypoint. The default command starts the workbench as a detached local
@@ -76,14 +76,14 @@ Configuration is read from `.env` or the process environment:
 Open the workbench at `http://127.0.0.1:3030` by default, or at the port passed
 to the `just` recipe. Restate ingress is
 `http://127.0.0.1:8080`; the local Restate admin/UI is on
-`http://127.0.0.1:9070`.
+`http://127.0.0.1:19070`.
 
-The browser UI has three work areas: the left rail contains red and blue host
-event buttons, a cron schedule card, and per-turn model controls; the center
+The browser UI has three work areas: the left rail contains red and blue trigger
+buttons, a cron schedule card, and per-turn model controls; the center
 pane is a chat/event stream; and the right rail polls the process registry for
 visible background work. A **chat / accounts** tab switch at the top of the
 center pane opens a dedicated mock-email view (see below). The buttons emit
-`ui.button.pressed`. The cron card is
+`ui.button.pressed` trigger occurrences. The cron card is
 backed by Restate: ask the agent to schedule something and it can construct a
 typed `cron.Schedule` source whose registrations sync to Restate virtual
 objects. Started Lashlang background processes appear in the right rail.
@@ -95,13 +95,13 @@ in-flight provider call, and the turn commits as
 The Lashlang graph panel is backed by `TraceLashlangGraphStore`, a public
 trace-derived observation store for foreground blocks, durable process runs,
 and child execution links; command operations still go through the session's
-`ProcessControl` facade.
+`SessionProcessAdmin` facade.
 
 The **accounts** tab is a mocked multi-account inbox world you control live.
 Type a name (for example `Work`) and press **add account** to connect one;
 **delete** disconnects it. Each account card has a compose form that delivers a
 message into its inbox and shows that inbox inline, with a per-message delete.
-Each account is projected into the RLM Lashlang surface as a typed module
+Each account is projected into the RLM Lashlang host environment as a typed module
 authority of type `Inbox` at `inbox.<slug>`, exposing three operations — a
 message is just a title and text, with no recipient address:
 
@@ -127,7 +127,7 @@ personal = start triage(box: inbox.personal)
 results = await { work: work, personal: personal }
 ```
 
-Adding or removing an account enqueues a durable tool-surface refresh that a
+Adding or removing an account enqueues a durable tool-catalog refresh that a
 Restate workflow drains and commits — nothing executes in the HTTP handler.
 The next opened turn picks up the new `inbox.<slug>` authority automatically.
 Inbox tools resolve by parsing the tool name rather than scanning live
@@ -138,7 +138,7 @@ fails with the world's unknown-account error.
 Delivering a message is the third trigger
 source in the demo: the host appends it to the inbox and emits `mail.received`
 with payload `mail.Received { account: str, title: str, text: str }`. Like the
-button, the emission runs inside a Restate effect scope
+button, the emission runs inside a Restate execution scope
 (`WorkbenchMailReceivedWorkflow`) so any registered trigger starts a durable
 process. Register an inbox concierge once and it fires on every delivery:
 
@@ -160,11 +160,12 @@ handle = await triggers.register({
 submit format("Inbox concierge registered as `{}`.", handle)
 ```
 
-This gives the demo three kinds of trigger source — a UI button (synthetic
-event), an inbound email (data event), and a cron schedule (clock) — all
-activating durable processes through the same registry. The host declares the
-`mail.received` source through the plugin's `lashlang_resources()` hook and a
-matching `mail` host-event registration, exactly like the button.
+This gives the demo three kinds of trigger source — a UI button trigger
+occurrence, an inbound email data occurrence, and a cron schedule tick — all
+activating durable processes through the same registry. Source constructors such
+as `cron.Schedule` and `mail.received` live in the plugin's
+`lashlang_resources()` hook. The button source is zero-config and exposed from
+its trigger declaration.
 
 The button source config is `{}`. Red/blue selection arrives in the event
 payload:
@@ -186,8 +187,8 @@ submit format("Registered button watcher `{}`. Active matching registrations: {}
 ```
 
 The cron card is the schedule reference integration: there is no Lashlang
-`schedule` syntax and no UI tick button. Restate owns the timer policy. The
-workbench plugin declares the `cron.Schedule` source; Lashlang builds a
+`schedule` syntax and no UI tick button. In this example, Restate owns the timer
+policy. The workbench plugin declares the `cron.Schedule` source; Lashlang builds a
 `cron.Schedule` value and registers it with the runtime trigger registry:
 
 ```lashlang
@@ -211,7 +212,7 @@ After a Restate-backed turn registers an enabled `cron.Schedule`, the workbench
 syncs that source key to `WorkbenchCronJob/{session_id}:{source_key}`. The
 virtual object stores the source request, the next execution timestamp, and the
 Restate invocation id in Restate K/V state. Its `run` handler emits a validated
-`cron.Tick` host-event occurrence for that stored source key:
+`cron.Tick` trigger occurrence for that stored source key:
 
 ```json
 { "fired_at": "2026-06-02T12:00:00Z" }
@@ -230,11 +231,27 @@ execution is already in the past. The trace JSONL files include
 `agent_workbench.cron.restate.run`, and
 `agent_workbench.cron.restate.zombie_cancelled` events.
 
-The host side declares those source constructors through the plugin's
-`lashlang_resources()` hook. The button is a zero-config source whose event
-payload is validated separately through the host-event registration:
+Host wiring has two pieces: source constructors such as `cron.Schedule` and
+`mail.received` are declared through the plugin's `lashlang_resources()` hook,
+while the button is a zero-config source exposed by its trigger declaration. The
+button payload is validated by that registration:
 
 ```rust
+fn schedule_config_type() -> lashlang::TypeExpr {
+    lashlang::TypeExpr::Object(vec![
+        lashlang::TypeField {
+            name: "expr".into(),
+            ty: lashlang::TypeExpr::Str,
+            optional: false,
+        },
+        lashlang::TypeField {
+            name: "tz".into(),
+            ty: lashlang::TypeExpr::Str,
+            optional: true,
+        },
+    ])
+}
+
 fn cron_tick_event_type() -> lashlang::NamedDataType {
     lashlang::NamedDataType::object(
         "cron.Tick",
@@ -271,11 +288,35 @@ fn button_trigger_event_type() -> lashlang::NamedDataType {
             },
         ],
     )
-    .expect("valid button event type")
+    .expect("valid button trigger event type")
 }
 
-fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
-    let mut resources = lashlang::ResourceCatalog::new();
+fn mail_received_event_type() -> lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "mail.Received",
+        vec![
+            lashlang::TypeField {
+                name: "account".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            },
+            lashlang::TypeField {
+                name: "title".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            },
+            lashlang::TypeField {
+                name: "text".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            },
+        ],
+    )
+    .expect("valid mail received event type")
+}
+
+fn workbench_lashlang_resources() -> lashlang::LashlangHostCatalog {
+    let mut resources = lashlang::LashlangHostCatalog::new();
     resources.add_trigger_source_constructor(
         ["cron", "Schedule"],
         schedule_config_type(),
@@ -283,16 +324,16 @@ fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
     )
     .expect("valid cron trigger source");
     resources.add_trigger_source_constructor(
-        ["ui", "button", "pressed"],
+        ["mail", "received"],
         lashlang::TypeExpr::Object(vec![]),
-        button_trigger_event_type(),
+        mail_received_event_type(),
     )
-    .expect("valid button trigger source");
+    .expect("valid mail trigger source");
     resources
 }
 
-reg.host_events().declare(
-    HostEvent::new("Button", "ui.button", "pressed", button_trigger_event_type()),
+reg.triggers().declare(
+    TriggerEvent::new("Button", "ui.button", "pressed", button_trigger_event_type()),
 )?;
 ```
 

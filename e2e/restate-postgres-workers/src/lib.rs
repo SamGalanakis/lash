@@ -5,7 +5,7 @@ use lash::persistence::{AttachmentStore, LashlangArtifactStore, SessionStoreFact
 use lash::plugins::{PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin};
 use lash::process::{ProcessRegistry, ProcessWorkDriver};
 use lash::tools::{
-    StaticToolExecute, StaticToolProvider, ToolAgentSurface, ToolCall, ToolDefinition,
+    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
     ToolProvider, ToolResult,
 };
 use lash::{ModeId, ModePreset};
@@ -17,12 +17,13 @@ use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_SESSION_ID: &str = "restate-postgres-workers-e2e";
 pub const TURN_WORKFLOW_NAME: &str = "E2eTurnWorkflow";
 pub const EXPECTED_FINAL_TEXT: &str = "kitchen-sink-complete";
 pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";
+pub const EXPECTED_ASYNC_TEXT: &str = "async-completion-complete";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
 
@@ -64,6 +65,7 @@ pub enum TurnScenario {
     DrainQueued,
     SignalSuspend,
     SignalProcess,
+    AsyncCompletion,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -250,9 +252,9 @@ pub async fn reset_e2e_rows(pool: &PgPool) -> Result<()> {
         "DELETE FROM lash_e2e_provider_calls",
         "DELETE FROM lash_e2e_tool_events",
         "DELETE FROM lash_e2e_turn_events",
-        "DELETE FROM lash_host_event_deliveries",
-        "DELETE FROM lash_host_event_occurrences",
-        "DELETE FROM lash_host_event_trigger_subscriptions",
+        "DELETE FROM lash_trigger_deliveries",
+        "DELETE FROM lash_trigger_occurrences",
+        "DELETE FROM lash_trigger_subscriptions",
         "DELETE FROM lash_queued_work_items",
         "DELETE FROM lash_queued_work_batches",
         "DELETE FROM lash_process_leases",
@@ -441,6 +443,7 @@ pub struct E2eCoreConfig {
     pub storage: lash_postgres_store::PostgresStorage,
     pub attachment_store: Arc<dyn AttachmentStore>,
     pub process_work_driver: ProcessWorkDriver,
+    pub restate_ingress_url: String,
     pub mock_provider_base_url: String,
     pub trace_dir: Option<PathBuf>,
     pub fail_once: bool,
@@ -451,8 +454,8 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         Arc::new(config.storage.lashlang_artifact_store()) as Arc<dyn LashlangArtifactStore>;
     let session_store_factory =
         Arc::new(config.storage.session_store_factory()) as Arc<dyn SessionStoreFactory>;
-    let host_event_store =
-        Arc::new(config.storage.host_event_store()) as Arc<dyn lash_core::HostEventStore>;
+    let trigger_store =
+        Arc::new(config.storage.trigger_store()) as Arc<dyn lash_core::TriggerStore>;
     let provider = lash_core::ProviderHandle::new(
         OpenAiCompatibleProvider::new(
             "e2e-key",
@@ -479,12 +482,15 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         .store_factory(session_store_factory)
         .attachment_store(config.attachment_store)
         .lashlang_artifact_store(artifact_store)
-        .effect_host(Arc::new(RestateEffectHost::new()) as Arc<dyn EffectHost>)
-        .host_event_store(host_event_store)
+        .effect_host(Arc::new(RestateEffectHost::with_ingress_url(
+            config.restate_ingress_url.clone(),
+        )) as Arc<dyn EffectHost>)
+        .trigger_store(trigger_store)
         .process_work_driver(config.process_work_driver)
         .plugin(Arc::new(E2ePluginFactory {
             pool: config.storage.pool().clone(),
             worker_id: config.worker_id.clone(),
+            restate_ingress_url: config.restate_ingress_url,
             fail_once: config.fail_once,
         }));
     if let Some(trace_dir) = config.trace_dir {
@@ -507,6 +513,7 @@ pub fn process_registry_from_storage(
 struct E2ePluginFactory {
     pool: PgPool,
     worker_id: String,
+    restate_ingress_url: String,
     fail_once: bool,
 }
 
@@ -523,8 +530,8 @@ impl PluginFactory for E2ePluginFactory {
             .with_triggers()
     }
 
-    fn lashlang_resources(&self) -> lash::modes::ResourceCatalog {
-        let mut resources = lash::modes::ResourceCatalog::new();
+    fn lashlang_resources(&self) -> lash::modes::LashlangHostCatalog {
+        let mut resources = lash::modes::LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["ui", "button", "pressed"],
@@ -542,6 +549,7 @@ impl PluginFactory for E2ePluginFactory {
         Ok(Arc::new(E2eSessionPlugin {
             pool: self.pool.clone(),
             worker_id: self.worker_id.clone(),
+            restate_ingress_url: self.restate_ingress_url.clone(),
             fail_once: self.fail_once,
         }))
     }
@@ -551,6 +559,7 @@ impl PluginFactory for E2ePluginFactory {
 struct E2eSessionPlugin {
     pool: PgPool,
     worker_id: String,
+    restate_ingress_url: String,
     fail_once: bool,
 }
 
@@ -560,17 +569,17 @@ impl SessionPlugin for E2eSessionPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), lash::plugins::PluginError> {
-        reg.host_events()
-            .declare(lash::host_events::HostEvent::new(
-                "Button",
-                "ui.button",
-                "pressed",
-                button_pressed_event_type(),
-            ))?;
+        reg.triggers().declare(lash::triggers::TriggerEvent::new(
+            "Button",
+            "ui.button",
+            "pressed",
+            button_pressed_event_type(),
+        ))?;
         reg.tools()
             .provider(e2e_tool_provider(
                 self.pool.clone(),
                 self.worker_id.clone(),
+                self.restate_ingress_url.clone(),
                 self.fail_once,
             ))
             .map_err(|err| lash::plugins::PluginError::Session(err.to_string()))?;
@@ -605,7 +614,12 @@ fn button_pressed_event_type() -> lash::modes::NamedDataType {
     .expect("valid e2e button payload type")
 }
 
-fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dyn ToolProvider> {
+fn e2e_tool_provider(
+    pool: PgPool,
+    worker_id: String,
+    restate_ingress_url: String,
+    fail_once: bool,
+) -> Arc<dyn ToolProvider> {
     Arc::new(StaticToolProvider::new(
         vec![
             e2e_tool_definition(
@@ -630,7 +644,33 @@ fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dy
                     "required": ["key", "value", "worker_id"],
                     "additionalProperties": false
                 }),
-                ToolAgentSurface::new(["tools"], "app_lookup"),
+                LashlangToolBinding::new(["tools"], "app_lookup"),
+            ),
+            e2e_tool_definition(
+                "tool:async_lookup",
+                "async_lookup",
+                "Deterministic E2E lookup that completes through external AwaitEvent ingress.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": { "type": "string" },
+                        "key": { "type": "string" }
+                    },
+                    "required": ["workflow_id", "key"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" },
+                        "value": { "type": "string" },
+                        "worker_id": { "type": "string" },
+                        "async": { "type": "boolean" }
+                    },
+                    "required": ["key", "value", "worker_id", "async"],
+                    "additionalProperties": false
+                }),
+                LashlangToolBinding::new(["tools"], "async_lookup"),
             ),
             e2e_tool_definition(
                 "tool:make_attachment",
@@ -656,7 +696,7 @@ fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dy
                     "required": ["id", "mime", "filename", "byte_len"],
                     "additionalProperties": false
                 }),
-                ToolAgentSurface::new(["tools"], "make_attachment"),
+                LashlangToolBinding::new(["tools"], "make_attachment"),
             ),
             e2e_tool_definition(
                 "tool:crash_once",
@@ -679,12 +719,13 @@ fn e2e_tool_provider(pool: PgPool, worker_id: String, fail_once: bool) -> Arc<dy
                     "required": ["crashed", "worker_id"],
                     "additionalProperties": false
                 }),
-                ToolAgentSurface::new(["tools"], "crash_once"),
+                LashlangToolBinding::new(["tools"], "crash_once"),
             ),
         ],
         E2eTools {
             pool,
             worker_id,
+            restate_ingress_url,
             fail_once,
         },
     )) as Arc<dyn ToolProvider>
@@ -696,16 +737,17 @@ fn e2e_tool_definition(
     description: &'static str,
     input_schema: serde_json::Value,
     output_schema: serde_json::Value,
-    surface: ToolAgentSurface,
+    surface: LashlangToolBinding,
 ) -> ToolDefinition {
     ToolDefinition::raw(id, name, description, input_schema, output_schema)
-        .with_agent_surface(surface)
+        .with_lashlang_binding(surface)
 }
 
 #[derive(Clone)]
 struct E2eTools {
     pool: PgPool,
     worker_id: String,
+    restate_ingress_url: String,
     fail_once: bool,
 }
 
@@ -714,6 +756,7 @@ impl StaticToolExecute for E2eTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "app_lookup" => self.app_lookup(call).await,
+            "async_lookup" => self.async_lookup(call).await,
             "make_attachment" => self.make_attachment(call).await,
             "crash_once" => self.crash_once(call).await,
             other => ToolResult::err_fmt(format_args!("unknown e2e tool `{other}`")),
@@ -745,6 +788,71 @@ impl E2eTools {
         )
         .await;
         ToolResult::ok(result)
+    }
+
+    async fn async_lookup(&self, call: ToolCall<'_>) -> ToolResult {
+        let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
+        let key_arg = call
+            .args
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default")
+            .to_string();
+        let result = serde_json::json!({
+            "key": key_arg,
+            "value": format!("async:{key_arg}"),
+            "worker_id": self.worker_id,
+            "async": true,
+        });
+        let completion_key = match call.context.completion_key().await {
+            Ok(key) => key,
+            Err(err) => return ToolResult::err_fmt(err),
+        };
+        let call_id = call.context.tool_call_id().map(ToOwned::to_owned);
+        let args = call.args.to_owned();
+        let _ = record_tool_event(
+            &self.pool,
+            &workflow_id,
+            &self.worker_id,
+            call.name,
+            call_id.as_deref(),
+            args.clone(),
+            serde_json::json!({
+                "pending": true,
+                "promise_key": completion_key.promise_key(),
+            }),
+        )
+        .await;
+
+        let pool = self.pool.clone();
+        let worker_id = self.worker_id.clone();
+        let restate_ingress_url = self.restate_ingress_url.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let host = RestateEffectHost::with_ingress_url(restate_ingress_url);
+            let resolution = lash_core::Resolution::Ok(result.clone());
+            let outcome = host
+                .resolve_await_event(&completion_key, resolution)
+                .await
+                .map(|outcome| serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null))
+                .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }));
+            let _ = record_tool_event(
+                &pool,
+                &workflow_id,
+                &worker_id,
+                "async_lookup.resolve",
+                call_id.as_deref(),
+                args,
+                serde_json::json!({
+                    "resolved": true,
+                    "outcome": outcome,
+                    "result": result,
+                }),
+            )
+            .await;
+        });
+
+        ToolResult::pending(lash_core::PendingCompletion::new())
     }
 
     async fn make_attachment(&self, call: ToolCall<'_>) -> ToolResult {

@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
 <link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
+<script src="./mermaid.js?v=4" defer></script>
 <script src="./docs.js?v=7" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
@@ -59,7 +60,7 @@ let core = LashCore::standard()
         <div class="section" id="lashlang-execution">
           <div class="section-header">
             <h2>Lashlang Execution Graphs</h2>
-            <p>Host-level Lashlang execution graphs are a separate opt-in sink. They are observability only: they are not written to <code>process_events</code>, do not create process-registry storage, and the normal <code>trace_sink</code> does not receive them unless the host explicitly tees the sink itself. Commands remain on the process control surfaces — the session-scoped <code>ProcessControl</code> and the runtime-level <code>LashCore::processes()</code> handle; observation is optional trace projection.</p>
+            <p>Host-level Lashlang execution graphs are a separate opt-in sink. They are observability only: they are not written to <code>process_events</code>, do not create process-registry storage, and the normal <code>trace_sink</code> does not receive them unless the host explicitly tees the sink itself. Commands remain on the process admin surfaces — the session-scoped <code>SessionProcessAdmin</code> and the runtime-level <code>LashCore::processes()</code> handle; observation is optional trace projection.</p>
           </div>
           <pre data-lang="rust" data-snippet="tracing#lashlang-execution-jsonl"><code>let core = LashCore::rlm()
     .provider(provider)
@@ -100,7 +101,104 @@ let core = LashCore::rlm()
 let graph = lashlang_graphs.graph("process:process-id");</code></pre>
           <p>Tracking records use <code>TraceEvent::LashlangExecution</code> with typed payloads for execution start/finish, node start/complete/fail, branch selection, and child execution links. Every payload includes a deterministic <code>event_key</code> so <code>TraceLashlangGraphStore</code> dedupes replayed records. Graph keys are derived from runtime identity, such as <code>effect:session:turn:effect-id</code> for foreground code and <code>process:process-id</code> for durable processes. Graph snapshots are derived from trace events and safe for host UIs, dashboards, tests, and debugging; they are not canonical process state.</p>
           <p>When the linked Lashlang artifact contains static <code>@label</code> annotations, <code>ExecutionStarted.execution_map.nodes</code> carries each node's optional <code>label_metadata</code> with <code>title</code> and optional <code>description</code>. Lifecycle events continue to reference <code>node_id</code> only, and <code>TraceLashlangGraphStore</code> reduces the metadata from the initial execution map into graph nodes for host renderers.</p>
-          <p>Process wakes carry typed provenance through <code>MessageOrigin::Process.caused_by</code>. Hosts can inspect that semantic metadata to relate a wake back to a host-event occurrence, session node, or other runtime cause; rendering remains the host's responsibility.</p>
+          <p>Process wakes carry typed provenance through <code>MessageOrigin::Process.caused_by</code>. Hosts can inspect that semantic metadata to relate a wake back to a trigger occurrence, session node, or other runtime cause; rendering remains the host's responsibility.</p>
+        </div>
+
+        <div class="section" id="lashlang-graph-updates">
+          <div class="section-header">
+            <h2>Lashlang Graph Updates</h2>
+            <p>A Lashlang graph is split into a static execution map and dynamic observation events. The static map gives a renderer the shape before any node runs; the dynamic stream updates node status, branch selection, timing, failures, and child execution links as the VM crosses observed sites.</p>
+          </div>
+          <dl class="def-list">
+            <dt>Static map</dt>
+            <dd><code>ExecutionStarted</code> carries <code>TraceLashlangMap</code>: graph identity, nodes, edges, node kinds, generated labels, and optional <code>@label</code> metadata. <code>TraceLashlangGraphStore</code> seeds those nodes as <code>unobserved</code> and branch edges as <code>unknown</code>. This is the data a UI uses to draw the full skeleton up front.</dd>
+            <dt>Dynamic updates</dt>
+            <dd><code>NodeStarted</code>, <code>NodeCompleted</code>, and <code>NodeFailed</code> update one node by <code>node_id</code>, set timestamps, duration, occurrence, and latest error. <code>BranchSelected</code> marks the chosen <code>then</code> or <code>else</code> edge as <code>selected</code>, marks the sibling branch edge as <code>rejected</code>, and completes the selected branch-arm node. <code>ChildStarted</code> links a parent node to another graph key, such as a started process graph. <code>ExecutionFinished</code> sets the graph-level status.</dd>
+            <dt><code>@label</code></dt>
+            <dd><code>@label(title: "...", description: "...")</code> is static authoring metadata only. It travels in the execution map as <code>label_metadata</code>, becomes part of the module artifact identity, and never appears as a runtime command or dynamic update. A renderer should display the title/description from the static node and overlay the live status from dynamic events.</dd>
+          </dl>
+          <pre data-lang="lashlang"><code>process review_one(path: str) {
+  @label(title: "Review file")
+  report = await agents.default.spawn({
+    task: format("Review {}", path),
+    capability: "explore"
+  })?
+  finish report
+}
+
+@label(title: "Find candidates")
+paths = await workspace.default.glob({ pattern: "src/**/*.rs" })?
+
+@label(title: "Choose path")
+if empty(paths) {
+  @label(title: "Submit empty result")
+  submit { reviewed: 0 }
+} else {
+  @label(title: "Start child review")
+  child = start review_one(path: paths[0])
+
+  @label(title: "Collect child result")
+  report = (await child)?
+  submit { reviewed: 1, report: report }
+}</code></pre>
+          <div class="diagram">
+            <div class="diagram-title">Static map with dynamic overlays</div>
+            <div class="mermaid">
+flowchart LR
+  A["Find candidates<br/>@label<br/>completed"] --> B{"Choose path<br/>@label<br/>selected branch"}
+  B -- else selected --> C["Start child review<br/>@label<br/>completed"]
+  B -. then rejected .-> D["Submit empty result<br/>@label<br/>unobserved"]
+  C --> E["Collect child result<br/>@label<br/>running"]
+  C == child graph link ==> P["process:review_one<br/>Review file"]
+
+  classDef completed fill:#d8f3dc,stroke:#2d6a4f,color:#10251b;
+  classDef running fill:#dbeafe,stroke:#2563eb,color:#111827;
+  classDef rejected fill:#f3f4f6,stroke:#9ca3af,color:#4b5563,stroke-dasharray:4 4;
+  class A,C completed;
+  class B,E running;
+  class D rejected;
+            </div>
+          </div>
+          <p>For the run shown above, the graph snapshot keeps every static node even when the branch is not taken. A host UI can render the rejected branch faintly, keep the child-process link attached to the <code>Start child review</code> node, and update <code>Collect child result</code> from <code>running</code> to <code>completed</code> or <code>failed</code> when the next node event arrives.</p>
+          <pre data-lang="json"><code>{
+  "graph_key": "effect:session-1:turn-7:exec-1",
+  "status": "running",
+  "nodes": [
+    {
+      "id": "n1",
+      "kind": "operation",
+      "label": "workspace.default.glob",
+      "label_metadata": { "title": "Find candidates" },
+      "status": "completed",
+      "duration_ms": 12
+    },
+    {
+      "id": "n2",
+      "kind": "branch",
+      "label": "if empty(paths)",
+      "label_metadata": { "title": "Choose path" },
+      "status": "completed"
+    },
+    {
+      "id": "n3",
+      "kind": "start",
+      "label": "start review_one",
+      "label_metadata": { "title": "Start child review" },
+      "status": "completed"
+    }
+  ],
+  "edges": [
+    { "id": "e-then", "from": "n2", "to": "then", "label": "then", "selection": "rejected" },
+    { "id": "e-else", "from": "n2", "to": "else", "label": "else", "selection": "selected" }
+  ],
+  "children": [
+    {
+      "parent_node_id": "n3",
+      "child_graph_key": "process:review-process-id",
+      "child_entry_name": "review_one"
+    }
+  ]
+}</code></pre>
         </div>
 
         <div class="section" id="sink-trait">

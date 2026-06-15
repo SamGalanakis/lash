@@ -86,13 +86,13 @@ pub struct PluginSession {
     pub(super) plugins: Vec<Arc<dyn SessionPlugin>>,
     pub(super) tools: Arc<dyn ToolProvider>,
     pub(super) tool_registry: Arc<crate::ToolRegistry>,
-    pub(super) tool_surface_overlay: ToolSurfaceContribution,
+    pub(super) tool_catalog_overlay: ToolCatalogContribution,
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionContext>,
     pub(super) lashlang_abilities: lashlang::LashlangAbilities,
     pub(super) lashlang_language_features: lashlang::LashlangLanguageFeatures,
-    pub(super) lashlang_resources: lashlang::ResourceCatalog,
-    pub(super) host_events: crate::HostEventCatalog,
+    pub(super) lashlang_resources: lashlang::LashlangHostCatalog,
+    pub(super) triggers: crate::TriggerEventCatalog,
     pub(super) contributions: PluginContributions,
 }
 impl PluginSession {
@@ -116,12 +116,12 @@ impl PluginSession {
         self.lashlang_language_features
     }
 
-    pub fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+    pub fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
         self.lashlang_resources.clone()
     }
 
-    pub fn host_events(&self) -> &crate::HostEventCatalog {
-        &self.host_events
+    pub fn triggers(&self) -> &crate::TriggerEventCatalog {
+        &self.triggers
     }
 
     pub fn host(&self) -> &PluginHost {
@@ -523,10 +523,10 @@ impl PluginSession {
         session_id: impl Into<String>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
-        self.host.build_session_with_surface(
+        self.host.build_session_with_overlay(
             session_id,
             Some(&snapshot),
-            self.tool_surface_overlay.clone(),
+            self.tool_catalog_overlay.clone(),
             Some(self.tool_registry.export_state()),
         )
     }
@@ -538,26 +538,26 @@ impl PluginSession {
         authority: super::SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
-        self.host.build_session_with_parent_and_surface(
+        self.host.build_session_with_parent_and_overlay(
             session_id,
             parent_session_id,
             Some(&snapshot),
-            self.tool_surface_overlay.clone(),
+            self.tool_catalog_overlay.clone(),
             Some(self.tool_registry.export_state()),
             authority,
         )
     }
 
-    pub fn fork_for_session_with_tool_surface(
+    pub fn fork_for_session_with_tool_catalog(
         &self,
         session_id: impl Into<String>,
-        tool_surface_overlay: ToolSurfaceContribution,
+        tool_catalog_overlay: ToolCatalogContribution,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
-        self.host.build_session_with_surface(
+        self.host.build_session_with_overlay(
             session_id,
             Some(&snapshot),
-            tool_surface_overlay,
+            tool_catalog_overlay,
             Some(self.tool_registry.export_state()),
         )
     }
@@ -641,14 +641,20 @@ impl PluginSession {
             )
             .await
             .map_err(|err| PluginError::Invoke(err.to_string()))?;
-        if !result.is_success() {
+        let Some(output) = result.as_done_output() else {
+            return Err(PluginError::Invoke(format!(
+                "{} returned a pending result where completed output is required",
+                Op::NAME
+            )));
+        };
+        if !output.is_success() {
             return Err(PluginError::Invoke(format!(
                 "{} failed: {}",
                 Op::NAME,
-                result.value_for_projection()
+                output.value_for_projection()
             )));
         }
-        serde_json::from_value(result.into_output().value_for_projection())
+        serde_json::from_value(output.value_for_projection())
             .map_err(|err| PluginError::Invoke(format!("invalid {} output: {err}", Op::NAME)))
     }
 }

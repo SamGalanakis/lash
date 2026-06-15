@@ -5,10 +5,11 @@ mod outcome;
 pub use envelope::{
     LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimeReplay, RuntimeScope, RuntimeSubject,
+    RuntimeReplay, RuntimeScope, RuntimeSubject, ToolCallLaunch,
 };
 pub use executor::{
-    EffectHost, EffectScope, InlineEffectHost, InlineRuntimeEffectController,
+    AwaitEventKey, AwaitEventWaitIdentity, EffectHost, ExecutionScope, ExternalCompletionError,
+    InlineEffectHost, InlineRuntimeEffectController, Resolution, ResolveOutcome,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
     ScopedEffectController,
 };
@@ -149,6 +150,52 @@ mod tests {
         assert_eq!(
             call.prepared_payload,
             serde_json::json!({"context": "prepared"})
+        );
+    }
+
+    #[tokio::test]
+    async fn await_event_key_is_stable_for_scope_and_wait_identity() {
+        let host = InlineEffectHost::default();
+        let scope = ExecutionScope::turn("session", "turn");
+        let wait = AwaitEventWaitIdentity::tool_completion("call");
+
+        let first = host
+            .await_event_key(&scope, wait.clone())
+            .await
+            .expect("first key");
+        let second = host
+            .await_event_key(&scope, wait)
+            .await
+            .expect("second key");
+
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn duplicate_await_event_resolution_reports_existing_terminal() {
+        let host = InlineEffectHost::default();
+        let scope = ExecutionScope::turn("session-dupe", "turn-dupe");
+        let key = host
+            .await_event_key(&scope, AwaitEventWaitIdentity::tool_completion("call-dupe"))
+            .await
+            .expect("key");
+        let resolution = Resolution::Ok(serde_json::json!({"done": true}));
+
+        let first = host
+            .resolve_await_event(&key, resolution.clone())
+            .await
+            .expect("first resolve");
+        let second = host
+            .resolve_await_event(&key, Resolution::Ok(serde_json::json!({"ignored": true})))
+            .await
+            .expect("duplicate resolve");
+
+        assert_eq!(first, ResolveOutcome::Accepted);
+        assert_eq!(
+            second,
+            ResolveOutcome::AlreadyResolved {
+                terminal: resolution
+            }
         );
     }
 }

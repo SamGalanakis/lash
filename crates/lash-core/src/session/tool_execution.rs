@@ -1,12 +1,13 @@
 use super::execution_context::RuntimeExecutionContext;
 use crate::tool_dispatch::{
-    ToolDispatchOutcome, ToolPreparationOutcome,
-    dispatch_prepared_tool_call_with_execution_context, prepare_tool_call_with_context,
+    ToolCallLaunch, ToolDispatchOutcome, ToolPreparationOutcome,
+    dispatch_prepared_tool_call_launch_with_execution_context,
+    finalize_tool_result_with_execution_context, prepare_tool_call_with_context,
     schedule_tool_batch,
 };
 use crate::{
     ModelToolReturn, SessionEvent, ToolCallOutput, ToolCallRecord, ToolCancellation, ToolFailure,
-    ToolFailureClass, TurnActivityId, TurnEvent,
+    ToolFailureClass, ToolResult, TurnActivityId, TurnEvent,
 };
 
 #[derive(Clone, Debug)]
@@ -67,9 +68,13 @@ impl ToolInvocationReply {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CompletedProtocolToolCall {
-    pub index: usize,
     pub completed: crate::sansio::CompletedToolCall,
     pub record: ToolCallRecord,
+}
+
+pub(crate) enum ProtocolToolCallLaunch {
+    Done(CompletedProtocolToolCall),
+    Pending(crate::tool_dispatch::PendingToolDispatchOutcome),
 }
 
 #[derive(Clone)]
@@ -139,7 +144,7 @@ impl RuntimeExecutionContext<'_> {
             args,
             replay: replay.clone(),
         };
-        let mut outcome =
+        let launch =
             match prepare_tool_call_with_context(&dispatch, pending, Some(call_id.clone())).await {
                 ToolPreparationOutcome::Prepared(prepared) => {
                     let dispatch_context = std::sync::Arc::new(dispatch.clone());
@@ -147,10 +152,11 @@ impl RuntimeExecutionContext<'_> {
                         crate::ToolContext::from_dispatch(std::sync::Arc::clone(&dispatch_context))
                             .prepared_call(&prepared)
                             .cancellation_token(self.cancellation_token.clone())
+                            .runtime_process_id(self.runtime_process_id.clone())
                             .parent_invocation(parent_invocation.clone())
                             .lashlang_execution_call_site(lashlang_execution_call_site.clone())
                             .build();
-                    dispatch_prepared_tool_call_with_execution_context(
+                    dispatch_prepared_tool_call_launch_with_execution_context(
                         dispatch_context.as_ref(),
                         prepared,
                         None,
@@ -158,8 +164,20 @@ impl RuntimeExecutionContext<'_> {
                     )
                     .await
                 }
-                ToolPreparationOutcome::Completed(outcome) => *outcome,
+                ToolPreparationOutcome::Completed(outcome) => ToolCallLaunch::Done(*outcome),
             };
+        let mut outcome = match launch {
+            ToolCallLaunch::Done(outcome) => outcome,
+            ToolCallLaunch::Pending(pending) => {
+                self.await_pending_tool_dispatch_outcome(
+                    &call_id,
+                    parent_invocation.clone(),
+                    pending,
+                    self.cancellation_token.clone(),
+                )
+                .await
+            }
+        };
         outcome.record.call_id = Some(call_id.clone());
 
         self.complete_tool_call(index, call_id, replay, outcome, tool_correlation_id)
@@ -174,22 +192,36 @@ impl RuntimeExecutionContext<'_> {
         prepare_tool_call_with_context(self.dispatch.as_ref(), pending, call_id).await
     }
 
-    pub(crate) async fn execute_prepared_tool_call(
+    pub(crate) async fn execute_prepared_tool_call_launch(
         &self,
         prepared: crate::PreparedToolCall,
         index: usize,
         parent_invocation: Option<crate::RuntimeInvocation>,
-    ) -> CompletedProtocolToolCall {
-        self.execute_prepared_tool_call_inner(prepared, index, parent_invocation)
-            .await
+    ) -> crate::runtime::ToolCallLaunch {
+        match Box::pin(self.execute_prepared_tool_call_launch_inner(
+            prepared,
+            index,
+            parent_invocation,
+        ))
+        .await
+        {
+            ProtocolToolCallLaunch::Done(completed) => crate::runtime::ToolCallLaunch::Done {
+                result: completed.completed,
+            },
+            ProtocolToolCallLaunch::Pending(pending) => crate::runtime::ToolCallLaunch::Pending {
+                key: pending.key,
+                pending: pending.pending,
+                duration_ms: pending.duration_ms,
+            },
+        }
     }
 
-    async fn execute_prepared_tool_call_inner(
+    async fn execute_prepared_tool_call_launch_inner(
         &self,
         prepared: crate::PreparedToolCall,
         index: usize,
         parent_invocation: Option<crate::RuntimeInvocation>,
-    ) -> CompletedProtocolToolCall {
+    ) -> ProtocolToolCallLaunch {
         let call_id = prepared.call_id.clone();
         let name = prepared.tool_name.clone();
         let args = prepared.args.clone();
@@ -220,20 +252,27 @@ impl RuntimeExecutionContext<'_> {
         let tool_context = crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
             .prepared_call(&prepared)
             .cancellation_token(self.cancellation_token.clone())
+            .runtime_process_id(self.runtime_process_id.clone())
             .parent_invocation(run.parent_invocation.clone())
             .build();
-        let mut outcome = dispatch_prepared_tool_call_with_execution_context(
+        let outcome = Box::pin(dispatch_prepared_tool_call_launch_with_execution_context(
             self.dispatch.as_ref(),
             prepared,
             None,
             tool_context,
-        )
+        ))
         .await;
-        outcome.record.call_id = Some(call_id.clone());
-        tokio::task::yield_now().await;
-
-        self.complete_tool_call(run.index, call_id, replay, outcome, tool_correlation_id)
-            .await
+        match outcome {
+            ToolCallLaunch::Done(mut outcome) => {
+                outcome.record.call_id = Some(call_id.clone());
+                tokio::task::yield_now().await;
+                let completed = self
+                    .complete_tool_call(run.index, call_id, replay, outcome, tool_correlation_id)
+                    .await;
+                ProtocolToolCallLaunch::Done(completed)
+            }
+            ToolCallLaunch::Pending(pending) => ProtocolToolCallLaunch::Pending(pending),
+        }
     }
 
     pub(super) async fn await_process_with_cancellation(
@@ -242,6 +281,7 @@ impl RuntimeExecutionContext<'_> {
         parent_invocation: Option<crate::RuntimeInvocation>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
+        let _phase = self.named_phase("rlm_process.await_handle");
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 result = self.dispatch.processes.await_process(
@@ -270,7 +310,7 @@ impl RuntimeExecutionContext<'_> {
 
     pub(crate) async fn complete_tool_call(
         &self,
-        index: usize,
+        _index: usize,
         call_id: String,
         replay: Option<crate::llm::types::ProviderReplayMeta>,
         outcome: ToolDispatchOutcome,
@@ -321,7 +361,6 @@ impl RuntimeExecutionContext<'_> {
             duration_ms: outcome.record.duration_ms,
         };
         CompletedProtocolToolCall {
-            index,
             completed: crate::sansio::CompletedToolCall {
                 call_id,
                 tool_name: outcome.record.tool,
@@ -333,6 +372,110 @@ impl RuntimeExecutionContext<'_> {
             },
             record,
         }
+    }
+
+    pub(crate) async fn pending_completion_dispatch_outcome(
+        &self,
+        tool_name: String,
+        args: serde_json::Value,
+        resolution: crate::Resolution,
+        duration_ms: u64,
+    ) -> ToolDispatchOutcome {
+        let output = crate::tool_result::tool_output_from_completion_resolution(resolution);
+        let result = finalize_tool_result_with_execution_context(
+            self.dispatch.as_ref(),
+            &tool_name,
+            &args,
+            ToolResult::from_output(output),
+            duration_ms,
+        )
+        .await;
+        let output = result.into_done_output().unwrap_or_else(|_| {
+            ToolCallOutput::failure(ToolFailure::runtime(
+                ToolFailureClass::Internal,
+                "pending_tool_not_finalized",
+                "pending tool result reached a completed-output projection path",
+            ))
+        });
+        ToolDispatchOutcome {
+            record: ToolCallRecord {
+                call_id: None,
+                tool: tool_name,
+                args,
+                output,
+                duration_ms,
+            },
+        }
+    }
+
+    async fn await_pending_tool_dispatch_outcome(
+        &self,
+        call_id: &str,
+        parent_invocation: Option<crate::RuntimeInvocation>,
+        pending: crate::tool_dispatch::PendingToolDispatchOutcome,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> ToolDispatchOutcome {
+        let fallback;
+        let parent = if let Some(parent) = parent_invocation.as_ref() {
+            parent
+        } else {
+            fallback = crate::RuntimeInvocation::effect(
+                crate::RuntimeScope::new(&self.dispatch.session_id),
+                format!("tool:{call_id}:await"),
+                crate::RuntimeEffectKind::AwaitEvent,
+                format!("tool:{call_id}:await"),
+            );
+            &fallback
+        };
+        let parent_effect_id = parent.effect_id().unwrap_or("tool");
+        let invocation = crate::runtime::causal::child_effect_invocation(
+            parent,
+            format!("{parent_effect_id}:{call_id}:await"),
+            crate::RuntimeEffectKind::AwaitEvent,
+            format!("{call_id}:await"),
+        );
+        let cancellation = cancellation.unwrap_or_default();
+        let deadline = pending
+            .pending
+            .deadline
+            .map(|duration| std::time::Instant::now() + duration);
+        let outcome = self
+            .dispatch
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::AwaitEvent { key: pending.key },
+                ),
+                crate::RuntimeEffectLocalExecutor::await_event(cancellation, deadline),
+            )
+            .await;
+        let resolution = match outcome.and_then(crate::RuntimeEffectOutcome::into_await_event) {
+            Ok(resolution) => resolution,
+            Err(err) => {
+                return ToolDispatchOutcome {
+                    record: ToolCallRecord {
+                        call_id: None,
+                        tool: pending.tool_name,
+                        args: pending.args,
+                        output: ToolCallOutput::failure(ToolFailure::runtime(
+                            ToolFailureClass::Internal,
+                            "pending_tool_completion_failed",
+                            err.to_string(),
+                        )),
+                        duration_ms: pending.duration_ms,
+                    },
+                };
+            }
+        };
+        self.pending_completion_dispatch_outcome(
+            pending.tool_name,
+            pending.args,
+            resolution,
+            pending.duration_ms,
+        )
+        .await
     }
 
     pub async fn call_tool(

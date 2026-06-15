@@ -9,7 +9,7 @@ pub enum DurableStoreFacet {
     ArtifactStore,
     SessionStore,
     ProcessRegistry,
-    HostEventStore,
+    TriggerStore,
 }
 
 impl DurableStoreFacet {
@@ -21,7 +21,7 @@ impl DurableStoreFacet {
             Self::ArtifactStore => "durable_store_required:artifact_store",
             Self::SessionStore => "durable_store_required:session_store",
             Self::ProcessRegistry => "durable_store_required:process_registry",
-            Self::HostEventStore => "durable_store_required:host_event_store",
+            Self::TriggerStore => "durable_store_required:trigger_store",
         }
     }
 }
@@ -32,8 +32,8 @@ impl DurableStoreFacet {
 /// errors, but callers should match this type instead of parsing display text.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RuntimeErrorCode {
-    MissingEffectScopeId,
-    EffectScopeTurnIdMismatch,
+    MissingExecutionScopeId,
+    ExecutionScopeTurnIdMismatch,
     /// A process (re-)execution was handed an empty/non-persisted process id.
     /// Process execution identity is the persisted `process_id`; a retry that
     /// cannot present that stable id has lost its idempotency anchor.
@@ -61,8 +61,8 @@ pub enum RuntimeErrorCode {
 impl RuntimeErrorCode {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::MissingEffectScopeId => "missing_effect_scope_id",
-            Self::EffectScopeTurnIdMismatch => "effect_scope_turn_id_mismatch",
+            Self::MissingExecutionScopeId => "missing_execution_scope_id",
+            Self::ExecutionScopeTurnIdMismatch => "execution_scope_turn_id_mismatch",
             Self::MissingProcessExecutionId => "missing_process_execution_id",
             Self::DurableStoreRequired { facet } => facet.as_code(),
             Self::StoreCommitFailed => "store_commit_failed",
@@ -91,8 +91,8 @@ impl std::fmt::Display for RuntimeErrorCode {
 impl From<&str> for RuntimeErrorCode {
     fn from(code: &str) -> Self {
         match code {
-            "missing_effect_scope_id" => Self::MissingEffectScopeId,
-            "effect_scope_turn_id_mismatch" => Self::EffectScopeTurnIdMismatch,
+            "missing_execution_scope_id" => Self::MissingExecutionScopeId,
+            "execution_scope_turn_id_mismatch" => Self::ExecutionScopeTurnIdMismatch,
             "missing_process_execution_id" => Self::MissingProcessExecutionId,
             "durable_store_required:attachment_store" => Self::DurableStoreRequired {
                 facet: DurableStoreFacet::AttachmentStore,
@@ -106,8 +106,8 @@ impl From<&str> for RuntimeErrorCode {
             "durable_store_required:process_registry" => Self::DurableStoreRequired {
                 facet: DurableStoreFacet::ProcessRegistry,
             },
-            "durable_store_required:host_event_store" => Self::DurableStoreRequired {
-                facet: DurableStoreFacet::HostEventStore,
+            "durable_store_required:trigger_store" => Self::DurableStoreRequired {
+                facet: DurableStoreFacet::TriggerStore,
             },
             "store_commit_failed" => Self::StoreCommitFailed,
             "plugin_session_manager" => Self::PluginSessionManager,
@@ -178,7 +178,7 @@ impl RuntimeError {
             DurableStoreFacet::ArtifactStore => "lashlang artifact store",
             DurableStoreFacet::SessionStore => "session store",
             DurableStoreFacet::ProcessRegistry => "process registry",
-            DurableStoreFacet::HostEventStore => "host event store",
+            DurableStoreFacet::TriggerStore => "trigger store",
         };
         Self::new(
             RuntimeErrorCode::DurableStoreRequired { facet },
@@ -191,7 +191,7 @@ impl RuntimeError {
     ///
     /// Process execution identity is the persisted `process_id`, so a retry
     /// must present that stable id — mirroring how
-    /// [`EffectScope`](crate::EffectScope) rejects an empty stable id.
+    /// [`ExecutionScope`](crate::ExecutionScope) rejects an empty stable id.
     pub fn missing_process_execution_id() -> Self {
         Self::new(
             RuntimeErrorCode::MissingProcessExecutionId,
@@ -219,7 +219,7 @@ mod tests {
             DurableStoreFacet::ArtifactStore,
             DurableStoreFacet::SessionStore,
             DurableStoreFacet::ProcessRegistry,
-            DurableStoreFacet::HostEventStore,
+            DurableStoreFacet::TriggerStore,
         ] {
             let err = RuntimeError::durable_store_required(facet);
             let json = serde_json::to_value(&err).expect("serialize runtime error");

@@ -126,10 +126,10 @@ fn autonomous_tool_allowed(name: &str) -> bool {
 pub(super) async fn apply_autonomous_tool_policy(
     session: &lash::LashSession,
 ) -> anyhow::Result<()> {
-    let mut snapshot = session.control().tools().state().await?;
+    let mut snapshot = session.admin().tools().state().await?;
     retain_autonomous_tools(&mut snapshot);
     session
-        .control()
+        .admin()
         .tools()
         .advanced()
         .apply_state(snapshot)

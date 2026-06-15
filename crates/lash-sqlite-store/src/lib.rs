@@ -73,32 +73,32 @@ mod blobs;
 mod conn;
 mod effect_replay;
 mod graph;
-mod host_events;
 mod leases;
 mod lifecycle;
 mod persistence;
 mod process_registry;
 mod queued_work;
 mod schema;
+mod triggers;
 
 use conn::TxOutcome;
 pub use effect_replay::{
     SqliteEffectHost, SqliteEffectReplayOptions, SqliteRuntimeEffectController,
 };
-pub use host_events::SqliteHostEventStore;
 use leases::*;
 use queued_work::*;
 use schema::{
-    StoreBacking, apply_pragmas, ensure_effect_schema, ensure_host_event_schema,
-    ensure_process_schema, ensure_schema,
+    StoreBacking, apply_pragmas, ensure_effect_schema, ensure_process_schema, ensure_schema,
+    ensure_trigger_schema,
 };
+pub use triggers::SqliteTriggerStore;
 
-/// SQLite-backed store for checkpoint blobs and the canonical session head.
+/// SQLite-backed store for checkpoint blobs, runtime session state, and
+/// Lashlang artifacts.
 ///
-/// The struct name and every public method match `lash_sqlite_store::Store`
-/// exactly so consumers swap backends with a path rename. Internally it holds a
-/// single cloneable [`SqliteConnection`] (a tokio-rusqlite handle to one
-/// database thread) rather than the prior store's `tokio::sync::Mutex<rusqlite::Connection>`.
+/// This is the first-party local implementation of the runtime store traits.
+/// Internally it holds a single cloneable [`SqliteConnection`] (a
+/// tokio-rusqlite handle to one database thread).
 pub struct Store {
     conn: SqliteConnection,
     artifact_cache: Mutex<BTreeMap<lashlang::ModuleRef, Arc<lashlang::ModuleArtifact>>>,
@@ -108,11 +108,9 @@ pub struct Store {
 
 /// SQLite-backed process registry for one configured runtime deployment.
 ///
-/// Named `SqliteProcessRegistry` so the path-rename swap keeps compiling; this is
-/// the SQLite implementation. It is intentionally separate from [`Store`]:
-/// session databases persist one conversation, while this registry persists
-/// background process state and handle visibility across all sessions in the
-/// same host profile.
+/// It is intentionally separate from [`Store`]: session databases persist one
+/// conversation, while this registry persists background process state and
+/// handle visibility across all sessions in the same host profile.
 pub struct SqliteProcessRegistry {
     conn: SqliteConnection,
     notify: tokio::sync::Notify,
@@ -263,7 +261,6 @@ pub struct StoredSessionCheckpoint {
 /// Explicit first-party factory for one SQLite session database per Lash
 /// session.
 ///
-/// Named `SqliteSessionStoreFactory` so the path-rename swap keeps compiling.
 /// Hosts opt into this by passing it to `lash::LashCoreBuilder::store_factory`.
 /// The factory never becomes a default: app storage and runtime storage remain
 /// host-owned decisions.
@@ -605,8 +602,8 @@ mod tests {
             lashlang::parse("process scan(root: str) { finish root }").expect("parse module");
         let linked = lashlang::LinkedModule::link(
             module,
-            lashlang::LashlangSurface::new(
-                lashlang::ResourceCatalog::new(),
+            lashlang::LashlangHostEnvironment::new(
+                lashlang::LashlangHostCatalog::new(),
                 lashlang::LashlangAbilities::all(),
             ),
         )
