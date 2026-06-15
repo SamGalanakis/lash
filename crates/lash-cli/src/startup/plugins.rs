@@ -11,9 +11,11 @@ use lash::prompt::{
     PromptTemplateSection,
 };
 use lash::{ModelSpec, PluginStack, SessionSpec};
-use lash_core::{PromptLayer, SessionToolAccess, ToolState};
+use lash_core::plugin::{PluginSpec, StaticPluginFactory};
+use lash_core::{PromptLayer, SessionToolAccess, ToolProvider, ToolState};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
+use lash_search_tools::grep_provider;
 use lash_standard_plugins::{
     StandardContextApproach, StandardToolStackOptions, standard_tool_stack,
 };
@@ -62,6 +64,7 @@ pub(super) fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>)
         },
     };
     let mut plugin_stack = standard_tool_stack(runtime_options);
+    push_cli_search_tool(&mut plugin_stack);
     plugin_stack.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
@@ -95,6 +98,13 @@ pub(super) fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>)
         ));
     }
     plugin_stack
+}
+
+fn push_cli_search_tool(plugin_stack: &mut PluginStack) {
+    plugin_stack.push(Arc::new(StaticPluginFactory::new(
+        "grep",
+        PluginSpec::new().with_tool_provider(Arc::new(grep_provider()) as Arc<dyn ToolProvider>),
+    )) as Arc<dyn PluginFactory>);
 }
 
 fn cli_child_tool_access() -> SessionToolAccess {
@@ -273,6 +283,13 @@ mod tests {
 
         assert!(!ids.contains(&"standard_protocol"));
         assert!(!ids.contains(&"rlm_protocol"));
+    }
+
+    #[test]
+    fn cli_surface_stack_installs_local_grep() {
+        let ids = plugin_factory_ids_for_autonomous(false);
+
+        assert!(ids.contains(&"grep"));
     }
 
     #[test]

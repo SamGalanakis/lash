@@ -8,7 +8,7 @@ publish = false
 [features]
 default = []
 dhat-heap = ["dep:dhat", "lash-perf?/dhat-heap"]
-fff-zlob = ["lash-standard-plugins/fff-zlob"]
+fff-zlob = ["lash-search-tools/fff-zlob"]
 semantic-tool-search = ["lash-standard-plugins/semantic-tool-search"]
 test-provider = ["lash-core/testing"]
 # Hidden UI self-benchmark apparatus (`--ui-perf-benchmark`). Gates the
@@ -34,6 +34,7 @@ lash-perf = { path = "../lash-perf", optional = true }
 lash-plugin-process-controls = { workspace = true }
 lash-sqlite-store = { workspace = true }
 lash-llm-tools = { workspace = true }
+lash-search-tools = { workspace = true }
 lash-standard-plugins = { workspace = true }
 lash-protocol-rlm = { workspace = true }
 lash-protocol-standard = { workspace = true }

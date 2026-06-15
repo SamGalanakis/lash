@@ -15,7 +15,6 @@ categories = ["asynchronous", "api-bindings"]
 
 [features]
 default = []
-fff-zlob = ["lash-tools/fff-zlob"]
 semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
 
 [dependencies]
@@ -24,7 +23,7 @@ lash-plugin-observational-memory = { workspace = true }
 lash-plugin-process-controls = { workspace = true }
 lash-plugin-tool-discovery = { workspace = true }
 lash-plugin-tool-output-budget = { workspace = true }
-lash-tools = { workspace = true, features = ["search"] }
+lash-tools = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 

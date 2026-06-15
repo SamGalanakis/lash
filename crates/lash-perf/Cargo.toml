@@ -12,7 +12,6 @@ default = []
 # dhat heap profiles. Without it the harness uses stats_alloc and reports
 # allocation counters instead.
 dhat-heap = ["dep:dhat"]
-fff-zlob = ["lash-standard-plugins/fff-zlob"]
 
 [lib]
 name = "lash_perf"
