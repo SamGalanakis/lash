@@ -16,6 +16,7 @@ DEFAULT_STACK_SCENARIOS = [
     "rlm_globals",
     "rlm_large_tool_catalog",
     "rlm_process_handles",
+    "rlm_process_async_tool_completion",
     "tool_discovery_search",
     "turn_checkpoint",
     "sqlite_store_reopen",

@@ -188,19 +188,27 @@ async fn execute_benchmark_async(call: lash_core::ToolCall<'_>) -> ToolResult {
         Ok(key) => key,
         Err(err) => return ToolResult::err_fmt(err),
     };
+    let delay_ms = call
+        .args
+        .get("delay_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
     let value = call
         .args
         .get("value")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
         let _ = lash_core::InlineRuntimeEffectController
             .resolve_await_event(
                 &key,
                 Resolution::Ok(serde_json::json!({
                     "value": value,
-                    "mode": "pending_completion"
+                    "mode": "pending_completion",
+                    "delay_ms": delay_ms
                 })),
             )
             .await;
@@ -273,7 +281,8 @@ fn benchmark_async_tool_definition() -> ToolDefinition {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "value": { "type": ["string", "number", "boolean", "object", "array", "null"] }
+                "value": { "type": ["string", "number", "boolean", "object", "array", "null"] },
+                "delay_ms": { "type": "integer", "minimum": 0 }
             },
             "required": ["value"],
             "additionalProperties": false
@@ -282,9 +291,10 @@ fn benchmark_async_tool_definition() -> ToolDefinition {
             "type": "object",
             "properties": {
                 "value": {},
-                "mode": { "type": "string" }
+                "mode": { "type": "string" },
+                "delay_ms": { "type": "integer", "minimum": 0 }
             },
-            "required": ["value", "mode"],
+            "required": ["value", "mode", "delay_ms"],
             "additionalProperties": false
         }),
     )
@@ -914,6 +924,15 @@ submit first.value
                 .to_string();
             text_profile(text)
         }
+        RuntimePerfScenario::RlmAsyncToolCompletion => {
+            let text = r#"```lashlang
+first = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
+second = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
+submit first.value
+```"#
+                .to_string();
+            text_profile(text)
+        }
         RuntimePerfScenario::RlmProcessHandles => {
             let text = r#"```lashlang
 process benchmark_echo_process(tool: Tools, value: str, ordinal: int) {
@@ -931,6 +950,22 @@ second = start benchmark_echo_process(tool: tools, value: "runtime perf benchmar
 slow = start benchmark_slow_process(tool: tools, value: "cancelled", delay_ms: 50)
 live = await processes.list({})?
 cancel slow
+first_result = (await first)?
+second_result = (await second)?
+submit first_result.value
+```"#
+                .to_string();
+            text_profile(text)
+        }
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => {
+            let text = r#"```lashlang
+process benchmark_async_process(tool: Tools, value: str) {
+  result = await tool.benchmark_async({ value: value, delay_ms: 0 })?
+  finish result
+}
+
+first = start benchmark_async_process(tool: tools, value: "runtime perf benchmark ok")
+second = start benchmark_async_process(tool: tools, value: "runtime perf benchmark ok")
 first_result = (await first)?
 second_result = (await second)?
 submit first_result.value

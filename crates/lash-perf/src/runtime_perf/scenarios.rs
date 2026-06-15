@@ -10,7 +10,9 @@ pub(crate) enum RuntimePerfScenario {
     StandardToolCalls,
     StandardAsyncToolCompletion,
     RlmToolCalls,
+    RlmAsyncToolCompletion,
     RlmProcessHandles,
+    RlmProcessAsyncToolCompletion,
     RlmLlmQuery,
     RlmGlobals,
     RlmLargeToolCatalog,
@@ -34,13 +36,15 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 26] = [
+    pub(crate) const DEFAULTS: [Self; 28] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
         Self::StandardAsyncToolCompletion,
         Self::RlmToolCalls,
+        Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
+        Self::RlmProcessAsyncToolCompletion,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
         Self::RlmLargeToolCatalog,
@@ -62,13 +66,15 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
     ];
-    pub(crate) const KNOWN: [Self; 26] = [
+    pub(crate) const KNOWN: [Self; 28] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
         Self::StandardAsyncToolCompletion,
         Self::RlmToolCalls,
+        Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
+        Self::RlmProcessAsyncToolCompletion,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
         Self::RlmLargeToolCatalog,
@@ -98,7 +104,9 @@ impl RuntimePerfScenario {
             "standard_tool_calls" => Some(Self::StandardToolCalls),
             "standard_async_tool_completion" => Some(Self::StandardAsyncToolCompletion),
             "rlm_tool_calls" => Some(Self::RlmToolCalls),
+            "rlm_async_tool_completion" => Some(Self::RlmAsyncToolCompletion),
             "rlm_process_handles" => Some(Self::RlmProcessHandles),
+            "rlm_process_async_tool_completion" => Some(Self::RlmProcessAsyncToolCompletion),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
             "rlm_globals" => Some(Self::RlmGlobals),
             "rlm_large_tool_catalog" => Some(Self::RlmLargeToolCatalog),
@@ -130,7 +138,9 @@ impl RuntimePerfScenario {
             Self::StandardToolCalls => "standard_tool_calls",
             Self::StandardAsyncToolCompletion => "standard_async_tool_completion",
             Self::RlmToolCalls => "rlm_tool_calls",
+            Self::RlmAsyncToolCompletion => "rlm_async_tool_completion",
             Self::RlmProcessHandles => "rlm_process_handles",
+            Self::RlmProcessAsyncToolCompletion => "rlm_process_async_tool_completion",
             Self::RlmLlmQuery => "rlm_llm_query",
             Self::RlmGlobals => "rlm_globals",
             Self::RlmLargeToolCatalog => "rlm_large_tool_catalog",
@@ -176,7 +186,9 @@ impl RuntimePerfScenario {
             | Self::TraceJsonlStandard => ModeId::standard(),
             Self::Rlm
             | Self::RlmToolCalls
+            | Self::RlmAsyncToolCompletion
             | Self::RlmProcessHandles
+            | Self::RlmProcessAsyncToolCompletion
             | Self::RlmLlmQuery
             | Self::RlmGlobals
             | Self::RlmLargeToolCatalog

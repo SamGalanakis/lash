@@ -11,9 +11,20 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import profile_guard  # noqa: E402
 import profile_lashlang  # noqa: E402
+import profile_runtime_stack  # noqa: E402
 
 
 class ProfileGuardCoverageTests(unittest.TestCase):
+    def test_async_completion_scenarios_are_in_default_perf_coverage(self) -> None:
+        self.assertIn(
+            "rlm_process_async_tool_completion",
+            profile_guard.DEFAULT_STACK_SCENARIOS,
+        )
+        self.assertIn(
+            "rlm_process_async_tool_completion",
+            profile_runtime_stack.DEFAULT_SCENARIOS,
+        )
+
     def test_coverage_passes_with_required_sections_and_stack_budget(self) -> None:
         payload = {
             "runtime": {

@@ -414,13 +414,18 @@ impl RuntimeExecutionContext<'_> {
         pending: crate::tool_dispatch::PendingToolDispatchOutcome,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> ToolDispatchOutcome {
-        let fallback = crate::RuntimeInvocation::effect(
-            crate::RuntimeScope::new(&self.dispatch.session_id),
-            format!("tool:{call_id}:await"),
-            crate::RuntimeEffectKind::AwaitEvent,
-            format!("tool:{call_id}:await"),
-        );
-        let parent = parent_invocation.as_ref().unwrap_or(&fallback);
+        let fallback;
+        let parent = if let Some(parent) = parent_invocation.as_ref() {
+            parent
+        } else {
+            fallback = crate::RuntimeInvocation::effect(
+                crate::RuntimeScope::new(&self.dispatch.session_id),
+                format!("tool:{call_id}:await"),
+                crate::RuntimeEffectKind::AwaitEvent,
+                format!("tool:{call_id}:await"),
+            );
+            &fallback
+        };
         let parent_effect_id = parent.effect_id().unwrap_or("tool");
         let invocation = crate::runtime::causal::child_effect_invocation(
             parent,
