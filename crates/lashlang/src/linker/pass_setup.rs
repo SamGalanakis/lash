@@ -1,0 +1,409 @@
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Binding {
+    Value(TypeExpr),
+    Resource { resource_type: String },
+}
+
+struct Linker<'module> {
+    program: &'module Program,
+    surface: &'module LashlangHostEnvironment,
+    process_names: BTreeSet<String>,
+    process_types: BTreeMap<String, TypeExpr>,
+    type_names: BTreeSet<String>,
+    type_defs: BTreeMap<String, TypeExpr>,
+}
+
+impl<'module> Linker<'module> {
+    fn new(program: &'module Program, surface: &'module LashlangHostEnvironment) -> Self {
+        Self {
+            program,
+            surface,
+            process_names: BTreeSet::new(),
+            process_types: BTreeMap::new(),
+            type_names: BTreeSet::new(),
+            type_defs: BTreeMap::new(),
+        }
+    }
+
+    fn link_program(&mut self) -> Result<Program, LinkError> {
+        // Single walk: collect declaration metadata, then lower (and validate)
+        // declarations in source order, then lower main. Declaration errors
+        // therefore still surface before main errors, matching the prior
+        // two-pass (validate-then-lower) ordering.
+        self.collect_declarations()?;
+        let declarations = self
+            .program
+            .declarations
+            .iter()
+            .enumerate()
+            .map(|(index, declaration)| {
+                let span = self.program.declaration_spans.get(index).copied();
+                self.lower_declaration(declaration, span)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut scope = Scope::new(true, false, None);
+        let main = self.lower_expr(&self.program.main, &mut scope)?.0;
+        Ok(Program {
+            declarations,
+            main,
+            declaration_spans: self.program.declaration_spans.clone(),
+            expression_spans: self.program.expression_spans.clone(),
+        })
+    }
+
+    fn collect_declarations(&mut self) -> Result<(), LinkError> {
+        self.ensure_label_annotations_enabled_for_program()?;
+        let mut names = BTreeSet::new();
+        for (index, declaration) in self.program.declarations.iter().enumerate() {
+            let span = self.program.declaration_spans.get(index).copied();
+            let (namespace, name) = match declaration {
+                Declaration::Type(decl) => {
+                    let name = decl.name.as_str();
+                    if !names.insert(("type", name.to_string())) {
+                        return Err(LinkError::DuplicateDeclaration {
+                            name: name.to_string(),
+                            span,
+                        });
+                    }
+                    self.type_names.insert(decl.name.to_string());
+                    self.type_defs
+                        .insert(decl.name.to_string(), decl.ty.clone());
+                    continue;
+                }
+                Declaration::Process(decl) => {
+                    self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
+                    ("process", decl.name.as_str())
+                }
+            };
+            if !names.insert((namespace, name.to_string())) {
+                return Err(LinkError::DuplicateDeclaration {
+                    name: name.to_string(),
+                    span,
+                });
+            }
+            if let Declaration::Process(decl) = declaration {
+                self.process_names.insert(decl.name.to_string());
+            }
+        }
+        for declaration in &self.program.declarations {
+            match declaration {
+                Declaration::Type(type_decl) => self.validate_type_refs(&type_decl.ty, None)?,
+                Declaration::Process(process) => {
+                    for param in &process.params {
+                        self.validate_type_refs(&param.ty, None)?;
+                    }
+                    for signal in &process.signals {
+                        self.validate_type_refs(&signal.ty, None)?;
+                    }
+                    if let Some(return_ty) = &process.return_ty {
+                        self.validate_type_refs(return_ty, None)?;
+                    }
+                }
+            }
+        }
+        for declaration in &self.program.declarations {
+            if let Declaration::Process(process) = declaration {
+                self.process_types.insert(
+                    process.name.to_string(),
+                    process_type_for_decl(process, TypeExpr::Any),
+                );
+            }
+        }
+        for (index, declaration) in self.program.declarations.iter().enumerate() {
+            let Declaration::Process(process) = declaration else {
+                continue;
+            };
+            let span = self.program.declaration_spans.get(index).copied();
+            let output = self.infer_process_output(process, span)?;
+            if let Some(expected) = &process.return_ty
+                && !self.is_type_assignable(&output, expected)
+            {
+                return Err(LinkError::IncompatibleProcessReturn {
+                    process: process.name.to_string(),
+                    expected: format_type_expr(&self.resolve_type_aliases(expected)),
+                    actual: format_type_expr(&self.resolve_type_aliases(&output)),
+                    span,
+                });
+            }
+            self.process_types.insert(
+                process.name.to_string(),
+                process_type_for_decl(process, output),
+            );
+        }
+        Ok(())
+    }
+
+    fn ensure_label_annotations_enabled_for_program(&self) -> Result<(), LinkError> {
+        if self.surface.language_features.label_annotations {
+            return Ok(());
+        }
+        for (index, declaration) in self.program.declarations.iter().enumerate() {
+            let span = self.program.declaration_spans.get(index).copied();
+            if let Declaration::Process(process) = declaration
+                && (process.label.is_some() || expr_has_label_annotation(&process.body))
+            {
+                return Err(LinkError::FeatureDisabled {
+                    feature: "label annotations",
+                    span,
+                });
+            }
+        }
+        if expr_has_label_annotation(&self.program.main) {
+            return Err(LinkError::FeatureDisabled {
+                feature: "label annotations",
+                span: self.program.expression_spans.first().copied(),
+            });
+        }
+        Ok(())
+    }
+
+    fn binding_for_type(&self, ty: &TypeExpr) -> Binding {
+        match self.resource_type_for_type(ty) {
+            Some(resource_type) => Binding::Resource { resource_type },
+            _ => Binding::Value(ty.clone()),
+        }
+    }
+
+    fn resource_type_for_type(&self, ty: &TypeExpr) -> Option<String> {
+        match self.resolve_type_aliases(ty) {
+            TypeExpr::Ref(name) if self.surface.resources.has_resource_type(name.as_str()) => {
+                Some(name.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_type_aliases(&self, ty: &TypeExpr) -> TypeExpr {
+        self.resolve_type_aliases_inner(ty, &mut BTreeSet::new())
+    }
+
+    fn resolve_type_aliases_inner(&self, ty: &TypeExpr, seen: &mut BTreeSet<String>) -> TypeExpr {
+        match ty {
+            TypeExpr::Ref(name) => {
+                if !seen.insert(name.to_string()) {
+                    return ty.clone();
+                }
+                let resolved = if let Some(ty) = self.type_defs.get(name.as_str()) {
+                    self.resolve_type_aliases_inner(ty, seen)
+                } else if let Some(data_type) = self
+                    .surface
+                    .resources
+                    .resolve_named_data_type(name.as_str())
+                {
+                    data_type.ty().clone()
+                } else {
+                    ty.clone()
+                };
+                seen.remove(name.as_str());
+                resolved
+            }
+            TypeExpr::List(item) => {
+                TypeExpr::List(Box::new(self.resolve_type_aliases_inner(item, seen)))
+            }
+            TypeExpr::Object(fields) => TypeExpr::Object(
+                fields
+                    .iter()
+                    .map(|field| TypeField {
+                        name: field.name.clone(),
+                        ty: self.resolve_type_aliases_inner(&field.ty, seen),
+                        optional: field.optional,
+                    })
+                    .collect(),
+            ),
+            TypeExpr::Union(items) => TypeExpr::Union(
+                items
+                    .iter()
+                    .map(|item| self.resolve_type_aliases_inner(item, seen))
+                    .collect(),
+            ),
+            TypeExpr::Process {
+                input,
+                output,
+                input_count,
+            } => TypeExpr::Process {
+                input: Box::new(self.resolve_type_aliases_inner(input, seen)),
+                output: Box::new(self.resolve_type_aliases_inner(output, seen)),
+                input_count: *input_count,
+            },
+            TypeExpr::TriggerHandle(event) => {
+                TypeExpr::TriggerHandle(Box::new(self.resolve_type_aliases_inner(event, seen)))
+            }
+            TypeExpr::Any
+            | TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Float
+            | TypeExpr::Bool
+            | TypeExpr::Dict
+            | TypeExpr::Null
+            | TypeExpr::Enum(_) => ty.clone(),
+        }
+    }
+
+    fn is_type_assignable(&self, source: &TypeExpr, target: &TypeExpr) -> bool {
+        let source = self.resolve_type_aliases(source);
+        let target = self.resolve_type_aliases(target);
+        crate::trigger::is_resolved_type_assignable(&source, &target)
+    }
+
+    fn validate_type_refs(&self, ty: &TypeExpr, span: Option<Span>) -> Result<(), LinkError> {
+        match ty {
+            TypeExpr::Ref(name) => {
+                if self.type_defs.contains_key(name.as_str())
+                    || self.surface.resources.has_resource_type(name.as_str())
+                    || self.surface.resources.has_named_data_type(name.as_str())
+                    || self
+                        .surface
+                        .resources
+                        .is_known_opaque_value_type(name.as_str())
+                {
+                    Ok(())
+                } else {
+                    Err(LinkError::UnknownType {
+                        name: name.to_string(),
+                        span,
+                    })
+                }
+            }
+            TypeExpr::List(item) => self.validate_type_refs(item, span),
+            TypeExpr::Object(fields) => {
+                for field in fields {
+                    self.validate_type_refs(&field.ty, span)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Union(items) => {
+                for item in items {
+                    self.validate_type_refs(item, span)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Process { input, output, .. } => {
+                self.validate_type_refs(input, span)?;
+                self.validate_type_refs(output, span)
+            }
+            TypeExpr::TriggerHandle(event) => self.validate_type_refs(event, span),
+            TypeExpr::Any
+            | TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Float
+            | TypeExpr::Bool
+            | TypeExpr::Dict
+            | TypeExpr::Null
+            | TypeExpr::Enum(_) => Ok(()),
+        }
+    }
+
+    fn field_type(
+        &self,
+        target: &TypeExpr,
+        field: &str,
+        span: Option<Span>,
+    ) -> Result<TypeExpr, LinkError> {
+        let target = self.resolve_type_aliases(target);
+        field_type(&target, field, span, |name| {
+            self.surface.resources.is_known_opaque_value_type(name)
+        })
+    }
+
+    fn index_type(&self, target: &TypeExpr, span: Option<Span>) -> Result<TypeExpr, LinkError> {
+        let target = self.resolve_type_aliases(target);
+        index_type(&target, span, |name| {
+            self.surface.resources.is_known_opaque_value_type(name)
+        })
+    }
+
+    fn ensure_feature(
+        &self,
+        enabled: bool,
+        feature: &'static str,
+        span: Option<Span>,
+    ) -> Result<(), LinkError> {
+        if enabled {
+            Ok(())
+        } else {
+            Err(LinkError::FeatureDisabled { feature, span })
+        }
+    }
+
+    fn validate_resource_ref(
+        &self,
+        resource: &ResourceRefExpr,
+        span: Option<Span>,
+    ) -> Result<ResourceRefExpr, LinkError> {
+        if !resource.resource_type.is_empty() {
+            return self
+                .surface
+                .resources
+                .resolve_alias(resource)
+                .map(|_| resource.clone())
+                .ok_or_else(|| LinkError::UnknownResource {
+                    path: resource.path_string(),
+                    span,
+                });
+        }
+        self.surface
+            .resources
+            .resolve_module_path(&resource.path)
+            .ok_or_else(|| LinkError::UnknownResource {
+                path: resource.path_string(),
+                span,
+            })
+    }
+
+    fn lower_declaration(
+        &self,
+        declaration: &Declaration,
+        span: Option<Span>,
+    ) -> Result<Declaration, LinkError> {
+        Ok(match declaration {
+            Declaration::Type(type_decl) => Declaration::Type(type_decl.clone()),
+            Declaration::Process(process) => {
+                self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
+                if process.label.is_some() {
+                    self.ensure_feature(
+                        self.surface.language_features.label_annotations,
+                        "label annotations",
+                        span,
+                    )?;
+                }
+                let mut scope = Scope::new(false, true, span);
+                let mut seen = BTreeSet::new();
+                for param in &process.params {
+                    if !seen.insert(param.name.to_string()) {
+                        return Err(LinkError::DuplicateProcessParam {
+                            name: param.name.to_string(),
+                            span,
+                        });
+                    }
+                    scope.bind(param.name.as_str(), self.binding_for_type(&param.ty));
+                }
+                let mut seen_signals = BTreeSet::new();
+                for signal in &process.signals {
+                    self.ensure_feature(
+                        self.surface.abilities.process_signals,
+                        "process signals",
+                        span,
+                    )?;
+                    if !seen_signals.insert(signal.name.to_string()) {
+                        return Err(LinkError::DuplicateProcessSignal {
+                            name: signal.name.to_string(),
+                            span,
+                        });
+                    }
+                }
+                scope.bind("input", Binding::Value(process_input_type(process)));
+                scope.bind("inputs", Binding::Value(process_input_record_type(process)));
+                let body = self.lower_expr(&process.body, &mut scope)?.0;
+                Declaration::Process(ProcessDecl {
+                    name: process.name.clone(),
+                    params: process.params.clone(),
+                    signals: process.signals.clone(),
+                    return_ty: process.return_ty.clone(),
+                    label: process.label.clone(),
+                    body,
+                })
+            }
+        })
+    }
+
+}

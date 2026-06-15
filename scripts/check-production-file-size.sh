@@ -1,79 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-threshold="${LASH_FILE_SIZE_LIMIT:-1000}"
-root="${1:-crates}"
+production_limit="${LASH_PRODUCTION_RUST_LINE_LIMIT:-1600}"
+test_limit="${LASH_TEST_RUST_LINE_LIMIT:-2500}"
 
-# Existing oversized production files are explicit debt. New entries should not
-# be added casually; split the module instead, or document why the file earns an
-# exception here.
-allowlist=$(cat <<'EOF'
-crates/lashlang/src/linker.rs
-crates/lash-remote-protocol/src/lib.rs
-crates/lash-remote-protocol/src/core_conversions.rs
-crates/lash-cli/src/render/compositor.rs
-crates/lashlang/src/runtime/compiler.rs
-crates/lash-sansio/src/tool_contract.rs
-crates/lash-core/src/runtime/session_manager/process_runners/mod.rs
-crates/lash-tools/src/search.rs
-crates/lash-cli/src/interactive/input_handling.rs
-crates/lashlang/src/parser.rs
-crates/lash-core/src/tool_registry.rs
-crates/lash-tools/src/shell/mod.rs
-crates/lash-sansio/src/sansio/mod.rs
-crates/lashlang/src/runtime/vm/mod.rs
-crates/lash-tools/src/apply_patch.rs
-crates/lash-provider-openai/src/responses_shared.rs
-crates/lash-protocol-rlm/src/executor.rs
-crates/lash-core/src/runtime/turn_loop.rs
-crates/lash-sansio/src/session_model/message.rs
-crates/lash-standard-plugins/src/rolling_history.rs
-crates/lash-provider-openai/src/codex.rs
-crates/lash-cli/src/startup/onboarding.rs
-crates/lashlang/src/artifact.rs
-crates/lashlang/src/graph.rs
-crates/lash-cli/src/markdown.rs
-crates/lash-tui-extensions/src/lib.rs
-crates/lash/src/control.rs
-crates/lash-restate/src/lib.rs
-crates/lash-tui/src/core.rs
-crates/lash-autoresearch/src/ui.rs
-crates/lashlang/src/runtime/ops.rs
-crates/lash-plugin-tool-output-budget/src/lib.rs
-crates/lash-trace/src/otel.rs
-crates/lash-core/src/runtime/process/model.rs
-crates/lash-cli/src/app/mod.rs
-crates/lashlang/src/trigger.rs
-crates/lash-sqlite-store/src/process_registry.rs
-crates/lash-core/src/store.rs
-crates/lash-perf/src/runtime_perf/providers.rs
-crates/lash-core/src/runtime/turn_boundary.rs
-crates/lash-cli/src/render/mod.rs
-crates/lash-perf/src/runtime_perf/measurement.rs
-crates/lash-cli/src/editor.rs
-crates/lash-core/src/session_graph.rs
-EOF
-)
+if (($#)); then
+  roots=("$@")
+else
+  roots=(".")
+fi
+
+is_test_rust_file() {
+  local file="$1"
+  case "$file" in
+    */tests/*|*/test/*|*/testing/*|*/src/tests.rs|*/src/test.rs|*/src/*/tests.rs|*/src/*/test.rs|*/language/support.rs)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
 failures=()
 while IFS= read -r -d '' file; do
-  case "$file" in
-    */tests/*|*/examples/*|*/benches/*|*/src/tests.rs|*/src/tests/*|*/src/*/tests.rs|*/src/testing/*|*/src/testing.rs) continue ;;
-  esac
+  rel="${file#./}"
+  if is_test_rust_file "$rel"; then
+    limit="$test_limit"
+    kind="test"
+  else
+    limit="$production_limit"
+    kind="production"
+  fi
+
   lines=$(wc -l < "$file")
-  if (( lines <= threshold )); then
-    continue
+  if ((lines > limit)); then
+    failures+=("$kind:$lines:$rel")
   fi
-  if grep -qxF "$file" <<<"$allowlist"; then
-    continue
-  fi
-  failures+=("$file:$lines")
-done < <(find "$root" -type f -name '*.rs' -print0)
+done < <(
+  find "${roots[@]}" \
+    \( \
+      -path '*/.git' -o \
+      -path '*/.git/*' -o \
+      -path '*/target' -o \
+      -path '*/target/*' -o \
+      -path '*/vendor' -o \
+      -path '*/vendor/*' -o \
+      -path '*/vendored' -o \
+      -path '*/vendored/*' -o \
+      -path '*/generated' -o \
+      -path '*/generated/*' \
+    \) -prune -o \
+    -type f -name '*.rs' -print0
+)
 
 if ((${#failures[@]})); then
-  echo "Production Rust files over ${threshold} lines:" >&2
+  echo "Rust files over line budget:" >&2
+  echo "  production limit: ${production_limit} lines" >&2
+  echo "  test/support limit: ${test_limit} lines" >&2
   printf '  %s\n' "${failures[@]}" >&2
-  echo >&2
-  echo "Split the file or add a justified exception to scripts/check-production-file-size.sh." >&2
   exit 1
 fi

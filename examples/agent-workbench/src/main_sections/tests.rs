@@ -1,0 +1,1816 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::persistence::RuntimePersistence;
+    use lash::tracing::{
+        TraceBranchSelection, TraceLashlangChildExecution, TraceLashlangEdgeSelection,
+        TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangGraphChildLink,
+        TraceLashlangMap, TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangStatus,
+        TraceRuntimeScope, TraceRuntimeSubject,
+    };
+    use std::future::Future;
+
+    fn sync_await<T, F>(future: F) -> T
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+    {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(future)
+        })
+        .join()
+        .expect("runtime thread")
+    }
+
+    fn explicit_durable_test_facets(
+        builder: lash::LashCoreBuilder,
+        data_dir: &std::path::Path,
+    ) -> lash::LashCoreBuilder {
+        builder
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+                data_dir.join("attachments"),
+            )))
+            .lashlang_artifact_store(Arc::new(sync_await({
+                let path = data_dir.join("artifacts.db");
+                async move {
+                    lash_sqlite_store::Store::open(&path)
+                        .await
+                        .expect("open artifact store")
+                }
+            })))
+            .trigger_store(Arc::new(sync_await({
+                let path = data_dir.join("triggers.db");
+                async move {
+                    lash_sqlite_store::SqliteTriggerStore::open(&path)
+                        .await
+                        .expect("open trigger store")
+                }
+            })))
+    }
+
+    const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+
+    fn run_async_test_on_stack_budget<F, Fut>(name: &str, test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(STACK_BUDGET_BYTES)
+            .spawn(|| {
+                let test = Box::pin(test());
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime")
+                    .block_on(test)
+            })
+            .expect("spawn stack-budget test thread")
+            .join()
+            .expect("stack-budget test thread");
+    }
+
+    fn run_async_test_on_stack_budget_multi_thread<F, Fut>(
+        name: &str,
+        worker_threads: usize,
+        test: F,
+    ) where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(STACK_BUDGET_BYTES)
+            .spawn(move || {
+                let test = Box::pin(test());
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(worker_threads)
+                    .thread_stack_size(STACK_BUDGET_BYTES)
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime")
+                    .block_on(test)
+            })
+            .expect("spawn stack-budget multi-thread test thread")
+            .join()
+            .expect("stack-budget multi-thread test thread");
+    }
+
+    fn test_graph(
+        graph_key: &str,
+        session_id: &str,
+        subject: TraceRuntimeSubject,
+        children: Vec<TraceLashlangGraphChildLink>,
+    ) -> TraceLashlangGraph {
+        TraceLashlangGraph {
+            graph_key: graph_key.to_string(),
+            scope: TraceRuntimeScope::new(session_id),
+            subject,
+            module_ref: format!("{graph_key}:module"),
+            entry_kind: "main".to_string(),
+            entry_ref: None,
+            entry_name: "main".to_string(),
+            status: TraceLashlangStatus::Running,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            children,
+        }
+    }
+
+    fn append_started_graph(store: &TraceLashlangGraphStore, graph: &TraceLashlangGraph) {
+        let identity = TraceLashlangExecutionIdentity {
+            scope: graph.scope.clone(),
+            subject: graph.subject.clone(),
+            module_ref: graph.module_ref.clone(),
+            entry_kind: graph.entry_kind.clone(),
+            entry_ref: graph.entry_ref.clone(),
+            entry_name: graph.entry_name.clone(),
+        };
+        store
+            .append(&TraceRecord::new(
+                TraceContext::default().for_session(graph.scope.session_id.clone()),
+                TraceEvent::LashlangExecution {
+                    event: TraceLashlangExecutionEvent::ExecutionStarted {
+                        event_key: format!("{}:start", graph.graph_key),
+                        identity,
+                        execution_map: TraceLashlangMap {
+                            module_ref: graph.module_ref.clone(),
+                            entry_kind: graph.entry_kind.clone(),
+                            entry_ref: graph.entry_ref.clone(),
+                            entry_name: graph.entry_name.clone(),
+                            nodes: Vec::new(),
+                            edges: Vec::new(),
+                        },
+                    },
+                },
+            ))
+            .expect("append test graph");
+    }
+
+    #[test]
+    fn reset_session_rotation_replaces_workbench_session_id() {
+        let ids = WorkbenchSessionIds::fresh();
+        let original = ids.current();
+
+        let (old, new) = ids.rotate();
+
+        assert_eq!(old, original);
+        assert_eq!(ids.current(), new);
+        assert_ne!(old, new);
+        assert!(old.starts_with(SESSION_ID_PREFIX));
+        assert!(new.starts_with(SESSION_ID_PREFIX));
+    }
+
+    #[test]
+    fn assistant_display_keeps_streamed_prose_with_terminal_value() {
+        assert_eq!(
+            combine_assistant_display_parts(
+                Some("I started the background checks.".to_string()),
+                Some("summary ready".to_string()),
+            ),
+            "I started the background checks.\n\nsummary ready"
+        );
+    }
+
+    #[test]
+    fn assistant_display_does_not_duplicate_matching_terminal_value() {
+        assert_eq!(
+            combine_assistant_display_parts(
+                Some("summary ready".to_string()),
+                Some("summary ready".to_string())
+            ),
+            "summary ready"
+        );
+    }
+
+    #[test]
+    fn workbench_ui_renders_assistant_markdown() {
+        assert!(ui::INDEX_HTML.contains("function renderMarkdownBlocks(markdown)"));
+        assert!(ui::INDEX_HTML.contains("setMessageBody(body, message.role, message.text)"));
+        assert!(
+            ui::INDEX_HTML.contains("draft.innerHTML = renderMarkdownBlocks(assistantDraftText)")
+        );
+        assert!(ui::INDEX_HTML.contains(".message.assistant .msg-body h1"));
+    }
+
+    #[test]
+    fn workbench_ui_renders_accounts_panel() {
+        assert!(ui::INDEX_HTML.contains("id=\"accountsView\""));
+        assert!(ui::INDEX_HTML.contains("data-view=\"accounts\""));
+        assert!(ui::INDEX_HTML.contains("id=\"accountAddForm\""));
+        assert!(ui::INDEX_HTML.contains("async function loadAccounts"));
+        assert!(ui::INDEX_HTML.contains("async function deleteAccount"));
+    }
+
+    #[test]
+    fn mail_received_event_type_matches_source_type() {
+        let resources = workbench_lashlang_resources();
+        let binding = resources
+            .resolve_trigger_source(MAIL_RECEIVED_SOURCE_TYPE)
+            .expect("mail.received source registered");
+        assert_eq!(binding.event_type_name(), "mail.Received");
+    }
+
+    #[test]
+    fn lashlang_graph_store_builds_graph_state() {
+        let store = TraceLashlangGraphStore::default();
+        let context = TraceContext::default().for_session("s1");
+        let identity = TraceLashlangExecutionIdentity {
+            scope: TraceRuntimeScope::new("s1"),
+            subject: TraceRuntimeSubject::Process {
+                process_id: "p1".to_string(),
+            },
+            module_ref: "m1".to_string(),
+            entry_kind: "process".to_string(),
+            entry_ref: Some("r1:0".to_string()),
+            entry_name: "main".to_string(),
+        };
+        let append = |event: TraceLashlangExecutionEvent| {
+            store
+                .append(&TraceRecord::new(
+                    context.clone(),
+                    TraceEvent::LashlangExecution { event },
+                ))
+                .expect("append tracking event");
+        };
+
+        append(TraceLashlangExecutionEvent::ExecutionStarted {
+            event_key: "p1:start".to_string(),
+            identity: identity.clone(),
+            execution_map: TraceLashlangMap {
+                module_ref: "m1".to_string(),
+                entry_kind: "process".to_string(),
+                entry_ref: Some("r1:0".to_string()),
+                entry_name: "main".to_string(),
+                nodes: vec![TraceLashlangMapNode {
+                    id: "branch".to_string(),
+                    kind: "branch".to_string(),
+                    label: "if".to_string(),
+                    label_metadata: None,
+                }],
+                edges: vec![
+                    TraceLashlangMapEdge {
+                        id: "then-edge".to_string(),
+                        from: "branch".to_string(),
+                        to: "then".to_string(),
+                        label: "then".to_string(),
+                    },
+                    TraceLashlangMapEdge {
+                        id: "else-edge".to_string(),
+                        from: "branch".to_string(),
+                        to: "else".to_string(),
+                        label: "else".to_string(),
+                    },
+                ],
+            },
+        });
+        append(TraceLashlangExecutionEvent::BranchSelected {
+            event_key: "p1:branch".to_string(),
+            identity: identity.clone(),
+            node_id: "branch".to_string(),
+            occurrence: 1,
+            edge_id: "then-edge".to_string(),
+            selected: TraceBranchSelection::Then,
+        });
+        append(TraceLashlangExecutionEvent::ChildStarted {
+            event_key: "p1:child".to_string(),
+            identity,
+            parent_node_id: "branch".to_string(),
+            occurrence: 1,
+            child: TraceLashlangChildExecution {
+                scope: TraceRuntimeScope::new("s1"),
+                subject: TraceRuntimeSubject::Process {
+                    process_id: "p2".to_string(),
+                },
+                module_ref: Some("m1".to_string()),
+                entry_ref: Some("r2:1".to_string()),
+                entry_name: Some("child".to_string()),
+            },
+        });
+
+        let graph = store.graph("process:p1").expect("graph");
+        assert_eq!(graph.status, TraceLashlangStatus::Running);
+        assert_eq!(graph.children.len(), 1);
+        assert_eq!(graph.children[0].child_graph_key, "process:p2");
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .find(|edge| edge.id == "then-edge")
+                .map(|edge| edge.selection),
+            Some(TraceLashlangEdgeSelection::Selected)
+        );
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .find(|edge| edge.id == "else-edge")
+                .map(|edge| edge.selection),
+            Some(TraceLashlangEdgeSelection::Rejected)
+        );
+    }
+
+    #[test]
+    fn empty_model_variant_request_clears_selected_variant() {
+        let selected_model = ModelSelection {
+            model: "x-ai/grok-build-0.1".to_string(),
+            model_variant: Some("medium".to_string()),
+        };
+
+        assert_eq!(
+            model_variant_for_request(&selected_model, None),
+            Some("medium".to_string())
+        );
+        assert_eq!(
+            model_variant_for_request(&selected_model, Some(" high ")),
+            Some("high".to_string())
+        );
+        assert_eq!(model_variant_for_request(&selected_model, Some("")), None);
+        assert_eq!(
+            model_variant_for_request(&selected_model, Some("   ")),
+            None
+        );
+    }
+
+    #[test]
+    fn done_stream_items_are_transient_and_not_snapshotted() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-transient-done-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let process_registry = Arc::new(sync_await({
+            let path = data_dir.join("processes.db");
+            async move {
+                lash_sqlite_store::SqliteProcessRegistry::open(&path)
+                    .await
+                    .expect("open registry")
+            }
+        })) as Arc<dyn lash::process::ProcessRegistry>;
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete_error("transient done test should not call the provider")
+            .build()
+            .into_handle();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let (event_tx, _) = broadcast::channel(16);
+        let mut events = event_tx.subscribe();
+        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core,
+            process_observer,
+            session_ids: WorkbenchSessionIds::fresh(),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx,
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
+            mail_world: mail::MailWorld::new(),
+        };
+
+        state.publish(StreamItem::Done);
+
+        assert!(state.timeline_snapshot().is_empty());
+        assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn inbox_authority_resolves_for_any_account_name() {
+        run_async_test_on_stack_budget("workbench-inbox-authority-test", || {
+            inbox_authority_resolves_for_any_account_name_inner()
+        });
+    }
+
+    // Names other than the prompt's illustrative work/personal must resolve too:
+    // an account called "test" should yield a usable `inbox.test` authority.
+    async fn inbox_authority_resolves_for_any_account_name_inner() {
+        let data_dir =
+            std::env::temp_dir().join(format!("agent-workbench-inbox-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let mail_world = mail::MailWorld::new();
+        mail_world.add_account("test").expect("add test");
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete(|_| async {
+                Ok(text_response(
+                    "```lashlang\nresult = await inbox.test.send({ title: \"Hi\", text: \"Yo\" })?\nsubmit result.id\n```",
+                ))
+            })
+            .build()
+            .into_handle();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let session_id = WorkbenchSessionIds::fresh().current();
+        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(
+                WorkbenchPluginFactory::new("").with_mail_world(mail_world.clone()),
+            ))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let session = core
+            .session(session_id)
+            .rlm()
+            .open()
+            .await
+            .expect("open session");
+
+        let tool_names = session
+            .tools()
+            .active_manifests()
+            .await
+            .expect("active tools")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(
+            tool_names.iter().any(|name| name == "inbox__test__send"),
+            "inbox.test send tool should be active: {tool_names:?}"
+        );
+
+        let output = session
+            .turn(lash::TurnInput::text("send a message"))
+            .turn_id(format!("workbench-test-turn:{}", uuid::Uuid::new_v4()))
+            .run()
+            .await
+            .expect("turn should resolve inbox.test.send, not fail with unknown name");
+        assert_eq!(output.submitted_value(), Some(&serde_json::json!("test-1")));
+        assert_eq!(mail_world.inbox("test").expect("inbox").len(), 1);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn inbox_added_after_session_open_updates_persisted_tool_catalog() {
+        run_async_test_on_stack_budget("workbench-dynamic-inbox-surface-test", || {
+            inbox_added_after_session_open_updates_persisted_tool_catalog_inner()
+        });
+    }
+
+    async fn inbox_added_after_session_open_updates_persisted_tool_catalog_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-dynamic-inbox-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let mail_world = mail::MailWorld::new();
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete_error("dynamic inbox surface test should not call the provider")
+            .build()
+            .into_handle();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let session_ids = WorkbenchSessionIds::fresh();
+        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(
+                WorkbenchPluginFactory::new("").with_mail_world(mail_world.clone()),
+            ))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core,
+            process_observer,
+            session_ids,
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx: broadcast::channel(1024).0,
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
+            mail_world: mail_world.clone(),
+        };
+
+        let receipt = enqueue_tool_catalog_refresh(&state, "initial_empty")
+            .await
+            .expect("enqueue initial empty refresh");
+        drain_refresh_batch(&state, &receipt).await;
+        mail_world.add_account("Late Account").expect("add account");
+        let receipt = enqueue_tool_catalog_refresh(&state, "account_added")
+            .await
+            .expect("enqueue account refresh");
+        drain_refresh_batch(&state, &receipt).await;
+
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
+        let tool_names = reopened
+            .tools()
+            .active_manifests()
+            .await
+            .expect("active tools")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "inbox__late_account__send"),
+            "late account send tool should be active after persisted refresh: {tool_names:?}"
+        );
+        reopened.close().await.expect("close session");
+
+        // Removing the account must not poison the persisted session: the
+        // provider stops resolving the account's tools, so restore orphans
+        // them (kept in state, marked orphaned, surfaced as Off) instead of
+        // failing the reopen.
+        mail_world
+            .remove_account("late_account")
+            .expect("remove account");
+        let receipt = enqueue_tool_catalog_refresh(&state, "account_removed")
+            .await
+            .expect("enqueue removal refresh");
+        drain_refresh_batch(&state, &receipt).await;
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session after account removal");
+        let tool_state = reopened.tools().state().await.expect("tool state");
+        let send_entry = tool_state
+            .get("inbox__late_account__send")
+            .expect("removed account tool is kept as an orphan");
+        assert!(
+            send_entry.is_orphaned(),
+            "removed account tool must be marked orphaned"
+        );
+        reopened.close().await.expect("close session");
+
+        // Re-adding the account (same slug, same tool ids) rebinds the
+        // orphans on the next refresh — the tools come back without ever
+        // having made the session unopenable.
+        mail_world
+            .add_account("Late Account")
+            .expect("re-add account");
+        let receipt = enqueue_tool_catalog_refresh(&state, "account_readded")
+            .await
+            .expect("enqueue re-add refresh");
+        drain_refresh_batch(&state, &receipt).await;
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session after account re-add");
+        let tool_state = reopened.tools().state().await.expect("tool state");
+        let send_entry = tool_state
+            .get("inbox__late_account__send")
+            .expect("re-added account tool is present");
+        assert!(
+            !send_entry.is_orphaned(),
+            "re-added account tool must be rebound to the live provider"
+        );
+        reopened.close().await.expect("close session");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn button_trigger_occurrence_starts_visible_lashlang_process() {
+        run_async_test_on_stack_budget("workbench-button-trigger-test", || {
+            button_trigger_occurrence_starts_visible_lashlang_process_inner()
+        });
+    }
+
+    async fn button_trigger_occurrence_starts_visible_lashlang_process_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-processes-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let db_path = data_dir.join("processes.db");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory.clone();
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&db_path)
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let provider = trigger_registration_provider();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let session_ids = WorkbenchSessionIds::fresh();
+        let session_id = session_ids.current();
+        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(WorkbenchPluginFactory::new("")))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let session = core
+            .session(session_id.clone())
+            .rlm()
+            .open()
+            .await
+            .expect("open session");
+        register_test_trigger(&session).await;
+        let tool_names = session
+            .tools()
+            .active_manifests()
+            .await
+            .expect("active tools")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        let removed_tool_name = ["attach", "button", "trigger"].join("_");
+        assert!(!tool_names.iter().any(|name| name == &removed_tool_name));
+
+        let report = emit_test_button_trigger(&core, ButtonChoice::Red).await;
+
+        assert_eq!(report.started_process_ids.len(), 1);
+        process_registry
+            .await_process(&report.started_process_ids[0])
+            .await
+            .expect("trigger process should finish");
+        let handles = session.processes().list_all().await.expect("list handles");
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0].descriptor.kind.as_deref(), Some("lashlang"));
+        assert_eq!(handles[0].descriptor.label.as_deref(), Some("remember"));
+        session.close().await.expect("close session");
+
+        let reopened = core
+            .session(session_id.clone())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
+        let reopened_handles = reopened
+            .processes()
+            .list_all()
+            .await
+            .expect("list handles after reopen");
+        assert_eq!(reopened_handles.len(), 1);
+        assert_eq!(
+            reopened_handles[0].status.label(),
+            "completed",
+            "{:?}",
+            reopened_handles[0].status
+        );
+        drop(reopened);
+
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core,
+            process_observer,
+            session_ids,
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx: broadcast::channel(1024).0,
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
+            mail_world: mail::MailWorld::new(),
+        };
+        let target_scope_id = lash::process::SessionScope::new(state.current_session_id()).id();
+        let session_store =
+            lash_sqlite_store::Store::open(&session_store_factory.path_for_session(&session_id))
+                .await
+                .expect("open session store");
+        let queued = session_store
+            .list_queued_work(&session_id)
+            .await
+            .expect("list queued work");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].items.len(), 1);
+        let lash::persistence::QueuedWorkPayload::ProcessWake { wake } =
+            &queued[0].items[0].payload
+        else {
+            panic!("expected process wake queue payload");
+        };
+        assert!(wake.input.contains("button_pressed"));
+        assert!(wake.input.contains("Red"));
+        assert_eq!(wake.target_scope_id, target_scope_id);
+        let Json(work) = list_work(State(state)).await.expect("list work");
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].process.status_label, "completed");
+        assert!(
+            work[0]
+                .events
+                .iter()
+                .any(|event| event.event_type == "process.completed")
+        );
+        assert!(
+            work[0]
+                .events
+                .iter()
+                .any(|event| event.event_type == "process.wake")
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn button_trigger_occurrence_is_submitted_to_restate_workflow() {
+        run_async_test_on_stack_budget("workbench-trigger-restate-test", || {
+            button_trigger_occurrence_is_submitted_to_restate_workflow_inner()
+        });
+    }
+
+    async fn button_trigger_occurrence_is_submitted_to_restate_workflow_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-queue-runner-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let trigger_store = Arc::new(
+            lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
+                .await
+                .expect("open trigger store"),
+        );
+        let artifact_store = Arc::new(
+            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+                .await
+                .expect("open artifact store"),
+        );
+        let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
+            artifact_store.clone();
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .supported_variants(|_| &["low", "medium", "high"])
+            .complete(|_| async { Ok(trigger_registration_response()) })
+            .build()
+            .into_handle();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
+        let (event_tx, _) = broadcast::channel(1024);
+        let core = LashCore::builder()
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(WorkbenchPluginFactory::new("")))
+            .process_registry(Arc::clone(&process_registry))
+            .trigger_store(trigger_store)
+            .advanced()
+            .runtime_host_config({
+                let mut config = lash::durability::RuntimeHostConfig::in_memory();
+                config.durability.lashlang_artifact_store = artifact_store_for_core;
+                config.control.effect_host =
+                    Arc::new(lash::durability::InlineEffectHost::default());
+                config
+            })
+            .build()
+            .expect("build core");
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core,
+            process_observer,
+            session_ids: WorkbenchSessionIds::fresh(),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx,
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url,
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
+            mail_world: mail::MailWorld::new(),
+        };
+        let session = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("open session");
+        register_test_trigger(&session).await;
+        drop(session);
+
+        let _accepted = button_trigger(
+            State(state.clone()),
+            Json(ButtonEventRequest {
+                button: ButtonChoice::Blue,
+                model: Some("button-model".to_string()),
+                model_variant: Some("high".to_string()),
+            }),
+        )
+        .await
+        .expect("button command");
+        let selected_model = state.selected_model();
+        assert_eq!(selected_model.model, "button-model");
+        assert_eq!(selected_model.model_variant.as_deref(), Some("high"));
+        assert!(
+            state
+                .messages_snapshot()
+                .iter()
+                .any(|message| message.role == "event" && message.text == "blue button event"),
+            "button click should publish the local accepted event"
+        );
+
+        let request = tokio::time::timeout(Duration::from_secs(2), restate_requests.recv())
+            .await
+            .expect("Restate request")
+            .expect("Restate request payload");
+        let path = request
+            .get("path")
+            .and_then(Value::as_str)
+            .expect("request path");
+        assert!(
+            path.starts_with("WorkbenchButtonTriggerWorkflow/workbench-button-"),
+            "unexpected Restate path: {path}"
+        );
+        assert!(
+            path.ends_with("/run/send"),
+            "unexpected Restate path: {path}"
+        );
+        assert_eq!(
+            request.pointer("/body/session_id").and_then(Value::as_str),
+            Some(state.current_session_id().as_str())
+        );
+        assert_eq!(
+            request.pointer("/body/button").and_then(Value::as_str),
+            Some("Blue")
+        );
+        assert_eq!(
+            request.pointer("/body/model/model").and_then(Value::as_str),
+            Some("button-model")
+        );
+        assert_eq!(
+            request
+                .pointer("/body/model/model_variant")
+                .and_then(Value::as_str),
+            Some("high")
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    async fn spawn_restate_ingress_capture() -> (String, mpsc::UnboundedReceiver<Value>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Restate ingress");
+        let addr = listener.local_addr().expect("mock Restate ingress addr");
+        let app = Router::new()
+            .route("/{*path}", post(capture_restate_send))
+            .with_state(tx);
+        tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app).await {
+                eprintln!("mock Restate ingress stopped: {err}");
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    async fn capture_restate_send(
+        AxumPath(path): AxumPath<String>,
+        State(tx): State<mpsc::UnboundedSender<Value>>,
+        Json(body): Json<Value>,
+    ) -> StatusCode {
+        let _ = tx.send(json!({
+            "path": path,
+            "body": body,
+        }));
+        StatusCode::ACCEPTED
+    }
+
+    #[test]
+    fn reset_chat_deletes_old_session_and_clears_trigger_started_work() {
+        run_async_test_on_stack_budget("workbench-reset-chat-test", || {
+            reset_chat_deletes_old_session_and_clears_trigger_started_work_inner()
+        });
+    }
+
+    async fn reset_chat_deletes_old_session_and_clears_trigger_started_work_inner() {
+        let data_dir =
+            std::env::temp_dir().join(format!("agent-workbench-reset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let provider = trigger_registration_provider();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
+        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(WorkbenchPluginFactory::new("")))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core,
+            process_observer,
+            session_ids: WorkbenchSessionIds::fresh(),
+            messages: Arc::new(Mutex::new(vec![ChatMessage {
+                id: "message".to_string(),
+                role: "user".to_string(),
+                text: "before reset".to_string(),
+                at: "2026-05-27T00:00:00Z".to_string(),
+            }])),
+            timeline: Arc::new(Mutex::new(vec![StreamItem::event(
+                TurnActivity::independent(TurnEvent::CodeBlockStarted {
+                    language: "lashlang".to_string(),
+                    code: "finish true".to_string(),
+                    graph_key: None,
+                }),
+            )])),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx: broadcast::channel(1024).0,
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url,
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
+            mail_world: mail::MailWorld::new(),
+        };
+        let old_session_id = state.current_session_id();
+        let session = state
+            .core
+            .session(old_session_id.clone())
+            .rlm()
+            .open()
+            .await
+            .expect("open old session");
+        register_test_trigger(&session).await;
+        let started = emit_test_button_trigger(&state.core, ButtonChoice::Red).await;
+        assert_eq!(started.started_process_ids.len(), 1);
+        let old_process_scope = session.observe().process_scope();
+        assert_eq!(
+            process_registry
+                .list_handle_grants(&old_process_scope)
+                .await
+                .expect("old grants before reset")
+                .len(),
+            1
+        );
+        append_started_graph(
+            &state.lashlang_execution,
+            &test_graph(
+                "process:old-reset-process",
+                &old_session_id,
+                TraceRuntimeSubject::Process {
+                    process_id: "old-reset-process".to_string(),
+                },
+                Vec::new(),
+            ),
+        );
+        assert_eq!(state.lashlang_execution.graphs().len(), 1);
+        state
+            .mail_world
+            .add_account("Reset Probe")
+            .expect("add account before reset");
+        drop(session);
+
+        let Json(snapshot) = reset_chat(State(state.clone())).await.expect("reset");
+
+        assert_ne!(snapshot.settings.session_id, old_session_id);
+        assert!(snapshot.messages.is_empty());
+        assert!(snapshot.timeline.is_empty());
+        assert!(state.messages_snapshot().is_empty());
+        assert!(state.timeline_snapshot().is_empty());
+        assert!(
+            state.mail_world.account_summaries().is_empty(),
+            "reset must clear mail accounts along with the chat session"
+        );
+        let request = tokio::time::timeout(Duration::from_secs(2), restate_requests.recv())
+            .await
+            .expect("Restate request")
+            .expect("Restate request payload");
+        let path = request
+            .get("path")
+            .and_then(Value::as_str)
+            .expect("request path");
+        assert!(
+            path.starts_with("WorkbenchSessionDeleteWorkflow/workbench-delete-"),
+            "unexpected Restate path: {path}"
+        );
+        assert!(
+            path.ends_with("/run/send"),
+            "unexpected Restate path: {path}"
+        );
+        assert_eq!(
+            request.pointer("/body/session_id").and_then(Value::as_str),
+            Some(old_session_id.as_str())
+        );
+        assert!(
+            process_registry
+                .list_handle_grants(&old_process_scope)
+                .await
+                .expect("old grants after reset submission")
+                .len()
+                == 1,
+            "mock Restate ingress must not consume deletion work inline"
+        );
+        assert!(
+            state
+                .core
+                .session(snapshot.settings.session_id)
+                .rlm()
+                .open()
+                .await
+                .expect("open new session")
+                .processes()
+                .list()
+                .await
+                .expect("new work")
+                .is_empty()
+        );
+        let Json(graph_index) = list_lashlang_graphs(State(state.clone()))
+            .await
+            .expect("list graphs after reset");
+        assert!(
+            graph_index.graphs.is_empty(),
+            "new session graph index should be empty after reset: {graph_index:#?}"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    #[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
+    fn live_restate_cron_runs_trigger_and_queued_turn_end_to_end() {
+        run_async_test_on_stack_budget_multi_thread("workbench-restate-cron-e2e", 4, || {
+            live_restate_cron_runs_trigger_and_queued_turn_end_to_end_inner()
+        });
+    }
+
+    async fn live_restate_cron_runs_trigger_and_queued_turn_end_to_end_inner() {
+        let ingress_url = match std::env::var("RESTATE_INGRESS_URL") {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("skipping live Restate E2E: RESTATE_INGRESS_URL is not set");
+                return;
+            }
+        };
+        let admin_url = std::env::var("RESTATE_ADMIN_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+        let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
+            .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
+            .parse()
+            .expect("valid workbench E2E endpoint bind");
+        let endpoint_url = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_URL")
+            .unwrap_or_else(|_| format!("http://{endpoint_bind}"));
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-restate-e2e-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let harness = live_workbench_restate_state(&data_dir, ingress_url).await;
+        restate::spawn_restate_endpoint(
+            endpoint_bind,
+            harness.state.clone(),
+            harness.process_deployment,
+            harness.process_worker,
+        );
+        wait_for_endpoint_socket(endpoint_bind).await;
+        register_restate_deployment(&admin_url, &endpoint_url).await;
+        harness.queued_work_runner.spawn();
+
+        run_workbench_turn_via_restate(
+            &harness.state,
+            "Register a cron trigger that runs every two seconds and reports the tick.",
+        )
+        .await;
+        wait_for_workbench_message(&harness.state, "cron registered", Duration::from_secs(60))
+            .await;
+        wait_for_restate_cron_sync(&harness.state, &harness.trace_path, Duration::from_secs(30))
+            .await;
+        wait_for_workbench_message(
+            &harness.state,
+            "cron tick observed",
+            Duration::from_secs(60),
+        )
+        .await;
+        let trace_text =
+            std::fs::read_to_string(&harness.trace_path).expect("read workbench trace jsonl");
+        assert!(
+            trace_text.contains("agent_workbench.cron.restate.sync_upserted"),
+            "trace should include cron sync; trace at {}",
+            harness.trace_path.display()
+        );
+        assert!(
+            trace_text.contains("agent_workbench.cron.restate.run"),
+            "trace should include cron run; trace at {}",
+            harness.trace_path.display()
+        );
+        // Regression for the single-tick chain kill: the occurrence
+        // idempotency key must be unique per tick and run() must re-arm, so a
+        // SECOND tick has to fire. The original bug passed any single-tick
+        // assertion and died silently on tick two.
+        wait_for_trace_event_count(
+            &harness.trace_path,
+            "agent_workbench.cron.restate.run",
+            2,
+            Duration::from_secs(30),
+        )
+        .await;
+        let _ = restate::cancel_cron_jobs_for_session(
+            &harness.state,
+            &harness.state.current_session_id(),
+            "live_e2e_cleanup",
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    async fn run_workbench_turn_via_restate(state: &AppState, text: &str) {
+        state.push_message("user", text);
+        let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
+        let request = restate::WorkbenchTurnWorkflowRequest {
+            turn_id: turn_id.clone(),
+            session_id: state.current_session_id(),
+            text: text.to_string(),
+            model: state.selected_model(),
+        };
+        let url = format!(
+            "{}/WorkbenchTurnWorkflow/{}/run",
+            state.restate_ingress_url.trim_end_matches('/'),
+            turn_id,
+        );
+        let response = tokio::time::timeout(
+            Duration::from_secs(60),
+            state.restate_http.post(&url).json(&request).send(),
+        )
+        .await
+        .expect("Restate-backed workbench turn timed out")
+        .expect("submit Restate-backed workbench turn");
+        assert!(
+            response.status().is_success(),
+            "Restate-backed workbench turn failed: {} {}",
+            response.status(),
+            response.text().await.unwrap_or_default(),
+        );
+    }
+
+    struct LiveWorkbenchRestateHarness {
+        state: AppState,
+        process_worker: lash::durability::DurableProcessWorker,
+        process_deployment: lash_restate::RestateProcessDeployment,
+        queued_work_runner: lash::runtime::QueuedWorkRunner,
+        trace_path: PathBuf,
+    }
+
+    async fn live_workbench_restate_state(
+        data_dir: &std::path::Path,
+        restate_ingress_url: String,
+    ) -> LiveWorkbenchRestateHarness {
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory.clone();
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open process registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let trigger_store = Arc::new(
+            lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
+                .await
+                .expect("open trigger store"),
+        );
+        let artifact_store = Arc::new(
+            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+                .await
+                .expect("open artifact store"),
+        ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
+        let trace_path = data_dir.join("trace.jsonl");
+        let lashlang_execution_path = data_dir.join("lashlang-execution.jsonl");
+        let trace_sink = Arc::new(JsonlTraceSink::new(trace_path.clone())) as Arc<dyn TraceSink>;
+        let lashlang_execution = Arc::new(TraceLashlangGraphStore::default());
+        let lashlang_execution_sink = Arc::new(TeeTraceSink::new([
+            Arc::clone(&lashlang_execution) as Arc<dyn TraceSink>,
+            Arc::new(JsonlTraceSink::new(lashlang_execution_path)) as Arc<dyn TraceSink>,
+        ])) as Arc<dyn TraceSink>;
+        let response_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let response_index_for_provider = Arc::clone(&response_index);
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-restate-e2e")
+            .supported_variants(|_| &["high"])
+            .complete(move |_| {
+                let response_index = Arc::clone(&response_index_for_provider);
+                async move {
+                    if response_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        Ok(text_response(&format!(
+                            "```lashlang\n{}\n```",
+                            test_cron_trigger_source().trim()
+                        )))
+                    } else {
+                        Ok(text_response(
+                            "```lashlang\nsubmit \"cron tick observed\"\n```",
+                        ))
+                    }
+                }
+            })
+            .build()
+            .into_handle();
+        let model =
+            lash::ModelSpec::from_token_limits("mock-model", Some("high".to_string()), 4096, None)
+                .expect("model spec");
+        let process_deployment = lash_restate::RestateProcessDeployment::new(
+            restate_ingress_url.clone(),
+            Arc::clone(&process_registry),
+        );
+        let session_ids = WorkbenchSessionIds::fresh();
+        let restate_http = reqwest::Client::new();
+        let queued_work_runner =
+            lash::runtime::QueuedWorkRunner::new(Arc::new(WorkbenchQueuedWorkSubmitter {
+                session_ids: session_ids.clone(),
+                store_factory: Arc::clone(&core_store_factory),
+                restate_ingress_url: restate_ingress_url.clone(),
+                restate_http: restate_http.clone(),
+            }));
+        let queued_work_poke = queued_work_runner.poke_handle();
+        let core = LashCore::builder()
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+                data_dir.join("attachments"),
+            )))
+            .lashlang_artifact_store(artifact_store)
+            .trigger_store(trigger_store)
+            .trace_sink(Arc::clone(&trace_sink))
+            .lashlang_execution_sink(lashlang_execution_sink)
+            .trace_level(TraceLevel::Extended)
+            .plugin(Arc::new(WorkbenchPluginFactory::new("")))
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .process_work_driver(process_deployment.process_work_driver())
+            .queued_work_poke(queued_work_poke.clone())
+            .build()
+            .expect("build core");
+        let process_worker = lash::durability::DurableProcessWorker::new(
+            core.durable_process_worker_config()
+                .expect("build process worker config"),
+        );
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let (event_tx, _) = broadcast::channel(1024);
+        let state = AppState {
+            core,
+            process_observer,
+            session_ids,
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "mock-model".to_string(),
+                model_variant: Some("high".to_string()),
+            })),
+            web_configured: false,
+            trace_sink: Some(trace_sink),
+            lashlang_execution,
+            event_tx,
+            queued_work_poke,
+            restate_ingress_url,
+            restate_http,
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
+            mail_world: mail::MailWorld::new(),
+        };
+        LiveWorkbenchRestateHarness {
+            state,
+            process_worker,
+            process_deployment,
+            queued_work_runner,
+            trace_path,
+        }
+    }
+
+    async fn wait_for_workbench_message(state: &AppState, needle: &str, timeout: Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let messages = state.messages_snapshot();
+            if messages
+                .iter()
+                .any(|message| message.role == "assistant" && message.text.contains(needle))
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for workbench message containing `{needle}`; messages={messages:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn wait_for_trace_event_count(
+        path: &std::path::Path,
+        needle: &str,
+        count: usize,
+        timeout: Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let seen = std::fs::read_to_string(path)
+                .map(|text| text.matches(needle).count())
+                .unwrap_or(0);
+            if seen >= count {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected {count}+ `{needle}` trace events within {timeout:?}, saw {seen}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn wait_for_restate_cron_sync(
+        state: &AppState,
+        trace_path: &std::path::Path,
+        timeout: Duration,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let known_jobs = state
+                .restate_cron_job_keys
+                .lock()
+                .expect("cron job key lock")
+                .clone();
+            let trace_text = std::fs::read_to_string(trace_path).unwrap_or_default();
+            if !known_jobs.is_empty()
+                && trace_text.contains("agent_workbench.cron.restate.sync_upserted")
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for Restate cron sync; known_jobs={known_jobs:#?}; messages={:#?}; trace_tail={}",
+                state.messages_snapshot(),
+                trace_tail(trace_path),
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    fn trace_tail(path: &std::path::Path) -> String {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return format!("<unreadable {}>", path.display());
+        };
+        let mut lines = text.lines().rev().take(20).collect::<Vec<_>>();
+        lines.reverse();
+        lines.join("\n")
+    }
+
+    async fn wait_for_endpoint_socket(addr: SocketAddr) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Restate endpoint did not open a TCP listener at {addr}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn register_restate_deployment(admin_url: &str, endpoint_url: &str) {
+        let client = reqwest::Client::builder()
+            .http2_prior_knowledge()
+            .build()
+            .expect("build Restate admin client");
+        let response = client
+            .post(format!("{}/deployments", admin_url.trim_end_matches('/')))
+            .json(&json!({
+                "uri": endpoint_url,
+                "force": true,
+                "breaking": true,
+            }))
+            .send()
+            .await
+            .expect("register deployment with Restate admin API");
+        assert!(
+            response.status().is_success(),
+            "Restate deployment registration failed: {} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store() {
+        run_async_test_on_stack_budget("workbench-persisted-trigger-test", || {
+            persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner()
+        });
+    }
+
+    async fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner() {
+        let data_dir =
+            std::env::temp_dir().join(format!("agent-workbench-trigger-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let process_registry_path = data_dir.join("processes.db");
+        let trigger_store_path = data_dir.join("triggers.db");
+        let artifact_store_path = data_dir.join("artifacts.db");
+        let session_id = WorkbenchSessionIds::fresh().current();
+
+        {
+            let artifact_store = Arc::new(
+                lash_sqlite_store::Store::open(&artifact_store_path)
+                    .await
+                    .expect("open artifacts"),
+            );
+            let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
+                artifact_store.clone();
+            let process_registry = Arc::new(
+                lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+                    .await
+                    .expect("open registry"),
+            ) as Arc<dyn lash::process::ProcessRegistry>;
+            let trigger_store = Arc::new(
+                lash_sqlite_store::SqliteTriggerStore::open(&trigger_store_path)
+                    .await
+                    .expect("open trigger store"),
+            );
+            let core = test_workbench_core(
+                session_store_factory.clone(),
+                process_registry,
+                trigger_store,
+                artifact_store_for_core,
+            );
+            let session = core
+                .session(session_id.clone())
+                .rlm()
+                .open()
+                .await
+                .expect("open session");
+            register_test_trigger(&session).await;
+            drop(session);
+            drop(core);
+        }
+
+        let artifact_store = Arc::new(
+            lash_sqlite_store::Store::open(&artifact_store_path)
+                .await
+                .expect("reopen artifacts"),
+        );
+        let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
+            artifact_store.clone();
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+                .await
+                .expect("reopen registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let trigger_store = Arc::new(
+            lash_sqlite_store::SqliteTriggerStore::open(&trigger_store_path)
+                .await
+                .expect("reopen trigger store"),
+        );
+        let core = test_workbench_core(
+            session_store_factory,
+            Arc::clone(&process_registry),
+            trigger_store,
+            artifact_store_for_core,
+        );
+        let _reopened = core
+            .session(session_id)
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
+        let report = emit_test_button_trigger(&core, ButtonChoice::Blue).await;
+        assert_eq!(report.started_process_ids.len(), 1);
+        process_registry
+            .await_process(&report.started_process_ids[0])
+            .await
+            .expect("trigger process should finish");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// Stand-in for the Restate queued-turn workflow: drains an enqueued
+    /// command batch in-process. The test cores' effect host permits
+    /// foreground drains; in production the same drain runs inside a Restate
+    /// handler context (`restate::run_queued_turn`).
+    async fn drain_refresh_batch(state: &AppState, receipt: &lash::SessionCommandReceipt) {
+        let session = state
+            .core
+            .session(receipt.session_id.clone())
+            .rlm()
+            .open()
+            .await
+            .expect("open session to drain refresh batch");
+        let _ = session
+            .queued_turn()
+            .batch_ids([receipt.batch_id.clone()])
+            .drain_id(receipt.batch_id.clone())
+            .run()
+            .await
+            .expect("drain refresh batch");
+        session.close().await.expect("close drain session");
+    }
+
+    #[test]
+    fn healthz_reports_workbench_fingerprint() {
+        // scripts/agent-workbench-dev.sh readiness-checks this exact shape to
+        // distinguish the workbench from a random process on the port.
+        let Json(body) = sync_await(healthz());
+        assert_eq!(body["service"], "agent-workbench");
+        assert_eq!(body["status"], "ok");
+    }
+
+    fn test_workbench_core(
+        session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
+        process_registry: Arc<dyn lash::process::ProcessRegistry>,
+        trigger_store: Arc<lash_sqlite_store::SqliteTriggerStore>,
+        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    ) -> LashCore {
+        let provider = trigger_registration_provider();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        LashCore::builder()
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(session_store_factory)
+            .plugin(Arc::new(WorkbenchPluginFactory::new("")))
+            .process_registry(process_registry)
+            .trigger_store(trigger_store)
+            .advanced()
+            .runtime_host_config({
+                let mut config = lash::durability::RuntimeHostConfig::in_memory();
+                config.durability.lashlang_artifact_store = artifact_store;
+                config.control.effect_host =
+                    Arc::new(lash::durability::InlineEffectHost::default());
+                config
+            })
+            .build()
+            .expect("build core")
+    }
+
+    fn text_response(text: &str) -> lash::direct::LlmResponse {
+        lash::direct::LlmResponse {
+            full_text: text.to_string(),
+            parts: vec![lash::direct::LlmOutputPart::Text {
+                text: text.to_string(),
+                response_meta: None,
+            }],
+            ..lash::direct::LlmResponse::default()
+        }
+    }
+
+    fn trigger_registration_response() -> lash::direct::LlmResponse {
+        text_response(&format!(
+            "```lashlang\n{}\n```",
+            test_button_trigger_source().trim()
+        ))
+    }
+
+    async fn register_test_trigger(session: &lash::LashSession) {
+        let output = session
+            .turn(lash::TurnInput::text("register trigger"))
+            .turn_id(format!("workbench-test-register:{}", uuid::Uuid::new_v4()))
+            .run()
+            .await
+            .expect("register trigger route");
+        assert_eq!(
+            output.submitted_value(),
+            Some(&serde_json::json!("registered"))
+        );
+    }
+
+    async fn emit_test_button_trigger(
+        core: &LashCore,
+        button: ButtonChoice,
+    ) -> lash::triggers::TriggerEmitReport {
+        let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
+            .expect("source key");
+        let idempotency_key = format!(
+            "workbench-test-button-trigger:{}:{}",
+            button.as_str(),
+            uuid::Uuid::new_v4()
+        );
+        let scoped_effect_controller = lash::runtime::ScopedEffectController::shared(
+            Arc::new(lash::runtime::InlineRuntimeEffectController),
+            lash::runtime::ExecutionScope::runtime_operation(format!("trigger:{idempotency_key}")),
+        )
+        .expect("inline trigger occurrence execution scope");
+        core.triggers()
+            .emit(
+                lash::triggers::TriggerOccurrenceRequest::new(
+                    BUTTON_TRIGGER_SOURCE_TYPE,
+                    source_key,
+                    json!({
+                        "button": button.as_str(),
+                        "message": format!("user pressed the {} button", button.lower()),
+                        "pressed_at": "2026-06-02T12:00:00Z"
+                    }),
+                    idempotency_key,
+                )
+                .with_source(json!({})),
+                scoped_effect_controller,
+            )
+            .await
+            .expect("emit button trigger occurrence")
+    }
+
+    fn trigger_registration_provider() -> ProviderHandle {
+        lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete(|_| async { Ok(trigger_registration_response()) })
+            .build()
+            .into_handle()
+    }
+
+    fn test_button_trigger_source() -> &'static str {
+        r#"
+        process remember(event: ui.button.Pressed) {
+          wake { kind: "button_pressed", button: event.button, message: event.message }
+          finish { button: event.button, ok: true }
+        }
+
+        handle = await triggers.register({
+          source: ui.button.pressed({}),
+          target: remember,
+          inputs: { event: trigger.event },
+          name: "remembered"
+        })?
+        submit "registered"
+        "#
+    }
+
+    fn test_cron_trigger_source() -> &'static str {
+        r#"
+        process remember_tick(tick: cron.Tick) {
+          wake { kind: "cron_tick", fired_at: tick.fired_at }
+          finish { fired_at: tick.fired_at }
+        }
+
+        handle = await triggers.register({
+          source: cron.Schedule({ expr: "*/2 * * * * *", tz: "UTC" }),
+          target: remember_tick,
+          inputs: { tick: trigger.event },
+          name: "cron smoke"
+        })?
+        submit "cron registered"
+        "#
+    }
+}
