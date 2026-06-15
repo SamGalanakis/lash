@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let model = ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
         .map_err(anyhow::Error::msg)?;
 
+    // one LashCore per app, cloned freely.
     let core = LashCore::standard()
         .provider(provider)
         .model(model)
@@ -55,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
+    // one session per chat / task; run one turn; read settled prose.
     let session = core.session("hello-1").open().await?;
     let result = session
         .turn(TurnInput::text("Say hi in one short sentence."))
