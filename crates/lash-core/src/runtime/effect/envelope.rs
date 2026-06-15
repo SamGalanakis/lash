@@ -301,7 +301,7 @@ pub enum RuntimeEffectCommand {
         duration_ms: u64,
     },
     AwaitEvent {
-        key: String,
+        key: crate::AwaitEventKey,
     },
 }
 
@@ -440,9 +440,22 @@ pub enum ProcessEffectOutcome {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallEffectOutcome {
-    pub result: CompletedToolCall,
+    pub launch: ToolCallLaunch,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<ToolTriggerEffectOutcome>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolCallLaunch {
+    Done {
+        result: CompletedToolCall,
+    },
+    Pending {
+        key: crate::AwaitEventKey,
+        pending: crate::PendingCompletion,
+        duration_ms: u64,
+    },
 }
 
 /// Serializable result of a runtime effect command.
@@ -457,7 +470,7 @@ pub enum RuntimeEffectOutcome {
         result: Result<LlmResponse, LlmCallError>,
     },
     ToolCall {
-        result: CompletedToolCall,
+        launch: ToolCallLaunch,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         triggers: Vec<ToolTriggerEffectOutcome>,
     },
@@ -475,7 +488,7 @@ pub enum RuntimeEffectOutcome {
     },
     Sleep,
     AwaitEvent {
-        payload: serde_json::Value,
+        resolution: crate::Resolution,
     },
 }
 
@@ -640,7 +653,17 @@ impl RuntimeEffectOutcome {
 
     pub fn into_tool_call(self) -> Result<CompletedToolCall, RuntimeEffectControllerError> {
         match self {
-            Self::ToolCall { result, .. } => Ok(result),
+            Self::ToolCall {
+                launch: ToolCallLaunch::Done { result },
+                ..
+            } => Ok(result),
+            Self::ToolCall {
+                launch: ToolCallLaunch::Pending { .. },
+                ..
+            } => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_tool_call_pending",
+                "tool call launch is pending and has no completed output yet",
+            )),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ToolCall,
                 other.kind(),
@@ -652,7 +675,7 @@ impl RuntimeEffectOutcome {
         self,
     ) -> Result<ToolCallEffectOutcome, RuntimeEffectControllerError> {
         match self {
-            Self::ToolCall { result, triggers } => Ok(ToolCallEffectOutcome { result, triggers }),
+            Self::ToolCall { launch, triggers } => Ok(ToolCallEffectOutcome { launch, triggers }),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ToolCall,
                 other.kind(),
@@ -705,9 +728,9 @@ impl RuntimeEffectOutcome {
         }
     }
 
-    pub fn into_await_event(self) -> Result<serde_json::Value, RuntimeEffectControllerError> {
+    pub fn into_await_event(self) -> Result<crate::Resolution, RuntimeEffectControllerError> {
         match self {
-            Self::AwaitEvent { payload } => Ok(payload),
+            Self::AwaitEvent { resolution } => Ok(resolution),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::AwaitEvent,
                 other.kind(),

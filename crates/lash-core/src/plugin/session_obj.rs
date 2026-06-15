@@ -641,14 +641,20 @@ impl PluginSession {
             )
             .await
             .map_err(|err| PluginError::Invoke(err.to_string()))?;
-        if !result.is_success() {
+        let Some(output) = result.as_done_output() else {
+            return Err(PluginError::Invoke(format!(
+                "{} returned a pending result where completed output is required",
+                Op::NAME
+            )));
+        };
+        if !output.is_success() {
             return Err(PluginError::Invoke(format!(
                 "{} failed: {}",
                 Op::NAME,
-                result.value_for_projection()
+                output.value_for_projection()
             )));
         }
-        serde_json::from_value(result.into_output().value_for_projection())
+        serde_json::from_value(output.value_for_projection())
             .map_err(|err| PluginError::Invoke(format!("invalid {} output: {err}", Op::NAME)))
     }
 }

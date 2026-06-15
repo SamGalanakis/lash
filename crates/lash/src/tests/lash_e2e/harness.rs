@@ -214,7 +214,7 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
                     Some("child turn"),
                 ),
             })),
-            inline_scope(lash_core::EffectScope::process(process_id)),
+            inline_scope(lash_core::ExecutionScope::process(process_id)),
         )
         .await?;
     assert_eq!(handle.process_id, process_id);

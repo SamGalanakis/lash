@@ -346,14 +346,14 @@ async fn process_start_and_cancel_emit_typed_observation_events() -> Result<()> 
                     Some("observed process"),
                 ),
             })),
-            inline_scope(lash_core::EffectScope::process(process_id)),
+            inline_scope(lash_core::ExecutionScope::process(process_id)),
         )
         .await?;
     session
         .processes()
         .cancel(
             process_id,
-            inline_scope(lash_core::EffectScope::process(process_id)),
+            inline_scope(lash_core::ExecutionScope::process(process_id)),
         )
         .await?;
 
@@ -401,7 +401,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
     let source_key = lash_core::empty_trigger_source_key("ui.button.pressed")?;
     let scoped_effect_controller = lash_core::ScopedEffectController::shared(
         Arc::new(lash_core::InlineRuntimeEffectController),
-        lash_core::EffectScope::runtime_operation("trigger:button-press-1"),
+        lash_core::ExecutionScope::runtime_operation("trigger:button-press-1"),
     )?;
     let report = core
         .triggers()
@@ -509,7 +509,7 @@ async fn processes_cancel_uses_host_cancel_ability() -> Result<()> {
                     Some("host process"),
                 ),
             })),
-            inline_scope(lash_core::EffectScope::process("host-process")),
+            inline_scope(lash_core::ExecutionScope::process("host-process")),
         )
         .await?;
 
@@ -517,7 +517,7 @@ async fn processes_cancel_uses_host_cancel_ability() -> Result<()> {
         .processes()
         .cancel(
             "host-process",
-            inline_scope(lash_core::EffectScope::process("host-process")),
+            inline_scope(lash_core::ExecutionScope::process("host-process")),
         )
         .await
         .expect_err("host ability should deny cancellation");
@@ -569,7 +569,7 @@ async fn processes_cancel_all_uses_host_cancel_ability() -> Result<()> {
                         Some(process_id),
                     ),
                 })),
-                inline_scope(lash_core::EffectScope::process(process_id)),
+                inline_scope(lash_core::ExecutionScope::process(process_id)),
             )
             .await?;
     }

@@ -138,7 +138,7 @@ fails with the world's unknown-account error.
 Delivering a message is the third trigger
 source in the demo: the host appends it to the inbox and emits `mail.received`
 with payload `mail.Received { account: str, title: str, text: str }`. Like the
-button, the emission runs inside a Restate effect scope
+button, the emission runs inside a Restate execution scope
 (`WorkbenchMailReceivedWorkflow`) so any registered trigger starts a durable
 process. Register an inbox concierge once and it fires on every delivery:
 

@@ -610,7 +610,7 @@ async fn run_button_trigger(
     )
     .await?;
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "button-trigger:{}",
             request.operation_id
         )))
@@ -655,7 +655,7 @@ async fn run_mail_received(
         .map_err(AppError::internal)?;
     apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "mail-received:{}",
             request.operation_id
         )))
@@ -691,7 +691,7 @@ async fn run_session_delete(
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::session_delete(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::session_delete(
             &request.session_id,
         ))
         .map_err(AppError::internal)?;
@@ -892,7 +892,7 @@ async fn emit_cron_occurrence(
     controller: &lash_restate::RestateRuntimeEffectController<'_, ObjectContext<'_>>,
 ) -> HandlerResult<Json<CronEmitReport>> {
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "cron:{}:{fired_at}",
             controller.context().key()
         )))

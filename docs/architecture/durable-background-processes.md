@@ -188,7 +188,7 @@ one owner. Process execution identity is the persisted `process_id` end-to-end
 retry — a Restate `run` re-invocation or a recovery sweep — must present that
 stable id, and an empty/fresh id is rejected loudly
 (`DurableProcessWorker::ensure_stable_process_id`), mirroring how
-`EffectScope::turn` rejects an empty turn id when scoped controller creation
+`ExecutionScope::turn` rejects an empty turn id when scoped controller creation
 validates it.
 
 ## Non-goals

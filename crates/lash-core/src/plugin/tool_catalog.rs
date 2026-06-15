@@ -129,7 +129,13 @@ pub enum PluginDirective {
 impl PluginDirective {
     pub fn short_circuit(result: ToolResult) -> Self {
         Self::ShortCircuitTool {
-            output: result.into_output(),
+            output: result.into_done_output().unwrap_or_else(|_| {
+                ToolCallOutput::failure(crate::ToolFailure::runtime(
+                    crate::ToolFailureClass::Internal,
+                    "pending_tool_short_circuit",
+                    "plugin short-circuit directives require completed tool output",
+                ))
+            }),
         }
     }
 

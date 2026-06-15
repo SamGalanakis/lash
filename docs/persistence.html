@@ -137,7 +137,7 @@ let core = LashCore::builder()
         <p>Use <code>LashCore::delete_session(..., scope)</code> when an app-level delete should remove factory-backed runtime state for a session id.</p>
       </div>
       <pre data-lang="rust" data-snippet="persistence#delete-session"><code>let effect_host = core.effect_host();
-let scope = effect_host.scoped(lash::runtime::EffectScope::runtime_operation(format!(
+let scope = effect_host.scoped(lash::runtime::ExecutionScope::runtime_operation(format!(
     "delete-session:{chat_id}"
 )))?;
 let report = core.delete_session(chat_id, scope).await?;

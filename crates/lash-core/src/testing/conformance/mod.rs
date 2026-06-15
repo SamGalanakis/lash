@@ -33,16 +33,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, CausalRef, DeliveryPolicy,
-    EffectHost, EffectScope, LiveReplayGapReason, LiveReplayResult, LiveReplayStore,
-    LiveReplayStoreError, LiveReplaySubscribeResult, MergeKey, ModelSpec, PluginSessionSnapshot,
-    ProtocolEvent, ProtocolTurnOptions, QueuedWorkBatch, QueuedWorkBatchDraft,
-    QueuedWorkClaimBoundary, QueuedWorkPayload, RuntimeCommit, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimePersistence, RuntimeScope, RuntimeSessionState, RuntimeSubject, RuntimeTurnCommitStamp,
-    ScopedEffectController, SessionMeta, SessionNodePayload, SessionNodeRecord,
-    SessionObservationEvent, SessionObservationEventPayload, SessionPolicy,
+    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, AwaitEventWaitIdentity,
+    CausalRef, DeliveryPolicy, EffectHost, ExecutionScope, LiveReplayGapReason, LiveReplayResult,
+    LiveReplayStore, LiveReplayStoreError, LiveReplaySubscribeResult, MergeKey, ModelSpec,
+    PluginSessionSnapshot, ProtocolEvent, ProtocolTurnOptions, QueuedWorkBatch,
+    QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload, Resolution, ResolveOutcome,
+    RuntimeCommit, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeInvocation, RuntimePersistence, RuntimeScope, RuntimeSessionState, RuntimeSubject,
+    RuntimeTurnCommitStamp, ScopedEffectController, SessionMeta, SessionNodePayload,
+    SessionNodeRecord, SessionObservationEvent, SessionObservationEventPayload, SessionPolicy,
     SessionProcessEventKind, SessionQueueEventKind, SessionReadScope, SessionRelation,
     SessionRevision, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnActivity,
     TurnEvent, TurnInput,
@@ -131,12 +131,13 @@ mod tests {
     #[tokio::test]
     async fn inline_effect_host_satisfies_conformance() {
         effect_host(|| Arc::new(crate::InlineEffectHost::default())).await;
+        effect_host_await_events(|| Arc::new(crate::InlineEffectHost::default())).await;
     }
 
     #[tokio::test]
     async fn recording_effect_host_records_selected_scope_and_envelope() {
         let host = RecordingEffectHost::default();
-        let scope = EffectScope::runtime_operation("trigger:button-1");
+        let scope = ExecutionScope::runtime_operation("trigger:button-1");
         let scoped = host.scoped(scope.clone()).expect("scoped controller");
         let envelope = RuntimeEffectEnvelope::new(
             crate::RuntimeInvocation::effect(
@@ -158,7 +159,7 @@ mod tests {
         assert_eq!(host.selected_scopes(), vec![scope.clone()]);
         let records = host.records();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].effect_scope, scope);
+        assert_eq!(records[0].execution_scope, scope);
         assert_eq!(records[0].runtime_scope, RuntimeScope::new("session-1"));
         assert_eq!(records[0].effect_id, "sleep-effect");
         assert_eq!(records[0].effect_kind, RuntimeEffectKind::Sleep);

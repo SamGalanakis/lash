@@ -1365,6 +1365,7 @@ pub struct RemoteToolCallRequest {
     pub call_path: String,
     pub args: serde_json::Value,
     pub session_id: String,
+    pub completion_key: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1393,8 +1394,29 @@ impl RemoteToolCallRequest {
                 "remote tool call request requires a non-empty session_id".to_string(),
             ));
         }
+        if self.completion_key.is_null() {
+            return Err(RemoteProtocolError::RemoteToolTransport(
+                "remote tool call request requires completion_key".to_string(),
+            ));
+        }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTimeoutBehavior {
+    #[default]
+    ErrorAsResult,
+    FailTurn,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCancelHint {
+    Ignore,
+    #[default]
+    CancelExternalWork,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1421,6 +1443,15 @@ pub enum RemoteToolCallResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         raw: Option<serde_json::Value>,
     },
+    Pending {
+        protocol_version: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<u64>,
+        #[serde(default)]
+        on_timeout: RemoteTimeoutBehavior,
+        #[serde(default)]
+        on_cancel: RemoteCancelHint,
+    },
 }
 
 impl RemoteToolCallResponse {
@@ -1433,6 +1464,9 @@ impl RemoteToolCallResponse {
                 protocol_version, ..
             }
             | Self::Cancelled {
+                protocol_version, ..
+            }
+            | Self::Pending {
                 protocol_version, ..
             } => *protocol_version,
         }

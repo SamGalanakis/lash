@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::{
-    EffectScope, InlineRuntimeEffectController, RuntimePersistence, ScopedEffectController,
+    ExecutionScope, InlineRuntimeEffectController, RuntimePersistence, ScopedEffectController,
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::RestateProcessDeployment;
@@ -610,6 +610,7 @@ async fn wait_for_queued_work(
         attachment_store: Arc::new(s3_store_from_env()?)
             as Arc<dyn lash::persistence::AttachmentStore>,
         process_work_driver,
+        restate_ingress_url: ingress_url.to_string(),
         mock_provider_base_url: mock_provider_base_url.to_string(),
         trace_dir,
         fail_once: false,
@@ -677,6 +678,7 @@ async fn emit_button_event(
         attachment_store: Arc::new(s3_store_from_env()?)
             as Arc<dyn lash::persistence::AttachmentStore>,
         process_work_driver,
+        restate_ingress_url: ingress_url.to_string(),
         mock_provider_base_url: mock_provider_base_url.to_string(),
         trace_dir,
         fail_once: false,
@@ -684,7 +686,7 @@ async fn emit_button_event(
     let source_key = empty_trigger_source_key(BUTTON_SOURCE_TYPE)?;
     let scoped = ScopedEffectController::shared(
         Arc::new(InlineRuntimeEffectController),
-        EffectScope::runtime_operation("e2e-button-trigger"),
+        ExecutionScope::runtime_operation("e2e-button-trigger"),
     )?;
     let report = core
         .triggers()
@@ -1119,6 +1121,7 @@ async fn assert_reopened_session_agrees(
         attachment_store: Arc::new(s3_store_from_env()?)
             as Arc<dyn lash::persistence::AttachmentStore>,
         process_work_driver,
+        restate_ingress_url: ingress_url.to_string(),
         mock_provider_base_url: mock_provider_base_url.to_string(),
         trace_dir,
         fail_once: false,

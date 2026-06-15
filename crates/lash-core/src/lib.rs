@@ -75,7 +75,7 @@ pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolRestoreReport, ToolSourceHandle, ToolState, ToolStateEntry,
 };
-pub use tool_result::ToolResult;
+pub use tool_result::{CancelHint, PendingCompletion, TimeoutBehavior, ToolResult};
 pub use triggers::{
     InMemoryTriggerStore, TriggerDeliveryReservation, TriggerEmitReport, TriggerEvent,
     TriggerEventCatalog, TriggerEventKey, TriggerEventType, TriggerOccurrenceRecord,
@@ -227,10 +227,11 @@ pub use provider::{
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
-    AgentFrameRun, AssembledTurn, AssistantOutput, CausalRef, CodeOutputRecord,
-    DefaultProcessCancelAbility, DeliveryPolicy, DirectCompletionClient, DurableProcessWorker,
-    DurableProcessWorkerConfig, DurableStoreFacet, EffectHost, EffectScope, EmbeddedRuntimeBuilder,
-    EmbeddedRuntimeHost, EventSink, ExecutionSummary, InMemoryLiveReplayStore,
+    AgentFrameRun, AssembledTurn, AssistantOutput, AwaitEventKey, AwaitEventWaitIdentity,
+    CausalRef, CodeOutputRecord, DefaultProcessCancelAbility, DeliveryPolicy,
+    DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig, DurableStoreFacet,
+    EffectHost, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionScope,
+    ExecutionSummary, ExternalCompletionError, InMemoryLiveReplayStore,
     InMemoryLiveReplayStoreConfig, InMemorySessionStore, InMemorySessionStoreFactory,
     InlineEffectHost, InlineProcessRunHandle, InlineRuntimeEffectController, InputItem,
     LashRuntime, LiveReplayGap, LiveReplayGapReason, LiveReplayResult, LiveReplayStore,
@@ -252,17 +253,17 @@ pub use runtime::{
     ProcessWorkObserver, ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, PromptUsage,
     ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
     ProtocolTurnExtensionHandle, QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome,
-    QueuedWorkRunRequest, QueuedWorkRunner, Residency, RuntimeEnvironment,
-    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig,
-    RuntimeObservation, ScopedEffectController, SessionCommand, SessionCommandReceipt,
-    SessionCursor, SessionCursorError, SessionObservation, SessionObservationEvent,
-    SessionObservationEventPayload, SessionObservationSubscription, SessionProcessEventKind,
-    SessionQueueEventKind, SessionResume, SessionRevision, SessionScope, SessionScopeId,
-    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
-    TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
-    TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UnavailableProcessService,
-    UsageReportRow, UsageTotals, WaitKind, WaitState, current_epoch_ms, diff_token_ledger,
-    diff_usage_reports, ensure_durable_effect_input, epoch_ms_from_system_time,
+    QueuedWorkRunRequest, QueuedWorkRunner, Residency, Resolution, ResolveOutcome,
+    RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
+    RuntimeHostConfig, RuntimeObservation, ScopedEffectController, SessionCommand,
+    SessionCommandReceipt, SessionCursor, SessionCursorError, SessionObservation,
+    SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
+    SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision, SessionScope,
+    SessionScopeId, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
+    TerminationPolicy, TokenLedgerEntry, ToolCallLaunch, TurnActivity, TurnActivityId,
+    TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
+    UnavailableProcessService, UsageReportRow, UsageTotals, WaitKind, WaitState, current_epoch_ms,
+    diff_token_ledger, diff_usage_reports, ensure_durable_effect_input, epoch_ms_from_system_time,
     lashlang_process_event_types, lashlang_process_signal_event_types, process_signal_event_type,
     process_signal_name_from_event_type, process_signal_wait_key, system_time_from_epoch_ms,
     validate_process_signal_name,

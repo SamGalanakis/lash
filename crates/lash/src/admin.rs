@@ -3,6 +3,28 @@ use crate::support::*;
 pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
+pub struct Completions {
+    pub(crate) core: LashCore,
+}
+
+impl Completions {
+    pub async fn resolve(
+        &self,
+        key: lash_core::AwaitEventKey,
+        resolution: lash_core::Resolution,
+    ) -> Result<lash_core::ResolveOutcome> {
+        self.core
+            .env
+            .core
+            .control
+            .effect_host
+            .resolve_await_event(&key, resolution)
+            .await
+            .map_err(|err| EmbedError::Plugin(lash_core::PluginError::Session(err.to_string())))
+    }
+}
+
+#[derive(Clone)]
 pub struct CoreTriggerAdmin {
     pub(crate) core: LashCore,
 }
@@ -136,7 +158,9 @@ impl Processes {
             grant,
             execution_context: Box::new(lash_core::ProcessExecutionContext::default()),
         };
-        let outcome = self.run_command(command, scoped_effect_controller).await?;
+        let outcome = self
+            .run_command(command, scoped_effect_controller.clone())
+            .await?;
         let lash_core::ProcessEffectOutcome::Start { record } = outcome else {
             return Err(EmbedError::Plugin(lash_core::PluginError::Session(
                 "process start returned the wrong outcome".to_string(),
@@ -186,7 +210,9 @@ impl Processes {
             process_id: process_id.to_string(),
             reason: Some("requested by host".to_string()),
         };
-        let outcome = self.run_command(command, scoped_effect_controller).await?;
+        let outcome = self
+            .run_command(command, scoped_effect_controller.clone())
+            .await?;
         let lash_core::ProcessEffectOutcome::Cancel { record } = outcome else {
             return Err(EmbedError::Plugin(lash_core::PluginError::Session(
                 "process cancel returned the wrong outcome".to_string(),
@@ -203,18 +229,72 @@ impl Processes {
         request: lash_core::ProcessEventAppendRequest,
         scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::ProcessEvent> {
+        let signal_name = signal_name.into();
+        let event_type = request.event_type.clone();
+        let payload = request.payload.clone();
         let command = lash_core::ProcessCommand::Signal {
             process_id: process_id.to_string(),
-            signal_name: signal_name.into(),
+            signal_name: signal_name.clone(),
             signal_id: signal_id.into(),
             request,
         };
-        let outcome = self.run_command(command, scoped_effect_controller).await?;
+        let outcome = self
+            .run_command(command, scoped_effect_controller.clone())
+            .await?;
         let lash_core::ProcessEffectOutcome::Signal { event } = outcome else {
             return Err(EmbedError::Plugin(lash_core::PluginError::Session(
                 "process signal returned the wrong outcome".to_string(),
             )));
         };
+        let registry = self.registry()?;
+        let waiting_ordinal =
+            registry
+                .get_process(process_id)
+                .await
+                .and_then(|record| match record.wait {
+                    Some(lash_core::WaitState {
+                        kind:
+                            lash_core::WaitKind::Signal {
+                                name,
+                                event_type: wait_event_type,
+                                ordinal,
+                                ..
+                            },
+                        ..
+                    }) if name == signal_name && wait_event_type == event_type => Some(ordinal),
+                    _ => None,
+                });
+        let ordinal = match waiting_ordinal {
+            Some(ordinal) => ordinal,
+            None => {
+                registry
+                    .count_events_through(process_id, &event_type, event.sequence)
+                    .await?
+            }
+        };
+        if ordinal > 0 {
+            let key = scoped_effect_controller
+                .controller()
+                .await_event_key(
+                    &lash_core::ExecutionScope::process(process_id),
+                    lash_core::AwaitEventWaitIdentity::process_signal(
+                        process_id,
+                        &signal_name,
+                        ordinal,
+                    ),
+                )
+                .await
+                .map_err(|err| {
+                    EmbedError::Plugin(lash_core::PluginError::Session(err.to_string()))
+                })?;
+            let _ = scoped_effect_controller
+                .controller()
+                .resolve_await_event(&key, lash_core::Resolution::Ok(payload))
+                .await
+                .map_err(|err| {
+                    EmbedError::Plugin(lash_core::PluginError::Session(err.to_string()))
+                })?;
+        }
         Ok(event)
     }
 
@@ -530,14 +610,20 @@ impl SessionAdmin {
                 })?,
             )
             .await?;
-        if !result.is_success() {
+        let Some(output) = result.as_done_output() else {
+            return Err(EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
+                "{} returned a pending result where completed output is required",
+                Op::NAME
+            ))));
+        };
+        if !output.is_success() {
             return Err(EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                 "{} failed: {}",
                 Op::NAME,
-                result.value_for_projection()
+                output.value_for_projection()
             ))));
         }
-        serde_json::from_value(result.into_output().value_for_projection()).map_err(|err| {
+        serde_json::from_value(output.value_for_projection()).map_err(|err| {
             EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                 "invalid {} output: {err}",
                 Op::NAME

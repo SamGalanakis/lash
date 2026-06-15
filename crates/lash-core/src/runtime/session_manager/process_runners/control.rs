@@ -103,18 +103,65 @@ impl<'scope> ProcessCommandRunner<'scope> {
         signal_id: String,
         request: crate::ProcessEventAppendRequest,
     ) -> Result<crate::ProcessEvent, crate::PluginError> {
-        match self
+        let event_type = request.event_type.clone();
+        let payload = request.payload.clone();
+        let event = match self
             .run(crate::ProcessCommand::Signal {
                 process_id: process_id.to_string(),
-                signal_name,
+                signal_name: signal_name.clone(),
                 signal_id,
                 request,
             })
             .await?
         {
-            crate::ProcessEffectOutcome::Signal { event } => Ok(event),
-            _ => Err(wrong_process_outcome("signal")),
+            crate::ProcessEffectOutcome::Signal { event } => event,
+            _ => return Err(wrong_process_outcome("signal")),
+        };
+        let waiting_ordinal = self
+            .registry
+            .get_process(process_id)
+            .await
+            .and_then(|record| match record.wait {
+                Some(crate::WaitState {
+                    kind:
+                        crate::WaitKind::Signal {
+                            name,
+                            event_type: wait_event_type,
+                            ordinal,
+                            ..
+                        },
+                    ..
+                }) if name == signal_name && wait_event_type == event_type => Some(ordinal),
+                _ => None,
+            });
+        let ordinal = match waiting_ordinal {
+            Some(ordinal) => ordinal,
+            None => {
+                self.registry
+                    .count_events_through(process_id, &event_type, event.sequence)
+                    .await?
+            }
+        };
+        if ordinal > 0 {
+            let key = self
+                .effect_controller
+                .await_event_key(
+                    &crate::ExecutionScope::process(process_id),
+                    crate::AwaitEventWaitIdentity::process_signal(
+                        process_id,
+                        &signal_name,
+                        ordinal,
+                    ),
+                )
+                .await
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+            let _ = self
+                .effect_controller
+                .resolve_await_event(&key, crate::Resolution::Ok(payload))
+                .await
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         }
+        Ok(event)
     }
 
     async fn transfer(

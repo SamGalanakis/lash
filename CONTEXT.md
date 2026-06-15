@@ -16,6 +16,7 @@
 - **Session Observation Event**: Observer-visible session activity that advances a Session Cursor. It may include preview activity before it is durable and committed activity that settles the session view; it is not scoped to a single turn.
 - **Turn Activity**: App-facing live stream item for one active turn.
 - **Turn Event**: Semantic payload carried by Turn Activity.
+- **Suspended Turn**: Active session turn parked on a Durable Wait before it commits. It remains session-owned and observable, is not durable session history, and ends if the session is deleted. Avoid: Background Process, Degenerate Process.
 - **Session Event**: Runtime-internal turn/protocol machinery tolerated inside implementation boundaries. Avoid using Session Event as app-facing vocabulary.
 - **Session Revision**: Durable point in the committed session graph as observed through a session read view.
 - **Session Cursor**: Opaque position in a session observation stream. It includes a Session Revision and any live replay position needed for reconnecting observers without making live activity permanent history.
@@ -28,6 +29,7 @@
 - **Runtime Process**: Globally addressable, durable unit of work owned by the runtime. Its lifecycle is independent of any session: ending or deleting a session never ends a process by itself; what happens to related processes is host policy. Only runtime processes appear in the CLI process dock.
 - **Process Event**: Durable fact recorded in a Runtime Process's own event log, such as a wake, yield, wait, resume, or terminal event. Distinct from a Trigger Occurrence, which is broadcast through subscriptions, and from a Process Signal, which is an addressed input to one process.
 - **Process Originator**: Provenance recording where a process came from — a session or the host. Pure metadata; carries no behavior. Children started by a process inherit its originator and wake target (the chain, not the execution machinery), and a process may always await or cancel handles it created itself.
+- **Execution Scope**: Stable runtime identity for one execution that can issue replayable effects and park on Durable Waits. It binds effect, replay, wait, cancellation, and tracing identity to a lifecycle owner such as a Turn or Runtime Process; it is not an Execution Environment. Avoid: Effect Scope, Work Item, Generic Process.
 - **Execution Environment**: The captured description of tools, plugins, and policy that work executes against. Sessions run in one; a process captures the required subset of its creator's at creation time as immutable references, and is self-contained thereafter. It is a description, never live state; it cannot drift after capture, and process arguments are the only state handover.
 - **Tool Catalog**: Effective set of host-provided tools available to model/runtime work, including their model-facing names, schemas, availability, and prompt-visible documentation. Avoid: Tool Surface.
 - **Lashlang Tool Binding**: Authored mapping that makes a host tool callable as a Lashlang module operation in RLM execution. Avoid: Tool Lashlang Tool Binding, Lashlang Tool Binding.
@@ -40,6 +42,7 @@
 - **Wake Target**: Optional session that receives a process's wakes as Queued Work. A process without one still records wake events; they are observable but deliver nowhere.
 - **Process Handle Grant**: Per-session visibility of a process. Grants are additive and revocable; they never affect whether the process runs.
 - **Process Signal**: Named, typed message delivered to one specific Runtime Process. A process declares its signals and senders are validated against the declaration. Distinct from a Trigger Occurrence, which is a broadcast world occurrence routed by subscriptions.
+- **Durable Wait**: Scope-agnostic, one-shot durable promise that an execution scope — a turn or a Runtime Process — parks on and resumes by key. It is the single suspension primitive: a Process Signal wait and a foreground-turn detached tool completion are both Durable Waits. The Process Event log observes a process's waits but is not how they resolve. Avoid: AwaitEvent (wire encoding), Tool Callback.
 - **Runtime Control**: Control-flow or durable effect machinery that changes execution trajectory or routes replayable effects. Avoid using Control for ordinary facade handles or tool-context clients.
 - **Replay Key**: Stable identity for one logical runtime operation when execution is re-driven. Re-executing the same operation with the same Replay Key is replay, not a new operation.
 - **Idempotency Key**: Stable identity for a submitted request or occurrence at an ingress boundary. Re-submitting matching content with the same Idempotency Key collapses to the prior accepted request or occurrence.

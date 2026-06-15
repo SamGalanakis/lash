@@ -441,6 +441,7 @@ pub struct E2eCoreConfig {
     pub storage: lash_postgres_store::PostgresStorage,
     pub attachment_store: Arc<dyn AttachmentStore>,
     pub process_work_driver: ProcessWorkDriver,
+    pub restate_ingress_url: String,
     pub mock_provider_base_url: String,
     pub trace_dir: Option<PathBuf>,
     pub fail_once: bool,
@@ -479,7 +480,9 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         .store_factory(session_store_factory)
         .attachment_store(config.attachment_store)
         .lashlang_artifact_store(artifact_store)
-        .effect_host(Arc::new(RestateEffectHost::new()) as Arc<dyn EffectHost>)
+        .effect_host(Arc::new(RestateEffectHost::with_ingress_url(
+            config.restate_ingress_url,
+        )) as Arc<dyn EffectHost>)
         .trigger_store(trigger_store)
         .process_work_driver(config.process_work_driver)
         .plugin(Arc::new(E2ePluginFactory {

@@ -1,13 +1,64 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutBehavior {
+    ErrorAsResult,
+    FailTurn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelHint {
+    Ignore,
+    CancelExternalWork,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PendingCompletion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<std::time::Duration>,
+    pub on_timeout: TimeoutBehavior,
+    pub on_cancel: CancelHint,
+}
+
+impl Default for PendingCompletion {
+    fn default() -> Self {
+        Self {
+            deadline: None,
+            on_timeout: TimeoutBehavior::ErrorAsResult,
+            on_cancel: CancelHint::CancelExternalWork,
+        }
+    }
+}
+
+impl PendingCompletion {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub fn fail_turn_on_timeout(mut self) -> Self {
+        self.on_timeout = TimeoutBehavior::FailTurn;
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
-pub struct ToolResult {
-    output: Box<crate::ToolCallOutput>,
+pub enum ToolResult {
+    Done(Box<crate::ToolCallOutput>),
+    Pending(PendingCompletion),
 }
 
 impl ToolResult {
     pub fn from_output(output: crate::ToolCallOutput) -> Self {
-        Self {
-            output: Box::new(output),
-        }
+        Self::Done(Box::new(output))
+    }
+
+    pub fn pending(pending: PendingCompletion) -> Self {
+        Self::Pending(pending)
     }
 
     pub fn ok(result: serde_json::Value) -> Self {
@@ -61,16 +112,26 @@ impl ToolResult {
     }
 
     pub fn with_control(mut self, control: crate::ToolControl) -> Self {
-        self.output.as_mut().control = Some(control);
+        if let Self::Done(output) = &mut self {
+            output.as_mut().control = Some(control);
+        }
         self
     }
 
     pub fn is_success(&self) -> bool {
-        self.output.is_success()
+        matches!(self, Self::Done(output) if output.is_success())
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
     }
 
     pub fn value_for_projection(&self) -> serde_json::Value {
-        match &self.output.outcome {
+        match &self
+            .as_done_output()
+            .expect("pending tool result has no projection value")
+            .outcome
+        {
             crate::ToolCallOutcome::Success(value) => value.to_json_value(),
             crate::ToolCallOutcome::Failure(failure) => failure
                 .raw
@@ -85,12 +146,23 @@ impl ToolResult {
         }
     }
 
-    pub fn as_output(&self) -> &crate::ToolCallOutput {
-        self.output.as_ref()
+    pub fn as_done_output(&self) -> Option<&crate::ToolCallOutput> {
+        match self {
+            Self::Done(output) => Some(output.as_ref()),
+            Self::Pending(_) => None,
+        }
     }
 
-    pub fn into_output(self) -> crate::ToolCallOutput {
-        *self.output
+    pub fn as_output(&self) -> &crate::ToolCallOutput {
+        self.as_done_output()
+            .expect("pending tool result cannot be viewed as completed output")
+    }
+
+    pub fn into_done_output(self) -> Result<crate::ToolCallOutput, PendingCompletion> {
+        match self {
+            Self::Done(output) => Ok(*output),
+            Self::Pending(pending) => Err(pending),
+        }
     }
 }
 
@@ -107,6 +179,28 @@ where
             },
             Err(err) => Self::err_fmt(err),
         }
+    }
+}
+
+pub(crate) fn tool_output_from_completion_resolution(
+    resolution: crate::Resolution,
+) -> crate::ToolCallOutput {
+    match resolution {
+        crate::Resolution::Ok(value) => crate::ToolCallOutput::success(value),
+        crate::Resolution::Err(err) => {
+            let mut failure =
+                crate::ToolFailure::tool(crate::ToolFailureClass::Execution, err.code, err.message);
+            failure.raw = err.raw.map(crate::ToolValue::from);
+            crate::ToolCallOutput::failure(failure)
+        }
+        crate::Resolution::Timeout => crate::ToolCallOutput::failure(crate::ToolFailure::runtime(
+            crate::ToolFailureClass::Timeout,
+            "tool_completion_timeout",
+            "pending tool completion timed out",
+        )),
+        crate::Resolution::Cancelled => crate::ToolCallOutput::cancelled(
+            crate::ToolCancellation::runtime("pending tool completion cancelled"),
+        ),
     }
 }
 
@@ -157,5 +251,13 @@ mod tests {
             result.value_for_projection(),
             serde_json::json!("Failed to serialize tool result: boom")
         );
+    }
+
+    #[test]
+    fn pending_result_is_not_completed_output() {
+        let result = ToolResult::pending(PendingCompletion::new());
+        assert!(result.is_pending());
+        assert!(result.as_done_output().is_none());
+        assert!(result.into_done_output().is_err());
     }
 }

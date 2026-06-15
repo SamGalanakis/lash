@@ -250,8 +250,8 @@ let cron_subscriptions = core
     .subscriptions(TriggerSubscriptionFilter::for_source_type("cron.Schedule"))
     .await?;
 let source_key = cron_subscriptions[0].source_key.clone();
-let cron_effect_scope = runtime_effect_controller.scoped_effect_controller(
-    EffectScope::runtime_operation("cron:daily-digest:2026-06-08T08:00:00Z"),
+let cron_execution_scope = runtime_effect_controller.scoped_effect_controller(
+    ExecutionScope::runtime_operation("cron:daily-digest:2026-06-08T08:00:00Z"),
 )?;
 core.triggers()
     .emit(
@@ -261,12 +261,12 @@ core.triggers()
             tick_payload,
             "cron:daily-digest:2026-06-08T08:00:00Z",
         ),
-        cron_effect_scope,
+        cron_execution_scope,
     )
     .await?;
 
-let button_effect_scope = runtime_effect_controller.scoped_effect_controller(
-    EffectScope::runtime_operation("button:red:2026-06-08T12:00:00Z"),
+let button_execution_scope = runtime_effect_controller.scoped_effect_controller(
+    ExecutionScope::runtime_operation("button:red:2026-06-08T12:00:00Z"),
 )?;
 core.triggers()
     .emit(
@@ -276,7 +276,7 @@ core.triggers()
             button_payload,
             "button:red:2026-06-08T12:00:00Z",
         ),
-        button_effect_scope,
+        button_execution_scope,
     )
     .await?;</code></pre>
         </div>

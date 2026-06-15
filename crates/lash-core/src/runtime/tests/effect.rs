@@ -60,7 +60,7 @@ fn scoped_test_turn<'a>(
 ) -> ScopedEffectController<'a> {
     ScopedEffectController::borrowed(
         controller,
-        EffectScope::turn("effect-test-session", turn_id),
+        ExecutionScope::turn("effect-test-session", turn_id),
     )
     .expect("scoped effect controller")
 }
@@ -159,18 +159,20 @@ impl RuntimeEffectController for RecordingEffectController {
             RuntimeEffectCommand::ToolCall { call } => {
                 let output = crate::ToolCallOutput::success(serde_json::json!({"ok": true}));
                 Ok(RuntimeEffectOutcome::ToolCall {
-                    result: crate::sansio::CompletedToolCall {
-                        call_id: call.call_id.clone(),
-                        tool_name: call.tool_name.clone(),
-                        args: call.args,
-                        model_return: crate::ModelToolReturn {
-                            call_id: call.call_id,
-                            tool_name: call.tool_name,
-                            parts: vec![crate::ModelToolReturnPart::text("ok")],
+                    launch: crate::ToolCallLaunch::Done {
+                        result: crate::sansio::CompletedToolCall {
+                            call_id: call.call_id.clone(),
+                            tool_name: call.tool_name.clone(),
+                            args: call.args,
+                            model_return: crate::ModelToolReturn {
+                                call_id: call.call_id,
+                                tool_name: call.tool_name,
+                                parts: vec![crate::ModelToolReturnPart::text("ok")],
+                            },
+                            output,
+                            duration_ms: 0,
+                            replay: call.replay,
                         },
-                        output,
-                        duration_ms: 0,
-                        replay: call.replay,
                     },
                     triggers: Vec::new(),
                 })
@@ -199,7 +201,7 @@ impl RuntimeEffectController for RecordingEffectController {
             }),
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
             RuntimeEffectCommand::AwaitEvent { .. } => Ok(RuntimeEffectOutcome::AwaitEvent {
-                payload: serde_json::json!(null),
+                resolution: crate::Resolution::Ok(serde_json::json!(null)),
             }),
             RuntimeEffectCommand::Direct { request, .. } => {
                 // Both the text-only (`direct_completion`) and full-response
@@ -529,9 +531,9 @@ async fn controller_rejection_fails_turn_explicitly() {
             CancellationToken::new(),
             ScopedEffectController::shared(
                 controller,
-                EffectScope::turn("root", "rejecting-controller"),
+                ExecutionScope::turn("root", "rejecting-controller"),
             )
-            .expect("rejecting effect scope"),
+            .expect("rejecting execution scope"),
         )
         .await
         .expect("turn");
@@ -565,9 +567,9 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
             CancellationToken::new(),
             ScopedEffectController::shared(
                 controller,
-                EffectScope::turn("root", "wrong-outcome-controller"),
+                ExecutionScope::turn("root", "wrong-outcome-controller"),
             )
-            .expect("wrong outcome effect scope"),
+            .expect("wrong outcome execution scope"),
         )
         .await
         .expect("turn");
@@ -586,8 +588,11 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
 async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
     let recorder = RecordingEffectController::default();
     assert!(
-        ScopedEffectController::borrowed(&recorder, EffectScope::turn("effect-test-session", ""))
-            .is_err()
+        ScopedEffectController::borrowed(
+            &recorder,
+            ExecutionScope::turn("effect-test-session", "")
+        )
+        .is_err()
     );
     let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
@@ -1072,9 +1077,9 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
                 CancellationToken::new(),
                 ScopedEffectController::shared(
                     Arc::new(controller.clone()),
-                    EffectScope::turn("root", "trigger-tool"),
+                    ExecutionScope::turn("root", "trigger-tool"),
                 )
-                .expect("capturing effect scope"),
+                .expect("capturing execution scope"),
             )
             .with_events(&NoopEventSink),
         )

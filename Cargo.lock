@@ -2532,6 +2532,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "hmac",
  "lash-sansio",
  "lash-trace",
  "lashlang",

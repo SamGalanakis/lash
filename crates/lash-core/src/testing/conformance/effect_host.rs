@@ -7,7 +7,7 @@ use super::*;
 #[derive(Clone, Debug)]
 pub struct RecordingEffectHostRecord {
     pub runtime_scope: RuntimeScope,
-    pub effect_scope: EffectScope,
+    pub execution_scope: ExecutionScope,
     pub effect_id: String,
     pub effect_kind: RuntimeEffectKind,
     pub replay_key: Option<String>,
@@ -16,7 +16,7 @@ pub struct RecordingEffectHostRecord {
 
 #[derive(Clone)]
 struct RecordingEffectHostController {
-    effect_scope: EffectScope,
+    execution_scope: ExecutionScope,
     records: Arc<Mutex<Vec<RecordingEffectHostRecord>>>,
 }
 
@@ -33,7 +33,7 @@ impl RuntimeEffectController for RecordingEffectHostController {
             .expect("effect host records")
             .push(RecordingEffectHostRecord {
                 runtime_scope: envelope.invocation.scope.clone(),
-                effect_scope: self.effect_scope.clone(),
+                execution_scope: self.execution_scope.clone(),
                 effect_id: envelope
                     .invocation
                     .effect_id()
@@ -56,19 +56,19 @@ impl RuntimeEffectController for RecordingEffectHostController {
     }
 }
 
-/// Test fixture that records every selected [`EffectScope`] and every effect
+/// Test fixture that records every selected [`ExecutionScope`] and every effect
 /// envelope executed through the returned scoped controller.
 #[derive(Clone, Default)]
 pub struct RecordingEffectHost {
-    selected_scopes: Arc<Mutex<Vec<EffectScope>>>,
+    selected_scopes: Arc<Mutex<Vec<ExecutionScope>>>,
     records: Arc<Mutex<Vec<RecordingEffectHostRecord>>>,
 }
 
 impl RecordingEffectHost {
-    pub fn selected_scopes(&self) -> Vec<EffectScope> {
+    pub fn selected_scopes(&self) -> Vec<ExecutionScope> {
         self.selected_scopes
             .lock()
-            .expect("selected effect scopes")
+            .expect("selected execution scopes")
             .clone()
     }
 
@@ -78,15 +78,15 @@ impl RecordingEffectHost {
 
     fn scoped_for<'run>(
         &self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<ScopedEffectController<'run>, crate::RuntimeError> {
         self.selected_scopes
             .lock()
-            .expect("selected effect scopes")
+            .expect("selected execution scopes")
             .push(scope.clone());
         ScopedEffectController::shared(
             Arc::new(RecordingEffectHostController {
-                effect_scope: scope.clone(),
+                execution_scope: scope.clone(),
                 records: Arc::clone(&self.records),
             }),
             scope,
@@ -97,14 +97,14 @@ impl RecordingEffectHost {
 impl EffectHost for RecordingEffectHost {
     fn scoped<'run>(
         &'run self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<ScopedEffectController<'run>, crate::RuntimeError> {
         self.scoped_for(scope)
     }
 
     fn scoped_static(
         &self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<Option<ScopedEffectController<'static>>, crate::RuntimeError> {
         Ok(Some(self.scoped_for(scope)?))
     }
@@ -112,7 +112,7 @@ impl EffectHost for RecordingEffectHost {
 
 /// Run the generic [`EffectHost`] scope-factory conformance suite.
 ///
-/// This suite checks the deployment-level contract: effect scopes must carry
+/// This suite checks the deployment-level contract: execution scopes must carry
 /// stable semantic identity, empty ids must fail loudly, and hosts that expose
 /// a static scoped controller must preserve the same scope metadata. It does
 /// not assert durability; that remains a property of each implementation.
@@ -128,57 +128,236 @@ where
     effect_host_static_scope_preserves_metadata_when_available(make()).await;
 }
 
+/// Run the generic AwaitEvent conformance suite for hosts that implement the
+/// external completion primitive.
+///
+/// This is intentionally separate from [`effect_host`]: deployment-level hosts
+/// may be valid scope factories while requiring an external workflow/object
+/// context before an AwaitEvent can be awaited.
+pub async fn effect_host_await_events<F>(make: F)
+where
+    F: Fn() -> Arc<dyn EffectHost>,
+{
+    effect_host_await_event_key_is_stable(make()).await;
+    effect_host_await_event_accepts_early_resolution(make()).await;
+    effect_host_await_event_duplicate_resolution_is_terminal(make()).await;
+    effect_host_await_event_cancel_and_timeout_are_terminal(make()).await;
+    effect_host_await_event_revokes_session_scope(make()).await;
+    effect_host_await_event_rejects_tampered_keys(make()).await;
+}
+
 async fn effect_host_preserves_scope_metadata(host: Arc<dyn EffectHost>) {
-    let scope = EffectScope::queue_drain("session-1", "drain-1");
+    let scope = ExecutionScope::queue_drain("session-1", "drain-1");
     let scoped = host.scoped(scope.clone()).expect("queue drain scope");
     assert_eq!(
-        scoped.effect_scope(),
+        scoped.execution_scope(),
         &scope,
         "scoped controller must retain the selected semantic scope"
     );
     assert_eq!(scoped.scope_id(), "drain-1");
     assert_eq!(scoped.turn_id(), None);
 
-    let turn_scope = EffectScope::turn("session-1", "turn-1");
+    let turn_scope = ExecutionScope::turn("session-1", "turn-1");
     let scoped_turn = host.scoped(turn_scope.clone()).expect("turn scope");
-    assert_eq!(scoped_turn.effect_scope(), &turn_scope);
+    assert_eq!(scoped_turn.execution_scope(), &turn_scope);
     assert_eq!(scoped_turn.scope_id(), "turn-1");
     assert_eq!(scoped_turn.turn_id(), Some("turn-1"));
 }
 
 async fn effect_host_rejects_missing_scope_ids(host: Arc<dyn EffectHost>) {
     let invalid_scopes = [
-        EffectScope::turn("", "turn"),
-        EffectScope::turn("session", ""),
-        EffectScope::process(""),
-        EffectScope::queue_drain("session", ""),
-        EffectScope::session_delete(""),
-        EffectScope::runtime_operation(""),
+        ExecutionScope::turn("", "turn"),
+        ExecutionScope::turn("session", ""),
+        ExecutionScope::process(""),
+        ExecutionScope::queue_drain("session", ""),
+        ExecutionScope::session_delete(""),
+        ExecutionScope::runtime_operation(""),
     ];
 
     for scope in invalid_scopes {
         let err = match host.scoped(scope) {
-            Ok(_) => panic!("invalid effect scope must be rejected"),
+            Ok(_) => panic!("invalid execution scope must be rejected"),
             Err(err) => err,
         };
         assert_eq!(
             err.code,
-            crate::RuntimeErrorCode::MissingEffectScopeId,
+            crate::RuntimeErrorCode::MissingExecutionScopeId,
             "invalid scope ids must fail with the stable missing-scope code"
         );
     }
 }
 
 async fn effect_host_static_scope_preserves_metadata_when_available(host: Arc<dyn EffectHost>) {
-    let scope = EffectScope::runtime_operation("static-runtime-op");
+    let scope = ExecutionScope::runtime_operation("static-runtime-op");
     let Some(scoped) = host
         .scoped_static(scope.clone())
         .expect("static scope factory")
     else {
         return;
     };
-    assert_eq!(scoped.effect_scope(), &scope);
+    assert_eq!(scoped.execution_scope(), &scope);
     assert_eq!(scoped.scope_id(), "static-runtime-op");
+}
+
+async fn effect_host_await_event_key_is_stable(host: Arc<dyn EffectHost>) {
+    let scope = ExecutionScope::turn("await-event-session-stable", "turn-stable");
+    let wait = AwaitEventWaitIdentity::tool_completion("call-stable");
+
+    let first = host
+        .await_event_key(&scope, wait.clone())
+        .await
+        .expect("first await-event key");
+    let second = host
+        .await_event_key(&scope, wait)
+        .await
+        .expect("second await-event key");
+
+    assert_eq!(first, second);
+}
+
+async fn effect_host_await_event_accepts_early_resolution(host: Arc<dyn EffectHost>) {
+    let scope = ExecutionScope::turn("await-event-session-early", "turn-early");
+    let key = host
+        .await_event_key(
+            &scope,
+            AwaitEventWaitIdentity::tool_completion("call-early"),
+        )
+        .await
+        .expect("await-event key");
+    let resolution = Resolution::Ok(serde_json::json!({ "ready": true }));
+
+    assert_eq!(
+        host.resolve_await_event(&key, resolution.clone())
+            .await
+            .expect("early resolve"),
+        ResolveOutcome::Accepted
+    );
+    let awaited = host
+        .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None)
+        .await
+        .expect("await early-resolved event");
+    assert_eq!(awaited, resolution);
+}
+
+async fn effect_host_await_event_duplicate_resolution_is_terminal(host: Arc<dyn EffectHost>) {
+    let scope = ExecutionScope::turn("await-event-session-dupe", "turn-dupe");
+    let key = host
+        .await_event_key(&scope, AwaitEventWaitIdentity::tool_completion("call-dupe"))
+        .await
+        .expect("await-event key");
+    let resolution = Resolution::Ok(serde_json::json!("first"));
+
+    let first = host
+        .resolve_await_event(&key, resolution.clone())
+        .await
+        .expect("first resolve");
+    let second = host
+        .resolve_await_event(&key, Resolution::Ok(serde_json::json!("second")))
+        .await
+        .expect("duplicate resolve");
+
+    assert_eq!(first, ResolveOutcome::Accepted);
+    assert_eq!(
+        second,
+        ResolveOutcome::AlreadyResolved {
+            terminal: resolution
+        }
+    );
+}
+
+async fn effect_host_await_event_cancel_and_timeout_are_terminal(host: Arc<dyn EffectHost>) {
+    let cancel_scope = ExecutionScope::turn("await-event-session-cancel", "turn-cancel");
+    let cancel_key = host
+        .await_event_key(
+            &cancel_scope,
+            AwaitEventWaitIdentity::tool_completion("call-cancel"),
+        )
+        .await
+        .expect("cancel await-event key");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let cancelled = host
+        .await_await_event(&cancel_key, cancel, None)
+        .await
+        .expect("cancelled await-event");
+    assert_eq!(cancelled, Resolution::Cancelled);
+    assert_eq!(
+        host.resolve_await_event(&cancel_key, Resolution::Ok(serde_json::json!("late")))
+            .await
+            .expect("late cancel resolve"),
+        ResolveOutcome::AlreadyResolved {
+            terminal: Resolution::Cancelled
+        }
+    );
+
+    let timeout_scope = ExecutionScope::turn("await-event-session-timeout", "turn-timeout");
+    let timeout_key = host
+        .await_event_key(
+            &timeout_scope,
+            AwaitEventWaitIdentity::tool_completion("call-timeout"),
+        )
+        .await
+        .expect("timeout await-event key");
+    let timed_out = host
+        .await_await_event(
+            &timeout_key,
+            tokio_util::sync::CancellationToken::new(),
+            Some(std::time::Instant::now()),
+        )
+        .await
+        .expect("timed-out await-event");
+    assert_eq!(timed_out, Resolution::Timeout);
+}
+
+async fn effect_host_await_event_revokes_session_scope(host: Arc<dyn EffectHost>) {
+    let scope = ExecutionScope::turn("await-event-session-revoke", "turn-revoke");
+    let key = host
+        .await_event_key(
+            &scope,
+            AwaitEventWaitIdentity::tool_completion("call-revoke"),
+        )
+        .await
+        .expect("await-event key");
+
+    host.revoke_await_events_for_session("await-event-session-revoke")
+        .await
+        .expect("revoke session");
+
+    assert_eq!(
+        host.resolve_await_event(&key, Resolution::Ok(serde_json::json!("late")))
+            .await
+            .expect("resolve revoked key"),
+        ResolveOutcome::UnknownOrRevoked
+    );
+    let err = host
+        .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None)
+        .await
+        .expect_err("revoked key must not await");
+    assert_eq!(err.code.as_str(), "await_event_unknown_or_revoked");
+}
+
+async fn effect_host_await_event_rejects_tampered_keys(host: Arc<dyn EffectHost>) {
+    let scope = ExecutionScope::turn("await-event-session-tamper", "turn-tamper");
+    let mut key = host
+        .await_event_key(
+            &scope,
+            AwaitEventWaitIdentity::tool_completion("call-tamper"),
+        )
+        .await
+        .expect("await-event key");
+    key.signature.push_str("-tampered");
+
+    assert_eq!(
+        host.resolve_await_event(&key, Resolution::Ok(serde_json::json!("bad")))
+            .await
+            .expect("resolve tampered key"),
+        ResolveOutcome::UnknownOrRevoked
+    );
+    let err = host
+        .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None)
+        .await
+        .expect_err("tampered key must not await");
+    assert_eq!(err.code.as_str(), "await_event_unknown_or_revoked");
 }
 
 /// Run the concurrent recorded-effect replay conformance case for a

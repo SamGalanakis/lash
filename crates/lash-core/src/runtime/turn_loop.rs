@@ -75,7 +75,7 @@ fn scoped_child_turn_controller<'run>(
 ) -> Result<ScopedEffectController<'run>, RuntimeError> {
     ScopedEffectController::borrowed(
         scoped_effect_controller.controller(),
-        EffectScope::turn(session_id, turn_id),
+        ExecutionScope::turn(session_id, turn_id),
     )
 }
 
@@ -492,7 +492,7 @@ impl LashRuntime {
             .input
             .trace_turn_id
             .clone()
-            .or_else(|| Some(opts.effect_scope_id().to_owned()))
+            .or_else(|| Some(opts.execution_scope_id().to_owned()))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         work.input.trace_turn_id = Some(turn_id.clone());
         let causes = work.turn_causes.clone();
@@ -607,14 +607,14 @@ impl LashRuntime {
         }
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && scoped_effect_controller
-                .effect_scope()
+                .execution_scope()
                 .validates_turn_trace_id()
             && input_turn_id != scoped_effect_controller.scope_id()
         {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::EffectScopeTurnIdMismatch,
+                RuntimeErrorCode::ExecutionScopeTurnIdMismatch,
                 format!(
-                    "input trace_turn_id `{input_turn_id}` does not match effect scope id `{}`",
+                    "input trace_turn_id `{input_turn_id}` does not match execution scope id `{}`",
                     scoped_effect_controller.scope_id()
                 ),
             ));
@@ -668,14 +668,14 @@ impl LashRuntime {
     ) -> Result<AgentFrameRun, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && scoped_effect_controller
-                .effect_scope()
+                .execution_scope()
                 .validates_turn_trace_id()
             && input_turn_id != scoped_effect_controller.scope_id()
         {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::EffectScopeTurnIdMismatch,
+                RuntimeErrorCode::ExecutionScopeTurnIdMismatch,
                 format!(
-                    "input trace_turn_id `{input_turn_id}` does not match effect scope id `{}`",
+                    "input trace_turn_id `{input_turn_id}` does not match execution scope id `{}`",
                     scoped_effect_controller.scope_id()
                 ),
             ));
@@ -698,7 +698,7 @@ impl LashRuntime {
             } else {
                 ScopedEffectController::borrowed(
                     scoped_effect_controller.controller(),
-                    EffectScope::turn(&self.state.session_id, &turn_trace_turn_id),
+                    ExecutionScope::turn(&self.state.session_id, &turn_trace_turn_id),
                 )?
             };
             let turn = self
@@ -990,7 +990,7 @@ impl LashRuntime {
         }
 
         self.state.last_prompt_usage = None;
-        self.stream_prepared_turn(
+        Box::pin(self.stream_prepared_turn(
             messages,
             previous_prompt_usage,
             input.protocol_turn_options.clone(),
@@ -1004,7 +1004,7 @@ impl LashRuntime {
             scoped_effect_controller,
             cancel,
             queued_claim,
-        )
+        ))
         .await
     }
 
@@ -1088,11 +1088,11 @@ impl LashRuntime {
                 },
                 self.turn_phase_probe.clone(),
             );
-            tokio::pin!(prepare_turn);
+            let mut prepare_turn = Box::pin(prepare_turn);
 
             loop {
                 tokio::select! {
-                    prepared = &mut prepare_turn => {
+                    prepared = prepare_turn.as_mut() => {
                         let prepared = prepared.map_err(|err| {
                             RuntimeError::new(RuntimeErrorCode::PluginPrepareTurn, err.to_string())
                         })?;
@@ -1357,7 +1357,7 @@ where
     F: std::future::Future<Output = Result<(crate::MessageSequence, usize), RuntimeError>>,
 {
     let run_result = {
-        tokio::pin!(run_future);
+        let mut run_future = Box::pin(run_future);
         loop {
             tokio::select! {
                 maybe_event = event_rx.recv() => {
@@ -1371,7 +1371,7 @@ where
                         .await;
                     }
                 }
-                completed = &mut run_future => {
+                completed = run_future.as_mut() => {
                     child_usage_event_relay.clear();
                     break completed;
                 }

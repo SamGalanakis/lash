@@ -131,7 +131,14 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFi
 
     // Directory — still works but nudges toward ls
     if path.is_dir() {
-        let mut output = list_directory(path, offset, limit).into_output();
+        let mut output = match list_directory(path, offset, limit).into_done_output() {
+            Ok(output) => output,
+            Err(_) => {
+                return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
+                    "directory listing unexpectedly returned pending output"
+                )));
+            }
+        };
         if output.is_success()
             && let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::String(s)) =
                 &mut output.outcome
@@ -775,7 +782,7 @@ mod tests {
             .await;
 
         let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::Attachment(reference)) =
-            result.into_output().outcome
+            result.into_done_output().expect("read_file result").outcome
         else {
             panic!("expected attachment result");
         };

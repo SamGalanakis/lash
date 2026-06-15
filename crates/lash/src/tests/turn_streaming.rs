@@ -94,7 +94,7 @@ impl lash_core::EffectHost for DurableNoopEffectHost {
 
     fn scoped<'run>(
         &'run self,
-        scope: lash_core::EffectScope,
+        scope: lash_core::ExecutionScope,
     ) -> std::result::Result<lash_core::ScopedEffectController<'run>, lash_core::RuntimeError> {
         lash_core::ScopedEffectController::shared(
             Arc::new(lash_core::InlineRuntimeEffectController),
@@ -104,7 +104,7 @@ impl lash_core::EffectHost for DurableNoopEffectHost {
 
     fn scoped_static(
         &self,
-        scope: lash_core::EffectScope,
+        scope: lash_core::ExecutionScope,
     ) -> std::result::Result<
         Option<lash_core::ScopedEffectController<'static>>,
         lash_core::RuntimeError,
@@ -206,7 +206,7 @@ async fn durable_configured_effect_host_requires_explicit_handler_effects() -> R
 }
 
 #[tokio::test]
-async fn turn_id_sets_effect_scope_and_trace_identity() -> Result<()> {
+async fn turn_id_sets_execution_scope_and_trace_identity() -> Result<()> {
     let recorder = Arc::new(RecordingInlineEffectController::default());
     let effect_controller: Arc<dyn lash_core::RuntimeEffectController> = recorder.clone();
     let core = explicit_ephemeral_facets(LashCore::standard())
@@ -1293,7 +1293,7 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
     let controller = Arc::new(RecordingDurableEffectController::default());
     let scoped_effect_controller = ScopedEffectController::borrowed(
         controller.as_ref(),
-        lash_core::EffectScope::turn(session_id, root_turn_id),
+        lash_core::ExecutionScope::turn(session_id, root_turn_id),
     )
     .expect("scoped durable effect controller");
     let core = explicit_ephemeral_facets(LashCore::standard())

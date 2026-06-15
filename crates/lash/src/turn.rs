@@ -215,8 +215,8 @@ impl TurnBuilder {
             .unwrap_or_else(fresh_turn_id)
     }
 
-    fn turn_scope(&self, turn_id: &str) -> lash_core::EffectScope {
-        lash_core::EffectScope::turn(self.runtime.observe().session_id(), turn_id)
+    fn turn_scope(&self, turn_id: &str) -> lash_core::ExecutionScope {
+        lash_core::ExecutionScope::turn(self.runtime.observe().session_id(), turn_id)
     }
 
     pub(crate) fn prepare(
@@ -562,7 +562,7 @@ impl QueuedTurnBuilder {
     ) -> Result<Option<TurnResult>> {
         let drain_id = self.resolved_drain_id();
         let scope =
-            lash_core::EffectScope::queue_drain(self.runtime.observe().session_id(), drain_id);
+            lash_core::ExecutionScope::queue_drain(self.runtime.observe().session_id(), drain_id);
         let scoped_effect_controller = effect_host.scoped(scope)?;
         self.stream_to_with_scope(events, scoped_effect_controller)
             .await
@@ -575,7 +575,7 @@ impl QueuedTurnBuilder {
     ) -> Result<Option<TurnResult>> {
         let drain_id = self.resolved_drain_id();
         let scope =
-            lash_core::EffectScope::queue_drain(self.runtime.observe().session_id(), drain_id);
+            lash_core::ExecutionScope::queue_drain(self.runtime.observe().session_id(), drain_id);
         let scoped_effect_controller = ScopedEffectController::borrowed(controller, scope)?;
         self.stream_to_with_scope(events, scoped_effect_controller)
             .await
@@ -658,7 +658,7 @@ fn trace_turn_id_for_scope(
     scoped_effect_controller: &ScopedEffectController<'_>,
 ) -> Option<String> {
     if scoped_effect_controller
-        .effect_scope()
+        .execution_scope()
         .validates_turn_trace_id()
     {
         Some(

@@ -386,9 +386,9 @@ submit "registered"
     ) -> lash_core::ScopedEffectController<'static> {
         lash_core::ScopedEffectController::shared(
             Arc::new(lash_core::InlineRuntimeEffectController),
-            lash_core::EffectScope::runtime_operation(scope_id.into()),
+            lash_core::ExecutionScope::runtime_operation(scope_id.into()),
         )
-        .expect("inline trigger occurrence effect scope")
+        .expect("inline trigger occurrence execution scope")
     }
 
     async fn emit_first_clock_alarm(

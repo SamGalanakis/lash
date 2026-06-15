@@ -39,6 +39,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
+hmac = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

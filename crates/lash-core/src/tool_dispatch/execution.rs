@@ -2,9 +2,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::plugin::ToolResultHookContext;
-use crate::{PreparedToolCall, ProgressSender, ToolContext, ToolFailureClass};
+use crate::{PreparedToolCall, ProgressSender, ToolContext, ToolFailureClass, ToolResult};
 
-use super::context::{ToolDispatchContext, ToolDispatchOutcome, outcome, runtime_failure};
+use super::context::{
+    PendingToolDispatchOutcome, ToolCallLaunch, ToolDispatchContext, ToolDispatchOutcome,
+    launch_done, outcome, runtime_failure,
+};
 use super::directives::apply_after_tool_directives;
 use super::preparation::resolve_callable_manifest;
 use super::retry::execute_tool_call;
@@ -15,10 +18,26 @@ pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolDispatchOutcome {
+    dispatch_prepared_tool_call_launch_with_execution_context(
+        context,
+        prepared,
+        progress,
+        tool_context,
+    )
+    .await
+    .into_done_or_runtime_failure()
+}
+
+pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'run>(
+    context: &ToolDispatchContext<'run>,
+    prepared: PreparedToolCall,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolContext<'run>,
+) -> ToolCallLaunch {
     let tool_name = prepared.tool_name.clone();
     let args = prepared.args.clone();
     let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
-        return outcome(
+        return launch_done(outcome(
             tool_name,
             args,
             runtime_failure(
@@ -27,19 +46,60 @@ pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
                 "Tool is unavailable in this session",
             ),
             0,
-        );
+        ));
     };
 
     let tool_start = Instant::now();
+    let tool_context = tool_context.with_prepared_payload(prepared.prepared_payload.clone());
+    let completion_context = tool_context.clone();
     let result = Box::pin(execute_tool_call(
         context,
         &manifest,
         &prepared,
         progress,
-        tool_context.with_prepared_payload(prepared.prepared_payload.clone()),
+        tool_context,
     ))
     .await;
     let duration_ms = tool_start.elapsed().as_millis() as u64;
+    let result = match result {
+        ToolResult::Done(_) => result,
+        ToolResult::Pending(pending) => {
+            let key = match completion_context.take_completion_key() {
+                Ok(Some(key)) => key,
+                Ok(None) => {
+                    return launch_done(outcome(
+                        tool_name,
+                        args,
+                        runtime_failure(
+                            ToolFailureClass::Internal,
+                            "pending_tool_missing_completion_key",
+                            "tool returned Pending without first obtaining a completion key",
+                        ),
+                        duration_ms,
+                    ));
+                }
+                Err(err) => {
+                    return launch_done(outcome(
+                        tool_name,
+                        args,
+                        runtime_failure(
+                            ToolFailureClass::Internal,
+                            "pending_tool_completion_key_failed",
+                            err.to_string(),
+                        ),
+                        duration_ms,
+                    ));
+                }
+            };
+            return ToolCallLaunch::Pending(PendingToolDispatchOutcome {
+                tool_name,
+                args,
+                key,
+                pending,
+                duration_ms,
+            });
+        }
+    };
 
     let result = match context
         .plugins
@@ -62,5 +122,27 @@ pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
         ),
     };
 
-    outcome(tool_name, args, result, duration_ms)
+    launch_done(outcome(tool_name, args, result, duration_ms))
+}
+
+trait ToolCallLaunchExt {
+    fn into_done_or_runtime_failure(self) -> ToolDispatchOutcome;
+}
+
+impl ToolCallLaunchExt for ToolCallLaunch {
+    fn into_done_or_runtime_failure(self) -> ToolDispatchOutcome {
+        match self {
+            ToolCallLaunch::Done(outcome) => outcome,
+            ToolCallLaunch::Pending(pending) => outcome(
+                pending.tool_name,
+                pending.args,
+                runtime_failure(
+                    ToolFailureClass::Internal,
+                    "pending_tool_not_supported_here",
+                    "pending tool completion is not supported on this dispatch path",
+                ),
+                pending.duration_ms,
+            ),
+        }
+    }
 }

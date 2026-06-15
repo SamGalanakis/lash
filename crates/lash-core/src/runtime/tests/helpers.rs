@@ -9,16 +9,16 @@ pub(crate) fn default_state() -> RuntimeSessionState {
     RuntimeSessionState::default()
 }
 
-pub(crate) fn inline_scope(scope: crate::EffectScope) -> crate::ScopedEffectController<'static> {
+pub(crate) fn inline_scope(scope: crate::ExecutionScope) -> crate::ScopedEffectController<'static> {
     crate::ScopedEffectController::shared(Arc::new(crate::InlineRuntimeEffectController), scope)
-        .expect("inline effect scope")
+        .expect("inline execution scope")
 }
 
 pub(crate) fn named_turn_scope(
     session_id: &str,
     turn_id: &str,
 ) -> crate::ScopedEffectController<'static> {
-    inline_scope(crate::EffectScope::turn(session_id, turn_id))
+    inline_scope(crate::ExecutionScope::turn(session_id, turn_id))
 }
 
 #[test]

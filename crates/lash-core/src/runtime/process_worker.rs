@@ -139,7 +139,7 @@ impl DurableProcessWorker {
             .runtime_host
             .control
             .effect_host
-            .scoped_static(crate::EffectScope::process(registration.id.clone()))
+            .scoped_static(crate::ExecutionScope::process(registration.id.clone()))
             .map_err(|err| PluginError::Session(err.to_string()))?
             .ok_or_else(|| {
                 PluginError::Session(
@@ -586,7 +586,7 @@ impl DurableProcessWorker {
     /// `run` re-invocation (keyed `LashProcessWorkflow/{process_id}`) or a
     /// recovery sweep re-running a non-terminal row — must present that stable
     /// id. An empty/fresh id has lost its idempotency anchor and is rejected
-    /// loudly here, mirroring how `EffectScope` rejects an
+    /// loudly here, mirroring how `ExecutionScope` rejects an
     /// empty turn id at the durable-effect boundary.
     fn ensure_stable_process_id(
         &self,

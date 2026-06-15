@@ -103,9 +103,25 @@ impl<'run> ToolDispatchContext<'run> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ToolDispatchOutcome {
     pub record: ToolCallRecord,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingToolDispatchOutcome {
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    pub key: crate::AwaitEventKey,
+    pub pending: crate::PendingCompletion,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum ToolCallLaunch {
+    Done(ToolDispatchOutcome),
+    Pending(PendingToolDispatchOutcome),
 }
 
 pub(crate) enum ToolPreparationOutcome {
@@ -126,10 +142,20 @@ pub(super) fn outcome(
         call_id: None,
         tool: tool_name,
         args,
-        output: result.into_output(),
+        output: result.into_done_output().unwrap_or_else(|_| {
+            crate::ToolCallOutput::failure(crate::ToolFailure::runtime(
+                crate::ToolFailureClass::Internal,
+                "pending_tool_not_finalized",
+                "pending tool result reached a completed-output projection path",
+            ))
+        }),
         duration_ms,
     };
     ToolDispatchOutcome { record }
+}
+
+pub(super) fn launch_done(outcome: ToolDispatchOutcome) -> ToolCallLaunch {
+    ToolCallLaunch::Done(outcome)
 }
 
 pub(super) fn runtime_failure(

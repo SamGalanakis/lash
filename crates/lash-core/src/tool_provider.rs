@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lash_sansio::llm::types::ProviderReplayMeta;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,39 @@ pub struct SandboxMessage {
 /// Sender for streaming progress messages from tools (e.g. live bash output).
 pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 
+#[derive(Clone, Default)]
+pub(crate) struct ToolCompletionState {
+    key: Arc<Mutex<Option<crate::AwaitEventKey>>>,
+}
+
+impl ToolCompletionState {
+    fn store(
+        &self,
+        key: crate::AwaitEventKey,
+    ) -> Result<crate::AwaitEventKey, crate::RuntimeError> {
+        let mut guard = self.key.lock().map_err(|_| {
+            crate::RuntimeError::new(
+                "tool_completion_state_poisoned",
+                "tool completion key state lock poisoned",
+            )
+        })?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(key.clone());
+        Ok(key)
+    }
+
+    pub(crate) fn take(&self) -> Result<Option<crate::AwaitEventKey>, crate::RuntimeError> {
+        self.key.lock().map(|mut guard| guard.take()).map_err(|_| {
+            crate::RuntimeError::new(
+                "tool_completion_state_poisoned",
+                "tool completion key state lock poisoned",
+            )
+        })
+    }
+}
+
 /// Per-call environment for [`ToolProvider::execute`]. Fields are sealed so
 /// the runtime can add capabilities without breaking tool authors.
 #[derive(Clone)]
@@ -59,6 +92,7 @@ pub struct ToolContext<'run> {
     pub(crate) attempt_number: u32,
     pub(crate) max_attempts: u32,
     pub(crate) replay_key: Option<String>,
+    pub(crate) completion: ToolCompletionState,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
     pub(crate) execution_env_spec: crate::ProcessExecutionEnvSpec,
     pub(crate) lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
@@ -119,6 +153,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     direct_completions: crate::DirectCompletionClient<'run>,
     prepared_payload: serde_json::Value,
     tool_call_id: Option<String>,
+    completion: ToolCompletionState,
     parent_invocation: Option<crate::RuntimeInvocation>,
     execution_env_spec: crate::ProcessExecutionEnvSpec,
     lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
@@ -146,6 +181,7 @@ impl<'run> ToolContextBuilder<'run> {
             direct_completions: dispatch.direct_completions.clone(),
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
+            completion: ToolCompletionState::default(),
             parent_invocation: dispatch.parent_invocation.clone(),
             execution_env_spec: dispatch.execution_env_spec.clone(),
             lashlang_execution_call_site: None,
@@ -240,6 +276,7 @@ impl<'run> ToolContextBuilder<'run> {
             attempt_number: 1,
             max_attempts: 1,
             replay_key: None,
+            completion: self.completion,
             parent_invocation: self.parent_invocation,
             execution_env_spec: self.execution_env_spec,
             lashlang_execution_call_site: self.lashlang_execution_call_site,
@@ -282,6 +319,7 @@ impl<'run> ToolContext<'run> {
             direct_completions,
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
+            completion: ToolCompletionState::default(),
             parent_invocation: None,
             execution_env_spec: crate::ProcessExecutionEnvSpec::new(
                 crate::PluginOptions::default(),
@@ -458,6 +496,30 @@ impl<'run> ToolContext<'run> {
 
     pub fn replay_key(&self) -> Option<&str> {
         self.replay_key.as_deref()
+    }
+
+    pub async fn completion_key(&self) -> Result<crate::AwaitEventKey, crate::RuntimeError> {
+        let tool_call_id = self.tool_call_id.clone().ok_or_else(|| {
+            crate::RuntimeError::new(
+                "tool_completion_key_missing_call_id",
+                "completion keys require a prepared tool call id",
+            )
+        })?;
+        let scoped = self.effect_controller.scoped();
+        let key = scoped
+            .controller()
+            .await_event_key(
+                scoped.execution_scope(),
+                crate::AwaitEventWaitIdentity::tool_completion(tool_call_id),
+            )
+            .await?;
+        self.completion.store(key)
+    }
+
+    pub(crate) fn take_completion_key(
+        &self,
+    ) -> Result<Option<crate::AwaitEventKey>, crate::RuntimeError> {
+        self.completion.take()
     }
 
     pub fn with_async_process(

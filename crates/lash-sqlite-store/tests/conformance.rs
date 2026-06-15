@@ -13,7 +13,7 @@ use lash_core::testing::conformance::{
     ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, EffectHost, EffectScope, LashlangArtifactStore, ProcessExecutionEnvRef,
+    DurabilityTier, EffectHost, ExecutionScope, LashlangArtifactStore, ProcessExecutionEnvRef,
     ProcessOriginator, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
     RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence,
@@ -380,7 +380,7 @@ async fn sqlite_effect_host_satisfies_scope_conformance() {
 
 #[tokio::test]
 async fn sqlite_effect_controller_satisfies_replay_conformance() {
-    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn(
+    let controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn(
         "effect-conformance-session",
         "effect-conformance-turn",
     ))
@@ -396,7 +396,7 @@ async fn sqlite_effect_controller_satisfies_replay_conformance() {
 
 #[tokio::test]
 async fn sqlite_effect_controller_replays_without_local_executor() {
-    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
+    let controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn("session", "turn"))
         .await
         .expect("controller");
     let envelope = exec_envelope("exec-replay", "first");
@@ -416,7 +416,7 @@ async fn sqlite_effect_controller_replays_without_local_executor() {
 
 #[tokio::test]
 async fn sqlite_effect_controller_rejects_envelope_hash_conflict() {
-    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
+    let controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn("session", "turn"))
         .await
         .expect("controller");
     controller
@@ -440,7 +440,7 @@ async fn sqlite_effect_controller_rejects_envelope_hash_conflict() {
 #[tokio::test]
 async fn sqlite_effect_controller_reclaims_stale_in_progress_lease() {
     let controller = SqliteRuntimeEffectController::memory_with_options(
-        EffectScope::turn("session", "turn"),
+        ExecutionScope::turn("session", "turn"),
         SqliteEffectReplayOptions {
             lease_ttl: std::time::Duration::from_millis(20),
         },
@@ -491,7 +491,7 @@ async fn sqlite_effect_controller_reclaims_stale_in_progress_lease() {
 
 #[tokio::test]
 async fn sqlite_sleep_replay_returns_after_recorded_due_time() {
-    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
+    let controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn("session", "turn"))
         .await
         .expect("controller");
     let envelope = RuntimeEffectEnvelope::new(

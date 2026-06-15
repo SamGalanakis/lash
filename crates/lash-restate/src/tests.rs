@@ -525,7 +525,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
     fn await_event<'run>(
         &'run self,
         _key: String,
-    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+    ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
@@ -650,7 +650,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
     fn await_event<'run>(
         &'run self,
         _key: String,
-    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, TerminalError>> + Send + 'run>>
+    ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
@@ -725,6 +725,64 @@ async fn restate_controller_routes_sleep_only_through_timer() {
     assert!(context.runs.lock().expect("runs lock").is_empty());
 }
 
+#[tokio::test]
+async fn restate_handler_resolves_process_await_events_through_workflow_handler() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = RuntimeEffectController::await_event_key(
+        &host,
+        &ExecutionScope::process("process-await"),
+        AwaitEventWaitIdentity::tool_completion("tool-call"),
+    )
+    .await
+    .expect("await event key");
+    let resolution = Resolution::Ok(serde_json::json!({ "done": true }));
+
+    let outcome = RuntimeEffectController::resolve_await_event(&host, &key, resolution.clone())
+        .await
+        .expect("resolve await event");
+
+    assert_eq!(outcome, ResolveOutcome::Accepted);
+    let resolved = context
+        .resolved_events
+        .lock()
+        .expect("resolved events lock");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].process_id, "process-await");
+    assert_eq!(resolved[0].key, key.promise_key());
+    assert_eq!(resolved[0].resolution, resolution);
+}
+
+#[tokio::test]
+async fn restate_handler_reports_non_process_await_event_resolution_unknown() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = RuntimeEffectController::await_event_key(
+        &host,
+        &ExecutionScope::turn("session", "turn"),
+        AwaitEventWaitIdentity::tool_completion("tool-call"),
+    )
+    .await
+    .expect("await event key");
+
+    let outcome = RuntimeEffectController::resolve_await_event(
+        &host,
+        &key,
+        Resolution::Ok(serde_json::json!({ "done": true })),
+    )
+    .await
+    .expect("resolve await event");
+
+    assert_eq!(outcome, ResolveOutcome::UnknownOrRevoked);
+    assert!(
+        context
+            .resolved_events
+            .lock()
+            .expect("resolved events lock")
+            .is_empty()
+    );
+}
+
 fn replay_test_policy(session_id: &str) -> lash_core::SessionPolicy {
     let mut policy = lash_core::testing::mock_session_policy();
     policy.session_id = Some(session_id.to_string());
@@ -775,7 +833,7 @@ async fn run_restate_replay_turn(
 ) -> lash_core::AssembledTurn {
     let controller = RestateRuntimeEffectController::new(context);
     let scoped_effect_controller = controller
-        .scoped_effect_controller(EffectScope::turn(session_id, turn_id))
+        .scoped_effect_controller(ExecutionScope::turn(session_id, turn_id))
         .expect("scoped restate controller");
     runtime
         .stream_turn(
@@ -1254,8 +1312,8 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
             lash_core::process_signal_wait_key("task-signal", "notify", 1)
         );
         assert_eq!(
-            resolved[0].payload,
-            serde_json::json!({ "signal": "notify" })
+            resolved[0].resolution,
+            Resolution::Ok(serde_json::json!({ "signal": "notify" }))
         );
     }
 
@@ -1339,7 +1397,7 @@ struct RecordedProcessRun {
     process_id: String,
     wake_target_session_id: Option<String>,
     tool_effect_id: Option<String>,
-    effect_scope_id: String,
+    execution_scope_id: String,
     controller_tier: lash_core::DurabilityTier,
 }
 
@@ -1369,7 +1427,7 @@ impl RestateProcessRunner for RecordingRunner {
                 tool_effect_id: execution_context
                     .causal_invocation
                     .and_then(|invocation| invocation.effect_id().map(str::to_string)),
-                effect_scope_id: scoped_effect_controller.scope_id().to_string(),
+                execution_scope_id: scoped_effect_controller.scope_id().to_string(),
                 controller_tier: scoped_effect_controller.controller().durability_tier(),
             });
         Ok(ProcessAwaitOutput::Success {
@@ -1470,7 +1528,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
             process_id: "task-smoke".to_string(),
             wake_target_session_id: Some("wake-smoke".to_string()),
             tool_effect_id: Some("tool-smoke".to_string()),
-            effect_scope_id: "task-smoke".to_string(),
+            execution_scope_id: "task-smoke".to_string(),
             controller_tier: lash_core::DurabilityTier::Durable,
         }]
     );
@@ -2150,7 +2208,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
             execution_context,
             lash_core::ScopedEffectController::shared(
                 Arc::new(lash_core::InlineRuntimeEffectController),
-                lash_core::EffectScope::process("task-workflow"),
+                lash_core::ExecutionScope::process("task-workflow"),
             )
             .expect("inline process scope"),
         )
@@ -2171,7 +2229,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
             process_id: "task-workflow".to_string(),
             wake_target_session_id: Some("wake-session".to_string()),
             tool_effect_id: Some("tool-effect".to_string()),
-            effect_scope_id: "task-workflow".to_string(),
+            execution_scope_id: "task-workflow".to_string(),
             controller_tier: lash_core::DurabilityTier::Inline,
         }]
     );

@@ -620,14 +620,26 @@ impl<'run> RuntimeExecutionContext<'run> {
 
     pub async fn await_process_event_lashlang(
         &self,
-        registry: Arc<dyn crate::ProcessRegistry>,
+        _registry: Arc<dyn crate::ProcessRegistry>,
         process_id: &str,
         signal_name: &str,
-        event_type: &str,
+        _event_type: &str,
         event_ordinal: u64,
     ) -> Result<serde_json::Value, crate::RuntimeEffectControllerError> {
         let cancellation = self.cancellation_token.clone().unwrap_or_default();
-        let key = crate::process_signal_wait_key(process_id, signal_name, event_ordinal);
+        let key = self
+            .dispatch
+            .effect_controller
+            .controller()
+            .await_event_key(
+                &crate::ExecutionScope::process(process_id),
+                crate::AwaitEventWaitIdentity::process_signal(
+                    process_id,
+                    signal_name,
+                    event_ordinal,
+                ),
+            )
+            .await?;
         let invocation = crate::runtime::causal::lashlang_await_event_invocation(
             &self.session_id,
             self.parent_invocation.as_ref(),
@@ -642,19 +654,26 @@ impl<'run> RuntimeExecutionContext<'run> {
             .execute_effect(
                 crate::RuntimeEffectEnvelope::new(
                     invocation,
-                    crate::RuntimeEffectCommand::AwaitEvent { key: key.clone() },
+                    crate::RuntimeEffectCommand::AwaitEvent { key },
                 ),
-                crate::RuntimeEffectLocalExecutor::await_process_event(
-                    key,
-                    registry,
-                    process_id.to_string(),
-                    event_type.to_string(),
-                    event_ordinal,
-                    cancellation,
-                ),
+                crate::RuntimeEffectLocalExecutor::await_event(cancellation, None),
             )
             .await?;
-        outcome.into_await_event()
+        match outcome.into_await_event()? {
+            crate::Resolution::Ok(value) => Ok(value),
+            crate::Resolution::Err(err) => Err(crate::RuntimeEffectControllerError::new(
+                err.code,
+                err.message,
+            )),
+            crate::Resolution::Timeout => Err(crate::RuntimeEffectControllerError::new(
+                "process_signal_wait_timeout",
+                "process signal wait timed out",
+            )),
+            crate::Resolution::Cancelled => Err(crate::RuntimeEffectControllerError::new(
+                "process_signal_wait_cancelled",
+                "process signal wait was cancelled",
+            )),
+        }
     }
 
     pub async fn signal_lashlang_process(
@@ -667,11 +686,12 @@ impl<'run> RuntimeExecutionContext<'run> {
     ) -> Result<crate::ProcessEvent, crate::RuntimeEffectControllerError> {
         let event_type = crate::process_signal_event_type(signal_name)?;
         let replay_key = format!("process:{process_id}:signal.{signal_name}:{signal_id}");
+        let signal_payload = payload.clone();
         let command = crate::ProcessCommand::Signal {
             process_id: process_id.to_string(),
             signal_name: signal_name.to_string(),
             signal_id,
-            request: crate::ProcessEventAppendRequest::new(event_type, payload)
+            request: crate::ProcessEventAppendRequest::new(event_type.clone(), payload)
                 .with_replay_key(replay_key),
         };
         let effect_id = command.effect_id();
@@ -689,11 +709,61 @@ impl<'run> RuntimeExecutionContext<'run> {
                     invocation,
                     crate::RuntimeEffectCommand::process(command),
                 ),
-                crate::RuntimeEffectLocalExecutor::processes(registry),
+                crate::RuntimeEffectLocalExecutor::processes(Arc::clone(&registry)),
             )
             .await?;
         match outcome.into_process()? {
-            crate::ProcessEffectOutcome::Signal { event } => Ok(event),
+            crate::ProcessEffectOutcome::Signal { event } => {
+                let waiting_ordinal =
+                    registry
+                        .get_process(process_id)
+                        .await
+                        .and_then(|record| match record.wait {
+                            Some(crate::WaitState {
+                                kind:
+                                    crate::WaitKind::Signal {
+                                        name,
+                                        event_type: wait_event_type,
+                                        ordinal,
+                                        ..
+                                    },
+                                ..
+                            }) if name == signal_name && wait_event_type == event_type => {
+                                Some(ordinal)
+                            }
+                            _ => None,
+                        });
+                let ordinal = match waiting_ordinal {
+                    Some(ordinal) => ordinal,
+                    None => {
+                        registry
+                            .count_events_through(process_id, &event_type, event.sequence)
+                            .await?
+                    }
+                };
+                if ordinal > 0 {
+                    let key = self
+                        .dispatch
+                        .effect_controller
+                        .controller()
+                        .await_event_key(
+                            &crate::ExecutionScope::process(process_id),
+                            crate::AwaitEventWaitIdentity::process_signal(
+                                process_id,
+                                signal_name,
+                                ordinal,
+                            ),
+                        )
+                        .await?;
+                    let _ = self
+                        .dispatch
+                        .effect_controller
+                        .controller()
+                        .resolve_await_event(&key, crate::Resolution::Ok(signal_payload))
+                        .await?;
+                }
+                Ok(event)
+            }
             other => Err(crate::RuntimeEffectControllerError::new(
                 "runtime_effect_wrong_outcome",
                 format!("expected signal outcome, got {other:?}"),

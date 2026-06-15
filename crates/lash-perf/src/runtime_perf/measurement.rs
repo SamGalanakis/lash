@@ -504,7 +504,7 @@ pub(crate) async fn run_once(
             let turn_id = format!("runtime-perf-scoped-{}", turn_index + 1);
             let scoped_effect_controller = lash::runtime::ScopedEffectController::borrowed(
                 &effect_controller,
-                lash::runtime::EffectScope::turn(
+                lash::runtime::ExecutionScope::turn(
                     format!("runtime-perf-{}", scenario.name()),
                     &turn_id,
                 ),
@@ -515,7 +515,7 @@ pub(crate) async fn run_once(
                 turn_index,
                 "run_turn",
                 Some(cancel.clone()),
-                runtime.run_turn_with_effect_scope(turn_input, cancel, scoped_effect_controller),
+                runtime.run_turn_with_execution_scope(turn_input, cancel, scoped_effect_controller),
             )
             .await
         } else {
@@ -2882,7 +2882,7 @@ pub(crate) async fn run_once_embed(
             async {
                 let effect_host = session.effect_host();
                 let scoped_effect_controller = effect_host
-                    .scoped(lash::runtime::EffectScope::turn(
+                    .scoped(lash::runtime::ExecutionScope::turn(
                         session.session_id(),
                         format!("runtime-perf-embed-{}", turn_index + 1),
                     ))

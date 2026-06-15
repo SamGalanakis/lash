@@ -271,7 +271,7 @@ async fn summarize_compaction_prefix(
     let turn_id = compaction_turn_id(scoped_effect_controller.scope_id());
     let compaction_effect_controller = lash_core::ScopedEffectController::borrowed(
         scoped_effect_controller.controller(),
-        lash_core::EffectScope::turn(&handle.session_id, &turn_id),
+        lash_core::ExecutionScope::turn(&handle.session_id, &turn_id),
     )
     .map_err(|err| ContextError::Session(err.to_string()))?;
     let request = lash_core::SessionTurnRequest::new(
@@ -559,7 +559,7 @@ mod tests {
             session_graph: manager,
             scoped_effect_controller: lash_core::ScopedEffectController::shared(
                 Arc::new(lash_core::InlineRuntimeEffectController),
-                lash_core::EffectScope::turn(session_id, "rolling-history-test-turn"),
+                lash_core::ExecutionScope::turn(session_id, "rolling-history-test-turn"),
             )
             .expect("test scoped effect controller"),
             direct_completions: lash_core::DirectCompletionClient::from_fn(|_, _| {
@@ -585,7 +585,7 @@ mod tests {
             session_graph: manager,
             scoped_effect_controller: lash_core::ScopedEffectController::shared(
                 Arc::new(lash_core::InlineRuntimeEffectController),
-                lash_core::EffectScope::runtime_operation("rolling-history-compact-test"),
+                lash_core::ExecutionScope::runtime_operation("rolling-history-compact-test"),
             )
             .expect("test scoped effect controller"),
         }
@@ -744,7 +744,7 @@ mod tests {
         );
         assert_eq!(
             turns[0].3,
-            lash_core::EffectScope::turn(
+            lash_core::ExecutionScope::turn(
                 "root-compaction",
                 "rolling-history-compact-test:rolling-history-compaction"
             )

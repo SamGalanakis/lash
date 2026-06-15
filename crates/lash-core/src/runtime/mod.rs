@@ -81,11 +81,13 @@ pub use causal::process_event_invocation;
 pub(crate) use causal::tool_retry_sleep_invocation;
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    CausalRef, EffectHost, EffectScope, InlineEffectHost, InlineRuntimeEffectController,
-    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
+    AwaitEventKey, AwaitEventWaitIdentity, CausalRef, EffectHost, ExecutionScope,
+    ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController, LlmAttachmentSpec,
+    LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, Resolution, ResolveOutcome,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
+    ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
@@ -787,7 +789,7 @@ impl TurnActivitySink for NoopTurnActivitySink {
 /// `stream_turn_with_agent_frames`).
 ///
 /// Construct via [`TurnOptions::new`] and chain `with_*` builders. Event sinks
-/// default to no-op sinks. Effect scope is explicit and required at every
+/// default to no-op sinks. Execution scope is explicit and required at every
 /// runtime boundary that can execute nondeterministic work.
 pub struct TurnOptions<'a> {
     events: Option<&'a dyn EventSink>,
@@ -827,7 +829,7 @@ impl<'a> TurnOptions<'a> {
         self.turn_events.unwrap_or(&NOOP_TURN_ACTIVITY_SINK)
     }
 
-    pub(crate) fn effect_scope_id(&self) -> &str {
+    pub(crate) fn execution_scope_id(&self) -> &str {
         self.scoped_effect_controller.scope_id()
     }
 

@@ -88,7 +88,7 @@ fn audit_process_cleanup(_report: lash::process::ProcessSessionDeleteReport) -> 
 async fn delete_session(core: &LashCore, chat_id: &str) -> anyhow::Result<()> {
     // docs:start:delete-session
     let effect_host = core.effect_host();
-    let scope = effect_host.scoped(lash::runtime::EffectScope::runtime_operation(format!(
+    let scope = effect_host.scoped(lash::runtime::ExecutionScope::runtime_operation(format!(
         "delete-session:{chat_id}"
     )))?;
     let report = core.delete_session(chat_id, scope).await?;

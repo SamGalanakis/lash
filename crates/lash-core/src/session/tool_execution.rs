@@ -1,6 +1,7 @@
 use super::execution_context::RuntimeExecutionContext;
 use crate::tool_dispatch::{
-    ToolDispatchOutcome, ToolPreparationOutcome,
+    ToolCallLaunch, ToolDispatchOutcome, ToolPreparationOutcome,
+    dispatch_prepared_tool_call_launch_with_execution_context,
     dispatch_prepared_tool_call_with_execution_context, prepare_tool_call_with_context,
     schedule_tool_batch,
 };
@@ -67,9 +68,13 @@ impl ToolInvocationReply {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CompletedProtocolToolCall {
-    pub index: usize,
     pub completed: crate::sansio::CompletedToolCall,
     pub record: ToolCallRecord,
+}
+
+pub(crate) enum ProtocolToolCallLaunch {
+    Done(CompletedProtocolToolCall),
+    Pending(crate::tool_dispatch::PendingToolDispatchOutcome),
 }
 
 #[derive(Clone)]
@@ -175,22 +180,36 @@ impl RuntimeExecutionContext<'_> {
         prepare_tool_call_with_context(self.dispatch.as_ref(), pending, call_id).await
     }
 
-    pub(crate) async fn execute_prepared_tool_call(
+    pub(crate) async fn execute_prepared_tool_call_launch(
         &self,
         prepared: crate::PreparedToolCall,
         index: usize,
         parent_invocation: Option<crate::RuntimeInvocation>,
-    ) -> CompletedProtocolToolCall {
-        self.execute_prepared_tool_call_inner(prepared, index, parent_invocation)
-            .await
+    ) -> crate::runtime::ToolCallLaunch {
+        match Box::pin(self.execute_prepared_tool_call_launch_inner(
+            prepared,
+            index,
+            parent_invocation,
+        ))
+        .await
+        {
+            ProtocolToolCallLaunch::Done(completed) => crate::runtime::ToolCallLaunch::Done {
+                result: completed.completed,
+            },
+            ProtocolToolCallLaunch::Pending(pending) => crate::runtime::ToolCallLaunch::Pending {
+                key: pending.key,
+                pending: pending.pending,
+                duration_ms: pending.duration_ms,
+            },
+        }
     }
 
-    async fn execute_prepared_tool_call_inner(
+    async fn execute_prepared_tool_call_launch_inner(
         &self,
         prepared: crate::PreparedToolCall,
         index: usize,
         parent_invocation: Option<crate::RuntimeInvocation>,
-    ) -> CompletedProtocolToolCall {
+    ) -> ProtocolToolCallLaunch {
         let call_id = prepared.call_id.clone();
         let name = prepared.tool_name.clone();
         let args = prepared.args.clone();
@@ -224,18 +243,24 @@ impl RuntimeExecutionContext<'_> {
             .runtime_process_id(self.runtime_process_id.clone())
             .parent_invocation(run.parent_invocation.clone())
             .build();
-        let mut outcome = dispatch_prepared_tool_call_with_execution_context(
+        let outcome = Box::pin(dispatch_prepared_tool_call_launch_with_execution_context(
             self.dispatch.as_ref(),
             prepared,
             None,
             tool_context,
-        )
+        ))
         .await;
-        outcome.record.call_id = Some(call_id.clone());
-        tokio::task::yield_now().await;
-
-        self.complete_tool_call(run.index, call_id, replay, outcome, tool_correlation_id)
-            .await
+        match outcome {
+            ToolCallLaunch::Done(mut outcome) => {
+                outcome.record.call_id = Some(call_id.clone());
+                tokio::task::yield_now().await;
+                let completed = self
+                    .complete_tool_call(run.index, call_id, replay, outcome, tool_correlation_id)
+                    .await;
+                ProtocolToolCallLaunch::Done(completed)
+            }
+            ToolCallLaunch::Pending(pending) => ProtocolToolCallLaunch::Pending(pending),
+        }
     }
 
     pub(super) async fn await_process_with_cancellation(
@@ -272,7 +297,7 @@ impl RuntimeExecutionContext<'_> {
 
     pub(crate) async fn complete_tool_call(
         &self,
-        index: usize,
+        _index: usize,
         call_id: String,
         replay: Option<crate::llm::types::ProviderReplayMeta>,
         outcome: ToolDispatchOutcome,
@@ -323,7 +348,6 @@ impl RuntimeExecutionContext<'_> {
             duration_ms: outcome.record.duration_ms,
         };
         CompletedProtocolToolCall {
-            index,
             completed: crate::sansio::CompletedToolCall {
                 call_id,
                 tool_name: outcome.record.tool,

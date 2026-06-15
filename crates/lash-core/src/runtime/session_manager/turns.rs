@@ -59,7 +59,7 @@ impl ManagedSessionCapability {
         }
         let turn = {
             let mut runtime_guard = runtime.runtime.lock().await;
-            let result = async {
+            let result = Box::pin(async {
                 runtime_guard
                     .refresh_session_tool_catalog()
                     .await
@@ -78,7 +78,7 @@ impl ManagedSessionCapability {
                     )
                 })?;
                 Ok(turn)
-            }
+            })
             .await;
             runtime.publish_from(&runtime_guard);
             result
@@ -124,7 +124,7 @@ mod tests {
         let controller = crate::InlineRuntimeEffectController;
         let scoped_effect_controller = crate::ScopedEffectController::borrowed(
             &controller,
-            crate::EffectScope::turn("child", "child-turn"),
+            crate::ExecutionScope::turn("child", "child-turn"),
         )
         .expect("turn scope");
         let request = crate::SessionTurnRequest::new(
@@ -141,11 +141,11 @@ mod tests {
     }
 
     #[test]
-    fn session_turn_request_rejects_mismatched_effect_scope() {
+    fn session_turn_request_rejects_mismatched_execution_scope() {
         let controller = crate::InlineRuntimeEffectController;
         let scoped_effect_controller = crate::ScopedEffectController::borrowed(
             &controller,
-            crate::EffectScope::turn("child", "other-turn"),
+            crate::ExecutionScope::turn("child", "other-turn"),
         )
         .expect("turn scope");
         let err = match crate::SessionTurnRequest::new(

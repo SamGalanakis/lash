@@ -9,8 +9,8 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    LashlangToolBinding, ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolManifest,
-    ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    LashlangToolBinding, Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract,
+    ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use super::scenarios::RuntimePerfScenario;
@@ -126,6 +126,7 @@ impl ToolProvider for BenchmarkEchoTool {
         vec![
             benchmark_echo_tool_definition().manifest(),
             benchmark_slow_tool_definition().manifest(),
+            benchmark_async_tool_definition().manifest(),
         ]
     }
 
@@ -137,6 +138,9 @@ impl ToolProvider for BenchmarkEchoTool {
             "benchmark_slow" => Some(std::sync::Arc::new(
                 benchmark_slow_tool_definition().contract(),
             )),
+            "benchmark_async" => Some(std::sync::Arc::new(
+                benchmark_async_tool_definition().contract(),
+            )),
             _ => None,
         }
     }
@@ -145,6 +149,7 @@ impl ToolProvider for BenchmarkEchoTool {
         match call.name {
             "benchmark_echo" => execute_benchmark_echo(call).await,
             "benchmark_slow" => execute_benchmark_slow(call).await,
+            "benchmark_async" => execute_benchmark_async(call).await,
             _ => ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name)),
         }
     }
@@ -176,6 +181,31 @@ async fn execute_benchmark_slow(call: lash_core::ToolCall<'_>) -> ToolResult {
         "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
         "delay_ms": delay_ms,
     }))
+}
+
+async fn execute_benchmark_async(call: lash_core::ToolCall<'_>) -> ToolResult {
+    let key = match call.context.completion_key().await {
+        Ok(key) => key,
+        Err(err) => return ToolResult::err_fmt(err),
+    };
+    let value = call
+        .args
+        .get("value")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let _ = lash_core::InlineRuntimeEffectController
+            .resolve_await_event(
+                &key,
+                Resolution::Ok(serde_json::json!({
+                    "value": value,
+                    "mode": "pending_completion"
+                })),
+            )
+            .await;
+    });
+    ToolResult::pending(lash_core::PendingCompletion::new())
 }
 
 fn benchmark_echo_tool_definition() -> ToolDefinition {
@@ -229,6 +259,32 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
                 "delay_ms": { "type": "integer", "minimum": 0 }
             },
             "required": ["value", "delay_ms"],
+            "additionalProperties": false
+        }),
+    )
+    .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn benchmark_async_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "tool:benchmark_async",
+        "benchmark_async",
+        "Return asynchronously through the host AwaitEvent completion path.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": ["string", "number", "boolean", "object", "array", "null"] }
+            },
+            "required": ["value"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": {},
+                "mode": { "type": "string" }
+            },
+            "required": ["value", "mode"],
             "additionalProperties": false
         }),
     )
@@ -752,6 +808,19 @@ fn benchmark_stream_profile_for_request(
                                 }
                             }
                         ]
+                    }),
+                )
+            }
+        }
+        RuntimePerfScenario::StandardAsyncToolCompletion => {
+            if request_has_tool_result(request) {
+                text_profile("runtime perf benchmark ok")
+            } else {
+                tool_call_profile(
+                    "standard-async-completion-call",
+                    "benchmark_async",
+                    serde_json::json!({
+                        "value": "runtime perf benchmark ok"
                     }),
                 )
             }

@@ -617,10 +617,10 @@ async fn emit_test_occurrence(
         .core
         .control
         .effect_host
-        .scoped(crate::EffectScope::runtime_operation(format!(
+        .scoped(crate::ExecutionScope::runtime_operation(format!(
             "test-trigger:{idempotency_key}"
         )))
-        .expect("trigger occurrence effect scope");
+        .expect("trigger occurrence execution scope");
     router
         .emit(
             crate::TriggerOccurrenceRequest::new(source_type, source_key, payload, idempotency_key),
@@ -654,10 +654,10 @@ async fn try_emit_test_occurrence(
         .core
         .control
         .effect_host
-        .scoped(crate::EffectScope::runtime_operation(format!(
+        .scoped(crate::ExecutionScope::runtime_operation(format!(
             "test-trigger:{idempotency_key}"
         )))
-        .expect("trigger occurrence effect scope");
+        .expect("trigger occurrence execution scope");
     router
         .emit(
             crate::TriggerOccurrenceRequest::new(source_type, source_key, payload, idempotency_key),

@@ -141,7 +141,7 @@ impl BenchmarkRuntime {
         let session = self.session.as_ref().expect("benchmark session");
         let effect_host = session.effect_host();
         let scoped_effect_controller = effect_host
-            .scoped(lash::runtime::EffectScope::turn(
+            .scoped(lash::runtime::ExecutionScope::turn(
                 session.session_id(),
                 lash_core::TurnActivityId::fresh().0,
             ))
@@ -158,7 +158,7 @@ impl BenchmarkRuntime {
             .map_err(anyhow::Error::from)
     }
 
-    pub(crate) async fn run_turn_with_effect_scope(
+    pub(crate) async fn run_turn_with_execution_scope(
         &self,
         input: lash::TurnInput,
         cancel: tokio_util::sync::CancellationToken,
@@ -775,6 +775,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::StandardToolCalls => format!(
             "Turn {} in standard mode. Use the batch tool to exercise parallel benchmark_echo calls, then reply with exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::StandardAsyncToolCompletion => format!(
+            "Turn {} in standard mode. Launch the async benchmark tool completion, then reply with exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

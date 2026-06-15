@@ -11,9 +11,13 @@ pub use context::{ToolDispatchContext, ToolTriggerEffectOutcome};
 pub use scheduling::{ParallelToolCallOutcome, ParallelToolCallSpec, dispatch_parallel_tool_calls};
 
 pub(crate) use context::{
-    CheckpointMessageBuffer, ToolDispatchOutcome, ToolPreparationOutcome, ToolTriggerOutcomeBuffer,
+    CheckpointMessageBuffer, PendingToolDispatchOutcome, ToolCallLaunch, ToolDispatchOutcome,
+    ToolPreparationOutcome, ToolTriggerOutcomeBuffer,
 };
-pub(crate) use execution::dispatch_prepared_tool_call_with_execution_context;
+pub(crate) use execution::{
+    dispatch_prepared_tool_call_launch_with_execution_context,
+    dispatch_prepared_tool_call_with_execution_context,
+};
 #[cfg(test)]
 pub(crate) use preparation::dispatch_tool_call;
 pub(crate) use preparation::{

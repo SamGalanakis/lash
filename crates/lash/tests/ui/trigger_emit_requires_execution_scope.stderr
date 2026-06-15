@@ -1,5 +1,5 @@
 error[E0061]: this method takes 2 arguments but 1 argument was supplied
-  --> tests/ui/trigger_emit_requires_effect_scope.rs:5:10
+  --> tests/ui/trigger_emit_requires_execution_scope.rs:5:10
    |
  5 |           .emit(lash::triggers::TriggerOccurrenceRequest::new(
    |  __________^^^^-

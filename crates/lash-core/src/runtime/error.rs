@@ -32,8 +32,8 @@ impl DurableStoreFacet {
 /// errors, but callers should match this type instead of parsing display text.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RuntimeErrorCode {
-    MissingEffectScopeId,
-    EffectScopeTurnIdMismatch,
+    MissingExecutionScopeId,
+    ExecutionScopeTurnIdMismatch,
     /// A process (re-)execution was handed an empty/non-persisted process id.
     /// Process execution identity is the persisted `process_id`; a retry that
     /// cannot present that stable id has lost its idempotency anchor.
@@ -61,8 +61,8 @@ pub enum RuntimeErrorCode {
 impl RuntimeErrorCode {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::MissingEffectScopeId => "missing_effect_scope_id",
-            Self::EffectScopeTurnIdMismatch => "effect_scope_turn_id_mismatch",
+            Self::MissingExecutionScopeId => "missing_execution_scope_id",
+            Self::ExecutionScopeTurnIdMismatch => "execution_scope_turn_id_mismatch",
             Self::MissingProcessExecutionId => "missing_process_execution_id",
             Self::DurableStoreRequired { facet } => facet.as_code(),
             Self::StoreCommitFailed => "store_commit_failed",
@@ -91,8 +91,8 @@ impl std::fmt::Display for RuntimeErrorCode {
 impl From<&str> for RuntimeErrorCode {
     fn from(code: &str) -> Self {
         match code {
-            "missing_effect_scope_id" => Self::MissingEffectScopeId,
-            "effect_scope_turn_id_mismatch" => Self::EffectScopeTurnIdMismatch,
+            "missing_execution_scope_id" => Self::MissingExecutionScopeId,
+            "execution_scope_turn_id_mismatch" => Self::ExecutionScopeTurnIdMismatch,
             "missing_process_execution_id" => Self::MissingProcessExecutionId,
             "durable_store_required:attachment_store" => Self::DurableStoreRequired {
                 facet: DurableStoreFacet::AttachmentStore,
@@ -191,7 +191,7 @@ impl RuntimeError {
     ///
     /// Process execution identity is the persisted `process_id`, so a retry
     /// must present that stable id — mirroring how
-    /// [`EffectScope`](crate::EffectScope) rejects an empty stable id.
+    /// [`ExecutionScope`](crate::ExecutionScope) rejects an empty stable id.
     pub fn missing_process_execution_id() -> Self {
         Self::new(
             RuntimeErrorCode::MissingProcessExecutionId,

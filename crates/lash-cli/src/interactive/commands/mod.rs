@@ -9,7 +9,7 @@ use super::*;
 use crate::SkillCatalog;
 use crate::info::{controls_document, help_document, info_document};
 use crate::turn_runner::make_turn_input;
-use lash_core::runtime::{EffectScope, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
+use lash_core::runtime::{ExecutionScope, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 
 #[derive(Clone)]
 pub(super) enum ParsedSlashCommand {
@@ -429,7 +429,7 @@ async fn handle_slash_command(
                 return Ok(false);
             };
             let effect_host = rt.effect_host();
-            let scoped_effect_controller = effect_host.scoped(EffectScope::runtime_operation(
+            let scoped_effect_controller = effect_host.scoped(ExecutionScope::runtime_operation(
                 format!("cli-compact:{}:{}", rt.session_id(), uuid::Uuid::new_v4()),
             ));
             let scoped_effect_controller = match scoped_effect_controller {

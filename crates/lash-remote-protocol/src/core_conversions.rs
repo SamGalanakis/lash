@@ -2254,6 +2254,30 @@ impl RemoteToolCallResponse {
                     ToolResult::cancelled(message)
                 }
             }
+            Self::Pending {
+                protocol_version: _,
+                deadline_ms,
+                on_timeout,
+                on_cancel,
+            } => {
+                let mut pending = lash_core::PendingCompletion::new();
+                if let Some(deadline_ms) = deadline_ms {
+                    pending.deadline = Some(std::time::Duration::from_millis(deadline_ms));
+                }
+                pending.on_timeout = match on_timeout {
+                    RemoteTimeoutBehavior::ErrorAsResult => {
+                        lash_core::TimeoutBehavior::ErrorAsResult
+                    }
+                    RemoteTimeoutBehavior::FailTurn => lash_core::TimeoutBehavior::FailTurn,
+                };
+                pending.on_cancel = match on_cancel {
+                    RemoteCancelHint::Ignore => lash_core::CancelHint::Ignore,
+                    RemoteCancelHint::CancelExternalWork => {
+                        lash_core::CancelHint::CancelExternalWork
+                    }
+                };
+                ToolResult::pending(pending)
+            }
         }
     }
 }
@@ -2337,6 +2361,13 @@ impl<T: RemoteToolTransport> ToolProvider for RemoteToolProvider<T> {
             let Some(call_path) = self.call_paths.get(call.name) else {
                 return ToolResult::err_fmt(format_args!("unknown remote tool `{}`", call.name));
             };
+            let completion_key = match call.context.completion_key().await {
+                Ok(key) => match serde_json::to_value(key) {
+                    Ok(value) => value,
+                    Err(err) => return ToolResult::err_fmt(err),
+                },
+                Err(err) => return ToolResult::err_fmt(err),
+            };
             let mut headers = HashMap::new();
             if let Some(tool_call_id) = call.context.tool_call_id() {
                 headers.insert("x-lash-tool-call-id".to_string(), tool_call_id.to_string());
@@ -2359,6 +2390,7 @@ impl<T: RemoteToolTransport> ToolProvider for RemoteToolProvider<T> {
                 call_path: call_path.clone(),
                 args: call.args.clone(),
                 session_id: call.context.session_id().to_string(),
+                completion_key,
                 tool_call_id: call.context.tool_call_id().map(str::to_string),
                 replay_key,
                 attempt_number: call.context.attempt_number(),

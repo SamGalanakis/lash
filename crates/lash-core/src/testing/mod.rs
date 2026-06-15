@@ -409,7 +409,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
 /// the snapshot, tool catalog, and turn outcome via the builder
 /// methods; mutations (`create_session`, `close_session`)
 /// are recorded so tests can assert against them.
-pub type RecordedSessionTurn = (String, String, Option<String>, crate::EffectScope);
+pub type RecordedSessionTurn = (String, String, Option<String>, crate::ExecutionScope);
 
 pub struct MockSessionManager {
     pub snapshot: SessionSnapshot,
@@ -540,7 +540,7 @@ impl crate::plugin::SessionLifecycleService for MockSessionManager {
             turn.session_id,
             turn.turn_id,
             turn.input.trace_turn_id,
-            scoped_effect_controller.effect_scope().clone(),
+            scoped_effect_controller.execution_scope().clone(),
         ));
         Ok(self.turn.clone())
     }

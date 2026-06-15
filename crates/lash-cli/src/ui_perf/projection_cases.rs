@@ -243,7 +243,9 @@ fn live_activity_event(index: usize) -> TurnEvent {
             call_id: Some(format!("generic-{index}")),
             name: "search_tools".to_string(),
             args: json!({ "query": "projection tools" }),
-            output: ToolResult::err(json!("tool search failed")).into_output(),
+            output: ToolResult::err(json!("tool search failed"))
+                .into_done_output()
+                .expect("static failure output"),
             duration_ms: 4,
         },
     }

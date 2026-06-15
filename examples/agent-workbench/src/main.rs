@@ -204,7 +204,9 @@ async fn async_main() -> AnyhowResult<()> {
                     .with_session_spec(SessionSpec::inherit()),
             ));
         })
-        .effect_host(Arc::new(lash_restate::RestateEffectHost::new()))
+        .effect_host(Arc::new(lash_restate::RestateEffectHost::with_ingress_url(
+            restate_ingress_url.clone(),
+        )))
         .process_work_driver(process_deployment.process_work_driver())
         .queued_work_poke(queued_work_poke.clone())
         .build()
@@ -3472,9 +3474,9 @@ mod tests {
         );
         let scoped_effect_controller = lash::runtime::ScopedEffectController::shared(
             Arc::new(lash::runtime::InlineRuntimeEffectController),
-            lash::runtime::EffectScope::runtime_operation(format!("trigger:{idempotency_key}")),
+            lash::runtime::ExecutionScope::runtime_operation(format!("trigger:{idempotency_key}")),
         )
-        .expect("inline trigger occurrence effect scope");
+        .expect("inline trigger occurrence execution scope");
         core.triggers()
             .emit(
                 lash::triggers::TriggerOccurrenceRequest::new(

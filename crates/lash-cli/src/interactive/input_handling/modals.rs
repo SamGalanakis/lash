@@ -4,7 +4,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::LashSession;
-use lash_core::runtime::EffectScope;
+use lash_core::runtime::ExecutionScope;
 
 use crate::app::{App, UiTimelineItem};
 use crate::render;
@@ -55,7 +55,7 @@ pub(super) async fn cancel_selected_process(app: &mut App, runtime: &Option<Lash
     let processes = session.admin().processes();
     let effect_host = session.effect_host();
     let scoped_effect_controller =
-        match effect_host.scoped(EffectScope::process(process.process_id.clone())) {
+        match effect_host.scoped(ExecutionScope::process(process.process_id.clone())) {
             Ok(controller) => controller,
             Err(err) => {
                 push_system_message(app, format!("Failed to scope process cancellation: {err}"));

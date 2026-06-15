@@ -1,9 +1,12 @@
+use std::collections::{HashMap, HashSet};
 #[cfg(any(test, feature = "testing"))]
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::AttachmentStore;
@@ -22,6 +25,13 @@ use super::envelope::{
 };
 use super::outcome::llm_call_error_from_transport;
 
+type HmacSha256 = Hmac<sha2::Sha256>;
+
+fn inline_await_events() -> &'static AwaitEventRegistry {
+    static REGISTRY: OnceLock<AwaitEventRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(AwaitEventRegistry::new)
+}
+
 // =============================================================================
 // Effect host + controller trait + scope + error
 // =============================================================================
@@ -31,9 +41,9 @@ use super::outcome::llm_call_error_from_transport;
 /// The scope is chosen by the host boundary before any nondeterministic work is
 /// planned. It is intentionally generic: Restate, an inline test host, or a
 /// future durable effect host all receive the same Lash scope vocabulary.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum EffectScope {
+pub enum ExecutionScope {
     Turn {
         session_id: String,
         turn_id: String,
@@ -53,7 +63,7 @@ pub enum EffectScope {
     },
 }
 
-impl EffectScope {
+impl ExecutionScope {
     pub fn turn(session_id: impl Into<String>, turn_id: impl Into<String>) -> Self {
         Self::Turn {
             session_id: session_id.into(),
@@ -132,9 +142,311 @@ impl EffectScope {
         };
         if missing {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::MissingEffectScopeId,
-                "effect scopes require non-empty stable ids",
+                RuntimeErrorCode::MissingExecutionScopeId,
+                "execution scopes require non-empty stable ids",
             ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AwaitEventWaitIdentity {
+    ToolCompletion {
+        tool_call_id: String,
+    },
+    ProcessSignal {
+        process_id: String,
+        signal_name: String,
+        ordinal: u64,
+    },
+    Custom {
+        key: String,
+    },
+}
+
+impl AwaitEventWaitIdentity {
+    pub fn tool_completion(tool_call_id: impl Into<String>) -> Self {
+        Self::ToolCompletion {
+            tool_call_id: tool_call_id.into(),
+        }
+    }
+
+    pub fn process_signal(
+        process_id: impl Into<String>,
+        signal_name: impl Into<String>,
+        ordinal: u64,
+    ) -> Self {
+        Self::ProcessSignal {
+            process_id: process_id.into(),
+            signal_name: signal_name.into(),
+            ordinal,
+        }
+    }
+
+    fn validate(&self) -> Result<(), RuntimeError> {
+        let invalid = match self {
+            Self::ToolCompletion { tool_call_id } => tool_call_id.trim().is_empty(),
+            Self::ProcessSignal {
+                process_id,
+                signal_name,
+                ordinal,
+            } => process_id.trim().is_empty() || signal_name.trim().is_empty() || *ordinal == 0,
+            Self::Custom { key } => key.trim().is_empty(),
+        };
+        if invalid {
+            return Err(RuntimeError::new(
+                "invalid_await_event_wait_identity",
+                "await-event wait identity requires non-empty stable ids",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AwaitEventKey {
+    pub scope: ExecutionScope,
+    pub wait: AwaitEventWaitIdentity,
+    pub key_id: String,
+    pub signature: String,
+}
+
+impl AwaitEventKey {
+    pub fn promise_key(&self) -> String {
+        format!("lash-await-event:{}", self.key_id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalCompletionError {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
+}
+
+impl ExternalCompletionError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            raw: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "payload", rename_all = "snake_case")]
+pub enum Resolution {
+    Ok(serde_json::Value),
+    Err(ExternalCompletionError),
+    Timeout,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ResolveOutcome {
+    Accepted,
+    AlreadyResolved { terminal: Resolution },
+    UnknownOrRevoked,
+}
+
+#[derive(Debug)]
+struct AwaitEventEntry {
+    terminal: Option<Resolution>,
+    notify: Arc<Notify>,
+}
+
+#[derive(Debug)]
+struct AwaitEventRegistryState {
+    entries: HashMap<String, AwaitEventEntry>,
+    revoked_key_ids: HashSet<String>,
+    revoked_session_ids: HashSet<String>,
+}
+
+#[derive(Debug)]
+struct AwaitEventRegistry {
+    secret: Vec<u8>,
+    state: std::sync::Mutex<AwaitEventRegistryState>,
+}
+
+impl AwaitEventRegistry {
+    fn new() -> Self {
+        Self {
+            secret: uuid::Uuid::new_v4().as_bytes().to_vec(),
+            state: std::sync::Mutex::new(AwaitEventRegistryState {
+                entries: HashMap::new(),
+                revoked_key_ids: HashSet::new(),
+                revoked_session_ids: HashSet::new(),
+            }),
+        }
+    }
+
+    fn key_for(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        scope.validate()?;
+        wait.validate()?;
+        let key_id =
+            crate::stable_hash::stable_json_sha256_hex(&(scope, &wait)).map_err(|err| {
+                RuntimeError::new(
+                    "await_event_key_hash",
+                    format!("failed to hash await-event identity: {err}"),
+                )
+            })?;
+        let signature = self.signature(scope, &wait, &key_id)?;
+        Ok(AwaitEventKey {
+            scope: scope.clone(),
+            wait,
+            key_id,
+            signature,
+        })
+    }
+
+    fn signature(
+        &self,
+        scope: &ExecutionScope,
+        wait: &AwaitEventWaitIdentity,
+        key_id: &str,
+    ) -> Result<String, RuntimeError> {
+        let mut mac = HmacSha256::new_from_slice(&self.secret).map_err(|err| {
+            RuntimeError::new(
+                "await_event_key_sign",
+                format!("failed to initialize await-event key signer: {err}"),
+            )
+        })?;
+        let canonical = serde_json::to_vec(&(scope, wait, key_id)).map_err(|err| {
+            RuntimeError::new(
+                "await_event_key_sign",
+                format!("failed to serialize await-event key identity: {err}"),
+            )
+        })?;
+        mac.update(&canonical);
+        Ok(format!("{:x}", mac.finalize().into_bytes()))
+    }
+
+    fn verify(&self, key: &AwaitEventKey) -> Result<bool, RuntimeError> {
+        let expected = self.signature(&key.scope, &key.wait, &key.key_id)?;
+        Ok(expected == key.signature)
+    }
+
+    fn resolve(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        if !self.verify(key)? {
+            return Ok(ResolveOutcome::UnknownOrRevoked);
+        }
+        let mut state = self.state.lock().map_err(|_| {
+            RuntimeError::new(
+                "await_event_registry_poisoned",
+                "await-event registry lock poisoned",
+            )
+        })?;
+        if state.revoked_key_ids.contains(&key.key_id)
+            || key
+                .scope
+                .session_id()
+                .is_some_and(|session_id| state.revoked_session_ids.contains(session_id))
+        {
+            return Ok(ResolveOutcome::UnknownOrRevoked);
+        }
+        let entry = state
+            .entries
+            .entry(key.key_id.clone())
+            .or_insert_with(|| AwaitEventEntry {
+                terminal: None,
+                notify: Arc::new(Notify::new()),
+            });
+        if let Some(terminal) = &entry.terminal {
+            return Ok(ResolveOutcome::AlreadyResolved {
+                terminal: terminal.clone(),
+            });
+        }
+        entry.terminal = Some(resolution);
+        entry.notify.notify_waiters();
+        Ok(ResolveOutcome::Accepted)
+    }
+
+    async fn await_resolution(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        if !self.verify(key)? {
+            return Err(RuntimeError::new(
+                "await_event_unknown_or_revoked",
+                "await-event key is invalid or revoked",
+            ));
+        }
+        loop {
+            let notify =
+                {
+                    let mut state = self.state.lock().map_err(|_| {
+                        RuntimeError::new(
+                            "await_event_registry_poisoned",
+                            "await-event registry lock poisoned",
+                        )
+                    })?;
+                    if state.revoked_key_ids.contains(&key.key_id)
+                        || key.scope.session_id().is_some_and(|session_id| {
+                            state.revoked_session_ids.contains(session_id)
+                        })
+                    {
+                        return Err(RuntimeError::new(
+                            "await_event_unknown_or_revoked",
+                            "await-event key is invalid or revoked",
+                        ));
+                    }
+                    let entry = state.entries.entry(key.key_id.clone()).or_insert_with(|| {
+                        AwaitEventEntry {
+                            terminal: None,
+                            notify: Arc::new(Notify::new()),
+                        }
+                    });
+                    if let Some(terminal) = entry.terminal.clone() {
+                        return Ok(terminal);
+                    }
+                    Arc::clone(&entry.notify)
+                };
+            if let Some(deadline) = deadline {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        let _ = self.resolve(key, Resolution::Cancelled)?;
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        let _ = self.resolve(key, Resolution::Timeout)?;
+                    }
+                    _ = notify.notified() => {}
+                }
+            } else {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        let _ = self.resolve(key, Resolution::Cancelled)?;
+                    }
+                    _ = notify.notified() => {}
+                }
+            }
+        }
+    }
+
+    fn revoke_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().map_err(|_| {
+            RuntimeError::new(
+                "await_event_registry_poisoned",
+                "await-event registry lock poisoned",
+            )
+        })?;
+        state.revoked_session_ids.insert(session_id.to_string());
+        for entry in state.entries.values() {
+            entry.notify.notify_waiters();
         }
         Ok(())
     }
@@ -154,17 +466,17 @@ impl Clone for ScopedEffectControllerInner<'_> {
     }
 }
 
-/// Scoped low-level controller plus the semantic effect scope it is serving.
+/// Scoped low-level controller plus the semantic execution scope it is serving.
 #[derive(Clone)]
 pub struct ScopedEffectController<'run> {
     controller: ScopedEffectControllerInner<'run>,
-    scope: EffectScope,
+    scope: ExecutionScope,
 }
 
 impl<'run> ScopedEffectController<'run> {
     pub fn borrowed(
         controller: &'run dyn RuntimeEffectController,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<Self, RuntimeError> {
         scope.validate()?;
         Ok(Self {
@@ -175,7 +487,7 @@ impl<'run> ScopedEffectController<'run> {
 
     pub fn shared(
         controller: Arc<dyn RuntimeEffectController>,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<Self, RuntimeError> {
         scope.validate()?;
         Ok(Self {
@@ -191,7 +503,7 @@ impl<'run> ScopedEffectController<'run> {
         }
     }
 
-    pub fn effect_scope(&self) -> &EffectScope {
+    pub fn execution_scope(&self) -> &ExecutionScope {
         &self.scope
     }
 
@@ -217,14 +529,49 @@ pub trait EffectHost: Send + Sync {
 
     fn scoped<'run>(
         &'run self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<ScopedEffectController<'run>, RuntimeError>;
 
     fn scoped_static(
         &self,
-        _scope: EffectScope,
+        _scope: ExecutionScope,
     ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
         Ok(None)
+    }
+
+    async fn await_event_key(
+        &self,
+        _scope: &ExecutionScope,
+        _wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        Err(RuntimeError::new(
+            "await_event_unsupported",
+            "this effect host does not support await-event keys",
+        ))
+    }
+
+    async fn resolve_await_event(
+        &self,
+        _key: &AwaitEventKey,
+        _resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        Ok(ResolveOutcome::UnknownOrRevoked)
+    }
+
+    async fn await_await_event(
+        &self,
+        _key: &AwaitEventKey,
+        _cancel: CancellationToken,
+        _deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        Err(RuntimeError::new(
+            "await_event_unsupported",
+            "this effect host does not support await-event waits",
+        ))
+    }
+
+    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
+        Ok(())
     }
 }
 
@@ -246,6 +593,41 @@ pub trait RuntimeEffectController: Send + Sync {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
+
+    async fn await_event_key(
+        &self,
+        _scope: &ExecutionScope,
+        _wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        Err(RuntimeError::new(
+            "await_event_unsupported",
+            "this effect controller does not support await-event keys",
+        ))
+    }
+
+    async fn resolve_await_event(
+        &self,
+        _key: &AwaitEventKey,
+        _resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        Ok(ResolveOutcome::UnknownOrRevoked)
+    }
+
+    async fn await_await_event(
+        &self,
+        _key: &AwaitEventKey,
+        _cancel: CancellationToken,
+        _deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        Err(RuntimeError::new(
+            "await_event_unsupported",
+            "this effect controller does not support await-event waits",
+        ))
+    }
+
+    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 /// Runtime-internal handle for effect-controller references carried through
@@ -256,7 +638,7 @@ pub(crate) enum RuntimeEffectControllerHandle<'run> {
     #[cfg(any(test, feature = "testing"))]
     Shared {
         controller: Arc<dyn RuntimeEffectController>,
-        scope: EffectScope,
+        scope: ExecutionScope,
     },
 }
 
@@ -269,7 +651,7 @@ impl<'run> RuntimeEffectControllerHandle<'run> {
     pub(crate) fn shared(controller: Arc<dyn RuntimeEffectController>) -> Self {
         Self::Shared {
             controller,
-            scope: EffectScope::runtime_operation("test-runtime-effect-controller"),
+            scope: ExecutionScope::runtime_operation("test-runtime-effect-controller"),
         }
     }
 
@@ -408,13 +790,9 @@ enum RuntimeEffectLocalExecutorState<'run> {
     SleepOnly {
         cancellation: CancellationToken,
     },
-    AwaitEvent {
-        key: String,
-        registry: Arc<dyn ProcessRegistry>,
-        process_id: String,
-        event_type: String,
-        event_ordinal: u64,
+    ExternalWaitOptions {
         cancellation: CancellationToken,
+        deadline: Option<Instant>,
     },
     Process(ProcessLocalExecution),
     Runner(Box<dyn RuntimeEffectLocalRunner + Send + 'run>),
@@ -442,22 +820,11 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
-    pub fn await_process_event(
-        key: impl Into<String>,
-        registry: Arc<dyn ProcessRegistry>,
-        process_id: impl Into<String>,
-        event_type: impl Into<String>,
-        event_ordinal: u64,
-        cancellation: CancellationToken,
-    ) -> Self {
+    pub fn await_event(cancellation: CancellationToken, deadline: Option<Instant>) -> Self {
         Self {
-            state: RuntimeEffectLocalExecutorState::AwaitEvent {
-                key: key.into(),
-                registry,
-                process_id: process_id.into(),
-                event_type: event_type.into(),
-                event_ordinal,
+            state: RuntimeEffectLocalExecutorState::ExternalWaitOptions {
                 cancellation,
+                deadline,
             },
         }
     }
@@ -525,24 +892,14 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
             RuntimeEffectLocalExecutorState::SleepOnly { cancellation } => {
                 execute_local_sleep(envelope, cancellation).await
             }
-            RuntimeEffectLocalExecutorState::AwaitEvent {
-                key,
-                registry,
-                process_id,
-                event_type,
-                event_ordinal,
-                cancellation,
-            } => {
-                execute_local_await_event(
-                    envelope,
-                    &key,
-                    registry,
-                    &process_id,
-                    &event_type,
-                    event_ordinal,
-                    cancellation,
-                )
-                .await
+            RuntimeEffectLocalExecutorState::ExternalWaitOptions { .. } => {
+                Err(RuntimeEffectControllerError::new(
+                    "runtime_effect_local_executor_mismatch",
+                    format!(
+                        "local await-event options cannot execute {} command directly",
+                        envelope.command.kind().as_str()
+                    ),
+                ))
             }
             RuntimeEffectLocalExecutorState::Unavailable => Err(RuntimeEffectControllerError::new(
                 "runtime_effect_local_executor_unavailable",
@@ -568,6 +925,18 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 "runtime_effect_local_executor_unavailable",
                 "no process executor is available for process command",
             )),
+        }
+    }
+
+    fn into_await_event_options(
+        self,
+    ) -> Result<(CancellationToken, Option<Instant>), RuntimeEffectControllerError> {
+        match self.state {
+            RuntimeEffectLocalExecutorState::ExternalWaitOptions {
+                cancellation,
+                deadline,
+            } => Ok((cancellation, deadline)),
+            _ => Ok((CancellationToken::new(), None)),
         }
     }
 }
@@ -618,14 +987,14 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                         &runner.cancellation,
                     )
                     .await?;
-                let result = outcome.completed.pop().ok_or_else(|| {
+                let launch = outcome.launches.pop().ok_or_else(|| {
                     RuntimeEffectControllerError::new(
                         "tool_result_missing",
-                        format!("tool `{tool_name}` completed without a result"),
+                        format!("tool `{tool_name}` completed without a launch result"),
                     )
                 })?;
                 Ok(RuntimeEffectOutcome::ToolCall {
-                    result,
+                    launch,
                     triggers: outcome.triggers,
                 })
             }
@@ -752,61 +1121,6 @@ async fn execute_local_sleep(
     }
 }
 
-async fn execute_local_await_event(
-    envelope: RuntimeEffectEnvelope,
-    expected_key: &str,
-    registry: Arc<dyn ProcessRegistry>,
-    process_id: &str,
-    event_type: &str,
-    event_ordinal: u64,
-    cancellation: CancellationToken,
-) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-    match envelope.command {
-        RuntimeEffectCommand::AwaitEvent { key } if key == expected_key => {
-            if event_ordinal == 0 {
-                return Err(RuntimeEffectControllerError::new(
-                    "runtime_effect_await_event_invalid_ordinal",
-                    "event ordinal must be one-based",
-                ));
-            }
-            let mut after_sequence = 0;
-            let mut matching_count = 0;
-            let event = loop {
-                let wait = registry.wait_event_after(process_id, event_type, after_sequence);
-                tokio::pin!(wait);
-                let event = tokio::select! {
-                    _ = cancellation.cancelled() => {
-                        return Err(RuntimeEffectControllerError::new(
-                            "runtime_effect_await_event_cancelled",
-                            "runtime effect event wait was cancelled",
-                        ));
-                    }
-                    event = &mut wait => event?,
-                };
-                matching_count += 1;
-                if matching_count == event_ordinal {
-                    break event;
-                }
-                after_sequence = event.sequence;
-            };
-            Ok(RuntimeEffectOutcome::AwaitEvent {
-                payload: event.payload,
-            })
-        }
-        RuntimeEffectCommand::AwaitEvent { key } => Err(RuntimeEffectControllerError::new(
-            "runtime_effect_await_event_key_mismatch",
-            format!("local event wait expected `{expected_key}`, got `{key}`"),
-        )),
-        command => Err(RuntimeEffectControllerError::new(
-            "runtime_effect_local_executor_mismatch",
-            format!(
-                "local event wait executor cannot execute {} command",
-                command.kind().as_str()
-            ),
-        )),
-    }
-}
-
 async fn sleep_with_cancellation(
     duration_ms: u64,
     cancellation: &CancellationToken,
@@ -842,6 +1156,14 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match envelope.command {
+            RuntimeEffectCommand::AwaitEvent { key } => {
+                let (cancellation, deadline) = local_executor.into_await_event_options()?;
+                let resolution = self
+                    .await_await_event(&key, cancellation, deadline)
+                    .await
+                    .map_err(RuntimeEffectControllerError::from)?;
+                Ok(RuntimeEffectOutcome::AwaitEvent { resolution })
+            }
             RuntimeEffectCommand::Process { command } => {
                 let execution = local_executor.into_process()?;
                 let registry = execution.registry;
@@ -859,6 +1181,37 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
             }
             _ => local_executor.execute(envelope).await,
         }
+    }
+
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        inline_await_events().key_for(scope, wait)
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        inline_await_events().resolve(key, resolution)
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        inline_await_events()
+            .await_resolution(key, cancel, deadline)
+            .await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        inline_await_events().revoke_session(session_id)
     }
 }
 
@@ -880,6 +1233,7 @@ impl Default for InlineEffectHost {
     }
 }
 
+#[async_trait::async_trait]
 impl EffectHost for InlineEffectHost {
     fn durability_tier(&self) -> crate::DurabilityTier {
         self.controller.durability_tier()
@@ -891,19 +1245,52 @@ impl EffectHost for InlineEffectHost {
 
     fn scoped<'run>(
         &'run self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<ScopedEffectController<'run>, RuntimeError> {
         ScopedEffectController::shared(Arc::clone(&self.controller), scope)
     }
 
     fn scoped_static(
         &self,
-        scope: EffectScope,
+        scope: ExecutionScope,
     ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
         Ok(Some(ScopedEffectController::shared(
             Arc::clone(&self.controller),
             scope,
         )?))
+    }
+
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.controller.await_event_key(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.controller.resolve_await_event(key, resolution).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        self.controller
+            .await_await_event(key, cancel, deadline)
+            .await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.controller
+            .revoke_await_events_for_session(session_id)
+            .await
     }
 }
 

@@ -77,7 +77,7 @@
         {
           title: "Advanced runtime",
           href: "embedding-advanced.html",
-          summary: "Session lifecycle, durable effect scopes, subagents, MCP servers, and advanced host controls.",
+          summary: "Session lifecycle, durable execution scopes, subagents, MCP servers, and advanced host controls.",
           kind: "guide",
         },
         {

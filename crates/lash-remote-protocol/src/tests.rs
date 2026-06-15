@@ -302,6 +302,7 @@ fn wrong_protocol_versions_are_rejected() {
         call_path: "tools.demo".to_string(),
         args: serde_json::Value::Null,
         session_id: "session".to_string(),
+        completion_key: serde_json::json!({"key": "test"}),
         tool_call_id: None,
         replay_key: None,
         attempt_number: 1,
@@ -364,6 +365,54 @@ fn wrong_protocol_versions_are_rejected() {
         report.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
     ));
+}
+
+#[test]
+fn remote_tool_call_request_requires_completion_key() {
+    let request = RemoteToolCallRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        tool_name: "demo".to_string(),
+        call_path: "tools.demo".to_string(),
+        args: serde_json::Value::Null,
+        session_id: "session".to_string(),
+        completion_key: serde_json::Value::Null,
+        tool_call_id: None,
+        replay_key: None,
+        attempt_number: 1,
+        max_attempts: 1,
+        headers: HashMap::new(),
+    };
+
+    let err = request
+        .validate()
+        .expect_err("remote tool requests require a completion key");
+    assert!(matches!(
+        err,
+        RemoteProtocolError::RemoteToolTransport(message)
+            if message.contains("completion_key")
+    ));
+}
+
+#[cfg(feature = "core-conversions")]
+#[test]
+fn remote_pending_tool_response_maps_to_pending_tool_result() {
+    let result = RemoteToolCallResponse::Pending {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        deadline_ms: Some(250),
+        on_timeout: RemoteTimeoutBehavior::FailTurn,
+        on_cancel: RemoteCancelHint::Ignore,
+    }
+    .into_tool_result();
+
+    let pending = result
+        .into_done_output()
+        .expect_err("pending remote response must not project as completed output");
+    assert_eq!(
+        pending.deadline,
+        Some(std::time::Duration::from_millis(250))
+    );
+    assert_eq!(pending.on_timeout, lash_core::TimeoutBehavior::FailTurn);
+    assert_eq!(pending.on_cancel, lash_core::CancelHint::Ignore);
 }
 
 #[test]

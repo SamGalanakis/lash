@@ -150,7 +150,9 @@ async fn main() -> anyhow_like::Result<()> {
                 // Restate ingress runner is the sole executor of
                 // out-of-turn/background processes.
                 core_builder
-                    .effect_host(Arc::new(RestateEffectHost::new()))
+                    .effect_host(Arc::new(RestateEffectHost::with_ingress_url(
+                        restate_ingress_url.clone(),
+                    )))
                     .process_work_driver(
                         process_deployment
                             .as_ref()

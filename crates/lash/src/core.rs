@@ -161,6 +161,10 @@ impl LashCore {
         crate::admin::Processes { core: self.clone() }
     }
 
+    pub fn completions(&self) -> crate::admin::Completions {
+        crate::admin::Completions { core: self.clone() }
+    }
+
     pub fn effect_host(&self) -> Arc<dyn EffectHost> {
         Arc::clone(&self.env.core.control.effect_host)
     }
@@ -223,6 +227,16 @@ impl LashCore {
                     message: err.to_string(),
                 })?;
         }
+        self.env
+            .core
+            .control
+            .effect_host
+            .revoke_await_events_for_session(&session_id)
+            .await
+            .map_err(|err| EmbedError::SessionDeleteProcess {
+                session_id: session_id.clone(),
+                message: err.to_string(),
+            })?;
         store_factory
             .delete_session(&session_id)
             .await

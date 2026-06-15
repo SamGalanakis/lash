@@ -156,9 +156,9 @@ mod tests {
         crate::ProcessOpScope::new(
             crate::ScopedEffectController::shared(
                 Arc::new(crate::InlineRuntimeEffectController),
-                crate::EffectScope::runtime_operation(id),
+                crate::ExecutionScope::runtime_operation(id),
             )
-            .expect("test effect scope"),
+            .expect("test execution scope"),
         )
     }
 
@@ -702,7 +702,7 @@ mod tests {
         // Process execution identity is the persisted process_id; a retry/
         // recovery that presents an empty (fresh, non-persisted) id has lost its
         // idempotency anchor and must fail loudly, mirroring the empty-turn-id
-        // rejection in `EffectScope`.
+        // rejection in `ExecutionScope`.
         let registry = Arc::new(crate::TestLocalProcessRegistry::default());
         let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
         let factory =
@@ -737,7 +737,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains(crate::RuntimeErrorCode::MissingEffectScopeId.as_str()),
+                .contains(crate::RuntimeErrorCode::MissingExecutionScopeId.as_str()),
             "{err}"
         );
     }
@@ -928,6 +928,46 @@ mod tests {
                 .execute_effect(envelope, local_executor)
                 .await
         }
+
+        async fn await_event_key(
+            &self,
+            scope: &crate::ExecutionScope,
+            wait: crate::AwaitEventWaitIdentity,
+        ) -> Result<crate::AwaitEventKey, crate::RuntimeError> {
+            crate::InlineRuntimeEffectController
+                .await_event_key(scope, wait)
+                .await
+        }
+
+        async fn resolve_await_event(
+            &self,
+            key: &crate::AwaitEventKey,
+            resolution: crate::Resolution,
+        ) -> Result<crate::ResolveOutcome, crate::RuntimeError> {
+            crate::InlineRuntimeEffectController
+                .resolve_await_event(key, resolution)
+                .await
+        }
+
+        async fn await_await_event(
+            &self,
+            key: &crate::AwaitEventKey,
+            cancel: tokio_util::sync::CancellationToken,
+            deadline: Option<std::time::Instant>,
+        ) -> Result<crate::Resolution, crate::RuntimeError> {
+            crate::InlineRuntimeEffectController
+                .await_await_event(key, cancel, deadline)
+                .await
+        }
+
+        async fn revoke_await_events_for_session(
+            &self,
+            session_id: &str,
+        ) -> Result<(), crate::RuntimeError> {
+            crate::InlineRuntimeEffectController
+                .revoke_await_events_for_session(session_id)
+                .await
+        }
     }
 
     #[derive(Clone)]
@@ -938,7 +978,7 @@ mod tests {
     impl crate::EffectHost for RejectingDeploymentEffectHost {
         fn scoped<'run>(
             &'run self,
-            scope: crate::EffectScope,
+            scope: crate::ExecutionScope,
         ) -> Result<crate::ScopedEffectController<'run>, crate::RuntimeError> {
             crate::ScopedEffectController::shared(
                 Arc::new(RejectingEffectController {
@@ -950,7 +990,7 @@ mod tests {
 
         fn scoped_static(
             &self,
-            scope: crate::EffectScope,
+            scope: crate::ExecutionScope,
         ) -> Result<Option<crate::ScopedEffectController<'static>>, crate::RuntimeError> {
             Ok(Some(crate::ScopedEffectController::shared(
                 Arc::new(RejectingEffectController {
@@ -1044,7 +1084,7 @@ mod tests {
         let controller = RecordingProcessEffectController::default();
         let scoped_effect_controller = crate::ScopedEffectController::borrowed(
             &controller,
-            crate::EffectScope::process("scoped-session-turn"),
+            crate::ExecutionScope::process("scoped-session-turn"),
         )
         .expect("process scoped controller");
 
@@ -2108,7 +2148,7 @@ mod tests {
             crate::ProcessOpScope::new(
                 crate::ScopedEffectController::borrowed(
                     &controller,
-                    crate::EffectScope::runtime_operation("scoped-process-transfer-test"),
+                    crate::ExecutionScope::runtime_operation("scoped-process-transfer-test"),
                 )
                 .expect("scoped process transfer scope"),
             )

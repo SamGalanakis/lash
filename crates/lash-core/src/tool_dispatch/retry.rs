@@ -33,6 +33,9 @@ pub(super) async fn execute_tool_call<'run>(
                 .clone()
                 .with_retry_context(tool_name, attempt, max_attempts);
         let result = execute_once(context, prepared, progress, attempt_context).await;
+        if result.is_pending() {
+            return result;
+        }
         let retry_after_ms = retry_after_ms(&result, retry_policy, attempt - 1);
         let Some(retry_after_ms) = retry_after_ms else {
             return result;
@@ -148,7 +151,10 @@ fn retry_after_ms(
     if matches!(retry_policy, ToolRetryPolicy::Never) {
         return None;
     }
-    let ToolCallOutcome::Failure(failure) = &result.as_output().outcome else {
+    let Some(output) = result.as_done_output() else {
+        return None;
+    };
+    let ToolCallOutcome::Failure(failure) = &output.outcome else {
         return None;
     };
     let ToolRetryDisposition::Safe { after_ms } = &failure.retry else {
@@ -158,7 +164,10 @@ fn retry_after_ms(
 }
 
 fn mark_retry_exhausted(result: ToolResult, attempts: u32) -> ToolResult {
-    let mut output = result.into_output();
+    let mut output = match result.into_done_output() {
+        Ok(output) => output,
+        Err(pending) => return ToolResult::pending(pending),
+    };
     if let ToolCallOutcome::Failure(failure) = &mut output.outcome {
         failure.retry = ToolRetryDisposition::Exhausted { attempts };
     }

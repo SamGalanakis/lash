@@ -8,6 +8,7 @@ pub(crate) enum RuntimePerfScenario {
     Standard,
     Rlm,
     StandardToolCalls,
+    StandardAsyncToolCompletion,
     RlmToolCalls,
     RlmProcessHandles,
     RlmLlmQuery,
@@ -33,10 +34,11 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 25] = [
+    pub(crate) const DEFAULTS: [Self; 26] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
+        Self::StandardAsyncToolCompletion,
         Self::RlmToolCalls,
         Self::RlmProcessHandles,
         Self::RlmLlmQuery,
@@ -60,10 +62,11 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
     ];
-    pub(crate) const KNOWN: [Self; 25] = [
+    pub(crate) const KNOWN: [Self; 26] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
+        Self::StandardAsyncToolCompletion,
         Self::RlmToolCalls,
         Self::RlmProcessHandles,
         Self::RlmLlmQuery,
@@ -93,6 +96,7 @@ impl RuntimePerfScenario {
             "standard" => Some(Self::Standard),
             "rlm" => Some(Self::Rlm),
             "standard_tool_calls" => Some(Self::StandardToolCalls),
+            "standard_async_tool_completion" => Some(Self::StandardAsyncToolCompletion),
             "rlm_tool_calls" => Some(Self::RlmToolCalls),
             "rlm_process_handles" => Some(Self::RlmProcessHandles),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
@@ -124,6 +128,7 @@ impl RuntimePerfScenario {
             Self::Standard => "standard",
             Self::Rlm => "rlm",
             Self::StandardToolCalls => "standard_tool_calls",
+            Self::StandardAsyncToolCompletion => "standard_async_tool_completion",
             Self::RlmToolCalls => "rlm_tool_calls",
             Self::RlmProcessHandles => "rlm_process_handles",
             Self::RlmLlmQuery => "rlm_llm_query",
@@ -153,6 +158,7 @@ impl RuntimePerfScenario {
         match self {
             Self::Standard
             | Self::StandardToolCalls
+            | Self::StandardAsyncToolCompletion
             | Self::ObservationalMemory
             | Self::ObservationalMemoryMaintenance
             | Self::OpenAiCompatStream

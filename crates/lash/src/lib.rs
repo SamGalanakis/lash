@@ -24,8 +24,8 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::admin::{
-    AdvancedToolAdmin, CoreTriggerAdmin, PluginActions, SessionCommandAdmin, SessionTriggerAdmin,
-    ToolAdmin,
+    AdvancedToolAdmin, Completions, CoreTriggerAdmin, PluginActions, SessionCommandAdmin,
+    SessionTriggerAdmin, ToolAdmin,
 };
 pub use crate::core::{LashCore, LashCoreBuilder, SessionDeleteReport};
 pub use crate::error::{EmbedError, Result};
@@ -40,7 +40,8 @@ pub use crate::turn::{
     message_role, message_text,
 };
 pub use lash_core::{
-    InputItem, ModelLimits, ModelSpec, PluginStack, SessionCommand, SessionCommandReceipt,
+    AwaitEventKey, AwaitEventWaitIdentity, ExternalCompletionError, InputItem, ModelLimits,
+    ModelSpec, PluginStack, Resolution, ResolveOutcome, SessionCommand, SessionCommandReceipt,
     SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
 };
 /// Cooperative cancellation handle accepted by
@@ -88,11 +89,11 @@ pub mod triggers {
 
 pub mod tools {
     pub use lash_core::{
-        LashlangToolBinding, PreparedToolCall, ToolActivation, ToolArgumentProjectionPolicy,
-        ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
-        ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolOutputContract,
-        ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolScheduling,
-        ToolSourceHandle, ToolTriggerClient,
+        CancelHint, LashlangToolBinding, PendingCompletion, PreparedToolCall, TimeoutBehavior,
+        ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
+        ToolCall, ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
+        ToolManifest, ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider,
+        ToolResult, ToolScheduling, ToolSourceHandle, ToolTriggerClient,
     };
     pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
@@ -229,7 +230,7 @@ pub mod durability {
 pub mod runtime {
     pub use crate::core::AdvancedLashCoreBuilder;
     pub use lash_core::runtime::{
-        AssembledTurn, DirectCompletionClient, EffectScope, EmbeddedRuntimeHost, EventSink,
+        AssembledTurn, DirectCompletionClient, EmbeddedRuntimeHost, EventSink, ExecutionScope,
         InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
         NoopEventSink, NoopTurnActivitySink, ProcessCommand, ProcessEffectOutcome, QueuedWorkPoke,
         QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest, QueuedWorkRunner,

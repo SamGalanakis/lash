@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use lash::durability::DurableProcessWorker;
 use lash::observe::SessionResume;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
-use lash_core::{EffectScope, ProcessEventAppendRequest};
+use lash_core::{ExecutionScope, ProcessEventAppendRequest};
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{LashProcessWorkflow, RestateProcessDeployment, RestateRuntimeEffectController};
 use restate_sdk::errors::{HandlerResult, TerminalError};
@@ -40,6 +40,7 @@ struct AppState {
     storage: PostgresStorage,
     attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
     process_work_driver: lash::process::ProcessWorkDriver,
+    restate_ingress_url: String,
     mock_provider_base_url: String,
     trace_dir: Option<PathBuf>,
     fail_once: bool,
@@ -55,6 +56,7 @@ impl AppState {
         ensure_e2e_schema(storage.pool()).await?;
         let attachment_store =
             Arc::new(s3_store_from_env()?) as Arc<dyn lash::persistence::AttachmentStore>;
+        let restate_ingress_url = env("RESTATE_INGRESS_URL", "http://restate:8080");
         let mock_provider_base_url = env("MOCK_PROVIDER_BASE_URL", "http://mock-provider:18001");
         let trace_dir = std::env::var("LASH_E2E_TRACE_DIR").ok().map(PathBuf::from);
         if let Some(dir) = &trace_dir {
@@ -67,6 +69,7 @@ impl AppState {
             storage,
             attachment_store,
             process_work_driver,
+            restate_ingress_url,
             mock_provider_base_url,
             trace_dir,
             fail_once,
@@ -79,6 +82,7 @@ impl AppState {
             storage: self.storage.clone(),
             attachment_store: Arc::clone(&self.attachment_store),
             process_work_driver: self.process_work_driver.clone(),
+            restate_ingress_url: self.restate_ingress_url.clone(),
             mock_provider_base_url: self.mock_provider_base_url.clone(),
             trace_dir: self.trace_dir.clone(),
             fail_once: self.fail_once,
@@ -282,7 +286,7 @@ impl AppState {
                 signal.process_id, signal.signal_name, signal.signal_id
             ));
         let scoped = controller
-            .scoped_effect_controller(EffectScope::runtime_operation(format!(
+            .scoped_effect_controller(ExecutionScope::runtime_operation(format!(
                 "e2e:{}:{}",
                 request.workflow_id, signal.signal_id
             )))
