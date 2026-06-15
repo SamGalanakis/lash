@@ -7,12 +7,12 @@ use lash_core::testing::conformance::{
 };
 use lash_core::{
     DurabilityTier, ProcessExecutionEnvRef, ProcessOriginator, ProcessRegistry, RuntimePersistence,
-    SessionScope, TriggerOccurrenceRequest, TriggerStore, TriggerSubscriptionDraft,
-    TriggerSubscriptionFilter,
+    SessionScope, SessionStoreFactory, TriggerOccurrenceRequest, TriggerStore,
+    TriggerSubscriptionDraft, TriggerSubscriptionFilter,
 };
 use lash_postgres_store::PostgresStorage;
 
-/// All four suites share one database and `reset()` truncates every `lash_*`
+/// All backend suites share one database and `reset()` truncates every `lash_*`
 /// table between cases, so they must not touch it concurrently. This guard
 /// serializes them intrinsically — correctness no longer depends on the test
 /// harness being invoked with `--test-threads=1`.
@@ -160,6 +160,29 @@ async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
             ReopenableRuntimePersistence { open, reopen }
         })
     })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_session_store_factory_satisfies_conformance_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
+    let Some(storage) = storage().await else {
+        eprintln!(
+            "skipping Postgres session-store-factory conformance: LASH_POSTGRES_DATABASE_URL is not set"
+        );
+        return;
+    };
+    let storage = Arc::new(storage);
+    lash_core::testing::conformance::session_store_factory(
+        || {
+            let storage = Arc::clone(&storage);
+            sync_await(async move {
+                reset(&storage).await;
+                Arc::new(storage.session_store_factory()) as Arc<dyn SessionStoreFactory>
+            })
+        },
+        DurabilityTier::Durable,
+    )
     .await;
 }
 

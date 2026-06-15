@@ -375,6 +375,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_scoped_attachment_store_satisfies_conformance() {
+        crate::testing::conformance::attachment_store(
+            || {
+                let manifest: Arc<dyn AttachmentManifest> = Arc::new(RecordingManifest::default());
+                Arc::new(SessionScopedAttachmentStore::new(
+                    Arc::new(InMemoryAttachmentStore::new()),
+                    manifest,
+                    "session-scoped-conformance",
+                )) as Arc<dyn AttachmentStore>
+            },
+            AttachmentStorePersistence::Ephemeral,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn session_scoped_store_tracks_successful_puts_until_commit_mark() {
         let manifest = Arc::new(RecordingManifest::default());
         let manifest_for_store: Arc<dyn AttachmentManifest> = manifest.clone();

@@ -17,6 +17,7 @@ mod lashlang_artifact_store;
 mod live_replay;
 mod process_registry;
 mod runtime_persistence;
+mod session_store_factory;
 mod trigger_store;
 
 pub use attachment_store::*;
@@ -26,6 +27,7 @@ pub use lashlang_artifact_store::*;
 pub use live_replay::*;
 pub use process_registry::*;
 pub use runtime_persistence::*;
+pub use session_store_factory::*;
 pub use trigger_store::*;
 
 use std::collections::BTreeMap;
@@ -125,6 +127,18 @@ mod tests {
         process_registry(|| {
             Arc::new(crate::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>
         })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_session_store_factory_satisfies_conformance() {
+        session_store_factory(
+            || {
+                Arc::new(crate::InMemorySessionStoreFactory::new())
+                    as Arc<dyn crate::SessionStoreFactory>
+            },
+            DurabilityTier::Inline,
+        )
         .await;
     }
 

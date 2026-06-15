@@ -17,12 +17,12 @@ use lash_core::{
     ProcessOriginator, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
     RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence,
-    SessionScope, TriggerOccurrenceRequest, TriggerStore, TriggerSubscriptionDraft,
-    TriggerSubscriptionFilter,
+    SessionScope, SessionStoreFactory, TriggerOccurrenceRequest, TriggerStore,
+    TriggerSubscriptionDraft, TriggerSubscriptionFilter,
 };
 use lash_sqlite_store::{
     SqliteEffectHost, SqliteEffectReplayOptions, SqliteProcessRegistry,
-    SqliteRuntimeEffectController, SqliteTriggerStore, Store,
+    SqliteRuntimeEffectController, SqliteSessionStoreFactory, SqliteTriggerStore, Store,
 };
 use tempfile::TempDir;
 
@@ -200,6 +200,22 @@ async fn sqlite_process_registry_satisfies_conformance() {
             reopen: open_registry(&path),
         }
     })
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_session_store_factory_satisfies_conformance() {
+    let dirs = Arc::new(Mutex::new(Vec::new()));
+    lash_core::testing::conformance::session_store_factory(
+        || {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let factory = Arc::new(SqliteSessionStoreFactory::new(dir.path()))
+                as Arc<dyn SessionStoreFactory>;
+            dirs.lock().expect("dirs lock").push(dir);
+            factory
+        },
+        DurabilityTier::Durable,
+    )
     .await;
 }
 
