@@ -61,6 +61,7 @@ pub struct RuntimeExecutionContext<'run> {
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
     lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     lashlang_execution_context: lash_trace::TraceContext,
+    turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
     /// Process ids started by THIS execution context. Possession of a handle
@@ -133,6 +134,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             parent_invocation: None,
             lashlang_execution_sink: None,
             lashlang_execution_context: lash_trace::TraceContext::default(),
+            turn_phase_probe: None,
             turn_event_tx: None,
             cancellation_token: None,
         }
@@ -280,6 +282,19 @@ impl<'run> RuntimeExecutionContext<'run> {
         self
     }
 
+    pub(crate) fn with_turn_phase_probe(
+        mut self,
+        probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
+    ) -> Self {
+        self.turn_phase_probe = probe;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn named_phase(&self, phase: &'static str) -> crate::runtime::RuntimeNamedPhase {
+        crate::runtime::RuntimeNamedPhase::begin(self.turn_phase_probe.clone(), phase)
+    }
+
     pub fn parent_invocation(&self) -> Option<&crate::RuntimeInvocation> {
         self.parent_invocation.as_ref()
     }
@@ -330,6 +345,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self,
         start: lashlang::ProcessStart,
     ) -> Result<(crate::ProcessRegistration, Option<String>), String> {
+        let _phase = self.named_phase("rlm_process.prepare_start");
         let display_name = Some(start.process_name.clone());
         let artifact = self
             .lashlang_artifact_store
@@ -548,6 +564,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         registration: crate::ProcessRegistration,
         label: Option<String>,
     ) -> crate::ToolInvocationReply {
+        let _phase = self.named_phase("rlm_process.start");
         let registration = match self
             .attach_captured_process_execution_env(registration)
             .await

@@ -177,6 +177,71 @@ pub trait RuntimeTurnPhaseProbe: Send + Sync {
     fn end_named(&self, _phase: &str) {}
 }
 
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct RuntimeTurnPhaseProbeSlot {
+    probes: Arc<StdMutex<HashMap<crate::SessionScopeId, Arc<dyn RuntimeTurnPhaseProbe>>>>,
+}
+
+impl RuntimeTurnPhaseProbeSlot {
+    pub fn set_for_session(
+        &self,
+        session_id: impl Into<String>,
+        probe: Arc<dyn RuntimeTurnPhaseProbe>,
+    ) {
+        self.set_for_scope(&crate::SessionScope::new(session_id), probe);
+    }
+
+    pub fn set_for_scope(
+        &self,
+        scope: &crate::SessionScope,
+        probe: Arc<dyn RuntimeTurnPhaseProbe>,
+    ) {
+        self.probes
+            .lock()
+            .expect("runtime phase probe slot")
+            .insert(scope.id(), probe);
+    }
+
+    pub fn get_for_scope(
+        &self,
+        scope: &crate::SessionScope,
+    ) -> Option<Arc<dyn RuntimeTurnPhaseProbe>> {
+        let probes = self.probes.lock().expect("runtime phase probe slot");
+        probes.get(&scope.id()).cloned().or_else(|| {
+            probes
+                .get(&crate::SessionScope::new(&scope.session_id).id())
+                .cloned()
+        })
+    }
+}
+
+#[doc(hidden)]
+pub struct RuntimeNamedPhase {
+    probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+    phase: &'static str,
+}
+
+impl RuntimeNamedPhase {
+    pub fn begin(
+        probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+        phase: &'static str,
+    ) -> RuntimeNamedPhase {
+        if let Some(probe) = probe.as_ref() {
+            probe.begin_named(phase);
+        }
+        RuntimeNamedPhase { probe, phase }
+    }
+}
+
+impl Drop for RuntimeNamedPhase {
+    fn drop(&mut self) {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.end_named(self.phase);
+        }
+    }
+}
+
 /// Host-provided per-turn input.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

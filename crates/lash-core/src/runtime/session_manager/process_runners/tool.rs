@@ -67,19 +67,24 @@ impl RuntimeSessionServices {
         let output = match launch {
             crate::tool_dispatch::ToolCallLaunch::Done(outcome) => outcome.record.output,
             crate::tool_dispatch::ToolCallLaunch::Pending(pending) => {
-                let fallback = crate::RuntimeInvocation::effect(
-                    crate::RuntimeScope::new(&self.current.session_id),
-                    format!(
-                        "process:{}:tool:{}:await",
-                        registration.id, pending.tool_name
-                    ),
-                    crate::RuntimeEffectKind::AwaitEvent,
-                    format!(
-                        "process:{}:tool:{}:await",
-                        registration.id, pending.tool_name
-                    ),
-                );
-                let parent = await_parent_invocation.as_ref().unwrap_or(&fallback);
+                let fallback;
+                let parent = if let Some(parent) = await_parent_invocation.as_ref() {
+                    parent
+                } else {
+                    fallback = crate::RuntimeInvocation::effect(
+                        crate::RuntimeScope::new(&self.current.session_id),
+                        format!(
+                            "process:{}:tool:{}:await",
+                            registration.id, pending.tool_name
+                        ),
+                        crate::RuntimeEffectKind::AwaitEvent,
+                        format!(
+                            "process:{}:tool:{}:await",
+                            registration.id, pending.tool_name
+                        ),
+                    );
+                    &fallback
+                };
                 let invocation = crate::runtime::causal::child_effect_invocation(
                     parent,
                     format!(

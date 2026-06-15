@@ -284,6 +284,7 @@ impl SessionBuilder {
             mode,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
+            process_phase_probe_slot: self.core.process_work_runner.phase_probe_slot(),
             turn_cancels: crate::turn::TurnCancelRegistry::default(),
         })
     }
@@ -334,6 +335,7 @@ pub struct LashSession {
     pub(crate) mode: ModeId,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
+    pub(crate) process_phase_probe_slot: Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot>,
     pub(crate) turn_cancels: crate::turn::TurnCancelRegistry,
 }
 
@@ -548,8 +550,20 @@ impl LashSession {
     ) {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
-        runtime.set_turn_phase_probe(probe);
+        runtime.set_turn_phase_probe(Arc::clone(&probe));
         self.runtime.publish_from(&runtime);
+        if let Some(slot) = &self.process_phase_probe_slot {
+            let observation = self.runtime.observe();
+            slot.set_for_session(observation.session_id(), Arc::clone(&probe));
+            let current_frame = observation.persisted_state.current_agent_frame_id.as_str();
+            if !current_frame.is_empty() {
+                let scope = lash_core::SessionScope::for_agent_frame(
+                    observation.session_id(),
+                    current_frame,
+                );
+                slot.set_for_scope(&scope, probe);
+            }
+        }
     }
 }
 

@@ -459,6 +459,41 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "live_replay.trim_by_capacity",
             "live_replay.gap_handling",
         ],
+        RuntimePerfScenario::RlmAsyncToolCompletion => &[
+            "context_transform",
+            "before_turn_hooks",
+            "prompt_build",
+            "effect_loop",
+            "finalize_turn",
+            "persist_turn",
+            "final_commit",
+            "post_persist_hooks",
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.execute",
+        ],
+        RuntimePerfScenario::RlmProcessHandles
+        | RuntimePerfScenario::RlmProcessAsyncToolCompletion => &[
+            "context_transform",
+            "before_turn_hooks",
+            "prompt_build",
+            "effect_loop",
+            "finalize_turn",
+            "persist_turn",
+            "final_commit",
+            "post_persist_hooks",
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.store_module_artifact",
+            "rlm_lashlang.execute",
+            "rlm_process.prepare_start",
+            "rlm_process.start",
+            "rlm_process.await_handle",
+            "rlm_process.load_artifact",
+            "rlm_process.resolve_environment",
+            "rlm_process.compile",
+            "rlm_process.build_context",
+            "rlm_process.execute",
+            "rlm_process.shutdown",
+        ],
         RuntimePerfScenario::EmbedStandard | RuntimePerfScenario::EmbedRlm => &[],
         _ => &[
             "context_transform",
@@ -475,6 +510,8 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
 
 fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
+        RuntimePerfScenario::RlmAsyncToolCompletion => 96_000_000.0,
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => 160_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
         RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 128_000_000.0,
@@ -487,6 +524,8 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
 
 fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
+        RuntimePerfScenario::RlmAsyncToolCompletion => 64_000_000.0,
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => 128_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 96_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
@@ -498,6 +537,8 @@ fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
 
 fn wall_clock_budget_ms(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
+        RuntimePerfScenario::RlmAsyncToolCompletion => 1_000.0,
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => 2_000.0,
         RuntimePerfScenario::ToolDiscoverySearch | RuntimePerfScenario::RlmLargeToolCatalog => {
             20_000.0
         }
@@ -664,6 +705,53 @@ mod tests {
                 .len(),
             RuntimePerfScenario::KNOWN.len()
         );
+    }
+
+    #[test]
+    fn async_completion_scenarios_have_specific_guard_budgets() {
+        assert!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion) < 100_000_000.0
+        );
+        assert!(
+            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion)
+                < 100_000_000.0
+        );
+        assert!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmProcessAsyncToolCompletion)
+                < 200_000_000.0
+        );
+        assert!(
+            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmProcessAsyncToolCompletion)
+                < 200_000_000.0
+        );
+        assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmAsyncToolCompletion) < 10_000.0);
+        assert!(
+            wall_clock_budget_ms(RuntimePerfScenario::RlmProcessAsyncToolCompletion) < 10_000.0
+        );
+    }
+
+    #[test]
+    fn rlm_process_async_completion_requires_named_phase_metrics() {
+        let phases = required_phases(RuntimePerfScenario::RlmProcessAsyncToolCompletion);
+        for expected in [
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.store_module_artifact",
+            "rlm_lashlang.execute",
+            "rlm_process.prepare_start",
+            "rlm_process.start",
+            "rlm_process.await_handle",
+            "rlm_process.load_artifact",
+            "rlm_process.resolve_environment",
+            "rlm_process.compile",
+            "rlm_process.build_context",
+            "rlm_process.execute",
+            "rlm_process.shutdown",
+        ] {
+            assert!(
+                phases.contains(&expected),
+                "missing required phase {expected}"
+            );
+        }
     }
 
     #[test]

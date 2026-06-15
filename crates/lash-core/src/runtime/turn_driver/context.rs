@@ -19,23 +19,25 @@ impl<'run> RuntimeTurnDriver<'run> {
             .turn_pipeline
             .state()
             .process_execution_env_spec(&self.policy.policy);
-        self.session.code_execution_context(
-            &self.session_id,
-            &self.turn_pipeline.state().current_agent_frame_id,
-            manager.state_service(),
-            manager.lifecycle_service(),
-            manager.graph_service(),
-            manager.process_service(),
-            manager.process_cancel_ability(),
-            effect_controller,
-            direct_completions,
-            manager.trigger_router(),
-            event_tx,
-            chronological_projection,
-            self.protocol_extension.clone(),
-            self.turn_context.clone(),
-            execution_env_spec,
-            self.checkpoint_messages.clone(),
-        )
+        self.session
+            .code_execution_context(
+                &self.session_id,
+                &self.turn_pipeline.state().current_agent_frame_id,
+                manager.state_service(),
+                manager.lifecycle_service(),
+                manager.graph_service(),
+                manager.process_service(),
+                manager.process_cancel_ability(),
+                effect_controller,
+                direct_completions,
+                manager.trigger_router(),
+                event_tx,
+                chronological_projection,
+                self.protocol_extension.clone(),
+                self.turn_context.clone(),
+                execution_env_spec,
+                self.checkpoint_messages.clone(),
+            )
+            .map(|context| context.with_turn_phase_probe(self.turn_phase_probe.clone()))
     }
 }

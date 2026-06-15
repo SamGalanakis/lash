@@ -281,6 +281,7 @@ impl RuntimeExecutionContext<'_> {
         parent_invocation: Option<crate::RuntimeInvocation>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
+        let _phase = self.named_phase("rlm_process.await_handle");
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 result = self.dispatch.processes.await_process(

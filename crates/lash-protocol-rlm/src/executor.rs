@@ -71,10 +71,12 @@ async fn execute_code_inner(
     projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> ExecResponse {
     state.dirty = true;
-    let cached_program = match state
-        .linked_programs
-        .get_or_compile(code, ctx.lashlang_host_environment())
-    {
+    let cached_program = match {
+        let _phase = ctx.named_phase("rlm_lashlang.compile_link");
+        state
+            .linked_programs
+            .get_or_compile(code, ctx.lashlang_host_environment())
+    } {
         Ok(program) => program,
         Err(lashlang::LinkedProgramCacheError::Parse(err)) => {
             return ExecResponse {
@@ -107,10 +109,12 @@ async fn execute_code_inner(
             .stored_lashlang_modules
             .contains(&linked_module.module_ref)
     {
-        if let Err(err) = ctx
-            .put_lashlang_module_artifact(&linked_module.artifact)
-            .await
-        {
+        let stored = {
+            let _phase = ctx.named_phase("rlm_lashlang.store_module_artifact");
+            ctx.put_lashlang_module_artifact(&linked_module.artifact)
+                .await
+        };
+        if let Err(err) = stored {
             return ExecResponse {
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),
@@ -128,9 +132,11 @@ async fn execute_code_inner(
     }
     let compiled = cached_program.compiled_program();
 
-    if let Err(err) =
+    let rehydrated = {
+        let _phase = ctx.named_phase("rlm_lashlang.rehydrate_projected_globals");
         rehydrate_projected_globals(&mut state.rlm, Arc::clone(&projection_resolver)).await
-    {
+    };
+    if let Err(err) = rehydrated {
         return ExecResponse {
             observations: Vec::new(),
             observation_truncation: Vec::new(),
@@ -143,7 +149,8 @@ async fn execute_code_inner(
         };
     }
 
-    let projected =
+    let projected = {
+        let _phase = ctx.named_phase("rlm_lashlang.resolve_projected_bindings");
         match projected_bindings(&ctx, session_projected_bindings, projection_resolver).await {
             Ok(projected) => projected,
             Err(err) => {
@@ -158,7 +165,8 @@ async fn execute_code_inner(
                     terminal_finish: None,
                 };
             }
-        };
+        }
+    };
     let projected_names = projected.names().collect::<Vec<_>>();
     prune_projected_binding_names(&mut state.rlm, projected_names.iter().map(String::as_str));
     let tool_result_projectors = tool_result_projectors(&ctx);
@@ -168,7 +176,7 @@ async fn execute_code_inner(
         emit_foreground_execution_started(trace, &linked_module.artifact);
     }
     let host = HostBridge::new(
-        ctx,
+        ctx.clone(),
         state.observe_projection.clone(),
         tool_result_projectors,
         lashlang_execution_trace.clone(),
@@ -177,7 +185,10 @@ async fn execute_code_inner(
         .traced()
         .with_scratch(std::mem::take(&mut state.scratch))
         .with_projected_bindings(projected);
-    let result = Box::pin(lashlang::execute(compiled, &mut state.rlm, &env)).await;
+    let result = {
+        let _phase = ctx.named_phase("rlm_lashlang.execute");
+        Box::pin(lashlang::execute(compiled, &mut state.rlm, &env)).await
+    };
     state.scratch = env.take_recycled_scratch().unwrap_or_default();
     let runtime_failure = env.take_runtime_failure();
     if let Some(trace) = &lashlang_execution_trace {

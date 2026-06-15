@@ -26,6 +26,8 @@ pub struct DurableProcessWorkerConfig {
     pub session_store_factory: Arc<dyn SessionStoreFactory>,
     pub process_registry: Arc<dyn ProcessRegistry>,
     pub trigger_store: Arc<dyn crate::TriggerStore>,
+    #[doc(hidden)]
+    pub turn_phase_probe_slot: crate::runtime::RuntimeTurnPhaseProbeSlot,
     /// Residency for sessions the worker rebuilds to run a process. Defaults to
     /// [`Residency::KeepAll`]; a host running [`Residency::ActivePathOnly`] wires
     /// it here so the worker's rebuilt sessions trim to the active path too,
@@ -48,6 +50,7 @@ impl DurableProcessWorkerConfig {
             session_store_factory,
             process_registry,
             trigger_store: Arc::new(crate::InMemoryTriggerStore::default()),
+            turn_phase_probe_slot: crate::runtime::RuntimeTurnPhaseProbeSlot::default(),
             residency: crate::Residency::default(),
         }
     }
@@ -64,6 +67,15 @@ impl DurableProcessWorkerConfig {
 
     pub fn with_residency(mut self, residency: crate::Residency) -> Self {
         self.residency = residency;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_turn_phase_probe_slot(
+        mut self,
+        slot: crate::runtime::RuntimeTurnPhaseProbeSlot,
+    ) -> Self {
+        self.turn_phase_probe_slot = slot;
         self
     }
 
@@ -171,7 +183,20 @@ impl DurableProcessWorker {
                 control: None,
             });
         }
-        let runtime = self.runtime_for_registration(&registration).await?;
+        let mut runtime = self.runtime_for_registration(&registration).await?;
+        let probe_scope = registration.wake_target.as_ref().or_else(|| {
+            if let crate::ProcessOriginator::Session { scope } = &registration.provenance.originator
+            {
+                Some(scope)
+            } else {
+                None
+            }
+        });
+        if let Some(probe) =
+            probe_scope.and_then(|scope| self.config.turn_phase_probe_slot.get_for_scope(scope))
+        {
+            runtime.set_turn_phase_probe(probe);
+        }
         let manager = RuntimeSessionServices::new(&runtime, true, None).map_err(|err| {
             PluginError::Session(format!(
                 "failed to build runtime env for process `{}`: {err}",

@@ -74,13 +74,21 @@ impl ProcessWorkSource {
 pub(crate) struct ProcessWorkRunnerSlot {
     setup: ProcessWorkRunnerSetup,
     poke: tokio::sync::OnceCell<Option<ProcessWorkPoke>>,
+    phase_probe_slot: Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot>,
 }
 
 impl ProcessWorkRunnerSlot {
     fn new(setup: ProcessWorkRunnerSetup) -> Self {
+        let phase_probe_slot = match &setup {
+            ProcessWorkRunnerSetup::LazyDefault { config } => {
+                Some(config.turn_phase_probe_slot.clone())
+            }
+            ProcessWorkRunnerSetup::None | ProcessWorkRunnerSetup::External { .. } => None,
+        };
         Self {
             setup,
             poke: tokio::sync::OnceCell::new(),
+            phase_probe_slot,
         }
     }
 
@@ -100,6 +108,10 @@ impl ProcessWorkRunnerSlot {
             })
             .await
             .clone()
+    }
+
+    pub(crate) fn phase_probe_slot(&self) -> Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot> {
+        self.phase_probe_slot.clone()
     }
 }
 
@@ -790,6 +802,7 @@ impl LashCoreBuilder {
         // the preset factory (added per-mode by `build_plugin_host_for_mode`), so
         // a worker built from them would fail to rebuild a runtime ("missing
         // protocol session capability").
+        let phase_probe_slot = lash_core::runtime::RuntimeTurnPhaseProbeSlot::default();
         let config = Box::new(
             DurableProcessWorkerConfig::new(
                 Arc::new(worker_plugin_host.clone()),
@@ -803,7 +816,8 @@ impl LashCoreBuilder {
                     .cloned()
                     .unwrap_or_else(|| Arc::new(lash_core::InMemoryTriggerStore::default())),
             )
-            .with_residency(residency),
+            .with_residency(residency)
+            .with_turn_phase_probe_slot(phase_probe_slot),
         );
         Ok(ProcessWorkRunnerSetup::LazyDefault { config })
     }
