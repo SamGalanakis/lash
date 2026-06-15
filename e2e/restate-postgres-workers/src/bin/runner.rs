@@ -6,9 +6,9 @@ use lash_core::{
 use lash_postgres_store::PostgresStorage;
 use lash_restate::RestateProcessDeployment;
 use lash_restate_postgres_workers_e2e::{
-    ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_FINAL_TEXT,
-    ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
-    build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
+    ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
+    EXPECTED_FINAL_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse,
+    TurnScenario, build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
     process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use reqwest::StatusCode;
@@ -152,7 +152,18 @@ async fn main() -> Result<()> {
     wait_for_process_terminal(storage.pool(), &signal_process_id).await?;
     assert_signal_process_output(storage.pool(), &signal_process_id).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 8).await?;
+    let async_request = TurnRequest {
+        workflow_id: "e2e-async-completion".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::AsyncCompletion,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &async_request).await?;
+    let async_response =
+        wait_for_terminal_result(storage.pool(), &async_request.workflow_id).await?;
+    assert_async_completion_response(&async_response)?;
+
+    let responses = wait_for_terminal_results(storage.pool(), 9).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -595,6 +606,30 @@ fn assert_signal_suspend_setup_response(response: &TurnResponse) -> Result<Strin
     Ok(process_id.to_string())
 }
 
+fn assert_async_completion_response(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == EXPECTED_ASYNC_TEXT,
+        "workflow `{}` async final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    let async_value = response
+        .submitted_value
+        .get("async")
+        .context("async completion response missing async result")?;
+    anyhow::ensure!(
+        async_value.get("async").and_then(Value::as_bool) == Some(true),
+        "async completion result did not mark async=true: {}",
+        response.submitted_value
+    );
+    anyhow::ensure!(
+        async_value.get("value").and_then(Value::as_str) == Some("async:detached"),
+        "async completion value mismatch: {}",
+        response.submitted_value
+    );
+    Ok(())
+}
+
 async fn wait_for_queued_work(
     storage: &PostgresStorage,
     mock_provider_base_url: &str,
@@ -803,8 +838,8 @@ async fn assert_processes_terminal(pool: &sqlx::PgPool) -> Result<()> {
     .await
     .context("load process rows")?;
     anyhow::ensure!(
-        rows.len() >= 10,
-        "expected at least 10 process rows for kitchen sink + failover + trigger + signal, got {}",
+        rows.len() >= 11,
+        "expected at least 11 process rows for kitchen sink + failover + trigger + signal + async completion, got {}",
         rows.len()
     );
     let terminal = rows
@@ -822,6 +857,8 @@ async fn assert_processes_terminal(pool: &sqlx::PgPool) -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
     for needle in [
+        "async_child",
+        "async:detached",
         "parent",
         "child",
         "on_button",
@@ -970,6 +1007,7 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
     .await
     .context("list provider scenarios")?;
     for expected in [
+        "async_completion",
         "kitchen_sink",
         "queued_wake",
         "trigger_setup",
@@ -984,7 +1022,12 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
 }
 
 async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
-    for tool in ["app_lookup", "make_attachment", "crash_once"] {
+    for tool in [
+        "app_lookup",
+        "async_lookup",
+        "make_attachment",
+        "crash_once",
+    ] {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM lash_e2e_tool_events WHERE tool_name = $1")
                 .bind(tool)
@@ -993,6 +1036,25 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
                 .with_context(|| format!("count tool events for `{tool}`"))?;
         anyhow::ensure!(count > 0, "missing tool telemetry for `{tool}`");
     }
+    let async_resolutions: Vec<String> = sqlx::query_scalar(
+        "SELECT result_json
+         FROM lash_e2e_tool_events
+         WHERE tool_name = 'async_lookup.resolve'",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load async lookup resolution telemetry")?;
+    let accepted = async_resolutions
+        .iter()
+        .filter_map(|row| serde_json::from_str::<Value>(row).ok())
+        .any(|row| {
+            row.pointer("/outcome/status").and_then(Value::as_str) == Some("accepted")
+                && row.pointer("/result/value").and_then(Value::as_str) == Some("async:detached")
+        });
+    anyhow::ensure!(
+        accepted,
+        "async lookup did not record an accepted external resolution: {async_resolutions:?}"
+    );
     let turn_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lash_e2e_turn_events")
         .fetch_one(pool)
         .await
@@ -1016,8 +1078,8 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
     .await
     .context("count live replay checks")?;
     anyhow::ensure!(
-        live_replay_checks >= 4,
-        "expected live replay checks for four workflow turns, got {live_replay_checks}"
+        live_replay_checks >= 5,
+        "expected live replay checks for five workflow turns, got {live_replay_checks}"
     );
     Ok(())
 }
@@ -1178,6 +1240,7 @@ async fn assert_traces(trace_dir: &Path) -> Result<()> {
             }
             for needle in [
                 "app_lookup",
+                "async_lookup",
                 "make_attachment",
                 "crash_once",
                 "parent",

@@ -140,12 +140,14 @@ impl RuntimeTurnDriver<'_> {
                             cancel,
                         )
                         .await?;
-                    let dispatch_outcome = pending_resolution_outcome(
-                        prepared_for_completion.tool_name.clone(),
-                        prepared_for_completion.args.clone(),
-                        resolution,
-                        duration_ms,
-                    )?;
+                    let dispatch_outcome = prepare_context
+                        .pending_completion_dispatch_outcome(
+                            prepared_for_completion.tool_name.clone(),
+                            prepared_for_completion.args.clone(),
+                            resolution,
+                            duration_ms,
+                        )
+                        .await;
                     let completed = prepare_context
                         .complete_tool_call(
                             index,
@@ -156,6 +158,18 @@ impl RuntimeTurnDriver<'_> {
                         )
                         .await
                         .completed;
+                    send_turn_activity(
+                        event_tx,
+                        crate::TurnActivityId::new(format!("tool:{call_id}")),
+                        crate::TurnEvent::ToolCallCompleted {
+                            call_id: Some(call_id.clone()),
+                            name: completed.tool_name.clone(),
+                            args: completed.args.clone(),
+                            output: completed.output.clone(),
+                            duration_ms: completed.duration_ms,
+                        },
+                    )
+                    .await;
                     results.push(completed);
                 }
             }
@@ -292,22 +306,4 @@ impl RuntimeTurnDriver<'_> {
             .await?;
         RuntimeEffectOutcome::into_await_event(outcome)
     }
-}
-
-fn pending_resolution_outcome(
-    tool_name: String,
-    args: serde_json::Value,
-    resolution: crate::Resolution,
-    duration_ms: u64,
-) -> Result<crate::tool_dispatch::ToolDispatchOutcome, RuntimeEffectControllerError> {
-    let output = crate::tool_result::tool_output_from_completion_resolution(resolution);
-    Ok(crate::tool_dispatch::ToolDispatchOutcome {
-        record: crate::ToolCallRecord {
-            call_id: None,
-            tool: tool_name,
-            args,
-            output,
-            duration_ms,
-        },
-    })
 }

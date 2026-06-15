@@ -16,7 +16,7 @@ pub(crate) use context::{
 };
 pub(crate) use execution::{
     dispatch_prepared_tool_call_launch_with_execution_context,
-    dispatch_prepared_tool_call_with_execution_context,
+    finalize_tool_result_with_execution_context,
 };
 #[cfg(test)]
 pub(crate) use preparation::dispatch_tool_call;

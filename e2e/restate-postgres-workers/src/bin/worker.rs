@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lash_restate_postgres_workers_e2e::{
-    DEFAULT_SESSION_ID, EXPECTED_FINAL_TEXT, HealthResponse, TurnRequest, TurnResponse,
-    TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
+    DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT, EXPECTED_FINAL_TEXT, HealthResponse, TurnRequest,
+    TurnResponse, TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
     default_session_originator_scope_id, ensure_e2e_schema, env, process_registry_from_storage,
     record_terminal_result, record_turn_activity, record_worker_event, required_env,
     s3_store_from_env,
@@ -237,6 +237,7 @@ impl AppState {
                 TurnScenario::DrainQueued => "wake-consumed",
                 TurnScenario::SignalSuspend => "signal-suspend-started",
                 TurnScenario::SignalProcess => "signal-sent",
+                TurnScenario::AsyncCompletion => EXPECTED_ASYNC_TEXT,
             })
             .to_string();
         let response = TurnResponse {
@@ -371,6 +372,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         ),
         TurnScenario::SignalProcess => format!(
             "Signal the E2E process. workflow_id={} signal_process=true",
+            request.workflow_id
+        ),
+        TurnScenario::AsyncCompletion => format!(
+            "Run the E2E async host tool completion scenario. workflow_id={} async_completion=true",
             request.workflow_id
         ),
     }

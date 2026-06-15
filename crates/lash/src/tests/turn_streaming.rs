@@ -1014,6 +1014,92 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
 }
 
 #[tokio::test]
+async fn pending_host_tool_completion_parks_turn_and_resolves_through_core_ingress() -> Result<()> {
+    let (key_tx, key_rx) = oneshot::channel();
+    let events = Arc::new(RecordingEvents::default());
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(tool_roundtrip_provider())
+        .model(mock_model_spec())
+        .tools(Arc::new(PendingAppTools::new(key_tx)))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("pending-host-tool").open().await?;
+    let turn_session = session.clone();
+    let turn_events = Arc::clone(&events);
+    let mut turn = tokio::spawn(async move {
+        turn_session
+            .turn(TurnInput::text("use async tool"))
+            .stream_to(turn_events.as_ref())
+            .await
+    });
+
+    let key = tokio::time::timeout(std::time::Duration::from_secs(1), key_rx)
+        .await
+        .expect("pending tool should request completion key")
+        .expect("pending tool should send completion key");
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut turn)
+            .await
+            .is_err(),
+        "turn completed before external completion resolved"
+    );
+    assert!(
+        !events
+            .snapshot()
+            .await
+            .iter()
+            .any(|activity| matches!(&activity.event, TurnEvent::ToolCallCompleted { .. })),
+        "pending launch must not be projected as a completed tool result"
+    );
+
+    let resolution = serde_json::json!({ "ok": true, "async": true });
+    let accepted = core
+        .completions()
+        .resolve(key.clone(), lash_core::Resolution::Ok(resolution.clone()))
+        .await?;
+    assert_eq!(accepted, lash_core::ResolveOutcome::Accepted);
+
+    let result = turn.await.expect("turn task")?;
+    assert!(matches!(
+        result.outcome,
+        TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage { .. })
+    ));
+    assert_eq!(result.assistant_message(), Some("done"));
+    let events = events.snapshot().await;
+    assert_eq!(assistant_prose(&events), "done");
+    let tool_started = events
+        .iter()
+        .position(|activity| matches!(&activity.event, TurnEvent::ToolCallStarted { .. }))
+        .expect("tool start event");
+    let tool_completed = events
+        .iter()
+        .position(|activity| matches!(&activity.event, TurnEvent::ToolCallCompleted { .. }))
+        .expect("tool completion event");
+    assert!(tool_started < tool_completed);
+    let TurnEvent::ToolCallCompleted { output, .. } = &events[tool_completed].event else {
+        unreachable!();
+    };
+    assert_eq!(output.value_for_projection(), resolution);
+
+    let duplicate = core
+        .completions()
+        .resolve(
+            key,
+            lash_core::Resolution::Ok(serde_json::json!({ "ok": false })),
+        )
+        .await?;
+    assert!(matches!(
+        duplicate,
+        lash_core::ResolveOutcome::AlreadyResolved {
+            terminal: lash_core::Resolution::Ok(value)
+        } if value == resolution
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
     let core = standard_core();
     let session = core.session("semantic-events").open().await?;
@@ -1216,6 +1302,162 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
         unreachable!();
     };
     assert_eq!(value, &serde_json::json!("done"));
+    Ok(())
+}
+
+#[test]
+fn rlm_pending_host_tool_completion_resumes_lashlang_await() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-pending-host-tool-test", || {
+        rlm_pending_host_tool_completion_resumes_lashlang_await_inner()
+    })
+}
+
+async fn rlm_pending_host_tool_completion_resumes_lashlang_await_inner() -> Result<()> {
+    let (key_tx, key_rx) = oneshot::channel();
+    let events = Arc::new(RecordingEvents::default());
+    let core = explicit_ephemeral_facets(LashCore::rlm())
+        .provider(queued_text_provider(vec![
+            "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit value\n```",
+        ]))
+        .model(mock_model_spec())
+        .tools(Arc::new(PendingAppTools::new(key_tx)))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("rlm-pending-host-tool").open().await?;
+    let turn_session = session.clone();
+    let turn_events = Arc::clone(&events);
+    let mut turn = tokio::spawn(async move {
+        turn_session
+            .turn(TurnInput::text("await async app lookup"))
+            .stream_to(turn_events.as_ref())
+            .await
+    });
+
+    let key = tokio::time::timeout(std::time::Duration::from_secs(1), key_rx)
+        .await
+        .expect("pending RLM tool should request completion key")
+        .expect("pending RLM tool should send completion key");
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut turn)
+            .await
+            .is_err(),
+        "RLM turn completed before external completion resolved"
+    );
+    assert!(
+        !events
+            .snapshot()
+            .await
+            .iter()
+            .any(|activity| matches!(&activity.event, TurnEvent::ToolCallCompleted { .. })),
+        "pending RLM launch must not emit a completed tool result"
+    );
+
+    let payload = serde_json::json!({ "ok": true, "async": "rlm" });
+    let outcome = core
+        .completions()
+        .resolve(key, lash_core::Resolution::Ok(payload.clone()))
+        .await?;
+    assert_eq!(outcome, lash_core::ResolveOutcome::Accepted);
+
+    let result = turn.await.expect("turn task")?;
+    assert!(matches!(
+        result.outcome,
+        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+    ));
+    assert_eq!(result.submitted_value(), Some(&payload));
+    let events = events.snapshot().await;
+    let terminal_output = events
+        .iter()
+        .find_map(|activity| match &activity.event {
+            TurnEvent::SubmittedValue { value } => Some(value),
+            _ => None,
+        })
+        .expect("terminal submitted value");
+    assert_eq!(terminal_output, &payload);
+    Ok(())
+}
+
+#[test]
+fn rlm_process_pending_host_tool_completion_resumes_process_await() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-process-pending-host-tool-test", || {
+        rlm_process_pending_host_tool_completion_resumes_process_await_inner()
+    })
+}
+
+async fn rlm_process_pending_host_tool_completion_resumes_process_await_inner() -> Result<()> {
+    let (key_tx, key_rx) = oneshot::channel();
+    let events = Arc::new(RecordingEvents::default());
+    let core = explicit_ephemeral_facets(LashCore::rlm())
+        .provider(queued_text_provider(vec![
+            r#"```lashlang
+process lookup(tools: Tools) {
+  value = await tools.app_lookup({})?
+  finish value
+}
+handle = start lookup(tools: tools)
+result = (await handle)?
+submit result
+```"#,
+        ]))
+        .model(mock_model_spec())
+        .tools(Arc::new(PendingAppTools::new(key_tx)))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("rlm-process-pending-host-tool").open().await?;
+    let turn_session = session.clone();
+    let turn_events = Arc::clone(&events);
+    let mut turn = tokio::spawn(async move {
+        turn_session
+            .turn(TurnInput::text("start process with async app lookup"))
+            .stream_to(turn_events.as_ref())
+            .await
+    });
+
+    let key = tokio::time::timeout(std::time::Duration::from_secs(1), key_rx)
+        .await
+        .expect("pending process tool should request completion key")
+        .expect("pending process tool should send completion key");
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut turn)
+            .await
+            .is_err(),
+        "process-backed turn completed before external completion resolved"
+    );
+    assert!(
+        !events
+            .snapshot()
+            .await
+            .iter()
+            .any(|activity| matches!(&activity.event, TurnEvent::ToolCallCompleted { .. })),
+        "pending process tool launch must not emit a completed tool result"
+    );
+
+    let payload = serde_json::json!({ "ok": true, "async": "process" });
+    let outcome = core
+        .completions()
+        .resolve(key, lash_core::Resolution::Ok(payload.clone()))
+        .await?;
+    assert_eq!(outcome, lash_core::ResolveOutcome::Accepted);
+
+    let result = turn.await.expect("turn task")?;
+    assert!(matches!(
+        result.outcome,
+        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+    ));
+    assert_eq!(result.submitted_value(), Some(&payload));
+    let events = events.snapshot().await;
+    let terminal_output = events
+        .iter()
+        .find_map(|activity| match &activity.event {
+            TurnEvent::SubmittedValue { value } => Some(value),
+            _ => None,
+        })
+        .expect("terminal submitted value");
+    assert_eq!(terminal_output, &payload);
     Ok(())
 }
 

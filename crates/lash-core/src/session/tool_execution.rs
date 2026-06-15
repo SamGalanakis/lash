@@ -2,12 +2,12 @@ use super::execution_context::RuntimeExecutionContext;
 use crate::tool_dispatch::{
     ToolCallLaunch, ToolDispatchOutcome, ToolPreparationOutcome,
     dispatch_prepared_tool_call_launch_with_execution_context,
-    dispatch_prepared_tool_call_with_execution_context, prepare_tool_call_with_context,
+    finalize_tool_result_with_execution_context, prepare_tool_call_with_context,
     schedule_tool_batch,
 };
 use crate::{
     ModelToolReturn, SessionEvent, ToolCallOutput, ToolCallRecord, ToolCancellation, ToolFailure,
-    ToolFailureClass, TurnActivityId, TurnEvent,
+    ToolFailureClass, ToolResult, TurnActivityId, TurnEvent,
 };
 
 #[derive(Clone, Debug)]
@@ -144,7 +144,7 @@ impl RuntimeExecutionContext<'_> {
             args,
             replay: replay.clone(),
         };
-        let mut outcome =
+        let launch =
             match prepare_tool_call_with_context(&dispatch, pending, Some(call_id.clone())).await {
                 ToolPreparationOutcome::Prepared(prepared) => {
                     let dispatch_context = std::sync::Arc::new(dispatch.clone());
@@ -156,7 +156,7 @@ impl RuntimeExecutionContext<'_> {
                             .parent_invocation(parent_invocation.clone())
                             .lashlang_execution_call_site(lashlang_execution_call_site.clone())
                             .build();
-                    dispatch_prepared_tool_call_with_execution_context(
+                    dispatch_prepared_tool_call_launch_with_execution_context(
                         dispatch_context.as_ref(),
                         prepared,
                         None,
@@ -164,8 +164,20 @@ impl RuntimeExecutionContext<'_> {
                     )
                     .await
                 }
-                ToolPreparationOutcome::Completed(outcome) => *outcome,
+                ToolPreparationOutcome::Completed(outcome) => ToolCallLaunch::Done(*outcome),
             };
+        let mut outcome = match launch {
+            ToolCallLaunch::Done(outcome) => outcome,
+            ToolCallLaunch::Pending(pending) => {
+                self.await_pending_tool_dispatch_outcome(
+                    &call_id,
+                    parent_invocation.clone(),
+                    pending,
+                    self.cancellation_token.clone(),
+                )
+                .await
+            }
+        };
         outcome.record.call_id = Some(call_id.clone());
 
         self.complete_tool_call(index, call_id, replay, outcome, tool_correlation_id)
@@ -359,6 +371,105 @@ impl RuntimeExecutionContext<'_> {
             },
             record,
         }
+    }
+
+    pub(crate) async fn pending_completion_dispatch_outcome(
+        &self,
+        tool_name: String,
+        args: serde_json::Value,
+        resolution: crate::Resolution,
+        duration_ms: u64,
+    ) -> ToolDispatchOutcome {
+        let output = crate::tool_result::tool_output_from_completion_resolution(resolution);
+        let result = finalize_tool_result_with_execution_context(
+            self.dispatch.as_ref(),
+            &tool_name,
+            &args,
+            ToolResult::from_output(output),
+            duration_ms,
+        )
+        .await;
+        let output = result.into_done_output().unwrap_or_else(|_| {
+            ToolCallOutput::failure(ToolFailure::runtime(
+                ToolFailureClass::Internal,
+                "pending_tool_not_finalized",
+                "pending tool result reached a completed-output projection path",
+            ))
+        });
+        ToolDispatchOutcome {
+            record: ToolCallRecord {
+                call_id: None,
+                tool: tool_name,
+                args,
+                output,
+                duration_ms,
+            },
+        }
+    }
+
+    async fn await_pending_tool_dispatch_outcome(
+        &self,
+        call_id: &str,
+        parent_invocation: Option<crate::RuntimeInvocation>,
+        pending: crate::tool_dispatch::PendingToolDispatchOutcome,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> ToolDispatchOutcome {
+        let fallback = crate::RuntimeInvocation::effect(
+            crate::RuntimeScope::new(&self.dispatch.session_id),
+            format!("tool:{call_id}:await"),
+            crate::RuntimeEffectKind::AwaitEvent,
+            format!("tool:{call_id}:await"),
+        );
+        let parent = parent_invocation.as_ref().unwrap_or(&fallback);
+        let parent_effect_id = parent.effect_id().unwrap_or("tool");
+        let invocation = crate::runtime::causal::child_effect_invocation(
+            parent,
+            format!("{parent_effect_id}:{call_id}:await"),
+            crate::RuntimeEffectKind::AwaitEvent,
+            format!("{call_id}:await"),
+        );
+        let cancellation = cancellation.unwrap_or_else(tokio_util::sync::CancellationToken::new);
+        let deadline = pending
+            .pending
+            .deadline
+            .map(|duration| std::time::Instant::now() + duration);
+        let outcome = self
+            .dispatch
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::AwaitEvent { key: pending.key },
+                ),
+                crate::RuntimeEffectLocalExecutor::await_event(cancellation, deadline),
+            )
+            .await;
+        let resolution = match outcome.and_then(crate::RuntimeEffectOutcome::into_await_event) {
+            Ok(resolution) => resolution,
+            Err(err) => {
+                return ToolDispatchOutcome {
+                    record: ToolCallRecord {
+                        call_id: None,
+                        tool: pending.tool_name,
+                        args: pending.args,
+                        output: ToolCallOutput::failure(ToolFailure::runtime(
+                            ToolFailureClass::Internal,
+                            "pending_tool_completion_failed",
+                            err.to_string(),
+                        )),
+                        duration_ms: pending.duration_ms,
+                    },
+                };
+            }
+        };
+        self.pending_completion_dispatch_outcome(
+            pending.tool_name,
+            pending.args,
+            resolution,
+            pending.duration_ms,
+        )
+        .await
     }
 
     pub async fn call_tool(

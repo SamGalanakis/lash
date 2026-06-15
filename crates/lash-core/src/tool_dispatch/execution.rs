@@ -101,11 +101,30 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
         }
     };
 
-    let result = match context
+    let result = finalize_tool_result_with_execution_context(
+        context,
+        &tool_name,
+        &args,
+        result,
+        duration_ms,
+    )
+    .await;
+
+    launch_done(outcome(tool_name, args, result, duration_ms))
+}
+
+pub(crate) async fn finalize_tool_result_with_execution_context(
+    context: &ToolDispatchContext<'_>,
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: ToolResult,
+    duration_ms: u64,
+) -> ToolResult {
+    match context
         .plugins
         .after_tool_call(ToolResultHookContext::new(
             context.session_id.clone(),
-            tool_name.clone(),
+            tool_name.to_string(),
             args.clone(),
             result.clone(),
             duration_ms,
@@ -120,9 +139,7 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
             "after_tool_call_failed",
             err.to_string(),
         ),
-    };
-
-    launch_done(outcome(tool_name, args, result, duration_ms))
+    }
 }
 
 trait ToolCallLaunchExt {

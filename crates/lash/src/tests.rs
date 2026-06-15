@@ -481,6 +481,41 @@ impl ToolProvider for AppTools {
     }
 }
 
+struct PendingAppTools {
+    key_tx: StdMutex<Option<oneshot::Sender<lash_core::AwaitEventKey>>>,
+}
+
+impl PendingAppTools {
+    fn new(key_tx: oneshot::Sender<lash_core::AwaitEventKey>) -> Self {
+        Self {
+            key_tx: StdMutex::new(Some(key_tx)),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for PendingAppTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![app_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(app_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        assert_eq!(call.name, "app_lookup");
+        let key = match call.context.completion_key().await {
+            Ok(key) => key,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        if let Some(tx) = self.key_tx.lock().expect("pending tool key tx").take() {
+            let _ = tx.send(key);
+        }
+        lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
+    }
+}
+
 struct AgentFrameSwitchTools;
 
 #[async_trait]
