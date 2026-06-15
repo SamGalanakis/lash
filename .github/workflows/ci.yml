@@ -25,17 +25,12 @@ env:
   CARGO_TERM_COLOR: always
   # One feature set for every cargo invocation in this workflow so the
   # dependency graph resolves (and compiles) exactly once per profile.
-  # fff-zlob is required wherever fff-search is built (its build.rs needs the
-  # zig-backed zlob under CI); bench keeps lash-cli's UI-bench code compiling
+  # fff-zlob is required by the CLI-owned grep crate (fff-search build.rs needs
+  # the zig-backed zlob under CI); bench keeps lash-cli's UI-bench code compiling
   # on every push without running the heavyweight performance guard in CI/CD.
   LASH_CI_FEATURES: >-
-    -F lash-tools/fff-zlob
-    -F lash-standard-plugins/fff-zlob
     -F lash-cli/fff-zlob
     -F lash-cli/bench
-    -F lash-perf/fff-zlob
-    -F docs-snippets/fff-zlob
-    -F agent-workbench/fff-zlob
 
 jobs:
   test:

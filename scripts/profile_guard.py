@@ -68,7 +68,13 @@ def parse_args() -> argparse.Namespace:
         "--cargo-feature",
         action="append",
         default=[],
-        help="Additional Cargo feature to enable when building lash-cli.",
+        help="Additional Cargo feature to enable for all built benchmark binaries.",
+    )
+    parser.add_argument(
+        "--cli-cargo-feature",
+        action="append",
+        default=[],
+        help="Additional Cargo feature to enable only when building lash-cli/UI benchmarks.",
     )
     parser.add_argument(
         "--stack-scenario",
@@ -205,6 +211,8 @@ def stack_cmd(args: argparse.Namespace, root: Path, out: Path) -> list[str]:
 def ui_cmd(args: argparse.Namespace, root: Path, out: Path) -> list[str]:
     cmd = [*script_cmd("profile_ui.py", root), "--profile", args.profile, f"--out={out}"]
     append_common_binary_args(cmd, args)
+    for feature in args.cli_cargo_feature:
+        cmd.extend(["--cargo-feature", feature])
     if args.ui_runs is not None:
         cmd.append(f"--runs={args.ui_runs}")
     if args.ui_warmups is not None:

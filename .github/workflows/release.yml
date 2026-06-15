@@ -70,9 +70,9 @@ jobs:
       #
       # --no-verify: skip the per-crate verify-build. It is both unnecessary and
       # broken here — the release is cut from a fully CI-tested `main`, and the
-      # verify-build compiles fff-search (a transitive dep of lash-tools)
-      # whose build.rs panics under CI unless its non-default, zig-backed `zlob`
-      # feature is enabled. Skipping verification packages + uploads the
+      # verify-build compiles fff-search through the CLI-only lash-search-tools
+      # crate. Its build.rs panics under CI unless the non-default, zig-backed
+      # `zlob` feature is enabled. Skipping verification packages + uploads the
       # already-built code directly, needing no compile toolchain.
       #
       # Auth: a crates.io API token in the CARGO_REGISTRY_TOKEN secret. This is

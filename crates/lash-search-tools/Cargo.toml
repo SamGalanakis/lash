@@ -1,5 +1,5 @@
 [package]
-name = "lash-tools"
+name = "lash-search-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,25 +9,22 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Built-in tool suite (patch, files, shell, web) for the lash agent runtime."
-keywords = ["lash", "agent", "tools", "llm", "runtime"]
+description = "CLI-only fff-backed local search tools for the lash agent runtime."
+keywords = ["lash", "agent", "search", "tools", "cli"]
 categories = ["asynchronous", "development-tools"]
 
 [features]
 default = []
+fff-zlob = ["fff-search/zlob"]
 
 [dependencies]
 lash-core = { workspace = true }
 lash-tool-support = { workspace = true }
 async-trait = { workspace = true }
-globset = "0.4"
-libc = "0.2"
-pdf-extract = "0.7"
-portable-pty = "0.9"
+fff-search = { version = "=0.6.2-nightly.a677d64", default-features = false }
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]

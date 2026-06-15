@@ -50,7 +50,7 @@ jobs:
 
       - name: Run full performance guard
         run: |
-          python3 scripts/profile_guard.py --profile full --release --cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
+          python3 scripts/profile_guard.py --profile full --release --cli-cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
 
       - name: Publish performance guard summary
         run: |

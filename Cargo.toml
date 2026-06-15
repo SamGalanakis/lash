@@ -24,6 +24,7 @@ members = [
     "crates/lash-llm-tools",
     "crates/lash-tool-support",
     "crates/lash-tools",
+    "crates/lash-search-tools",
     "crates/lash-standard-plugins",
     "crates/lash-provider-anthropic",
     "crates/lash-provider-google",
@@ -151,6 +152,7 @@ lash-rlm-types = { path = "crates/lash-rlm-types", version = "=0.1.0-alpha.47" }
 lash-sansio = { path = "crates/lash-sansio", version = "=0.1.0-alpha.47" }
 lash-standard-plugins = { path = "crates/lash-standard-plugins", version = "=0.1.0-alpha.47" }
 lash-subagents = { path = "crates/lash-subagents", version = "=0.1.0-alpha.47" }
+lash-search-tools = { path = "crates/lash-search-tools", version = "=0.1.0-alpha.47" }
 lash-tool-support = { path = "crates/lash-tool-support", version = "=0.1.0-alpha.47" }
 lash-tools = { path = "crates/lash-tools", version = "=0.1.0-alpha.47" }
 lash-trace = { path = "crates/lash-trace", version = "=0.1.0-alpha.47" }

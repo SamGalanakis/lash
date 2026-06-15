@@ -1532,4 +1532,4 @@ fn first_match_text(matched: &GrepMatch) -> String {
     matched.line_content[start..end].to_string()
 }
 
-include!("search/tests.rs");
+include!("tests.rs");

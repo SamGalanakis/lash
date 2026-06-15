@@ -2504,6 +2504,7 @@ dependencies = [
  "lash-provider-openai",
  "lash-rlm-types",
  "lash-runtime",
+ "lash-search-tools",
  "lash-sqlite-store",
  "lash-standard-plugins",
  "lash-subagents",
@@ -2958,6 +2959,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-search-tools"
+version = "0.1.0-alpha.47"
+dependencies = [
+ "async-trait",
+ "fff-search",
+ "lash-core",
+ "lash-tool-support",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "lash-sqlite-store"
 version = "0.1.0-alpha.47"
 dependencies = [
@@ -3029,7 +3045,6 @@ name = "lash-tools"
 version = "0.1.0-alpha.47"
 dependencies = [
  "async-trait",
- "fff-search",
  "globset",
  "lash-core",
  "lash-tool-support",

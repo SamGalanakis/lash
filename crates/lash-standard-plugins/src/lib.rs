@@ -11,7 +11,6 @@ use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
 use lash_tools::apply_patch::apply_patch_provider;
 use lash_tools::files::{glob_provider, ls_provider, read_file_provider};
-use lash_tools::search::grep_provider;
 use lash_tools::shell::StandardShellPluginFactory;
 use lash_tools::web::{fetch_url_provider, web_search_provider};
 pub use rolling_history::RollingHistoryConfig;
@@ -125,10 +124,6 @@ fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: boo
         "ls",
         PluginSpec::new().with_tool_provider(Arc::new(ls_provider()) as Arc<dyn ToolProvider>),
     )));
-    stack.push(Arc::new(StaticPluginFactory::new(
-        "grep",
-        PluginSpec::new().with_tool_provider(Arc::new(grep_provider()) as Arc<dyn ToolProvider>),
-    )));
 }
 
 fn push_web_tools(stack: &mut PluginStack, tavily_api_key: String) {
@@ -222,6 +217,13 @@ mod tests {
         assert!(!without_web.contains(&"search_web"));
         assert!(with_web.contains(&"search_web"));
         assert!(with_web.contains(&"fetch_url"));
+    }
+
+    #[test]
+    fn standard_stack_does_not_install_cli_local_grep() {
+        let ids = stack_ids(&standard_tool_stack(StandardToolStackOptions::default()));
+
+        assert!(!ids.contains(&"grep"));
     }
 
     #[test]

@@ -5,15 +5,13 @@
 //!
 //! - [`apply_patch`] — `files.patch` envelope-diff editing
 //! - [`files`] — `files.read` / `files.ls` / `files.glob`
-//! - `search` — ripgrep/fff-backed `search.grep` (behind the default
-//!   `search` feature; disable default features to drop the fff-search
-//!   build dependency)
 //! - [`shell`] — `shell.exec` / `shell.start` / `shell.write`
 //! - [`web`] — `web.fetch` / `web.search`
+//!
+//! CLI-owned local grep lives in the separate `lash-search-tools` crate so
+//! non-CLI hosts do not inherit the fff-search build dependency.
 
 pub mod apply_patch;
 pub mod files;
-#[cfg(feature = "search")]
-pub mod search;
 pub mod shell;
 pub mod web;

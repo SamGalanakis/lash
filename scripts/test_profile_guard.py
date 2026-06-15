@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +16,32 @@ import profile_runtime_stack  # noqa: E402
 
 
 class ProfileGuardCoverageTests(unittest.TestCase):
+    def test_cli_cargo_feature_only_routes_to_ui_lane(self) -> None:
+        args = argparse.Namespace(
+            release=True,
+            profile="quick",
+            cargo_feature=["common"],
+            cli_cargo_feature=["fff-zlob"],
+            runtime_runs=None,
+            runtime_warmups=None,
+            runtime_turns=None,
+            runtime_scenario=[],
+            ui_runs=None,
+            ui_warmups=None,
+            ui_scenario=[],
+            enforce=False,
+            dhat_frames=24,
+        )
+        root = Path("/repo")
+
+        runtime = profile_guard.runtime_cmd(args, root, Path("/tmp/runtime.json"))
+        ui = profile_guard.ui_cmd(args, root, Path("/tmp/ui.json"))
+
+        self.assertIn("common", runtime)
+        self.assertNotIn("fff-zlob", runtime)
+        self.assertIn("common", ui)
+        self.assertIn("fff-zlob", ui)
+
     def test_async_completion_scenarios_are_in_default_perf_coverage(self) -> None:
         self.assertIn(
             "rlm_process_async_tool_completion",

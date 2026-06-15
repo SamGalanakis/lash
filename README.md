@@ -174,13 +174,13 @@ just perf-guard
 That guard runs the quick runtime profile, runtime stack-sensitivity checks at the 2 MiB budget, UI perf budgets, and the Lashlang perf/profile sweep. Runtime coverage includes standard mode, RLM, RLM tool batches, large tool catalogs, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect-controller turns, store reopen, sans-IO turn-checkpoint round trips, live replay pressure, and JSONL trace-sink overhead. For deeper investigations, run the full guard locally, including DHAT runtime heap attribution:
 
 ```bash
-python3 scripts/profile_guard.py --profile full --release --cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
+python3 scripts/profile_guard.py --profile full --release --cli-cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
 ```
 
 For focused runtime, UI, or Lashlang regressions, the primitive profilers remain available:
 
 ```bash
-python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
+python3 scripts/profile_runtime.py --profile full --release --out .benchmarks/runtime-perf/full.json
 python3 scripts/profile_ui.py --profile full --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/ui-perf/full.json
 python3 scripts/profile_lashlang.py --iterations 2500 --profile-iterations 2500 --out .benchmarks/lashlang-perf/full.json
 ```

@@ -8,7 +8,6 @@ description = "Compiled sources for the Rust code blocks in docs/*.html. cargo c
 
 [features]
 default = []
-fff-zlob = ["lash-standard-plugins/fff-zlob"]
 
 [dependencies]
 anyhow = { workspace = true }
