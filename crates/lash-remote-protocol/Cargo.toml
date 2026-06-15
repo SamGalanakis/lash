@@ -16,6 +16,7 @@ categories = ["api-bindings", "data-structures"]
 [dependencies]
 base64 = { workspace = true }
 lash-core = { workspace = true, optional = true }
+lashlang = { workspace = true, optional = true }
 schemars = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -23,9 +24,8 @@ thiserror = { workspace = true }
 
 [features]
 default = []
-core-conversions = ["dep:lash-core"]
+core-conversions = ["dep:lash-core", "dep:lashlang"]
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
-lashlang = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

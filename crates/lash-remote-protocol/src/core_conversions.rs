@@ -17,6 +17,7 @@ use lash_core::llm::types as core_llm;
 use super::*;
 
 include!("core_conversions/triggers.rs");
+include!("core_conversions/processes.rs");
 include!("core_conversions/turn_input.rs");
 include!("core_conversions/llm.rs");
 include!("core_conversions/turn_result.rs");

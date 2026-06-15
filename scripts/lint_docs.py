@@ -24,6 +24,7 @@ DOCS_JS = DOCS / "docs.js"
 MOVED_STUBS = {
     "architecture.html",
     "architecture/execution-modes.html",
+    "plugins-tools.html",
 }
 
 
@@ -194,8 +195,7 @@ def check_registry(errors: list[str], pages: dict[Path, PageParser]) -> list[str
         for path, parser in pages.items()
         if "docs-page" in (path.read_text(encoding="utf-8").split("<body", 1)[1].split(">", 1)[0])
     }
-    expected.discard("architecture.html")
-    expected.discard("architecture/execution-modes.html")
+    expected.difference_update(MOVED_STUBS)
     missing = sorted(expected - set(canonical))
     extra = sorted(set(canonical) - expected)
     for href in missing:

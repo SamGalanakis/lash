@@ -41,6 +41,7 @@ testing = ["lash-core/testing"]
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
+lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 lashlang = { workspace = true }
 lash-subagents = { workspace = true }
 lash-sqlite-store = { workspace = true }

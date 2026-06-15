@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,7 @@ include!("protocol/version.rs");
 include!("protocol/llm.rs");
 include!("protocol/turn_input.rs");
 include!("protocol/observations.rs");
+include!("protocol/processes.rs");
 include!("protocol/triggers.rs");
 include!("protocol/turn_result.rs");
 include!("protocol/prompt.rs");

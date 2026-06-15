@@ -707,6 +707,9 @@ mod tests {
             .await
             .expect("open session");
         register_test_trigger(&session).await;
+        let trigger_records =
+            assert_remote_trigger_subscription_records_round_trip(&data_dir, &session_id).await;
+        assert_eq!(trigger_records.len(), 1);
         let tool_names = session
             .tools()
             .active_manifests()
@@ -719,6 +722,7 @@ mod tests {
         assert!(!tool_names.iter().any(|name| name == &removed_tool_name));
 
         let report = emit_test_button_trigger(&core, ButtonChoice::Red).await;
+        assert_remote_trigger_emit_report_round_trip(&report);
 
         assert_eq!(report.started_process_ids.len(), 1);
         process_registry
@@ -750,6 +754,14 @@ mod tests {
             reopened_handles[0].status
         );
         drop(reopened);
+
+        assert_remote_started_process_surface(
+            &core,
+            process_registry.as_ref(),
+            &session_id,
+            &report.started_process_ids,
+        )
+        .await;
 
         let process_observer = core
             .processes()
@@ -1088,6 +1100,11 @@ mod tests {
             .expect("open old session");
         register_test_trigger(&session).await;
         let started = emit_test_button_trigger(&state.core, ButtonChoice::Red).await;
+        assert_remote_trigger_emit_report_round_trip(&started);
+        let trigger_records =
+            assert_remote_trigger_subscription_records_round_trip(&data_dir, &old_session_id)
+                .await;
+        assert_eq!(trigger_records.len(), 1);
         assert_eq!(started.started_process_ids.len(), 1);
         let old_process_scope = session.observe().process_scope();
         assert_eq!(
@@ -1110,6 +1127,13 @@ mod tests {
             ),
         );
         assert_eq!(state.lashlang_execution.graphs().len(), 1);
+        assert_remote_started_process_surface(
+            &state.core,
+            process_registry.as_ref(),
+            &old_session_id,
+            &started.started_process_ids,
+        )
+        .await;
         state
             .mail_world
             .add_account("Reset Probe")
@@ -1737,6 +1761,182 @@ mod tests {
             output.submitted_value(),
             Some(&serde_json::json!("registered"))
         );
+    }
+
+    async fn assert_remote_trigger_subscription_records_round_trip(
+        data_dir: &std::path::Path,
+        session_id: &str,
+    ) -> Vec<lash_core::TriggerSubscriptionRecord> {
+        let store = lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
+            .await
+            .expect("open trigger store for remote DTO round trip");
+        let filter = lash_core::TriggerSubscriptionFilter::for_session(session_id);
+        let remote_filter = lash_remote_protocol::RemoteTriggerSubscriptionFilter::from(
+            filter.clone(),
+        );
+        remote_filter
+            .validate()
+            .expect("remote trigger subscription filter should validate");
+        let round_trip_filter: lash_core::TriggerSubscriptionFilter = remote_filter
+            .try_into()
+            .expect("remote trigger subscription filter should convert back");
+        assert_eq!(round_trip_filter, filter);
+
+        let records = lash_core::TriggerStore::list_subscriptions(&store, filter)
+            .await
+            .expect("list persisted trigger subscriptions for remote DTO round trip");
+        let remote_list =
+            lash_remote_protocol::RemoteTriggerListSubscriptionsResponse::from(records.clone());
+        remote_list
+            .validate()
+            .expect("remote trigger subscription list should validate");
+        let round_trip_records: Vec<lash_core::TriggerSubscriptionRecord> = remote_list
+            .try_into()
+            .expect("remote trigger subscription list should convert back");
+        assert_eq!(round_trip_records, records);
+
+        for record in &records {
+            let remote_record =
+                lash_remote_protocol::RemoteTriggerSubscriptionRecord::from(record.clone());
+            remote_record
+                .validate("WorkbenchTriggerSubscription")
+                .expect("remote trigger subscription record should validate");
+            let round_trip_record: lash_core::TriggerSubscriptionRecord = remote_record
+                .try_into()
+                .expect("remote trigger subscription record should convert back");
+            assert_eq!(&round_trip_record, record);
+
+            let remote_result =
+                lash_remote_protocol::RemoteTriggerRegisterSubscriptionResult::from(
+                    record.clone(),
+                );
+            remote_result
+                .validate()
+                .expect("remote trigger register result should validate");
+            let round_trip_result: lash_core::TriggerSubscriptionRecord = remote_result
+                .try_into()
+                .expect("remote trigger register result should convert back");
+            assert_eq!(&round_trip_result, record);
+        }
+
+        records
+    }
+
+    fn assert_remote_trigger_emit_report_round_trip(
+        report: &lash::triggers::TriggerEmitReport,
+    ) {
+        let remote = lash_remote_protocol::RemoteTriggerEmitReport::from(report.clone());
+        remote
+            .validate()
+            .expect("remote trigger emit report should validate");
+        let round_trip: lash_core::TriggerEmitReport = remote
+            .try_into()
+            .expect("remote trigger emit report should convert back");
+        assert_eq!(&round_trip, report);
+    }
+
+    async fn assert_remote_started_process_surface(
+        core: &LashCore,
+        registry: &dyn lash::process::ProcessRegistry,
+        session_id: &str,
+        process_ids: &[String],
+    ) {
+        let filter = lash_core::ProcessListFilter {
+            definition: None,
+            status: lash_core::ProcessStatusFilter::Any,
+            waiting: None,
+        };
+        let observed = core
+            .processes()
+            .list(&filter)
+            .await
+            .expect("list observed processes for remote DTO round trip");
+        let remote_list =
+            lash_remote_protocol::RemoteProcessListResponse::try_from(observed.clone())
+                .expect("observed process list should convert to remote DTO");
+        remote_list
+            .validate()
+            .expect("remote process list should validate");
+        let round_trip_observed: Vec<lash_core::ObservedProcess> = remote_list
+            .try_into()
+            .expect("remote process list should convert back");
+        for process_id in process_ids {
+            assert!(
+                round_trip_observed
+                    .iter()
+                    .any(|process| process.process_id == *process_id),
+                "remote process list did not include started process {process_id}"
+            );
+        }
+
+        let snapshot = core
+            .processes()
+            .session_snapshot(session_id)
+            .await
+            .expect("capture process work snapshot for remote DTO round trip");
+        let remote_snapshot =
+            lash_remote_protocol::RemoteProcessWorkSnapshot::try_from(snapshot)
+                .expect("process work snapshot should convert to remote DTO");
+        remote_snapshot
+            .validate()
+            .expect("remote process work snapshot should validate");
+        let round_trip_snapshot: lash_core::ProcessWorkSnapshot = remote_snapshot
+            .try_into()
+            .expect("remote process work snapshot should convert back");
+        assert_eq!(round_trip_snapshot.session_id, session_id);
+        for process_id in process_ids {
+            assert!(
+                round_trip_snapshot
+                    .visible_process_ids
+                    .iter()
+                    .any(|visible_id| visible_id == process_id),
+                "remote process work snapshot did not include started process {process_id}"
+            );
+        }
+
+        for process_id in process_ids {
+            let record = registry
+                .get_process(process_id)
+                .await
+                .expect("started process record should exist");
+            let remote_record = lash_remote_protocol::RemoteProcessRecord::try_from(record)
+                .expect("started process record should convert to remote DTO");
+            remote_record
+                .validate("WorkbenchStartedProcessRecord")
+                .expect("remote started process record should validate");
+            let round_trip_record: lash_core::ProcessRecord = remote_record
+                .try_into()
+                .expect("remote started process record should convert back");
+            assert_eq!(&round_trip_record.id, process_id);
+
+            let events = registry
+                .recent_events(process_id, 32)
+                .await
+                .expect("load started process event tail for remote DTO round trip");
+            let expected_tail = events
+                .iter()
+                .map(|event| (event.sequence, event.event_type.clone()))
+                .collect::<Vec<_>>();
+            let remote_events = lash_remote_protocol::RemoteProcessEventsResponse::from((
+                process_id.clone(),
+                events,
+            ));
+            remote_events
+                .validate()
+                .expect("remote started process event tail should validate");
+            let (round_trip_process_id, round_trip_events): (
+                String,
+                Vec<lash_core::ProcessEvent>,
+            ) = remote_events
+                .try_into()
+                .expect("remote started process event tail should convert back");
+            let round_trip_tail = round_trip_events
+                .iter()
+                .map(|event| (event.sequence, event.event_type.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(round_trip_process_id, *process_id);
+            assert_eq!(round_trip_tail, expected_tail);
+        }
     }
 
     async fn emit_test_button_trigger(

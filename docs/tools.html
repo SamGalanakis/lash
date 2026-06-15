@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>tools · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=11">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=7" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#content">skip to content</a>
+<section class="opener">
+    <h1 class="opener__title">tools</h1>
+    <p class="opener__lede">Expose host capabilities as model-callable operations. Implement <code>ToolProvider</code> directly for ordinary tools, or register a provider from a plugin when the tool also needs plugin state, prompts, hooks, or catalog policy.</p>
+  </section>
+
+  <main class="body" id="content">
+        <div class="section" id="where-tools-live">
+          <div class="section-header">
+            <h2>Where Tools Live</h2>
+            <p>Tools are a runtime surface, not a plugin requirement. Start with a <code>ToolProvider</code>; add a plugin only when the provider is part of deeper runtime behavior.</p>
+          </div>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">direct provider</div>
+              <div class="listing__body"><p>Use <code>LashCoreBuilder::tools(Arc::new(MyTools))</code> or the core/session tool admin when the tool is just a callable host operation. This is the common path for app-owned APIs, database actions, file operations, search, and remote-service wrappers.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">plugin provider</div>
+              <div class="listing__body"><p>Register the provider through <code>reg.tools().provider(...)</code> when the tool travels with plugin-owned prompt context, turn hooks, tool-result projection, typed per-turn input, or resumable session-local state. The tool still executes through the same <code>ToolProvider</code> contract.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">remote work</div>
+              <div class="listing__body"><p>The remote protocol can describe granted tool surfaces, but it does not execute tools for you. If a tool calls HTTP, a queue, a workflow, or another service, put that client code inside a normal <code>ToolProvider</code> and keep the runtime-facing contract local.</p></div>
+            </div>
+          </div>
+        </div>
+
+<div class="section" id="toolcall-shape">
+          <div class="section-header">
+            <h2>The <code>ToolCall&lt;'_&gt;</code> Shape</h2>
+            <p>Every <code>execute()</code> call receives a borrowed view of the invocation. Don't store the reference — copy what you need into owned types.</p>
+          </div>
+          <pre data-lang="rust"><code>pub struct ToolCall&lt;'a&gt; {
+    pub name: &amp;'a str,                           // Advertised tool name the model called
+    pub args: &amp;'a serde_json::Value,             // Deserialized JSON args
+    pub context: &amp;'a ToolContext&lt;'a&gt;,            // Explicit session/tool capabilities
+    pub progress: Option&lt;&amp;'a ProgressSender&gt;,    // For streaming progress updates
+}</code></pre>
+          <p>Tools receive plain JSON arguments. In RLM mode, host-projected Lashlang values are normalized through each tool's <code>ToolArgumentProjectionPolicy</code> before schema validation and before <code>execute()</code>; ordinary tools use the default materializing policy and should not know about the internal projection marker. Projection-aware RLM control tools declare <code>PreserveProjectedRefsInField { field: "seed" }</code>, so only root <code>seed</code> entries keep projected wrappers and ref-backed entries keep <code>{"__projection_ref__": ...}</code> for child or AgentFrames.</p>
+          <p>Typed per-turn input passed via <code>TurnBuilder::with_plugin_input</code> is read off the turn context, not the execute-time <code>ToolContext</code>: a tool's <code>prepare_tool_call</code> sees it through <code>ctx.plugin_input::&lt;MyInput&gt;("plugin_id")</code> on the <code>ToolPrepareContext</code>, and hooks read the same value from their <code>TurnContext</code>. See the <a href="./embedding-prompts.html#typed-plugin-input">Lash API · prompts</a> guide's "Typed Plugin Input" section for the matching <code>PluginBinding</code> pattern.</p>
+        </div>
+
+        <div class="section" id="tool-capabilities">
+          <div class="section-header">
+            <h2>Tool Capabilities</h2>
+            <p><code>ToolContext</code> exposes named capabilities instead of a broad runtime host handle. Tools ask for exactly the capability they need: the current model, the current session snapshot, the searchable tool catalog, dynamic tool availability, child-session client, process admin, process event append, borrowed durable effects, or a direct completion.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Method</th><th>Use it for</th></tr></thead>
+              <tbody>
+                <tr><td><code>context.sessions().model().await?</code></td><td>Read the active session's concrete <code>model</code> and optional <code>model_variant</code>. Use this before building a <code>DirectRequest</code> that should match the current session.</td></tr>
+                <tr><td><code>context.sessions().snapshot_current().await?</code></td><td>Read the current session snapshot when a tool truly needs more than model selection.</td></tr>
+                <tr><td><code>context.sessions().snapshot(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
+                <tr><td><code>context.sessions().tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
+                <tr><td><code>context.sessions().set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
+                <tr><td><code>context.sessions()</code></td><td>Cloneable child-session client: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses process handles granted to sessions, not child-turn handles.</td></tr>
+                <tr><td><code>context.processes()</code></td><td>Session-scoped process admin: start a process from a tool, await its output, and list the process handles granted to the session.</td></tr>
+                <tr><td><code>context.process_events().emit(...).await?</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
+                <tr><td><code>context.durable_effects()?</code></td><td>Borrow the caller's durable effect boundary for advanced in-process tools. Use it only from prepared tool calls running under a controller that supports durable tool effects.</td></tr>
+                <tr><td><code>context.direct_completions().complete(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>caused_by</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect replay keys; set <code>DirectRequest::replay</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <pre data-lang="rust" data-snippet="plugins_tools#direct-completion-tool"><code>use lash::direct::{DirectOutputSpec, DirectRequest};
+
+async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
+    let model = match call.context.sessions().model().await {
+        Ok(model) =&gt; model,
+        Err(err) =&gt; return ToolResult::err_fmt(format_args!("{err}")),
+    };
+
+    let request = DirectRequest {
+        model: model.model,
+        model_variant: model.model_variant,
+        messages: vec![/* ... */],
+        attachments: Vec::new(),
+        output: DirectOutputSpec::Text,
+        generation: Default::default(),
+        stream_events: None,
+        session_id: None, // filled by ToolContext
+        caused_by: None,  // filled by ToolContext
+        replay: None,
+    };
+
+    match call
+        .context
+        .direct_completions()
+        .complete(request, "my_tool")
+        .await
+    {
+        Ok(completion) =&gt; ToolResult::ok(serde_json::json!({ "text": completion.text })),
+        Err(err) =&gt; ToolResult::err_fmt(format_args!("{err}")),
+    }
+}</code></pre>
+          <p><code>ToolContext</code> exposes no public <code>host()</code> escape hatch. Runtime host wiring stays inside <code>lash-core</code>; plugin-facing code uses explicit context capabilities. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
+        </div>
+
+        <div class="section" id="tool-registry-state">
+          <div class="section-header">
+            <h2>Tool Registry State</h2>
+            <p>The model sees a projected <code>ToolCatalog</code>, but the runtime owns a richer <code>ToolRegistry</code>: live tool sources, per-tool availability, source identity, and a serializable <code>ToolState</code> snapshot.</p>
+          </div>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">sources</div>
+              <div class="listing__body"><p>Static providers, plugin registrations, MCP providers, and host-added providers enter as registry sources. A source handle lets the host replace or remove one advertised surface without rebuilding the session.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">projection</div>
+              <div class="listing__body"><p><code>ToolRegistry</code> resolves manifests and execution providers; <code>ToolCatalog</code> is the model-facing projection used by provider requests, discovery tools, and Lashlang host surfaces. Availability changes advance the registry generation and refresh the session catalog.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">apply vs restore</div>
+              <div class="listing__body"><p><code>apply_state</code> is a generation-checked edit for a live registry. <code>restore_state</code> adopts a persisted generation during cold resume or worker rebuild; missing sources remain visible as orphaned, forced-Off tools until a matching source returns.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">admin API</div>
+              <div class="listing__body"><p>App hosts normally use <code>LashCoreBuilder::tools(...)</code>, plugin registration, or <code>LashSession::tools()</code> / <code>LashSession::admin().tools()</code>. The advanced admin exposes raw <code>ToolState</code> only for hosts that need to persist, migrate, or inspect the full registry surface.</p></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section" id="where-next">
+          <div class="section-header">
+            <h2>Where Next</h2>
+            <p>This page owns the tool surface and registry. Use the execution guide for scheduling, deferred completion, durable effects, and tool-output budgeting.</p>
+          </div>
+          <div data-related="tools-execution.html plugins.html embedding-prompts.html architecture/providers.html architecture/abstractions.html"></div>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+  </div>
+</section>
+</body>
+</html>

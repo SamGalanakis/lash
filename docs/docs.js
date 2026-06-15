@@ -80,18 +80,6 @@
           summary: "Session lifecycle, durable execution scopes, subagents, MCP servers, and advanced host controls.",
           kind: "guide",
         },
-        {
-          title: "Persistence",
-          href: "persistence.html",
-          summary: "Install local or distributed stores, understand what persists, handle CAS conflicts, and verify Postgres/S3/Restate E2E durability.",
-          kind: "guide",
-        },
-        {
-          title: "Tracing",
-          href: "tracing.html",
-          summary: "Attach TraceSink, write JSONL, inspect Lashlang execution graphs, and render trace reports.",
-          kind: "guide",
-        },
       ],
     },
     {
@@ -111,17 +99,80 @@
           summary: "Syntax, module shape, foreground blocks, processes, labels, and language-level diagnostics.",
           kind: "reference",
         },
+      ],
+    },
+    {
+      label: "Tools",
+      summary: "Expose callable host operations to model turns and Lashlang modules.",
+      href: "tools.html",
+      items: [
         {
-          title: "Lashlang effects",
-          href: "architecture/lashlang-effects.html",
-          summary: "Executor effects, projected host bindings, trigger registry, process wiring, and module artifacts.",
-          kind: "internal",
+          title: "Tools overview",
+          href: "tools.html",
+          summary: "Advertise tools, execute calls, use ToolContext capabilities, and manage registry state.",
+          kind: "guide",
         },
         {
-          title: "Lashlang runtime",
-          href: "architecture/lashlang-runtime.html",
-          summary: "Parser, linker, compiler, VM, bytecode, artifact cache, and runtime execution internals.",
-          kind: "internal",
+          title: "Tool execution and durability",
+          href: "tools-execution.html",
+          summary: "Schedule tool calls, defer completion, borrow durable effect boundaries, and project large outputs.",
+          kind: "guide",
+        },
+      ],
+    },
+    {
+      label: "Plugins",
+      summary: "Add behavior that participates in runtime/session lifecycle, prompt construction, policy, or resumable state.",
+      href: "plugins.html",
+      items: [
+        {
+          title: "Plugin basics",
+          href: "plugins.html",
+          summary: "Implement PluginFactory and SessionPlugin when tools need prompt hooks, runtime hooks, typed input, catalog policy, or resumable session state.",
+          kind: "guide",
+        },
+        {
+          title: "Runtime plugins",
+          href: "plugins-runtime.html",
+          summary: "Persist plugin state, restore snapshots, and hook into runtime/session lifecycle.",
+          kind: "reference",
+        },
+      ],
+    },
+    {
+      label: "Operations",
+      summary: "Run Lash with durable stores, traces, workflow replay, scaling, and service boundaries.",
+      href: "persistence.html",
+      items: [
+        {
+          title: "Persistence",
+          href: "persistence.html",
+          summary: "Install local or distributed stores, understand what persists, handle CAS conflicts, and verify Postgres/S3/Restate E2E durability.",
+          kind: "guide",
+        },
+        {
+          title: "Tracing",
+          href: "tracing.html",
+          summary: "Attach TraceSink, write JSONL, inspect Lashlang execution graphs, and render trace reports.",
+          kind: "guide",
+        },
+        {
+          title: "Durability and replay",
+          href: "architecture/durability.html",
+          summary: "EffectHost, ScopedEffectController, workflow replay, idempotent commits, and durable background work.",
+          kind: "guide",
+        },
+        {
+          title: "Scaling",
+          href: "architecture/scaling.html",
+          summary: "Run Lash as a stateless service with Postgres, S3-compatible attachments, Restate replay, CAS, and session-agnostic ingress.",
+          kind: "guide",
+        },
+        {
+          title: "Remote protocol",
+          href: "remote-protocol.html",
+          summary: "Versioned DTOs for HTTP, queues, callbacks, workflow handlers, activity streams, triggers, and host-owned tool grants.",
+          kind: "reference",
         },
       ],
     },
@@ -147,37 +198,6 @@
           href: "example-agent-workbench.html",
           summary: "Trigger, process, cron, mail, and queued-work example for background-capable hosts.",
           kind: "example",
-        },
-      ],
-    },
-    {
-      label: "Extend lash",
-      summary: "Add host tools, plugins, prompt hooks, runtime hooks, providers, and tool-catalog policies.",
-      href: "plugins.html",
-      items: [
-        {
-          title: "Plugin basics",
-          href: "plugins.html",
-          summary: "Implement PluginFactory, SessionPlugin, ToolProvider, and registrar hooks.",
-          kind: "guide",
-        },
-        {
-          title: "Tool plugins",
-          href: "plugins-tools.html",
-          summary: "Advertise tools, execute calls, use ToolContext capabilities, and borrow durable effect boundaries.",
-          kind: "guide",
-        },
-        {
-          title: "Runtime plugins",
-          href: "plugins-runtime.html",
-          summary: "Persist plugin state, restore snapshots, and hook into runtime/session lifecycle.",
-          kind: "reference",
-        },
-        {
-          title: "Providers",
-          href: "architecture/providers.html",
-          summary: "Provider request/response normalization, cache policy, usage mapping, and adding a provider crate.",
-          kind: "reference",
         },
       ],
     },
@@ -217,6 +237,18 @@
           kind: "internal",
         },
         {
+          title: "Lashlang effects",
+          href: "architecture/lashlang-effects.html",
+          summary: "Executor effects, projected host bindings, trigger registry, process wiring, and module artifacts.",
+          kind: "internal",
+        },
+        {
+          title: "Lashlang runtime",
+          href: "architecture/lashlang-runtime.html",
+          summary: "Parser, linker, compiler, VM, bytecode, artifact cache, and runtime execution internals.",
+          kind: "internal",
+        },
+        {
           title: "Runtime host",
           href: "architecture/runtime.html",
           summary: "Runtime environment, host services, session lifecycle, residency, queued work, and effects.",
@@ -229,21 +261,9 @@
           kind: "internal",
         },
         {
-          title: "Durability and replay",
-          href: "architecture/durability.html",
-          summary: "EffectHost, ScopedEffectController, workflow replay, idempotent commits, and durable background work.",
-          kind: "internal",
-        },
-        {
           title: "Triggers",
           href: "architecture/triggers.html",
           summary: "Session-agnostic ingress: declare, emit, match by source_type, idempotent delivery, and the wake that is the only session-ordered step. Timers and cron as trigger sources.",
-          kind: "internal",
-        },
-        {
-          title: "Scaling",
-          href: "architecture/scaling.html",
-          summary: "Running lash as a stateless, horizontally-scaling microservice with Postgres, S3-compatible attachments, Restate replay, CAS, and session-agnostic ingress.",
           kind: "internal",
         },
       ],
@@ -260,9 +280,9 @@
           kind: "reference",
         },
         {
-          title: "Remote protocol",
-          href: "remote-protocol.html",
-          summary: "Versioned DTOs for exposing Lash through HTTP, queues, callbacks, workflow handlers, and host-owned tool grants.",
+          title: "Providers",
+          href: "architecture/providers.html",
+          summary: "Provider request/response normalization, cache policy, usage mapping, and adding a provider crate.",
           kind: "reference",
         },
         {
@@ -290,6 +310,7 @@
   const MOVED_STUB_HREFS = new Set([
     "architecture.html",
     "architecture/execution-modes.html",
+    "plugins-tools.html",
   ]);
 
   function normalizeDocHref(href) {

@@ -963,6 +963,36 @@ pub struct ProcessDefinitionSelector {
 }
 
 impl ProcessDefinitionSelector {
+    pub fn new(
+        module_ref: lashlang::ModuleRef,
+        host_requirements_ref: lashlang::HostRequirementsRef,
+        process_ref: lashlang::ProcessRef,
+        process_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            module_ref,
+            host_requirements_ref,
+            process_ref,
+            process_name: process_name.into(),
+        }
+    }
+
+    pub fn module_ref(&self) -> &lashlang::ModuleRef {
+        &self.module_ref
+    }
+
+    pub fn host_requirements_ref(&self) -> &lashlang::HostRequirementsRef {
+        &self.host_requirements_ref
+    }
+
+    pub fn process_ref(&self) -> &lashlang::ProcessRef {
+        &self.process_ref
+    }
+
+    pub fn process_name(&self) -> &str {
+        &self.process_name
+    }
+
     pub fn decode(value: &serde_json::Value) -> Result<Self, String> {
         if value
             .get(lashlang::LASH_PROCESS_VALUE_KEY)

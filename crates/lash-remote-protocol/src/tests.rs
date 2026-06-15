@@ -214,7 +214,7 @@ fn remote_trigger_dtos_json_round_trip() {
         source: serde_json::json!({}),
         target: RemoteTriggerTargetSummary {
             process_name: "on_button".to_string(),
-            inputs: serde_json::json!({ "event": "trigger.event" }),
+            inputs: remote_trigger_input_template(),
         },
         enabled: true,
     };
@@ -266,6 +266,249 @@ fn remote_session_observation_dtos_json_round_trip_typed_kinds() {
     let decoded: RemoteSessionObservationEventPayload =
         serde_json::from_value(value).expect("deserialize process payload");
     assert_eq!(decoded, process);
+}
+
+#[test]
+fn remote_process_dtos_json_round_trip() {
+    let start = RemoteProcessStartRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        id: "process:1".to_string(),
+        input: RemoteProcessInput::External {
+            metadata: serde_json::json!({ "label": "Import" }),
+        },
+        env_spec: Some(serde_json::json!({ "policy": "trusted-admin" })),
+        originator: RemoteProcessOriginator::Session {
+            scope: RemoteSessionScope::new("session"),
+        },
+        wake_target: Some(RemoteSessionScope::new("session")),
+        grant: Some(RemoteProcessStartGrant {
+            session_scope: RemoteSessionScope::new("session"),
+            descriptor: RemoteProcessHandleDescriptor {
+                kind: Some("external".to_string()),
+                label: Some("Import".to_string()),
+            },
+        }),
+        event_types: vec![remote_process_event_type()],
+    };
+    start.validate().expect("valid process start request");
+    let decoded: RemoteProcessStartRequest =
+        serde_json::from_value(serde_json::to_value(&start).expect("serialize start"))
+            .expect("deserialize start");
+    assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
+    assert_eq!(decoded.id, "process:1");
+
+    let record = remote_process_record();
+    record
+        .validate("RemoteProcessRecord")
+        .expect("valid record");
+    let decoded: RemoteProcessRecord =
+        serde_json::from_value(serde_json::to_value(&record).expect("serialize record"))
+            .expect("deserialize record");
+    assert_eq!(decoded.process_id, "process:1");
+
+    let event = remote_process_event();
+    event.validate("RemoteProcessEvent").expect("valid event");
+    let decoded: RemoteProcessEvent =
+        serde_json::from_value(serde_json::to_value(&event).expect("serialize event"))
+            .expect("deserialize event");
+    assert_eq!(decoded.event_type, "process.completed");
+
+    let snapshot = RemoteProcessWorkSnapshot {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        visible_process_ids: vec!["process:1".to_string()],
+        items: vec![RemoteProcessWorkItem {
+            process: RemoteObservedProcess {
+                process_id: "process:1".to_string(),
+                graph_key: "process:process:1".to_string(),
+                kind: "external".to_string(),
+                lifecycle: RemoteProcessLifecycleStatus::Running,
+                status_label: "running".to_string(),
+                terminal: false,
+                error: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                input: RemoteProcessInput::External {
+                    metadata: serde_json::json!({ "label": "Import" }),
+                },
+                originator: RemoteProcessOriginator::Host,
+                env_ref: None,
+                wake_target: Some(RemoteSessionScope::new("session")),
+                caused_by: None,
+                external_ref: None,
+                wait: None,
+                child_session_id: None,
+                label: "Import".to_string(),
+            },
+            descriptor: RemoteProcessHandleDescriptor {
+                kind: Some("external".to_string()),
+                label: Some("Import".to_string()),
+            },
+            events: vec![RemoteObservedProcessEvent {
+                sequence: 1,
+                event_type: "process.yield".to_string(),
+                occurred_at_ms: 2,
+                payload: serde_json::json!({ "ok": true }),
+            }],
+            kind: "external".to_string(),
+            label: "Import".to_string(),
+        }],
+    };
+    snapshot.validate().expect("valid process work snapshot");
+
+    let list_filter = RemoteProcessListFilter {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        definition: Some(remote_process_definition_identity()),
+        status: RemoteProcessStatusFilter::Any,
+        waiting: Some(false),
+    };
+    list_filter.validate().expect("valid process list filter");
+    let list_response = RemoteProcessListResponse {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        records: snapshot
+            .items
+            .iter()
+            .map(|item| item.process.clone())
+            .collect(),
+    };
+    list_response.validate().expect("valid list response");
+
+    let cancel = RemoteProcessCancelRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        process_id: "process:1".to_string(),
+        reason: Some("requested by host".to_string()),
+    };
+    cancel.validate().expect("valid cancel request");
+    let cancel_result = RemoteProcessCancelResult {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        process_id: "process:1".to_string(),
+        status: RemoteProcessLifecycleStatus::Cancelled,
+        record: Some(remote_process_record()),
+    };
+    cancel_result.validate().expect("valid cancel result");
+
+    let signal = RemoteProcessSignalRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        process_id: "process:1".to_string(),
+        signal_name: "ready".to_string(),
+        signal_id: "signal:1".to_string(),
+        payload: serde_json::json!({ "ready": true }),
+        replay_key: Some("process:1:signal:ready:1".to_string()),
+        wake_target_scope: Some(RemoteSessionScope::new("session")),
+    };
+    signal.validate().expect("valid signal request");
+    let signal_result = RemoteProcessSignalResult {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        event: remote_process_event(),
+    };
+    signal_result.validate().expect("valid signal result");
+
+    let await_request = RemoteProcessAwaitRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        process_id: "process:1".to_string(),
+    };
+    await_request.validate().expect("valid await request");
+    let await_result = RemoteProcessAwaitResult {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        process_id: "process:1".to_string(),
+        output: RemoteProcessAwaitOutput::Success {
+            value: serde_json::json!({ "done": true }),
+            control: None,
+        },
+    };
+    await_result.validate().expect("valid await result");
+
+    let events_request = RemoteProcessEventsRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        process_id: "process:1".to_string(),
+        after_sequence: 0,
+    };
+    events_request.validate().expect("valid events request");
+    let events_response = RemoteProcessEventsResponse {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        process_id: "process:1".to_string(),
+        events: vec![remote_process_event()],
+    };
+    events_response.validate().expect("valid events response");
+}
+
+#[test]
+fn remote_trigger_subscription_dtos_json_round_trip() {
+    let draft = RemoteTriggerSubscriptionDraft {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        registrant: RemoteProcessOriginator::Session {
+            scope: RemoteSessionScope::new("session"),
+        },
+        env_ref: "process-env:sha256:abc".to_string(),
+        wake_target: Some(RemoteSessionScope::new("session")),
+        name: Some("button watcher".to_string()),
+        source_type: "ui.button.pressed".to_string(),
+        source_key: "source-key".to_string(),
+        source: serde_json::json!({ "button": "blue" }),
+        event_ty: serde_json::json!({ "kind": "any" }),
+        target: RemoteTriggerTargetIdentity {
+            module_ref: "lashlang:v1:sha256:module".to_string(),
+            host_requirements_ref: "lashlang-host-requirements:v1:sha256:host".to_string(),
+            process_ref: remote_process_ref(),
+            process_name: "on_button".to_string(),
+        },
+        input_template: remote_trigger_input_template(),
+    };
+    draft.validate().expect("valid trigger draft");
+    let decoded: RemoteTriggerSubscriptionDraft =
+        serde_json::from_value(serde_json::to_value(&draft).expect("serialize draft"))
+            .expect("deserialize draft");
+    assert_eq!(decoded.source_type, "ui.button.pressed");
+
+    let record = RemoteTriggerSubscriptionRecord {
+        subscription_id: "subscription:1".to_string(),
+        registrant: draft.registrant.clone(),
+        env_ref: draft.env_ref.clone(),
+        wake_target: draft.wake_target.clone(),
+        handle: "trigger:1".to_string(),
+        name: draft.name.clone(),
+        source_type: draft.source_type.clone(),
+        source_key: draft.source_key.clone(),
+        source: draft.source.clone(),
+        event_ty: draft.event_ty.clone(),
+        target: draft.target.clone(),
+        input_template: draft.input_template.clone(),
+        enabled: true,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+    };
+    record
+        .validate("RemoteTriggerSubscriptionRecord")
+        .expect("valid trigger record");
+
+    let register = RemoteTriggerRegisterSubscriptionRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        draft,
+    };
+    register.validate().expect("valid register request");
+    let register_result = RemoteTriggerRegisterSubscriptionResult {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        record: record.clone(),
+    };
+    register_result.validate().expect("valid register result");
+    let list = RemoteTriggerListSubscriptionsResponse {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        subscriptions: vec![record],
+    };
+    list.validate().expect("valid trigger list");
+    let cancel = RemoteTriggerCancelSubscriptionRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        handle: "trigger:1".to_string(),
+    };
+    cancel.validate().expect("valid cancel request");
+    let cancel_result = RemoteTriggerCancelSubscriptionResult {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        handle: "trigger:1".to_string(),
+        cancelled: true,
+    };
+    cancel_result.validate().expect("valid cancel result");
 }
 
 #[test]
@@ -374,6 +617,25 @@ fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteTriggerOccurrenceRequest>();
     assert_schema_has_protocol_version::<RemoteTriggerEmitReport>();
     assert_schema_has_protocol_version::<RemoteTriggerSubscriptionFilter>();
+    assert_schema_has_protocol_version::<RemoteTriggerSubscriptionDraft>();
+    assert_schema_has_protocol_version::<RemoteTriggerRegisterSubscriptionRequest>();
+    assert_schema_has_protocol_version::<RemoteTriggerRegisterSubscriptionResult>();
+    assert_schema_has_protocol_version::<RemoteTriggerListSubscriptionsResponse>();
+    assert_schema_has_protocol_version::<RemoteTriggerCancelSubscriptionRequest>();
+    assert_schema_has_protocol_version::<RemoteTriggerCancelSubscriptionResult>();
+    assert_schema_has_protocol_version::<RemoteProcessStartRequest>();
+    assert_schema_has_protocol_version::<RemoteProcessStartResult>();
+    assert_schema_has_protocol_version::<RemoteProcessWorkSnapshot>();
+    assert_schema_has_protocol_version::<RemoteProcessListFilter>();
+    assert_schema_has_protocol_version::<RemoteProcessListResponse>();
+    assert_schema_has_protocol_version::<RemoteProcessCancelRequest>();
+    assert_schema_has_protocol_version::<RemoteProcessCancelResult>();
+    assert_schema_has_protocol_version::<RemoteProcessSignalRequest>();
+    assert_schema_has_protocol_version::<RemoteProcessSignalResult>();
+    assert_schema_has_protocol_version::<RemoteProcessAwaitRequest>();
+    assert_schema_has_protocol_version::<RemoteProcessAwaitResult>();
+    assert_schema_has_protocol_version::<RemoteProcessEventsRequest>();
+    assert_schema_has_protocol_version::<RemoteProcessEventsResponse>();
 }
 
 #[test]
@@ -418,4 +680,128 @@ fn assert_schema_has_protocol_version<T: JsonSchema>() {
         schema_text.contains("protocol_version"),
         "schema did not include protocol_version: {schema_text}"
     );
+}
+
+fn remote_trigger_input_template() -> RemoteTriggerInputTemplate {
+    RemoteTriggerInputTemplate::new(BTreeMap::from([
+        ("event".to_string(), RemoteTriggerInputBinding::Event),
+        (
+            "fixed".to_string(),
+            RemoteTriggerInputBinding::Fixed {
+                value: serde_json::json!("blue"),
+            },
+        ),
+    ]))
+}
+
+fn remote_process_ref() -> RemoteLashlangProcessRef {
+    RemoteLashlangProcessRef {
+        component: "process-component".to_string(),
+        pos: 1,
+    }
+}
+
+fn remote_process_definition_identity() -> RemoteProcessDefinitionIdentity {
+    RemoteProcessDefinitionIdentity {
+        module_ref: "lashlang:v1:sha256:module".to_string(),
+        host_requirements_ref: "lashlang-host-requirements:v1:sha256:host".to_string(),
+        process_ref: remote_process_ref(),
+        process_name: "main".to_string(),
+    }
+}
+
+fn remote_process_event_type() -> RemoteProcessEventType {
+    RemoteProcessEventType {
+        name: "process.completed".to_string(),
+        payload_schema: serde_json::json!({}),
+        semantics: RemoteProcessEventSemanticsSpec {
+            terminal: Some(RemoteProcessTerminalSpec {
+                state: RemoteProcessTerminalState::Completed,
+                await_output: Some(RemoteProcessValueSelector::Pointer(
+                    "/await_output".to_string(),
+                )),
+            }),
+            wake: Some(RemoteProcessWakeSpec {
+                when: None,
+                input: RemoteProcessValueSelector::Pointer("/text".to_string()),
+                dedupe_key: RemoteProcessWakeDedupeKey::EventIdentity,
+            }),
+        },
+    }
+}
+
+fn remote_process_record() -> RemoteProcessRecord {
+    RemoteProcessRecord {
+        process_id: "process:1".to_string(),
+        input: RemoteProcessInput::External {
+            metadata: serde_json::json!({ "label": "Import" }),
+        },
+        event_types: vec![remote_process_event_type()],
+        provenance: RemoteProcessProvenance {
+            originator: RemoteProcessOriginator::Host,
+            host_profile_id: "host".to_string(),
+            caused_by: None,
+        },
+        env_ref: Some("process-env:sha256:abc".to_string()),
+        wake_target: Some(RemoteSessionScope::new("session")),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        external_ref: Some(RemoteProcessExternalRef {
+            backend: "worker".to_string(),
+            id: "external:1".to_string(),
+            metadata: None,
+        }),
+        wait: Some(RemoteProcessWaitState {
+            kind: RemoteProcessWaitKind::Signal {
+                name: "ready".to_string(),
+                event_type: "signal.ready".to_string(),
+                key: "process:1:signal.ready:1".to_string(),
+                ordinal: 1,
+            },
+            since_ms: 2,
+        }),
+        status: RemoteProcessStatus::Running,
+    }
+}
+
+fn remote_process_event() -> RemoteProcessEvent {
+    RemoteProcessEvent {
+        process_id: "process:1".to_string(),
+        sequence: 1,
+        event_type: "process.completed".to_string(),
+        payload: serde_json::json!({ "await_output": { "type": "success", "value": true } }),
+        invocation: Some(RemoteRuntimeInvocation {
+            scope: RemoteRuntimeScope {
+                session_id: "session".to_string(),
+                turn_id: Some("turn".to_string()),
+                turn_index: Some(1),
+                protocol_iteration: Some(0),
+            },
+            subject: RemoteRuntimeSubject::ProcessEvent {
+                process_id: "process:1".to_string(),
+                sequence: 1,
+                event_type: "process.completed".to_string(),
+            },
+            caused_by: Some(RemoteCausalRef::Process {
+                process_id: "process:1".to_string(),
+            }),
+            replay: Some(RemoteRuntimeReplay {
+                key: "process:1:completed".to_string(),
+            }),
+        }),
+        semantics: RemoteProcessEventSemantics {
+            terminal: Some(RemoteProcessTerminalSemantics {
+                state: RemoteProcessTerminalState::Completed,
+                await_output: RemoteProcessAwaitOutput::Success {
+                    value: serde_json::json!(true),
+                    control: None,
+                },
+            }),
+            wake: Some(RemoteProcessWake {
+                input: "wake".to_string(),
+                dedupe_key: "dedupe".to_string(),
+            }),
+        },
+        occurred_at_ms: 3,
+    }
 }
