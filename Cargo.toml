@@ -77,7 +77,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-alpha.52"
+version = "0.1.0-alpha.53"
 license = "MIT"
 edition = "2024"
 authors = ["Samuel Galanakis"]
@@ -124,42 +124,42 @@ uuid = "1"
 
 # Internal crates — single source of truth for the lockstep workspace version.
 # A release bump only edits these lines (not every crate manifest).
-lash = { package = "lash-runtime", path = "crates/lash", version = "=0.1.0-alpha.52" }
-lash-autoresearch = { path = "crates/lash-autoresearch", version = "=0.1.0-alpha.52" }
-lash-cli = { path = "crates/lash-cli", version = "=0.1.0-alpha.52" }
-lash-core = { path = "crates/lash-core", version = "=0.1.0-alpha.52" }
-lash-export = { path = "crates/lash-export", version = "=0.1.0-alpha.52" }
-lash-file-index = { path = "crates/lash-file-index", version = "=0.1.0-alpha.52" }
-lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.1.0-alpha.52" }
-lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.1.0-alpha.52" }
-lash-postgres-store = { path = "crates/lash-postgres-store", version = "=0.1.0-alpha.52" }
-lash-s3-store = { path = "crates/lash-s3-store", version = "=0.1.0-alpha.52" }
-lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.52" }
-lash-plugin-observational-memory = { path = "crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.52" }
-lash-plugin-plan-mode = { path = "crates/lash-plugin-plan-mode", version = "=0.1.0-alpha.52" }
-lash-plugin-process-controls = { path = "crates/lash-plugin-process-controls", version = "=0.1.0-alpha.52" }
-lash-plugin-tool-discovery = { path = "crates/lash-plugin-tool-discovery", version = "=0.1.0-alpha.52" }
-lash-plugin-tool-output-budget = { path = "crates/lash-plugin-tool-output-budget", version = "=0.1.0-alpha.52" }
-lash-protocol-rlm = { path = "crates/lash-protocol-rlm", version = "=0.1.0-alpha.52" }
-lash-protocol-standard = { path = "crates/lash-protocol-standard", version = "=0.1.0-alpha.52" }
-lash-provider-anthropic = { path = "crates/lash-provider-anthropic", version = "=0.1.0-alpha.52" }
-lash-provider-auth = { path = "crates/lash-provider-auth", version = "=0.1.0-alpha.52" }
-lash-provider-google = { path = "crates/lash-provider-google", version = "=0.1.0-alpha.52" }
-lash-provider-openai = { path = "crates/lash-provider-openai", version = "=0.1.0-alpha.52" }
-lash-remote-protocol = { path = "crates/lash-remote-protocol", version = "=0.1.0-alpha.52" }
-lash-restate = { path = "crates/lash-restate", version = "=0.1.0-alpha.52" }
-lash-rlm-types = { path = "crates/lash-rlm-types", version = "=0.1.0-alpha.52" }
-lash-sansio = { path = "crates/lash-sansio", version = "=0.1.0-alpha.52" }
-lash-standard-plugins = { path = "crates/lash-standard-plugins", version = "=0.1.0-alpha.52" }
-lash-subagents = { path = "crates/lash-subagents", version = "=0.1.0-alpha.52" }
-lash-search-tools = { path = "crates/lash-search-tools", version = "=0.1.0-alpha.52" }
-lash-tool-support = { path = "crates/lash-tool-support", version = "=0.1.0-alpha.52" }
-lash-tools = { path = "crates/lash-tools", version = "=0.1.0-alpha.52" }
-lash-trace = { path = "crates/lash-trace", version = "=0.1.0-alpha.52" }
-lash-tui = { path = "crates/lash-tui", version = "=0.1.0-alpha.52" }
-lash-tui-extensions = { path = "crates/lash-tui-extensions", version = "=0.1.0-alpha.52" }
-lash-sqlite-store = { path = "crates/lash-sqlite-store", version = "=0.1.0-alpha.52" }
-lashlang = { path = "crates/lashlang", version = "=0.1.0-alpha.52" }
+lash = { package = "lash-runtime", path = "crates/lash", version = "=0.1.0-alpha.53" }
+lash-autoresearch = { path = "crates/lash-autoresearch", version = "=0.1.0-alpha.53" }
+lash-cli = { path = "crates/lash-cli", version = "=0.1.0-alpha.53" }
+lash-core = { path = "crates/lash-core", version = "=0.1.0-alpha.53" }
+lash-export = { path = "crates/lash-export", version = "=0.1.0-alpha.53" }
+lash-file-index = { path = "crates/lash-file-index", version = "=0.1.0-alpha.53" }
+lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.1.0-alpha.53" }
+lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.1.0-alpha.53" }
+lash-postgres-store = { path = "crates/lash-postgres-store", version = "=0.1.0-alpha.53" }
+lash-s3-store = { path = "crates/lash-s3-store", version = "=0.1.0-alpha.53" }
+lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.53" }
+lash-plugin-observational-memory = { path = "crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.53" }
+lash-plugin-plan-mode = { path = "crates/lash-plugin-plan-mode", version = "=0.1.0-alpha.53" }
+lash-plugin-process-controls = { path = "crates/lash-plugin-process-controls", version = "=0.1.0-alpha.53" }
+lash-plugin-tool-discovery = { path = "crates/lash-plugin-tool-discovery", version = "=0.1.0-alpha.53" }
+lash-plugin-tool-output-budget = { path = "crates/lash-plugin-tool-output-budget", version = "=0.1.0-alpha.53" }
+lash-protocol-rlm = { path = "crates/lash-protocol-rlm", version = "=0.1.0-alpha.53" }
+lash-protocol-standard = { path = "crates/lash-protocol-standard", version = "=0.1.0-alpha.53" }
+lash-provider-anthropic = { path = "crates/lash-provider-anthropic", version = "=0.1.0-alpha.53" }
+lash-provider-auth = { path = "crates/lash-provider-auth", version = "=0.1.0-alpha.53" }
+lash-provider-google = { path = "crates/lash-provider-google", version = "=0.1.0-alpha.53" }
+lash-provider-openai = { path = "crates/lash-provider-openai", version = "=0.1.0-alpha.53" }
+lash-remote-protocol = { path = "crates/lash-remote-protocol", version = "=0.1.0-alpha.53" }
+lash-restate = { path = "crates/lash-restate", version = "=0.1.0-alpha.53" }
+lash-rlm-types = { path = "crates/lash-rlm-types", version = "=0.1.0-alpha.53" }
+lash-sansio = { path = "crates/lash-sansio", version = "=0.1.0-alpha.53" }
+lash-standard-plugins = { path = "crates/lash-standard-plugins", version = "=0.1.0-alpha.53" }
+lash-subagents = { path = "crates/lash-subagents", version = "=0.1.0-alpha.53" }
+lash-search-tools = { path = "crates/lash-search-tools", version = "=0.1.0-alpha.53" }
+lash-tool-support = { path = "crates/lash-tool-support", version = "=0.1.0-alpha.53" }
+lash-tools = { path = "crates/lash-tools", version = "=0.1.0-alpha.53" }
+lash-trace = { path = "crates/lash-trace", version = "=0.1.0-alpha.53" }
+lash-tui = { path = "crates/lash-tui", version = "=0.1.0-alpha.53" }
+lash-tui-extensions = { path = "crates/lash-tui-extensions", version = "=0.1.0-alpha.53" }
+lash-sqlite-store = { path = "crates/lash-sqlite-store", version = "=0.1.0-alpha.53" }
+lashlang = { path = "crates/lashlang", version = "=0.1.0-alpha.53" }
 [profile.release]
 lto = "thin"
 strip = true
