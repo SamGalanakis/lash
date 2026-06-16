@@ -1,0 +1,159 @@
+//! Compiled sources for the Rust snippets on `docs/streaming.html`.
+
+use lash::observe::{SessionObservationEvent, SessionObservationEventPayload};
+use lash::persistence::SessionReadView;
+use lash::{LashSession, TurnActivity, TurnActivitySink, TurnInput};
+
+async fn render_activity(_activity: TurnActivity) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn replace_from_read_view(_view: &SessionReadView) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn append_committed_view(_view: &SessionReadView) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn refetch_queue_summaries(_batch_ids: &[String]) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn refetch_process_summaries(_process_ids: &[String]) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn persist_cursor(_cursor: &lash::observe::SessionCursor) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn update_frame(_frame_id: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
+// docs:start:turn-local-stream
+async fn stream_one_turn(
+    session: &LashSession,
+    sink: &dyn TurnActivitySink,
+) -> lash::Result<lash::TurnResult> {
+    session
+        .turn(TurnInput::text("Summarize the incident."))
+        .stream_to(sink)
+        .await
+}
+
+async fn pull_one_turn(session: &LashSession) -> anyhow::Result<lash::TurnResult> {
+    let mut stream = session
+        .turn(TurnInput::text("Summarize the incident."))
+        .stream()?;
+
+    while let Some(activity) = stream.next_activity().await {
+        render_activity(activity?).await?;
+    }
+
+    Ok(stream.finish().await?)
+}
+// docs:end:turn-local-stream
+
+// docs:start:session-reconnect
+use lash::observe::{SessionObservationSubscription, SessionResume};
+
+async fn reconnect_session(
+    session: &LashSession,
+    stored_cursor: Option<lash::observe::SessionCursor>,
+) -> anyhow::Result<lash::observe::SessionCursor> {
+    let observable = session.observe();
+
+    let mut cursor = match stored_cursor {
+        Some(cursor) => cursor,
+        None => {
+            let observation = observable.current_observation();
+            replace_from_read_view(&observation.read_view).await?;
+            observation.cursor
+        }
+    };
+
+    match observable.resume_from_cursor(&cursor)? {
+        SessionResume::Replayed { events } => {
+            for event in events {
+                cursor = event.cursor.clone();
+                fold_session_event(event).await?;
+            }
+        }
+        SessionResume::Gap { observation, gap } => {
+            replace_from_read_view(&observation.read_view).await?;
+            cursor = gap.latest_cursor;
+        }
+    }
+
+    match observable.subscribe_from_cursor(&cursor)? {
+        SessionObservationSubscription::Subscribed(mut live) => {
+            let event = live.next_event().await?;
+            cursor = event.cursor.clone();
+            fold_session_event(event).await?;
+        }
+        SessionObservationSubscription::Gap { observation, gap } => {
+            replace_from_read_view(&observation.read_view).await?;
+            cursor = gap.latest_cursor;
+        }
+    }
+
+    persist_cursor(&cursor).await?;
+    Ok(cursor)
+}
+// docs:end:session-reconnect
+
+async fn fold_session_event(event: SessionObservationEvent) -> anyhow::Result<()> {
+    // docs:start:fold-session-event
+    match event.payload {
+        SessionObservationEventPayload::TurnActivity(activity) => {
+            render_activity(activity).await?;
+        }
+        SessionObservationEventPayload::Committed { read_view } => {
+            append_committed_view(&read_view).await?;
+        }
+        SessionObservationEventPayload::AgentFrameSwitched { frame_id } => {
+            update_frame(&frame_id).await?;
+        }
+        SessionObservationEventPayload::QueueChanged { batch_ids, .. } => {
+            refetch_queue_summaries(&batch_ids).await?;
+        }
+        SessionObservationEventPayload::ProcessChanged { process_ids, .. } => {
+            refetch_process_summaries(&process_ids).await?;
+        }
+    }
+    // docs:end:fold-session-event
+    Ok(())
+}
+
+// docs:start:remote-ndjson-sink
+use lash_remote_protocol::RemoteTurnActivitySink;
+
+async fn stream_turn_as_ndjson(session: &LashSession) -> anyhow::Result<Vec<u8>> {
+    let sink = RemoteTurnActivitySink::new(Vec::<u8>::new(), 0);
+
+    session
+        .turn(TurnInput::text("Summarize the incident."))
+        .stream_to(&sink)
+        .await?;
+
+    let errors = sink.take_errors();
+    if !errors.is_empty() {
+        anyhow::bail!("remote stream write failed: {}", errors.join("; "));
+    }
+
+    sink.into_inner()
+        .map_err(|_| anyhow::anyhow!("remote stream writer still borrowed"))
+}
+// docs:end:remote-ndjson-sink
+
+// docs:start:remote-session-event
+fn encode_observation_event(
+    sequence: u64,
+    event: lash::observe::SessionObservationEvent,
+) -> anyhow::Result<String> {
+    let remote = lash_remote_protocol::RemoteSessionObservationEvent::from_core(sequence, event);
+    Ok(serde_json::to_string(&remote)?)
+}
+// docs:end:remote-session-event

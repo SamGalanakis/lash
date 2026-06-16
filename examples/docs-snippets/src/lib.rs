@@ -22,4 +22,6 @@ mod plugins_tools;
 mod quickstart;
 mod remote_protocol;
 mod rlm;
+mod streaming;
+mod tools;
 mod tracing;

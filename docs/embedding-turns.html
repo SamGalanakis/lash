@@ -100,7 +100,7 @@ pub enum TurnFinish {
           </div>
           <div class="callout">
             <strong>Turn streams are not reconnect cursors.</strong>
-            <p>Use <code>TurnBuilder::stream_to</code>, <code>run</code>, and pull-style <code>stream</code> for one running turn. Hosts that need browser reconnect or service resume use <code>ObservableSession::current_observation()</code>, <code>resume_from_cursor</code>, and <code>subscribe_from_cursor</code>, which replay session-level <code>SessionObservationEvent</code>s or return a <code>LiveReplayGap</code>.</p>
+            <p>Use <code>TurnBuilder::stream_to</code>, <code>run</code>, and pull-style <code>stream</code> for one running turn. Hosts that need browser reconnect, session cursors, NDJSON, SSE, or remote DTO framing should use <a href="./streaming.html">Streaming and reconnect</a>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">TurnActivity sink</div>

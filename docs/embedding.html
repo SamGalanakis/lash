@@ -44,7 +44,7 @@
             <dt>Semantic event stream</dt>
             <dd>Identity-bearing <code>TurnActivity</code> items: assistant prose deltas, reasoning deltas, tool start/complete pairs with correlation ids, code-block start/complete, terminal <code>SubmittedValue</code>/<code>ToolValue</code>, per-call and rolling usage. Assistant prose deltas are live previews; the settled transcript comes from <code>TurnResult</code> / <code>SessionReadView</code> after the runtime commit.</dd>
             <dt>Session observation</dt>
-            <dd><code>ObservableSession::current_observation()</code> returns the current <code>SessionReadView</code> plus an opaque <code>SessionCursor</code>. <code>resume_from_cursor</code> and <code>subscribe_from_cursor</code> replay recent <code>SessionObservationEvent</code>s when still buffered, or return a <code>LiveReplayGap</code> with a fresh observation when the bounded live replay window was missed.</dd>
+            <dd><code>ObservableSession::current_observation()</code> returns the current <code>SessionReadView</code> plus an opaque <code>SessionCursor</code>. <code>resume_from_cursor</code> and <code>subscribe_from_cursor</code> replay recent <code>SessionObservationEvent</code>s when still buffered, or return a <code>LiveReplayGap</code> with a fresh observation when the bounded live replay window was missed. See <a href="./streaming.html#session-reconnect">Streaming and reconnect</a> for browser folding and gap recovery.</dd>
             <dt>Tracing as a first-class sink</dt>
             <dd>Attach <code>TraceSink</code> implementations for structured runtime records. JSONL tracing and the HTML viewer cover turns, tools, LLMs, prompts, stream deltas, and usage; OpenTelemetry export is optional. Lashlang execution graphs use a separate opt-in sink so foreground blocks, durable process runs, and subagent child work can be observed without mutating process-registry state. Use <code>LashCore::processes()</code> for host process commands and <code>TraceLashlangGraphStore</code> for optional trace-derived graph snapshots.</dd>
             <dt>Snapshot and restore seams</dt>
@@ -80,7 +80,7 @@
                 <dt><code>TurnResult</code> / <code>TurnOutput</code></dt>
                 <dd>The committed result. <code>TurnResult</code> is the terminal outcome and usage; <code>TurnOutput</code> adds the collected semantic <code>TurnActivity</code> stream for app UIs and logs.</dd>
                 <dt><code>SessionObservation</code></dt>
-                <dd>The reconnect surface for hosts that observe a whole session. It is session-level and cursor-based; turn activity APIs remain local conveniences for the currently running turn.</dd>
+                <dd>The reconnect surface for hosts that observe a whole session. It is session-level and cursor-based; turn activity APIs remain local conveniences for the currently running turn. The host recipe lives in <a href="./streaming.html">Streaming and reconnect</a>.</dd>
               </dl>
             </article>
           </div>
