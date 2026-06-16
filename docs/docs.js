@@ -69,6 +69,12 @@
           kind: "guide",
         },
         {
+          title: "Streaming and reconnect",
+          href: "streaming.html",
+          summary: "Turn-local streams, reconnectable session cursors, frontend folding, gap recovery, and remote activity framing.",
+          kind: "guide",
+        },
+        {
           title: "Prompts and bindings",
           href: "embedding-prompts.html",
           summary: "Context strategy, prompt templates, typed plugin input, and projected RLM bindings.",

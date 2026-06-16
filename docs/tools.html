@@ -21,19 +21,23 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">tools</h1>
-    <p class="opener__lede">Expose host capabilities as model-callable operations. Implement <code>ToolProvider</code> directly for ordinary tools, or register a provider from a plugin when the tool also needs plugin state, prompts, hooks, or catalog policy.</p>
+    <p class="opener__lede">Expose host capabilities as model-callable operations. For fixed app tools, start with <code>StaticToolProvider</code> and <code>StaticToolExecute</code>; implement raw <code>ToolProvider</code> only when manifests, contracts, or provider behavior must be dynamic.</p>
   </section>
 
   <main class="body" id="content">
         <div class="section" id="where-tools-live">
           <div class="section-header">
             <h2>Where Tools Live</h2>
-            <p>Tools are a runtime surface, not a plugin requirement. Start with a <code>ToolProvider</code>; add a plugin only when the provider is part of deeper runtime behavior.</p>
+            <p>Tools are a runtime surface, not a plugin requirement. Start with the fixed-provider helper for ordinary app tools; add raw providers or plugins only when the capability really needs that surface.</p>
           </div>
           <div class="listing">
             <div class="listing__row">
-              <div class="listing__label">direct provider</div>
-              <div class="listing__body"><p>Use <code>LashCoreBuilder::tools(Arc::new(MyTools))</code> or the core/session tool admin when the tool is just a callable host operation. This is the common path for app-owned APIs, database actions, file operations, search, and remote-service wrappers.</p></div>
+              <div class="listing__label">fixed app tools</div>
+              <div class="listing__body"><p>Use <code>lash::tools::StaticToolProvider</code> plus <code>StaticToolExecute</code> when the set of tools is known when the provider is built. This is the common path for app-owned APIs, database actions, file operations, search, and remote-service wrappers. Install it with <code>LashCoreBuilder::tools(...)</code>, plugin registration, or the core/session tool admin.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">dynamic provider</div>
+              <div class="listing__body"><p>Implement raw <code>ToolProvider</code> when <code>tool_manifests</code>, <code>resolve_contract</code>, <code>prepare_tool_call</code>, or execution dispatch depends on changing external state, negotiated remote manifests, plugin policy, or a custom provider cache.</p></div>
             </div>
             <div class="listing__row">
               <div class="listing__label">plugin provider</div>
@@ -44,6 +48,78 @@
               <div class="listing__body"><p>The remote protocol can describe granted tool surfaces, but it does not execute tools for you. If a tool calls HTTP, a queue, a workflow, or another service, put that client code inside a normal <code>ToolProvider</code> and keep the runtime-facing contract local.</p></div>
             </div>
           </div>
+        </div>
+
+        <div class="section" id="fixed-tools">
+          <div class="section-header">
+            <h2>Fixed Tools</h2>
+            <p><code>StaticToolProvider::new(...)</code> derives manifests and full contracts from the supplied <code>ToolDefinition</code>s once, then serves them from a cache. Your executor only owns runtime state and behavior.</p>
+          </div>
+          <p>Use <code>ToolDefinition::typed</code> when Rust argument and output structs can derive <code>JsonSchema</code>. Lash validates the incoming JSON against the contract before execution; the tool still decodes <code>call.args</code> into its local Rust type inside <code>execute()</code>.</p>
+          <pre data-lang="rust" data-snippet="tools#simple-fixed-tool"><code>use std::sync::Arc;
+
+use async_trait::async_trait;
+use lash::tools::{
+    StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition, ToolProvider, ToolResult,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WeatherArgs {
+    city: String,
+    units: Option&lt;String&gt;,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct WeatherReport {
+    summary: String,
+    temperature_c: f32,
+}
+
+struct WeatherTools;
+
+#[async_trait]
+impl StaticToolExecute for WeatherTools {
+    async fn execute(&amp;self, call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
+        match call.name {
+            "weather_lookup" =&gt; {
+                let args: WeatherArgs = match serde_json::from_value(call.args.clone()) {
+                    Ok(args) =&gt; args,
+                    Err(err) =&gt; return ToolResult::err_fmt(format_args!("invalid args: {err}")),
+                };
+
+                let report = lookup_weather(args).await;
+                match serde_json::to_value(report) {
+                    Ok(value) =&gt; ToolResult::ok(value),
+                    Err(err) =&gt; ToolResult::err_fmt(format_args!("serialize output: {err}")),
+                }
+            }
+            other =&gt; ToolResult::err_fmt(format_args!("unknown tool: {other}")),
+        }
+    }
+}
+
+pub fn weather_provider() -&gt; Arc&lt;dyn ToolProvider&gt; {
+    let definition = ToolDefinition::typed::&lt;WeatherArgs, WeatherReport&gt;(
+        "weather_lookup",
+        "Look up the current weather for a city.",
+    );
+
+    Arc::new(StaticToolProvider::new(vec![definition], WeatherTools)) as Arc&lt;dyn ToolProvider&gt;
+}
+
+async fn lookup_weather(args: WeatherArgs) -&gt; WeatherReport {
+    let units = args.units.unwrap_or_else(|| "metric".to_string());
+    WeatherReport {
+        summary: format!("{} weather in {}", units, args.city),
+        temperature_c: 21.0,
+    }
+}</code></pre>
+          <aside class="callout callout--note">
+            <strong>Note</strong>
+            <p>Use <code>ToolDefinition::raw</code> or <code>raw_named</code> only when the schema is already JSON, such as an MCP-advertised contract or a schema fetched from another service.</p>
+          </aside>
         </div>
 
 <div class="section" id="toolcall-shape">

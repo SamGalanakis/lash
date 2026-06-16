@@ -148,11 +148,11 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">activity stream</div>
-        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned per-stream <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>. It is still a turn convenience item, not the reconnect cursor.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned per-stream <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>. It is still a turn convenience item, not the reconnect cursor. See <a href="./streaming.html#remote-boundaries">Streaming and reconnect</a> for NDJSON and SSE framing guidance.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">session observation</div>
-        <div class="listing__body"><p><code>RemoteSessionCursor</code>, <code>RemoteSessionObservationEvent</code>, and <code>RemoteLiveReplayGap</code> are the remote reconnect surface. They carry opaque cursor strings, session revisions, bounded replay events, and explicit gap recovery without serializing a full <code>SessionReadView</code>.</p></div>
+        <div class="listing__body"><p><code>RemoteSessionCursor</code>, <code>RemoteSessionObservationEvent</code>, and <code>RemoteLiveReplayGap</code> are the remote reconnect surface. They carry opaque cursor strings, session revisions, bounded replay events, and explicit gap recovery without serializing a full <code>SessionReadView</code>. See <a href="./streaming.html#session-reconnect">Streaming and reconnect</a> for the host/frontend folding recipe.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">prompt layer</div>
@@ -227,7 +227,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">streaming</div>
-        <div class="listing__body"><p><code>RemoteTurnActivitySink&lt;W&gt;</code> serializes remote activities as newline-delimited JSON and records sink write errors for the host to inspect.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnActivitySink&lt;W&gt;</code> serializes remote activities as newline-delimited JSON and records sink write errors for the host to inspect. It is a DTO adapter, not an HTTP route; the host still owns transport, auth, and reconnect policy.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">triggers</div>
@@ -245,7 +245,7 @@ request.validate()?;</code></pre>
       <h2>Where Next</h2>
       <p>This page owns the remote DTO contract. Use the facade guides for local embedding behavior, process architecture docs for durable execution, and the provider docs for transport normalization.</p>
     </div>
-    <div data-related="embedding.html embedding-turns.html tools.html architecture/durability.html architecture/lashlang-runtime.html architecture/providers.html architecture/reference.html architecture/deps.html"></div>
+    <div data-related="embedding.html embedding-turns.html streaming.html tools.html architecture/durability.html architecture/lashlang-runtime.html architecture/providers.html architecture/reference.html architecture/deps.html"></div>
   </div>
 </main>
 

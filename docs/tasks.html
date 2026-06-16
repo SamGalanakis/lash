@@ -51,7 +51,7 @@
       <div class="listing__row">
         <div class="listing__label">stream a turn</div>
         <div class="listing__body">
-          <p>Implement <code>TurnActivitySink</code> and call <code>TurnBuilder::stream_to(&amp;sink)</code>, or use pull-style <code>stream()</code>. Fold <code>TurnActivity.correlation_id</code> into stable UI rows. See <a href="./embedding-turns.html#semantic-events">Turns and streams</a>.</p>
+          <p>Implement <code>TurnActivitySink</code> and call <code>TurnBuilder::stream_to(&amp;sink)</code>, or use pull-style <code>stream()</code>. For browser reconnect and service-boundary streams, use <a href="./streaming.html">Streaming and reconnect</a>.</p>
         </div>
       </div>
       <div class="listing__row">
@@ -78,7 +78,7 @@
       <div class="listing__row">
         <div class="listing__label">add a tool</div>
         <div class="listing__body">
-          <p>Implement <code>ToolProvider</code> or use <code>StaticToolProvider</code>; advertise cheap manifests, resolve full contracts, and execute work in <code>execute()</code>. Install the provider through <code>LashCoreBuilder::tools(...)</code>, a plugin registration, or the session/core <code>ToolAdmin</code> when availability needs to change at runtime. See the <a href="./tools.html">Tools guide</a>; use <a href="./plugins.html">Plugin basics</a> only when the tool also needs plugin state, prompt hooks, or runtime hooks.</p>
+          <p>Use <code>StaticToolProvider</code> and <code>StaticToolExecute</code> for fixed app tools; implement raw <code>ToolProvider</code> only for dynamic manifests, dynamic contracts, or custom provider behavior. Install the provider through <code>LashCoreBuilder::tools(...)</code>, plugin registration, or the session/core <code>ToolAdmin</code>. See the <a href="./tools.html">Tools guide</a>; use <a href="./plugins.html">Plugin basics</a> only when the tool also needs plugin state, prompt hooks, or runtime hooks.</p>
         </div>
       </div>
       <div class="listing__row">
@@ -125,7 +125,7 @@
       </div>
     </div>
     <h3>Where next</h3>
-    <div data-related="quickstart.html embedding.html embedding-turns.html tools.html persistence.html plugins.html rlm.html tracing.html"></div>
+    <div data-related="quickstart.html embedding.html embedding-turns.html streaming.html tools.html persistence.html plugins.html rlm.html tracing.html"></div>
   </div>
 </main>
 
