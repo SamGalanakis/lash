@@ -150,7 +150,23 @@ impl crate::ProcessService for RuntimeSessionProcessService {
                 scope,
             )
             .await?;
-        let definition = crate::ProcessDefinitionSummary::from_input(record.input.as_ref());
+        let definition = match record.input.as_ref() {
+            crate::ProcessInput::LashlangProcess {
+                module_ref,
+                process_ref,
+                host_requirements_ref,
+                process_name,
+                ..
+            } => Some(lashlang::ProcessDefinitionIdentity::new(
+                module_ref.clone(),
+                host_requirements_ref.clone(),
+                process_ref.clone(),
+                process_name.clone(),
+            )),
+            crate::ProcessInput::ToolCall { .. }
+            | crate::ProcessInput::SessionTurn { .. }
+            | crate::ProcessInput::External { .. } => None,
+        };
         Ok(crate::ProcessHandleSummary::new(
             record.id,
             descriptor,

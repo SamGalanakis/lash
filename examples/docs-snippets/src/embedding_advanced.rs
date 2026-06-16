@@ -93,6 +93,73 @@ async fn await_all_processes(session: &LashSession) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn lashlang_module_facade(
+    artifact_store: Arc<dyn LashlangArtifactStore>,
+) -> anyhow::Result<()> {
+    // docs:start:lashlang-module-facade
+    use std::collections::BTreeMap;
+
+    let mut resources = lashlang::LashlangHostCatalog::new();
+    resources.add_trigger_source_constructor(
+        ["app", "button"],
+        lashlang::TypeExpr::Object(Vec::new()),
+        lashlang::NamedDataType::object(
+            "app.ButtonPressed",
+            vec![lashlang::TypeField {
+                name: "color".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            }],
+        )?,
+    )?;
+
+    let environment = lashlang::LashlangHostEnvironment {
+        resources,
+        abilities: lashlang::LashlangAbilities::default().with_processes(),
+        ..lashlang::LashlangHostEnvironment::default()
+    };
+
+    let compiled = lashlang::compile_module(lashlang::ModuleCompileRequest {
+        source: r#"
+process on_button(event: app.ButtonPressed) {
+  finish event.color
+}
+source = app.button({})
+submit source
+"#,
+        environment: &environment,
+        artifact_store: Some(artifact_store.as_ref()),
+    })
+    .await?;
+
+    let process = compiled
+        .introspection
+        .exported_processes
+        .iter()
+        .find(|process| process.definition.process_name == "on_button")
+        .expect("compiled module exports on_button");
+
+    let inputs = lashlang::TriggerInputTemplate::new(BTreeMap::from([(
+        "event".to_string(),
+        lashlang::TriggerInputBinding::Event,
+    )]));
+    let compatibility =
+        lashlang::check_trigger_compatibility(lashlang::TriggerCompatibilityRequest {
+            artifact: &compiled.artifact,
+            definition: &process.definition,
+            source_type: "app.button",
+            inputs: &inputs,
+        })?;
+
+    println!(
+        "compiled {} and trigger emits {}",
+        compiled.module_ref,
+        compatibility.event_type.name()
+    );
+    // docs:end:lashlang-module-facade
+    Ok(())
+}
+
 async fn process_registry_core(
     provider: ProviderHandle,
     model: ModelSpec,

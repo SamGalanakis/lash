@@ -344,7 +344,7 @@ pub struct TriggerSubscriptionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<lashlang::TriggerTargetIdentity>,
+    pub target: Option<lashlang::ProcessDefinitionIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
@@ -386,7 +386,7 @@ impl TriggerSubscriptionFilter {
                 .is_none_or(|source_key| record.source_key == source_key)
             && self.enabled.is_none_or(|enabled| record.enabled == enabled)
             && self.target.as_ref().is_none_or(|target| {
-                target.matches(
+                target.matches_input_refs(
                     &record.module_ref,
                     &record.host_requirements_ref,
                     &record.process_ref,

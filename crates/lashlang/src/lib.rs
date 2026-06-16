@@ -1,11 +1,15 @@
 mod artifact;
 mod ast;
 mod builtins;
+mod compile;
 mod graph;
+mod identity;
+mod introspection;
 mod lexer;
 mod linker;
 mod parser;
 mod runtime;
+mod source;
 mod tracking;
 mod trigger;
 
@@ -21,9 +25,20 @@ pub use ast::{
     LabelMetadata, ProcessDecl, ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, TypeDecl,
     TypeExpr, TypeField, UnaryOp, fold_expr_children, format_type_expr, walk_expr,
 };
+pub use compile::{
+    ModuleCompileDiagnostic, ModuleCompileError, ModuleCompileOutput, ModuleCompileRequest,
+    ModuleCompileStage, compile_module,
+};
 pub use graph::{
     LashlangMap, LashlangMapEdge, LashlangMapNode, LashlangMapOptions, map_lashlang_main,
     map_lashlang_process, static_graph_json,
+};
+pub use identity::{ProcessDefinitionIdentity, ProcessDefinitionIdentityError};
+pub use introspection::{
+    ModuleInstanceIntrospection, ModuleIntrospection, ModuleIntrospectionError,
+    ModuleOperationIntrospection, NamedDataTypeIntrospection, ProcessInputIntrospection,
+    ProcessIntrospection, ProcessSignalIntrospection, ResourceOperationIntrospection,
+    ResourceTypeIntrospection, TriggerSourceIntrospection, TypeView, ValueConstructorIntrospection,
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
@@ -47,17 +62,21 @@ pub use runtime::{
     compile_linked_process, compile_module_artifact_process, compile_process, execute, from_json,
     prewarm, unwrap_type_value,
 };
+pub use source::{
+    CanonicalSourceError, canonical_process_source, canonical_process_source_with_requirements,
+    canonical_program_source, canonical_program_source_with_requirements,
+};
 pub use tracking::{
     LashlangBranchSite, LashlangExecutionCallSite, LashlangExecutionChild,
     LashlangExecutionObservation, LashlangExecutionSite, ProcessBranchSelection, process_ref_key,
 };
 pub use trigger::{
     HostDescriptor, HostDescriptorError, LASH_TRIGGER_EVENT_KEY, TriggerCancelRequest,
+    TriggerCompatibility, TriggerCompatibilityError, TriggerCompatibilityRequest,
     TriggerHostOperation, TriggerInputBinding, TriggerInputTemplate, TriggerListRequest,
-    TriggerRegistrationRequest, TriggerTargetIdentity, TriggerTargetValidation,
-    TriggerTargetValidationError, add_trigger_resource_operations, cancel_call_args,
-    event_type_for_source, is_trigger_resource_type, list_call_args, register_call_args,
-    trigger_event_placeholder_expr, validate_trigger_target,
+    TriggerRegistrationRequest, add_trigger_resource_operations, cancel_call_args,
+    check_trigger_compatibility, event_type_for_source, is_trigger_resource_type, list_call_args,
+    register_call_args, trigger_event_placeholder_expr,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {

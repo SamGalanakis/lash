@@ -3,13 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::artifact::{HostRequirementsRef, ModuleArtifact, ModuleRef, ProcessRef};
+use crate::artifact::ModuleArtifact;
 use crate::ast::{AstString, Expr, TypeExpr, TypeField, format_type_expr};
+use crate::identity::{ProcessDefinitionIdentity, ProcessDefinitionIdentityError};
 use crate::linker::{LashlangHostCatalog, NamedDataType};
-use crate::runtime::{
-    LASH_HOST_DESCRIPTOR_TYPE_KEY, LASH_HOST_DESCRIPTOR_VALUE_KEY, LASH_HOST_REQUIREMENTS_REF_KEY,
-    LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY,
-};
+use crate::runtime::{LASH_HOST_DESCRIPTOR_TYPE_KEY, LASH_HOST_DESCRIPTOR_VALUE_KEY};
 
 const TRIGGERS_RESOURCE_TYPE: &str = "Triggers";
 const TRIGGERS_ALIAS: &str = "triggers";
@@ -201,7 +199,7 @@ pub enum TriggerCallShapeError {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerRegistrationRequest {
     pub source: HostDescriptor,
-    pub target: TriggerTargetIdentity,
+    pub target: ProcessDefinitionIdentity,
     pub inputs: TriggerInputTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -213,7 +211,7 @@ impl TriggerRegistrationRequest {
         Ok(Self {
             source: HostDescriptor::decode(required_json_field(request, "source", operation)?)
                 .map_err(TriggerRequestDecodeError::from)?,
-            target: TriggerTargetIdentity::decode(
+            target: decode_process_definition_identity(
                 required_json_field(request, "target", operation)?,
                 "trigger target",
             )?,
@@ -312,7 +310,7 @@ fn is_trigger_event_placeholder_value(value: &serde_json::Value) -> bool {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<TriggerTargetIdentity>,
+    pub target: Option<ProcessDefinitionIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,7 +343,7 @@ impl TriggerListRequest {
         Ok(Self {
             target: request
                 .get("target")
-                .map(|value| TriggerTargetIdentity::decode(value, "triggers.list target"))
+                .map(|value| decode_process_definition_identity(value, "triggers.list target"))
                 .transpose()?,
             name: optional_string_filter(request, "name", TriggerHostOperation::List)?,
             source_type: optional_string_filter(
@@ -490,58 +488,6 @@ pub enum HostDescriptorError {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TriggerTargetIdentity {
-    pub module_ref: ModuleRef,
-    pub host_requirements_ref: HostRequirementsRef,
-    pub process_ref: ProcessRef,
-    pub process_name: String,
-}
-
-impl TriggerTargetIdentity {
-    pub fn decode(
-        value: &serde_json::Value,
-        label: &'static str,
-    ) -> Result<Self, TriggerRequestDecodeError> {
-        if value
-            .get(LASH_PROCESS_VALUE_KEY)
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        {
-            return Err(TriggerRequestDecodeError::InvalidTarget {
-                label,
-                message: "must be a process value".to_string(),
-            });
-        }
-        Ok(Self {
-            module_ref: decode_json_field(value, LASH_MODULE_REF_KEY, label)?,
-            host_requirements_ref: decode_json_field(value, LASH_HOST_REQUIREMENTS_REF_KEY, label)?,
-            process_ref: decode_json_field(value, LASH_PROCESS_REF_KEY, label)?,
-            process_name: value
-                .get(LASH_PROCESS_NAME_KEY)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| TriggerRequestDecodeError::InvalidTarget {
-                    label,
-                    message: format!("missing {LASH_PROCESS_NAME_KEY}"),
-                })?
-                .to_string(),
-        })
-    }
-
-    pub fn matches(
-        &self,
-        module_ref: &ModuleRef,
-        host_requirements_ref: &HostRequirementsRef,
-        process_ref: &ProcessRef,
-        process_name: &str,
-    ) -> bool {
-        self.module_ref == *module_ref
-            && self.host_requirements_ref == *host_requirements_ref
-            && self.process_ref == *process_ref
-            && self.process_name == process_name
-    }
-}
-
 pub fn event_type_for_source(
     resources: &LashlangHostCatalog,
     source_type: &str,
@@ -607,51 +553,248 @@ fn required_json_field<'json>(
         })
 }
 
-fn decode_json_field<T: serde::de::DeserializeOwned>(
+fn decode_process_definition_identity(
     value: &serde_json::Value,
-    field: &'static str,
     label: &'static str,
-) -> Result<T, TriggerRequestDecodeError> {
-    serde_json::from_value(value.get(field).cloned().ok_or_else(|| {
+) -> Result<ProcessDefinitionIdentity, TriggerRequestDecodeError> {
+    ProcessDefinitionIdentity::from_process_value(value).map_err(|err| {
         TriggerRequestDecodeError::InvalidTarget {
             label,
-            message: format!("missing {field}"),
+            message: match err {
+                ProcessDefinitionIdentityError::NotProcessValue => {
+                    "must be a process value".to_string()
+                }
+                ProcessDefinitionIdentityError::MissingField { field } => {
+                    format!("missing {field}")
+                }
+                ProcessDefinitionIdentityError::InvalidField { field, message } => {
+                    format!("invalid {field}: {message}")
+                }
+            },
         }
-    })?)
-    .map_err(|err| TriggerRequestDecodeError::InvalidTarget {
-        label,
-        message: format!("invalid {field}: {err}"),
     })
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TriggerTargetValidation {
-    pub inputs: TriggerInputTemplate,
-    pub event_ty: TypeExpr,
+struct TriggerCompatibilityValidation {
+    inputs: TriggerInputTemplate,
+    event_ty: TypeExpr,
 }
 
-pub fn validate_trigger_target(
-    target: &TriggerTargetIdentity,
+pub struct TriggerCompatibilityRequest<'a> {
+    pub artifact: &'a ModuleArtifact,
+    pub definition: &'a ProcessDefinitionIdentity,
+    pub source_type: &'a str,
+    pub inputs: &'a TriggerInputTemplate,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TriggerCompatibility {
+    pub definition: ProcessDefinitionIdentity,
+    pub event_type: NamedDataType,
+    pub resolved_event_type: TypeExpr,
+    pub inputs: TriggerInputTemplate,
+}
+
+pub fn check_trigger_compatibility(
+    request: TriggerCompatibilityRequest<'_>,
+) -> Result<TriggerCompatibility, TriggerCompatibilityError> {
+    let event_type = event_type_for_source(
+        &request.artifact.host_requirements.resources,
+        request.source_type,
+    )
+    .map_err(|err| match err {
+        TriggerRequestDecodeError::UnknownSourceType { source_type } => {
+            TriggerCompatibilityError::UnknownSourceType { source_type }
+        }
+        other => TriggerCompatibilityError::Source(other.to_string()),
+    })?;
+    let validation = validate_trigger_compatibility_target(
+        request.definition,
+        &event_type,
+        request.inputs,
+        request.artifact,
+    )?;
+    Ok(TriggerCompatibility {
+        definition: request.definition.clone(),
+        event_type,
+        resolved_event_type: validation.event_ty,
+        inputs: validation.inputs,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum TriggerCompatibilityError {
+    #[error("host descriptor `{source_type}` is not registered as a trigger source")]
+    UnknownSourceType { source_type: String },
+    #[error("trigger source is invalid: {0}")]
+    Source(String),
+    #[error(
+        "trigger target `{process_name}` module ref mismatch: target has {target_module_ref}, artifact has {artifact_module_ref}"
+    )]
+    ModuleRefMismatch {
+        process_name: String,
+        target_module_ref: String,
+        artifact_module_ref: String,
+    },
+    #[error(
+        "trigger target `{process_name}` host requirements mismatch: target has {target_host_requirements}, artifact has {artifact_host_requirements}"
+    )]
+    HostRequirementsMismatch {
+        process_name: String,
+        target_host_requirements: String,
+        artifact_host_requirements: String,
+    },
+    #[error(
+        "trigger target artifact `{module_ref}` does not export process `{process_name}` as requested ref {process_ref}"
+    )]
+    ProcessRefMismatch {
+        module_ref: String,
+        process_name: String,
+        process_ref: String,
+    },
+    #[error("trigger target artifact `{module_ref}` is missing process `{process_name}`")]
+    MissingProcess {
+        module_ref: String,
+        process_name: String,
+    },
+    #[error("trigger target `{process_name}` input `{input}` is not mapped")]
+    MissingInput { process_name: String, input: String },
+    #[error("trigger target `{process_name}` has no input `{input}`")]
+    UnknownInput { process_name: String, input: String },
+    #[error("trigger target `{process_name}` inputs must map at least one param to trigger.event")]
+    MissingEventInput { process_name: String },
+    #[error(
+        "trigger source emits {event}, but target `{process_name}` input `{input_name}` expects {input}"
+    )]
+    EventMismatch {
+        event: String,
+        process_name: String,
+        input_name: String,
+        input: String,
+    },
+    #[error(
+        "trigger target `{process_name}` input `{input}` has incompatible fixed authority type: expected {expected}, got {actual}"
+    )]
+    FixedInputMismatch {
+        process_name: String,
+        input: String,
+        expected: String,
+        actual: String,
+    },
+}
+
+impl From<TriggerCompatibilityValidationError> for TriggerCompatibilityError {
+    fn from(err: TriggerCompatibilityValidationError) -> Self {
+        match err {
+            TriggerCompatibilityValidationError::ModuleRefMismatch {
+                process_name,
+                target_module_ref,
+                artifact_module_ref,
+            } => Self::ModuleRefMismatch {
+                process_name,
+                target_module_ref,
+                artifact_module_ref,
+            },
+            TriggerCompatibilityValidationError::HostRequirementsMismatch {
+                process_name,
+                target_host_requirements,
+                artifact_host_requirements,
+            } => Self::HostRequirementsMismatch {
+                process_name,
+                target_host_requirements,
+                artifact_host_requirements,
+            },
+            TriggerCompatibilityValidationError::ProcessRefMismatch {
+                module_ref,
+                process_name,
+                process_ref,
+            } => Self::ProcessRefMismatch {
+                module_ref,
+                process_name,
+                process_ref,
+            },
+            TriggerCompatibilityValidationError::MissingProcess {
+                module_ref,
+                process_name,
+            } => Self::MissingProcess {
+                module_ref,
+                process_name,
+            },
+            TriggerCompatibilityValidationError::MissingInput {
+                process_name,
+                input,
+            } => Self::MissingInput {
+                process_name,
+                input,
+            },
+            TriggerCompatibilityValidationError::UnknownInput {
+                process_name,
+                input,
+            } => Self::UnknownInput {
+                process_name,
+                input,
+            },
+            TriggerCompatibilityValidationError::MissingEventInput { process_name } => {
+                Self::MissingEventInput { process_name }
+            }
+            TriggerCompatibilityValidationError::EventMismatch {
+                event,
+                process_name,
+                input_name,
+                input,
+            } => Self::EventMismatch {
+                event,
+                process_name,
+                input_name,
+                input,
+            },
+            TriggerCompatibilityValidationError::FixedInputMismatch {
+                process_name,
+                input,
+                expected,
+                actual,
+            } => Self::FixedInputMismatch {
+                process_name,
+                input,
+                expected,
+                actual,
+            },
+        }
+    }
+}
+
+fn validate_trigger_compatibility_target(
+    target: &ProcessDefinitionIdentity,
     event_ty: &NamedDataType,
     inputs: &TriggerInputTemplate,
     artifact: &ModuleArtifact,
-) -> Result<TriggerTargetValidation, TriggerTargetValidationError> {
-    if artifact.host_requirements_ref != target.host_requirements_ref {
-        return Err(TriggerTargetValidationError::HostRequirementsMismatch {
+) -> Result<TriggerCompatibilityValidation, TriggerCompatibilityValidationError> {
+    if artifact.module_ref != target.module_ref {
+        return Err(TriggerCompatibilityValidationError::ModuleRefMismatch {
             process_name: target.process_name.clone(),
-            target_host_requirements: target.host_requirements_ref.to_string(),
-            artifact_host_requirements: artifact.host_requirements_ref.to_string(),
+            target_module_ref: target.module_ref.to_string(),
+            artifact_module_ref: artifact.module_ref.to_string(),
         });
     }
+    if artifact.host_requirements_ref != target.host_requirements_ref {
+        return Err(
+            TriggerCompatibilityValidationError::HostRequirementsMismatch {
+                process_name: target.process_name.clone(),
+                target_host_requirements: target.host_requirements_ref.to_string(),
+                artifact_host_requirements: artifact.host_requirements_ref.to_string(),
+            },
+        );
+    }
     let Some(exported_process_name) = artifact.process_name_for_ref(&target.process_ref) else {
-        return Err(TriggerTargetValidationError::ProcessRefMismatch {
+        return Err(TriggerCompatibilityValidationError::ProcessRefMismatch {
             module_ref: target.module_ref.to_string(),
             process_name: target.process_name.clone(),
             process_ref: format!("{:?}", target.process_ref),
         });
     };
     if exported_process_name != target.process_name {
-        return Err(TriggerTargetValidationError::ProcessRefMismatch {
+        return Err(TriggerCompatibilityValidationError::ProcessRefMismatch {
             module_ref: target.module_ref.to_string(),
             process_name: target.process_name.clone(),
             process_ref: format!("{:?}", target.process_ref),
@@ -660,7 +803,7 @@ pub fn validate_trigger_target(
     let process = artifact
         .canonical_ir
         .process(exported_process_name)
-        .ok_or_else(|| TriggerTargetValidationError::MissingProcess {
+        .ok_or_else(|| TriggerCompatibilityValidationError::MissingProcess {
             module_ref: target.module_ref.to_string(),
             process_name: target.process_name.clone(),
         })?;
@@ -670,14 +813,14 @@ pub fn validate_trigger_target(
             .iter()
             .any(|param| param.name.as_str() == input_name)
         {
-            return Err(TriggerTargetValidationError::UnknownInput {
+            return Err(TriggerCompatibilityValidationError::UnknownInput {
                 process_name: target.process_name.clone(),
                 input: input_name.to_string(),
             });
         }
     }
     if !inputs.contains_event() {
-        return Err(TriggerTargetValidationError::MissingEventInput {
+        return Err(TriggerCompatibilityValidationError::MissingEventInput {
             process_name: target.process_name.clone(),
         });
     }
@@ -689,7 +832,7 @@ pub fn validate_trigger_target(
     );
     for param in &process.params {
         let Some(input) = inputs.get(param.name.as_str()) else {
-            return Err(TriggerTargetValidationError::MissingInput {
+            return Err(TriggerCompatibilityValidationError::MissingInput {
                 process_name: target.process_name.clone(),
                 input: param.name.to_string(),
             });
@@ -699,7 +842,7 @@ pub fn validate_trigger_target(
         match input {
             TriggerInputBinding::Event => {
                 if !is_resolved_type_assignable(&event_ty, &input_ty) {
-                    return Err(TriggerTargetValidationError::EventMismatch {
+                    return Err(TriggerCompatibilityValidationError::EventMismatch {
                         event: format_type_expr(&event_ty),
                         process_name: target.process_name.clone(),
                         input_name: param.name.to_string(),
@@ -718,7 +861,7 @@ pub fn validate_trigger_target(
             }
         }
     }
-    Ok(TriggerTargetValidation {
+    Ok(TriggerCompatibilityValidation {
         inputs: inputs.clone(),
         event_ty,
     })
@@ -730,7 +873,7 @@ fn validate_fixed_input_value(
     resources: &LashlangHostCatalog,
     process_name: &str,
     input_name: &str,
-) -> Result<(), TriggerTargetValidationError> {
+) -> Result<(), TriggerCompatibilityValidationError> {
     let TypeExpr::Ref(resource_type) = input_ty else {
         return Ok(());
     };
@@ -739,13 +882,15 @@ fn validate_fixed_input_value(
     }
     match crate::runtime::from_json(value.clone()) {
         crate::Value::Resource(handle) if handle.resource_type == *resource_type => Ok(()),
-        crate::Value::Resource(handle) => Err(TriggerTargetValidationError::FixedInputMismatch {
-            process_name: process_name.to_string(),
-            input: input_name.to_string(),
-            expected: resource_type.to_string(),
-            actual: handle.resource_type,
-        }),
-        _ => Err(TriggerTargetValidationError::FixedInputMismatch {
+        crate::Value::Resource(handle) => {
+            Err(TriggerCompatibilityValidationError::FixedInputMismatch {
+                process_name: process_name.to_string(),
+                input: input_name.to_string(),
+                expected: resource_type.to_string(),
+                actual: handle.resource_type,
+            })
+        }
+        _ => Err(TriggerCompatibilityValidationError::FixedInputMismatch {
             process_name: process_name.to_string(),
             input: input_name.to_string(),
             expected: resource_type.to_string(),
@@ -755,7 +900,15 @@ fn validate_fixed_input_value(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum TriggerTargetValidationError {
+enum TriggerCompatibilityValidationError {
+    #[error(
+        "trigger target `{process_name}` module ref mismatch: target has {target_module_ref}, artifact has {artifact_module_ref}"
+    )]
+    ModuleRefMismatch {
+        process_name: String,
+        target_module_ref: String,
+        artifact_module_ref: String,
+    },
     #[error(
         "trigger target `{process_name}` host requirements mismatch: target has {target_host_requirements}, artifact has {artifact_host_requirements}"
     )]
@@ -987,6 +1140,37 @@ mod tests {
         resources
     }
 
+    fn process_environment(resources: LashlangHostCatalog) -> crate::LashlangHostEnvironment {
+        crate::LashlangHostEnvironment {
+            resources,
+            abilities: crate::LashlangAbilities::default().with_processes(),
+            ..crate::LashlangHostEnvironment::default()
+        }
+    }
+
+    fn linked_artifact(source: &str, resources: LashlangHostCatalog) -> ModuleArtifact {
+        let source =
+            format!("{source}\nsource = cron.Schedule({{ expr: \"*\" }})\nsubmit source\n");
+        crate::LinkedModule::link(
+            crate::parse(&source).expect("parse trigger target module"),
+            process_environment(resources),
+        )
+        .expect("link trigger target module")
+        .artifact
+    }
+
+    fn event_input_template() -> TriggerInputTemplate {
+        TriggerInputTemplate::new(BTreeMap::from([(
+            "event".to_string(),
+            TriggerInputBinding::Event,
+        )]))
+    }
+
+    fn definition_for(artifact: &ModuleArtifact, process_name: &str) -> ProcessDefinitionIdentity {
+        ProcessDefinitionIdentity::from_artifact_export(artifact, process_name)
+            .expect("artifact should export process")
+    }
+
     #[test]
     fn host_descriptor_encode_decode_and_typed_decode_round_trip() {
         let value = serde_json::json!({
@@ -1031,5 +1215,188 @@ mod tests {
         assert!(
             matches!(err, HostDescriptorError::MalformedPayload { source_type, .. } if source_type == "cron.Schedule")
         );
+    }
+
+    #[test]
+    fn trigger_compatibility_accepts_matching_event_mapping() {
+        let artifact = linked_artifact(
+            "process tick(event: cron.Tick) { finish event.fired_at }",
+            resources(),
+        );
+        let definition = definition_for(&artifact, "tick");
+
+        let compatibility = check_trigger_compatibility(TriggerCompatibilityRequest {
+            artifact: &artifact,
+            definition: &definition,
+            source_type: "cron.Schedule",
+            inputs: &event_input_template(),
+        })
+        .expect("trigger should be compatible");
+
+        assert_eq!(compatibility.definition, definition);
+        assert_eq!(compatibility.event_type.name(), "cron.Tick");
+        assert_eq!(
+            format_type_expr(&compatibility.resolved_event_type),
+            "{ fired_at: str }"
+        );
+    }
+
+    #[test]
+    fn trigger_compatibility_rejects_unknown_source() {
+        let artifact = linked_artifact(
+            "process tick(event: cron.Tick) { finish event.fired_at }",
+            resources(),
+        );
+        let definition = definition_for(&artifact, "tick");
+
+        let err = check_trigger_compatibility(TriggerCompatibilityRequest {
+            artifact: &artifact,
+            definition: &definition,
+            source_type: "missing.Source",
+            inputs: &event_input_template(),
+        })
+        .expect_err("unknown source should fail");
+
+        assert!(
+            matches!(err, TriggerCompatibilityError::UnknownSourceType { source_type } if source_type == "missing.Source")
+        );
+    }
+
+    #[test]
+    fn trigger_compatibility_rejects_wrong_process_ref() {
+        let artifact = linked_artifact(
+            "process tick(event: cron.Tick) { finish event.fired_at }",
+            resources(),
+        );
+        let mut definition = definition_for(&artifact, "tick");
+        definition.process_ref.pos = definition.process_ref.pos.saturating_add(1);
+
+        let err = check_trigger_compatibility(TriggerCompatibilityRequest {
+            artifact: &artifact,
+            definition: &definition,
+            source_type: "cron.Schedule",
+            inputs: &event_input_template(),
+        })
+        .expect_err("wrong process ref should fail");
+
+        assert!(matches!(
+            err,
+            TriggerCompatibilityError::ProcessRefMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn trigger_compatibility_rejects_missing_event_input() {
+        let artifact = linked_artifact(
+            "process tick(event: cron.Tick) { finish event.fired_at }",
+            resources(),
+        );
+        let definition = definition_for(&artifact, "tick");
+        let inputs = TriggerInputTemplate::new(BTreeMap::from([(
+            "event".to_string(),
+            TriggerInputBinding::Fixed {
+                value: serde_json::json!({"fired_at": "now"}),
+            },
+        )]));
+
+        let err = check_trigger_compatibility(TriggerCompatibilityRequest {
+            artifact: &artifact,
+            definition: &definition,
+            source_type: "cron.Schedule",
+            inputs: &inputs,
+        })
+        .expect_err("missing event mapping should fail");
+
+        assert!(matches!(
+            err,
+            TriggerCompatibilityError::MissingEventInput { .. }
+        ));
+    }
+
+    #[test]
+    fn trigger_compatibility_rejects_unknown_input() {
+        let artifact = linked_artifact(
+            "process tick(event: cron.Tick) { finish event.fired_at }",
+            resources(),
+        );
+        let definition = definition_for(&artifact, "tick");
+        let inputs = TriggerInputTemplate::new(BTreeMap::from([
+            ("event".to_string(), TriggerInputBinding::Event),
+            ("extra".to_string(), TriggerInputBinding::Event),
+        ]));
+
+        let err = check_trigger_compatibility(TriggerCompatibilityRequest {
+            artifact: &artifact,
+            definition: &definition,
+            source_type: "cron.Schedule",
+            inputs: &inputs,
+        })
+        .expect_err("unknown input should fail");
+
+        assert!(matches!(
+            err,
+            TriggerCompatibilityError::UnknownInput { input, .. }
+                if input == "extra"
+        ));
+    }
+
+    #[test]
+    fn trigger_compatibility_rejects_event_type_mismatch() {
+        let artifact = linked_artifact(
+            "process tick(event: Type { fired_at: str, required: str }) { finish event.fired_at }",
+            resources(),
+        );
+        let definition = definition_for(&artifact, "tick");
+
+        let err = check_trigger_compatibility(TriggerCompatibilityRequest {
+            artifact: &artifact,
+            definition: &definition,
+            source_type: "cron.Schedule",
+            inputs: &event_input_template(),
+        })
+        .expect_err("event mismatch should fail");
+
+        assert!(matches!(
+            err,
+            TriggerCompatibilityError::EventMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn trigger_compatibility_rejects_fixed_resource_mismatch() {
+        let mut resources = resources();
+        resources.ensure_resource_type("Bucket");
+        let artifact = linked_artifact(
+            "process tick(event: cron.Tick, bucket: Bucket) { finish event.fired_at }",
+            resources,
+        );
+        let definition = definition_for(&artifact, "tick");
+        let inputs = TriggerInputTemplate::new(BTreeMap::from([
+            ("event".to_string(), TriggerInputBinding::Event),
+            (
+                "bucket".to_string(),
+                TriggerInputBinding::Fixed {
+                    value: serde_json::json!({
+                        "__resource__": true,
+                        "type": "OtherBucket",
+                        "alias": "wrong",
+                    }),
+                },
+            ),
+        ]));
+
+        let err = check_trigger_compatibility(TriggerCompatibilityRequest {
+            artifact: &artifact,
+            definition: &definition,
+            source_type: "cron.Schedule",
+            inputs: &inputs,
+        })
+        .expect_err("resource mismatch should fail");
+
+        assert!(matches!(
+            err,
+            TriggerCompatibilityError::FixedInputMismatch { input, .. }
+                if input == "bucket"
+        ));
     }
 }

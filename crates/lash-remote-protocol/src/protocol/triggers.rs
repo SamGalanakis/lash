@@ -94,7 +94,7 @@ pub struct RemoteTriggerSubscriptionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<RemoteTriggerTargetIdentity>,
+    pub target: Option<RemoteProcessDefinitionIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
@@ -161,23 +161,6 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteTriggerTargetIdentity {
-    pub module_ref: String,
-    pub host_requirements_ref: String,
-    pub process_ref: RemoteLashlangProcessRef,
-    pub process_name: String,
-}
-
-impl RemoteTriggerTargetIdentity {
-    pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
-        require_non_empty(type_name, "module_ref", &self.module_ref)?;
-        require_non_empty(type_name, "host_requirements_ref", &self.host_requirements_ref)?;
-        self.process_ref.validate(type_name)?;
-        require_non_empty(type_name, "process_name", &self.process_name)
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct RemoteTriggerInputTemplate {
@@ -219,7 +202,7 @@ pub struct RemoteTriggerSubscriptionDraft {
     pub source: serde_json::Value,
     #[serde(default)]
     pub event_ty: serde_json::Value,
-    pub target: RemoteTriggerTargetIdentity,
+    pub target: RemoteProcessDefinitionIdentity,
     #[serde(default)]
     pub input_template: RemoteTriggerInputTemplate,
 }
@@ -264,7 +247,7 @@ pub struct RemoteTriggerSubscriptionRecord {
     pub source: serde_json::Value,
     #[serde(default)]
     pub event_ty: serde_json::Value,
-    pub target: RemoteTriggerTargetIdentity,
+    pub target: RemoteProcessDefinitionIdentity,
     #[serde(default)]
     pub input_template: RemoteTriggerInputTemplate,
     #[serde(default = "default_true")]

@@ -260,9 +260,12 @@ mod tests {
                 lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
                 lash_core::ProcessLifecycleStatus::Running,
             )
-            .with_definition(Some(lash_core::ProcessDefinitionSummary {
-                name: "responder".into(),
-            })),
+            .with_definition(Some(lashlang::ProcessDefinitionIdentity::new(
+                lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
+                lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host")),
+                lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
+                "responder",
+            ))),
         ]);
         app.select_next_process();
 

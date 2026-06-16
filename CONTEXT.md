@@ -43,6 +43,7 @@
 - **Host Descriptor**: Pure, typed Lashlang value describing host-owned configuration or identity for later host interpretation. Avoid: Host Value, Opaque Host Descriptor.
 - **Trigger Source Descriptor**: Host Descriptor for a Trigger Source policy or configuration.
 - **Host Requirements**: Content-addressed description of the Lashlang Host Environment capabilities a linked Lashlang artifact requires. Avoid: Surface Requirements, Required Surface.
+- **Process Definition Identity**: Canonical identity for one exported Lashlang process definition: module ref, host requirements ref, process ref, and process name. Trigger targets, process summaries, and process filters use this full identity instead of partial selector shapes.
 - **Wake Target**: Optional session that receives a process's wakes as Queued Work. A process without one still records wake events; they are observable but deliver nowhere.
 - **Process Handle Grant**: Per-session visibility of a process. Grants are additive and revocable; they never affect whether the process runs.
 - **Process Signal**: Named, typed message delivered to one specific Runtime Process. A process declares its signals and senders are validated against the declaration. Distinct from a Trigger Occurrence, which is a broadcast world occurrence routed by subscriptions.

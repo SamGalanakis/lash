@@ -179,6 +179,53 @@ impl ModuleArtifact {
             .find_map(|(name, candidate)| (candidate == process_ref).then_some(name.as_str()))
     }
 
+    /// Pretty-print the saved canonical IR as Lashlang source.
+    ///
+    /// The returned source is generated from canonical IR and host
+    /// requirements. It preserves compile-equivalent structure, not comments or
+    /// original formatting.
+    pub fn canonical_source(&self) -> Result<String, crate::CanonicalSourceError> {
+        crate::canonical_program_source_with_requirements(
+            &self.canonical_ir,
+            &self.host_requirements,
+        )
+    }
+
+    /// Pretty-print a focused process definition by process ref.
+    ///
+    /// Returns `Ok(None)` when the ref is not exported by this module artifact.
+    /// The fragment is the process declaration itself; use
+    /// [`Self::canonical_source`] when the host needs a complete module snippet.
+    pub fn canonical_process_source(
+        &self,
+        process_ref: &ProcessRef,
+    ) -> Result<Option<String>, crate::CanonicalSourceError> {
+        let Some(process_name) = self.process_name_for_ref(process_ref) else {
+            return Ok(None);
+        };
+        self.canonical_process_source_by_name(process_name)
+    }
+
+    /// Pretty-print a focused process definition by exported process name.
+    ///
+    /// Returns `Ok(None)` when the process is not declared by this artifact.
+    pub fn canonical_process_source_by_name(
+        &self,
+        process_name: &str,
+    ) -> Result<Option<String>, crate::CanonicalSourceError> {
+        let Some(process) = self.canonical_ir.process(process_name) else {
+            return Ok(None);
+        };
+        crate::canonical_process_source_with_requirements(process, &self.host_requirements)
+            .map(Some)
+    }
+
+    pub fn introspect(
+        &self,
+    ) -> Result<crate::ModuleIntrospection, crate::ModuleIntrospectionError> {
+        crate::ModuleIntrospection::from_artifact(self)
+    }
+
     pub fn verify(&self) -> Result<(), ModuleArtifactError> {
         let rebuilt = Self::from_program_with_requirements(
             self.canonical_ir.clone(),

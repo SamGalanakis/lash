@@ -147,6 +147,72 @@ let core = LashCore::rlm()
           </aside>
         </div>
 
+        <div class="section" id="lashlang-modules">
+          <div class="section-header">
+            <h2>Lashlang Modules</h2>
+            <p>Hosts that accept or ship Lashlang modules should compile through <code>compile_module</code>. The facade returns the persisted artifact refs, stable introspection, exported process definition identities, and structured diagnostics; trigger registration screens can run compatibility checks before saving a subscription.</p>
+          </div>
+          <pre data-lang="rust" data-snippet="embedding_advanced#lashlang-module-facade"><code>use std::collections::BTreeMap;
+
+let mut resources = lashlang::LashlangHostCatalog::new();
+resources.add_trigger_source_constructor(
+    ["app", "button"],
+    lashlang::TypeExpr::Object(Vec::new()),
+    lashlang::NamedDataType::object(
+        "app.ButtonPressed",
+        vec![lashlang::TypeField {
+            name: "color".into(),
+            ty: lashlang::TypeExpr::Str,
+            optional: false,
+        }],
+    )?,
+)?;
+
+let environment = lashlang::LashlangHostEnvironment {
+    resources,
+    abilities: lashlang::LashlangAbilities::default().with_processes(),
+    ..lashlang::LashlangHostEnvironment::default()
+};
+
+let compiled = lashlang::compile_module(lashlang::ModuleCompileRequest {
+    source: r#"
+process on_button(event: app.ButtonPressed) {
+  finish event.color
+}
+source = app.button({})
+submit source
+"#,
+    environment: &amp;environment,
+    artifact_store: Some(artifact_store.as_ref()),
+})
+.await?;
+
+let process = compiled
+    .introspection
+    .exported_processes
+    .iter()
+    .find(|process| process.definition.process_name == "on_button")
+    .expect("compiled module exports on_button");
+
+let inputs = lashlang::TriggerInputTemplate::new(BTreeMap::from([(
+    "event".to_string(),
+    lashlang::TriggerInputBinding::Event,
+)]));
+let compatibility =
+    lashlang::check_trigger_compatibility(lashlang::TriggerCompatibilityRequest {
+        artifact: &amp;compiled.artifact,
+        definition: &amp;process.definition,
+        source_type: "app.button",
+        inputs: &amp;inputs,
+    })?;
+
+println!(
+    "compiled {} and trigger emits {}",
+    compiled.module_ref,
+    compatibility.event_type.name()
+);</code></pre>
+        </div>
+
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
