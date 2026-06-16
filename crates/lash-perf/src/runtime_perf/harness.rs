@@ -408,7 +408,7 @@ pub(crate) fn build_embed_core(
     builder = builder
         .provider(benchmark_provider(scenario).into_handle())
         .model(benchmark_model_spec())
-        .store_factory(Arc::new(RuntimePerfStoreFactory { store }));
+        .store_factory(Arc::new(RuntimePerfStoreFactory::new(store)));
     if scenario.execution_mode() == ModeId::rlm() {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
@@ -462,6 +462,13 @@ pub(crate) async fn build_runtime_with_store(
     if matches!(scenario, RuntimePerfScenario::RlmLlmQuery) {
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
     }
+    if matches!(scenario, RuntimePerfScenario::RlmSubagentSpawn) {
+        plugin_stack.push(Arc::new(lash_subagents::SubagentsPluginFactory::new(
+            Arc::new(lash_subagents::CapabilityRegistry::new().with(Arc::new(
+                lash_subagents::StaticCapability::new("default", lash_core::SessionSpec::inherit()),
+            ))),
+        )));
+    }
     if matches!(
         scenario,
         RuntimePerfScenario::RlmLargeToolCatalog | RuntimePerfScenario::ToolDiscoverySearch
@@ -501,9 +508,7 @@ pub(crate) async fn build_runtime_with_store(
     // Store-backed turns reject those extensions because they cannot be
     // checkpointed/resumed.
     if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
-        builder = builder.store_factory(Arc::new(RuntimePerfStoreFactory {
-            store: Arc::clone(&store),
-        }));
+        builder = builder.store_factory(Arc::new(RuntimePerfStoreFactory::new(Arc::clone(&store))));
     }
     let core = if matches!(scenario, RuntimePerfScenario::StoreReopen) {
         builder
@@ -827,6 +832,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => format!(
             "Turn {} in RLM mode. Exercise pending benchmark_async completion inside a started process, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmSubagentSpawn => format!(
+            "Turn {} in RLM mode. Start a process that spawns a default subagent with seeded input, await it, then submit exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

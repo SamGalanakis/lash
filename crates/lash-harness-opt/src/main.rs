@@ -178,8 +178,22 @@ impl From<CliSplit> for Split {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let stack_bytes = std::env::var("LASH_HARNESS_OPT_TOKIO_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(stack_bytes)
+        .build()
+        .context("build lash-harness-opt Tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Command::Optimize { project } => match project {

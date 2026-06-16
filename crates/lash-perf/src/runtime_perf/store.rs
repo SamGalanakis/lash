@@ -51,15 +51,35 @@ impl RuntimePerfStore {
 #[derive(Clone)]
 pub(crate) struct RuntimePerfStoreFactory {
     pub(crate) store: Arc<RuntimePerfStore>,
+    child_stores: Arc<Mutex<HashMap<String, Arc<RuntimePerfStore>>>>,
+}
+
+impl RuntimePerfStoreFactory {
+    pub(crate) fn new(store: Arc<RuntimePerfStore>) -> Self {
+        Self {
+            store,
+            child_stores: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionStoreFactory for RuntimePerfStoreFactory {
     async fn create_store(
         &self,
-        _request: &SessionStoreCreateRequest,
+        request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn RuntimePersistence>, String> {
-        Ok(Arc::clone(&self.store) as Arc<dyn RuntimePersistence>)
+        if request.parent_session_id().is_none() {
+            return Ok(Arc::clone(&self.store) as Arc<dyn RuntimePersistence>);
+        }
+        let mut stores = self
+            .child_stores
+            .lock()
+            .expect("lock runtime perf child stores");
+        let store = stores
+            .entry(request.session_id.clone())
+            .or_insert_with(|| Arc::new(RuntimePerfStore::default()));
+        Ok(Arc::clone(store) as Arc<dyn RuntimePersistence>)
     }
 
     async fn delete_session(&self, _session_id: &str) -> Result<(), String> {

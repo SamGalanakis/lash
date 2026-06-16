@@ -36,18 +36,41 @@ DEFAULT_STACKS = [
     8 * 1024 * 1024,
 ]
 
-DEFAULT_SCENARIOS = [
+STACK_BUDGET_BYTES = 2 * 1024 * 1024
+
+KNOWN_RUNTIME_SCENARIOS = [
     "standard",
     "rlm",
-    "rlm_globals",
+    "standard_tool_calls",
+    "standard_async_tool_completion",
     "rlm_tool_calls",
+    "rlm_async_tool_completion",
     "rlm_process_handles",
     "rlm_process_async_tool_completion",
+    "rlm_subagent_spawn",
+    "rlm_llm_query",
+    "rlm_globals",
     "rlm_large_tool_catalog",
+    "observational_memory",
+    "observational_memory_maintenance",
+    "openai_compat_stream",
+    "standard_shell_output",
     "tool_discovery_search",
+    "openai_responses_sse_parse",
+    "direct_llm_client",
+    "process_list_stress",
+    "embed_standard",
+    "embed_rlm",
     "scoped_effect_controller",
+    "store_reopen",
+    "sqlite_store_reopen",
     "turn_checkpoint",
+    "live_replay_pressure",
+    "trace_jsonl_standard",
+    "trace_jsonl_extended",
 ]
+
+DEFAULT_SCENARIOS = KNOWN_RUNTIME_SCENARIOS
 
 
 def parse_size(value: str) -> int:
@@ -227,6 +250,15 @@ def run_sample(
     payload: dict[str, object] | None = None
     if proc.returncode == 0 and sample_out.exists():
         payload = json.loads(sample_out.read_text())
+    reported_stack_bytes = (payload or {}).get("worker_stack_bytes")
+    summaries = (payload or {}).get("summary")
+    summary_scenarios = []
+    if isinstance(summaries, list):
+        summary_scenarios = [
+            item.get("scenario")
+            for item in summaries
+            if isinstance(item, dict) and isinstance(item.get("scenario"), str)
+        ]
     return {
         "scenario": scenario,
         "stack_bytes": stack_bytes,
@@ -235,9 +267,11 @@ def run_sample(
         "started_at": started.isoformat(),
         "duration_ms": round((finished - started).total_seconds() * 1000, 3),
         "runtime_perf_out": str(sample_out),
-        "stdout_tail": proc.stdout[-4000:],
-        "stderr_tail": proc.stderr[-4000:],
-        "summary": (payload or {}).get("summary"),
+        "reported_worker_stack_bytes": reported_stack_bytes,
+        "stack_accounted": reported_stack_bytes == stack_bytes,
+        "stdout_tail": "" if proc.returncode == 0 else proc.stdout[-4000:],
+        "stderr_tail": "" if proc.returncode == 0 else proc.stderr[-4000:],
+        "summary_scenarios": summary_scenarios,
     }
 
 
@@ -290,7 +324,10 @@ def main() -> int:
         "warmups": max(args.warmups, 0),
         "turns": max(args.turns, 1),
         "scenarios": scenarios,
+        "known_scenarios": KNOWN_RUNTIME_SCENARIOS,
+        "missing_known_scenarios": sorted(set(KNOWN_RUNTIME_SCENARIOS) - set(scenarios)),
         "stack_bytes": stacks,
+        "stack_budget_bytes": STACK_BUDGET_BYTES,
         "first_success_stack_bytes": {
             scenario: first_success(samples, scenario) for scenario in scenarios
         },

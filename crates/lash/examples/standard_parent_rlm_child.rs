@@ -2,8 +2,22 @@ use std::sync::Arc;
 
 use lash::{LashCore, ModeId, ModePreset};
 
-#[tokio::main]
-async fn main() -> lash::Result<()> {
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let stack_bytes = std::env::var("LASH_EXAMPLE_TOKIO_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(stack_bytes)
+        .build()
+        .map_err(Box::<dyn std::error::Error>::from)?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let core = LashCore::builder()
         .install_mode(ModePreset::standard())
         .install_mode(ModePreset::rlm())

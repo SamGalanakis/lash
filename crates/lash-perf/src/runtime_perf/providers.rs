@@ -719,6 +719,12 @@ fn benchmark_stream_profile_for_request(
     scenario: RuntimePerfScenario,
     request: &LlmRequest,
 ) -> BenchmarkStreamProfile {
+    if matches!(scenario, RuntimePerfScenario::RlmSubagentSpawn)
+        && request_text(request).contains("Subagent capability: default. Depth: 1/5.")
+    {
+        return text_profile("```lashlang\nsubmit { len: len(chunk) }\n```");
+    }
+
     if matches!(
         scenario,
         RuntimePerfScenario::ObservationalMemoryMaintenance
@@ -973,6 +979,25 @@ submit first_result.value
                 .to_string();
             text_profile(text)
         }
+        RuntimePerfScenario::RlmSubagentSpawn => {
+            let text = r#"```lashlang
+process spawn_child(agents: Agents) {
+  result = await agents.spawn({
+    capability: "default",
+    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    seed: { chunk: ["alpha", "beta", "gamma"] },
+    output: Type { len: int }
+  })?
+  finish result
+}
+
+handle = start spawn_child(agents: agents)
+result = (await handle)?
+submit "runtime perf benchmark ok"
+```"#
+                .to_string();
+            text_profile(text)
+        }
         RuntimePerfScenario::RlmLlmQuery => {
             let text = r#"```lashlang
 result = await llm.query({
@@ -1021,6 +1046,30 @@ fn request_has_tool_result(request: &LlmRequest) -> bool {
             .iter()
             .any(|block| matches!(block, LlmContentBlock::ToolResult { .. }))
     })
+}
+
+fn request_text(request: &LlmRequest) -> String {
+    let mut out = String::new();
+    for message in &request.messages {
+        for block in message.blocks.iter() {
+            match block {
+                LlmContentBlock::Text { text, .. } => out.push_str(text),
+                LlmContentBlock::ToolResult { content, .. } => out.push_str(content),
+                LlmContentBlock::ToolCall {
+                    tool_name,
+                    input_json,
+                    ..
+                } => {
+                    out.push_str(tool_name);
+                    out.push_str(input_json);
+                }
+                LlmContentBlock::Reasoning { text, .. } => out.push_str(text),
+                LlmContentBlock::Image { .. } => {}
+            }
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn empty_request() -> LlmRequest {
