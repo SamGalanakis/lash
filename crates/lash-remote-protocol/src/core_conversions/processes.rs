@@ -50,12 +50,10 @@ impl From<lash_core::ProcessProvenance> for RemoteProcessProvenance {
     fn from(value: lash_core::ProcessProvenance) -> Self {
         let lash_core::ProcessProvenance {
             originator,
-            host_profile_id,
             caused_by,
         } = value;
         Self {
             originator: originator.into(),
-            host_profile_id,
             caused_by: caused_by.map(Into::into),
         }
     }
@@ -65,12 +63,10 @@ impl From<RemoteProcessProvenance> for lash_core::ProcessProvenance {
     fn from(value: RemoteProcessProvenance) -> Self {
         let RemoteProcessProvenance {
             originator,
-            host_profile_id,
             caused_by,
         } = value;
         Self {
             originator: originator.into(),
-            host_profile_id,
             caused_by: caused_by.map(Into::into),
         }
     }
@@ -936,6 +932,138 @@ impl From<RemoteRuntimeEffectKind> for lash_core::RuntimeEffectKind {
     }
 }
 
+impl From<lash_core::PluginOptions> for RemoteProcessPluginOptions {
+    fn from(value: lash_core::PluginOptions) -> Self {
+        let lash_core::PluginOptions { plugins } = value;
+        Self { plugins }
+    }
+}
+
+impl From<RemoteProcessPluginOptions> for lash_core::PluginOptions {
+    fn from(value: RemoteProcessPluginOptions) -> Self {
+        let RemoteProcessPluginOptions { plugins } = value;
+        Self { plugins }
+    }
+}
+
+impl From<lash_core::ModelLimits> for RemoteProcessModelLimits {
+    fn from(value: lash_core::ModelLimits) -> Self {
+        Self {
+            context_window_tokens: value.context_window_tokens.get(),
+            output_token_capacity: value.output_token_capacity.map(|value| value.get()),
+        }
+    }
+}
+
+impl From<lash_core::ModelSpec> for RemoteProcessModelSpec {
+    fn from(value: lash_core::ModelSpec) -> Self {
+        let lash_core::ModelSpec {
+            id,
+            variant,
+            limits,
+        } = value;
+        Self {
+            id,
+            variant,
+            limits: limits.into(),
+        }
+    }
+}
+
+impl TryFrom<RemoteProcessModelSpec> for lash_core::ModelSpec {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteProcessModelSpec) -> Result<Self, Self::Error> {
+        let RemoteProcessModelSpec {
+            id,
+            variant,
+            limits,
+        } = value;
+        lash_core::ModelSpec::from_token_limits(
+            id,
+            variant,
+            limits.context_window_tokens,
+            limits.output_token_capacity,
+        )
+        .map_err(|err| RemoteProtocolError::InvalidEnvelope {
+            type_name: "RemoteProcessExecutionPolicy",
+            message: err,
+        })
+    }
+}
+
+impl From<lash_core::SessionPolicy> for RemoteProcessExecutionPolicy {
+    fn from(value: lash_core::SessionPolicy) -> Self {
+        let lash_core::SessionPolicy {
+            model,
+            provider_id,
+            session_id,
+            autonomous,
+            max_turns,
+            prompt,
+        } = value;
+        Self {
+            model: model.into(),
+            provider_id,
+            session_id,
+            autonomous,
+            max_turns,
+            prompt: prompt.into(),
+        }
+    }
+}
+
+impl TryFrom<RemoteProcessExecutionPolicy> for lash_core::SessionPolicy {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteProcessExecutionPolicy) -> Result<Self, Self::Error> {
+        let RemoteProcessExecutionPolicy {
+            model,
+            provider_id,
+            session_id,
+            autonomous,
+            max_turns,
+            prompt,
+        } = value;
+        Ok(Self {
+            model: model.try_into()?,
+            provider_id,
+            session_id,
+            autonomous,
+            max_turns,
+            prompt: prompt.into(),
+        })
+    }
+}
+
+impl From<lash_core::ProcessExecutionEnvSpec> for RemoteProcessExecutionEnvSpec {
+    fn from(value: lash_core::ProcessExecutionEnvSpec) -> Self {
+        let lash_core::ProcessExecutionEnvSpec {
+            plugin_options,
+            policy,
+        } = value;
+        Self {
+            plugin_options: plugin_options.into(),
+            policy: policy.into(),
+        }
+    }
+}
+
+impl TryFrom<RemoteProcessExecutionEnvSpec> for lash_core::ProcessExecutionEnvSpec {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteProcessExecutionEnvSpec) -> Result<Self, Self::Error> {
+        let RemoteProcessExecutionEnvSpec {
+            plugin_options,
+            policy,
+        } = value;
+        Ok(Self {
+            plugin_options: plugin_options.into(),
+            policy: policy.try_into()?,
+        })
+    }
+}
+
 impl From<lash_core::ProcessEvent> for RemoteProcessEvent {
     fn from(value: lash_core::ProcessEvent) -> Self {
         let lash_core::ProcessEvent {
@@ -1336,11 +1464,7 @@ impl TryFrom<RemoteProcessStartRequest> for lash_core::ProcessStartRequest {
                 .with_wake_target(wake_target.map(Into::into))
                 .with_grant(grant.map(Into::into))
                 .with_event_types(event_types.into_iter().map(Into::into));
-        request.env_spec = env_spec
-            .map(|value| {
-                decode_remote_json(value, "RemoteProcessStartRequest", "env_spec")
-            })
-            .transpose()?;
+        request.env_spec = env_spec.map(TryInto::try_into).transpose()?;
         Ok(request)
     }
 }
@@ -1362,16 +1486,7 @@ impl TryFrom<lash_core::ProcessStartRequest> for RemoteProcessStartRequest {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             id,
             input: input.try_into()?,
-            env_spec: env_spec
-                .map(|env_spec| {
-                    serde_json::to_value(env_spec).map_err(|err| {
-                        RemoteProtocolError::InvalidEnvelope {
-                            type_name: "RemoteProcessStartRequest",
-                            message: format!("invalid env_spec: {err}"),
-                        }
-                    })
-                })
-                .transpose()?,
+            env_spec: env_spec.map(Into::into),
             originator: originator.into(),
             wake_target: wake_target.map(Into::into),
             grant: grant.map(Into::into),

@@ -73,8 +73,8 @@ The controller submits workflow `run` with workflow key
 `ProcessRegistration.id` and sends cancellation to the workflow's shared
 `cancel` handler. The workflow runner should be built from the host's
 deployment config: plugin factories, runtime host config, session-store
-factory, process registry, attachment store, provider policy, and host profile.
-Process rows carry the process input plus `ProcessProvenance`: originator,
-host profile id, and optional causal parent. Tool and Lashlang rows also carry a
+factory, process registry, attachment store, and provider policy.
+Process rows carry the process input plus `ProcessProvenance`: originator
+and optional causal parent. Tool and Lashlang rows also carry a
 captured execution-environment reference, so workers do not parse grant keys or
 rebuild origin sessions to recover execution context.

@@ -276,7 +276,26 @@ fn remote_process_dtos_json_round_trip() {
         input: RemoteProcessInput::External {
             metadata: serde_json::json!({ "label": "Import" }),
         },
-        env_spec: Some(serde_json::json!({ "policy": "trusted-admin" })),
+        env_spec: Some(RemoteProcessExecutionEnvSpec {
+            plugin_options: RemoteProcessPluginOptions {
+                plugins: BTreeMap::from([(
+                    "snapshot-tools".to_string(),
+                    serde_json::json!({ "snapshot_ref": "tool-authority:sha256:abc" }),
+                )]),
+            },
+            policy: RemoteProcessExecutionPolicy {
+                provider_id: "remote-provider".to_string(),
+                model: RemoteProcessModelSpec {
+                    id: "remote-model".to_string(),
+                    limits: RemoteProcessModelLimits {
+                        context_window_tokens: 4096,
+                        output_token_capacity: Some(1024),
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        }),
         originator: RemoteProcessOriginator::Session {
             scope: RemoteSessionScope::new("session"),
         },
@@ -296,6 +315,10 @@ fn remote_process_dtos_json_round_trip() {
             .expect("deserialize start");
     assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.id, "process:1");
+    assert_eq!(
+        decoded.env_spec.as_ref().unwrap().plugin_options.plugins["snapshot-tools"]["snapshot_ref"],
+        "tool-authority:sha256:abc"
+    );
 
     let record = remote_process_record();
     record
@@ -430,6 +453,32 @@ fn remote_process_dtos_json_round_trip() {
         events: vec![remote_process_event()],
     };
     events_response.validate().expect("valid events response");
+}
+
+#[test]
+fn remote_process_env_spec_rejects_unknown_product_metadata_fields() {
+    for field in ["tool_grants", "resolved_tool_bindings"] {
+        let request = serde_json::json!({
+            "protocol_version": REMOTE_PROTOCOL_VERSION,
+            "id": "process:1",
+            "input": {
+                "type": "external",
+                "metadata": {}
+            },
+            "env_spec": {
+                field: []
+            },
+            "originator": {
+                "type": "host"
+            }
+        });
+        let err = serde_json::from_value::<RemoteProcessStartRequest>(request)
+            .expect_err("loose process env fields must be rejected");
+        assert!(
+            err.to_string().contains(field),
+            "error should name rejected field `{field}`: {err}"
+        );
+    }
 }
 
 #[test]
@@ -739,7 +788,6 @@ fn remote_process_record() -> RemoteProcessRecord {
         event_types: vec![remote_process_event_type()],
         provenance: RemoteProcessProvenance {
             originator: RemoteProcessOriginator::Host,
-            host_profile_id: "host".to_string(),
             caused_by: None,
         },
         env_ref: Some("process-env:sha256:abc".to_string()),

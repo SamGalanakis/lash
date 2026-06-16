@@ -343,7 +343,6 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
             Arc::clone(&artifact_store),
             Some(process_registry),
             None,
-            "test".to_string(),
         )),
         effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,

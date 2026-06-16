@@ -10,7 +10,7 @@ fn registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
-        ProcessProvenance::host("test-host"),
+        ProcessProvenance::host(),
     )
 }
 

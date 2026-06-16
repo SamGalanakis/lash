@@ -46,7 +46,6 @@ impl CoreTriggerAdmin {
             Arc::clone(&self.core.env.core.durability.lashlang_artifact_store),
             self.core.env.process_registry.clone(),
             process_work_poke,
-            self.core.env.core.profile.host_profile_id.clone(),
         );
         router
             .emit(request, scoped_effect_controller.controller())
@@ -151,8 +150,7 @@ impl Processes {
             None => None,
         };
         let grant = request.grant.clone();
-        let registration =
-            request.into_registration(self.core.env.core.profile.host_profile_id.clone(), env_ref);
+        let registration = request.into_registration(env_ref);
         let command = lash_core::ProcessCommand::Start {
             registration,
             grant,

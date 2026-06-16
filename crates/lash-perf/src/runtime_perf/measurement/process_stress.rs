@@ -61,7 +61,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
                 lash_core::ProcessInput::External {
                     metadata: serde_json::json!({ "label": "signal stress" }),
                 },
-                lash_core::ProcessProvenance::host("runtime-perf"),
+                lash_core::ProcessProvenance::host(),
             )
             .with_event_types(vec![lash_core::ProcessEventType {
                 name: signal_event_type.clone(),
@@ -381,7 +381,7 @@ fn process_list_stress_registration(
         lash_core::ProcessInput::External {
             metadata: serde_json::json!({ "index": index }),
         },
-        lash_core::ProcessProvenance::session(session_scope, "runtime-perf-process-list"),
+        lash_core::ProcessProvenance::session(session_scope),
     )
 }
 

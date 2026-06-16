@@ -12,17 +12,11 @@ use super::{
 /// Required host configuration for all runtimes.
 #[derive(Clone)]
 pub struct RuntimeHostConfig {
-    pub profile: RuntimeHostProfileConfig,
     pub durability: RuntimeDurabilityConfig,
     pub providers: RuntimeProviderConfig,
     pub prompt: RuntimePromptConfig,
     pub control: RuntimeControlConfig,
     pub tracing: RuntimeTracingConfig,
-}
-
-#[derive(Clone)]
-pub struct RuntimeHostProfileConfig {
-    pub host_profile_id: String,
 }
 
 #[derive(Clone)]
@@ -72,9 +66,6 @@ impl RuntimeHostConfig {
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
         Self {
-            profile: RuntimeHostProfileConfig {
-                host_profile_id: "default".to_string(),
-            },
             durability: RuntimeDurabilityConfig {
                 attachment_store,
                 lashlang_artifact_store,

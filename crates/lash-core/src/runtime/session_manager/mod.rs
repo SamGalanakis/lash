@@ -266,7 +266,6 @@ impl RuntimeSessionServices {
                 Arc::clone(&self.current.host.core.durability.lashlang_artifact_store),
                 self.current.host.process_registry.clone(),
                 self.current.host.process_work_poke.clone(),
-                self.current.host.core.profile.host_profile_id.clone(),
             )
         })
     }

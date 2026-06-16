@@ -35,3 +35,51 @@ fn remote_turn_request(
     // docs:end:remote-turn-request
     Ok(())
 }
+
+fn remote_process_start_request() -> anyhow::Result<()> {
+    // docs:start:remote-process-start-request
+    use std::collections::BTreeMap;
+
+    use lash::remote::{
+        REMOTE_PROTOCOL_VERSION, RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy,
+        RemoteProcessInput, RemoteProcessModelLimits, RemoteProcessModelSpec,
+        RemoteProcessOriginator, RemoteProcessPluginOptions, RemoteProcessStartRequest,
+    };
+    use serde_json::json;
+
+    let request = RemoteProcessStartRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        id: "process-01".to_string(),
+        input: RemoteProcessInput::External {
+            metadata: json!({ "source": "scheduler" }),
+        },
+        env_spec: Some(RemoteProcessExecutionEnvSpec {
+            plugin_options: RemoteProcessPluginOptions {
+                plugins: BTreeMap::from([(
+                    "snapshot-tools".to_string(),
+                    json!({ "snapshot_ref": "tool-authority:sha256:abc123" }),
+                )]),
+            },
+            policy: RemoteProcessExecutionPolicy {
+                provider_id: "example-provider".to_string(),
+                model: RemoteProcessModelSpec {
+                    id: "example-model".to_string(),
+                    variant: None,
+                    limits: RemoteProcessModelLimits {
+                        context_window_tokens: 128_000,
+                        output_token_capacity: Some(8_192),
+                    },
+                },
+                ..Default::default()
+            },
+        }),
+        originator: RemoteProcessOriginator::Host,
+        wake_target: None,
+        grant: None,
+        event_types: Vec::new(),
+    };
+
+    request.validate()?;
+    // docs:end:remote-process-start-request
+    Ok(())
+}

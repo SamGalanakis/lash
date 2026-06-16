@@ -315,14 +315,12 @@ impl ProcessCapability {
         let grant_scope = wake_target.clone();
         let registration = registration
             .with_process_provenance(
-                crate::ProcessProvenance::new(
-                    originator,
-                    current.host.core.profile.host_profile_id.clone(),
-                )
-                .with_caused_by(caused_by),
+                crate::ProcessProvenance::new(originator).with_caused_by(caused_by),
             )
             .with_execution_env_ref(env_ref)
             .with_wake_target(wake_target);
+        self.validate_process_environment(current, &registration)
+            .await?;
         let execution_context = options.execution_context(&scope);
         let runner = ProcessCommandRunner::new(
             current,
@@ -341,6 +339,48 @@ impl ProcessCapability {
                 execution_context,
             )
             .await
+    }
+
+    async fn validate_process_environment(
+        &self,
+        current: &CurrentSessionCapability,
+        registration: &crate::ProcessRegistration,
+    ) -> Result<(), crate::PluginError> {
+        let crate::ProcessInput::LashlangProcess { .. } = registration.input.as_ref() else {
+            return Ok(());
+        };
+        let Some(env_ref) = registration.env_ref.as_ref() else {
+            return Err(crate::PluginError::Session(format!(
+                "process `{}` requires a captured execution env",
+                registration.id
+            )));
+        };
+        let env_spec = crate::load_process_execution_env(
+            current
+                .host
+                .core
+                .durability
+                .lashlang_artifact_store
+                .as_ref(),
+            env_ref,
+        )
+        .await?;
+        crate::runtime::process::validate_lashlang_process_execution_env(
+            current
+                .host
+                .core
+                .durability
+                .lashlang_artifact_store
+                .as_ref(),
+            current.plugins.host(),
+            &format!("process-env-validation:{}", registration.id),
+            crate::runtime::process::ProcessEnvValidationRuntime {
+                process_registry_available: current.host.process_registry.is_some(),
+            },
+            registration.input.as_ref(),
+            &env_spec,
+        )
+        .await
     }
 
     pub(in crate::runtime::session_manager) async fn await_process(

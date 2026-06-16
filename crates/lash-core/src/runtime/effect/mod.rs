@@ -105,7 +105,7 @@ mod tests {
                     prepared_payload: serde_json::json!({"context": "prepared"}),
                 },
             },
-            crate::ProcessProvenance::host("effect-test-host"),
+            crate::ProcessProvenance::host(),
         );
         let invocation = RuntimeInvocation::effect(
             RuntimeScope::for_turn("session", "turn", 0, 0),

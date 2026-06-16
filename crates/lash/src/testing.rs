@@ -293,10 +293,7 @@ submit "registered"
         lash_core::ProcessRegistration::new(
             id,
             input,
-            lash_core::ProcessProvenance::session(
-                lash_core::SessionScope::new(SESSION_ID),
-                "default",
-            ),
+            lash_core::ProcessProvenance::session(lash_core::SessionScope::new(SESSION_ID)),
         )
     }
 

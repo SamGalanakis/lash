@@ -141,16 +141,7 @@ impl crate::ProcessService for RuntimeSessionProcessService {
             ),
             None => None,
         };
-        let registration = request.into_registration(
-            self.services
-                .current
-                .host
-                .core
-                .profile
-                .host_profile_id
-                .clone(),
-            env_ref,
-        );
+        let registration = request.into_registration(env_ref);
         let record = self
             .start(
                 session_id,

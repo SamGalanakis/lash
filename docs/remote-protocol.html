@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
   <h1 class="opener__title">remote<span class="slash">/</span>protocol</h1>
-  <p class="opener__lede">Use the remote protocol when Lash crosses a service boundary. The <code>lash-remote-protocol</code> crate defines versioned, serde-compatible DTOs for turns, LLM calls, activities, prompt layers, trigger occurrences and subscriptions, and remote tool grants; the facade reexports the DTO surface as <code>lash::remote</code>.</p>
+  <p class="opener__lede">Use the remote protocol when Lash crosses a service boundary. The <code>lash-remote-protocol</code> crate defines versioned, serde-compatible DTOs for turns, process admin, LLM calls, activities, prompt layers, trigger occurrences and subscriptions, and remote tool grants; the facade reexports the DTO surface as <code>lash::remote</code>.</p>
 </section>
 
 <main class="body" id="content">
@@ -55,7 +55,7 @@
 
   <div class="section" id="minimal-example">
     <div class="section-header">
-      <h2>Minimal Example</h2>
+      <h2>Minimal Examples</h2>
       <p>Wrap Lash's DTO in your host envelope. Service-specific fields belong in the wrapper or in <code>metadata</code>, not as local forks of Lash sub-objects.</p>
     </div>
 <pre data-lang="rust" data-snippet="remote_protocol#remote-turn-request"><code>use lash::remote::{
@@ -80,6 +80,49 @@ let request = RemoteTurnRequest {
     tool_grants: Vec::new(),
     model_intent: None,
     metadata: Default::default(),
+};
+
+request.validate()?;</code></pre>
+    <p>Process starts use the same rule. The optional <code>env_spec</code> is a closed Lash DTO: plugin-owned options plus runtime policy. It is not a product metadata bag.</p>
+<pre data-lang="rust" data-snippet="remote_protocol#remote-process-start-request"><code>use std::collections::BTreeMap;
+
+use lash::remote::{
+    REMOTE_PROTOCOL_VERSION, RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy,
+    RemoteProcessInput, RemoteProcessModelLimits, RemoteProcessModelSpec,
+    RemoteProcessOriginator, RemoteProcessPluginOptions, RemoteProcessStartRequest,
+};
+use serde_json::json;
+
+let request = RemoteProcessStartRequest {
+    protocol_version: REMOTE_PROTOCOL_VERSION,
+    id: "process-01".to_string(),
+    input: RemoteProcessInput::External {
+        metadata: json!({ "source": "scheduler" }),
+    },
+    env_spec: Some(RemoteProcessExecutionEnvSpec {
+        plugin_options: RemoteProcessPluginOptions {
+            plugins: BTreeMap::from([(
+                "snapshot-tools".to_string(),
+                json!({ "snapshot_ref": "tool-authority:sha256:abc123" }),
+            )]),
+        },
+        policy: RemoteProcessExecutionPolicy {
+            provider_id: "example-provider".to_string(),
+            model: RemoteProcessModelSpec {
+                id: "example-model".to_string(),
+                variant: None,
+                limits: RemoteProcessModelLimits {
+                    context_window_tokens: 128_000,
+                    output_token_capacity: Some(8_192),
+                },
+            },
+            ..Default::default()
+        },
+    }),
+    originator: RemoteProcessOriginator::Host,
+    wake_target: None,
+    grant: None,
+    event_types: Vec::new(),
 };
 
 request.validate()?;</code></pre>
@@ -119,6 +162,10 @@ request.validate()?;</code></pre>
         <div class="listing__label">trigger ingress</div>
         <div class="listing__body"><p><code>RemoteTriggerOccurrenceRequest</code>, <code>RemoteTriggerOccurrenceRecord</code>, <code>RemoteTriggerEmitReport</code>, <code>RemoteTriggerSubscriptionFilter</code>, <code>RemoteTriggerRegistration</code>, and <code>RemoteTriggerTargetSummary</code> mirror trigger emission, stored occurrence replay, match reports, subscription listing, and target summaries.</p></div>
       </div>
+      <div class="listing__row">
+        <div class="listing__label">process admin</div>
+        <div class="listing__body"><p><code>RemoteProcessStartRequest</code>, process records, summaries, event DTOs, work snapshots, await/cancel/signal requests, and list filters mirror durable process admin. <code>RemoteProcessStartRequest.env_spec</code> is typed as <code>RemoteProcessExecutionEnvSpec</code>, a closed contract containing only <code>plugin_options</code> and <code>policy</code>.</p></div>
+      </div>
     </div>
   </div>
 
@@ -155,6 +202,7 @@ request.validate()?;</code></pre>
       <div class="listing__row"><div class="listing__label">attachments</div><div class="listing__body"><p>Attachments require a non-empty MIME type. Attachment references require non-empty <code>id</code> and <code>mime</code>. Image blobs require non-empty ids and base64 payloads.</p></div></div>
       <div class="listing__row"><div class="listing__label">generation</div><div class="listing__body"><p><code>RemoteGenerationOptions.output_token_cap</code> must be greater than zero when present. Temperature and top-p are strings so provider-specific precision can round-trip.</p></div></div>
       <div class="listing__row"><div class="listing__label">triggers</div><div class="listing__body"><p>Trigger occurrence requests require non-empty <code>source_type</code>, <code>source_key</code>, and <code>idempotency_key</code>. Trigger filters and emit reports validate protocol version but leave authorization and tenant scoping to the boundary host.</p></div></div>
+      <div class="listing__row"><div class="listing__label">process env</div><div class="listing__body"><p>Process start environments are closed: <code>env_spec</code> accepts only <code>plugin_options</code> and <code>policy</code>. Unknown fields, including old product metadata such as <code>tool_grants</code> or <code>resolved_tool_bindings</code> under <code>env_spec</code>, fail deserialization. Model limits must be positive when supplied.</p></div></div>
       <div class="listing__row"><div class="listing__label">remote tools</div><div class="listing__body"><p>Remote tool grants require non-empty names, schemas, and Lashlang bindings. Duplicate <code>module_path</code> / <code>operation</code> call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div></div>
     </div>
     <aside class="gotcha">
@@ -185,15 +233,19 @@ request.validate()?;</code></pre>
         <div class="listing__label">triggers</div>
         <div class="listing__body"><p>Conversions cover trigger occurrence requests, stored occurrence records, emit reports, subscription filters, registrations, and target summaries when the standalone crate is built with <code>core-conversions</code>.</p></div>
       </div>
+      <div class="listing__row">
+        <div class="listing__label">processes</div>
+        <div class="listing__body"><p>Conversions cover process inputs, records, events, summaries, admin requests, and typed <code>RemoteProcessExecutionEnvSpec</code> when the standalone crate is built with <code>core-conversions</code>.</p></div>
+      </div>
     </div>
   </div>
 
   <div class="section" id="where-next">
     <div class="section-header">
       <h2>Where Next</h2>
-      <p>This page owns the remote DTO contract. Use the facade guides for local embedding behavior and the provider docs for transport normalization.</p>
+      <p>This page owns the remote DTO contract. Use the facade guides for local embedding behavior, process architecture docs for durable execution, and the provider docs for transport normalization.</p>
     </div>
-    <div data-related="embedding.html embedding-turns.html tools.html architecture/providers.html architecture/reference.html architecture/deps.html"></div>
+    <div data-related="embedding.html embedding-turns.html tools.html architecture/durability.html architecture/lashlang-runtime.html architecture/providers.html architecture/reference.html architecture/deps.html"></div>
   </div>
 </main>
 

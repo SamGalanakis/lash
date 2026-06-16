@@ -16,8 +16,8 @@ use crate::{
 /// Deployment-local configuration for rebuilding durable process executions.
 ///
 /// Process rows intentionally carry only portable process input and provenance.
-/// Workers provide the host profile, plugins, providers, stores, secrets, and
-/// host capabilities for the deployment that owns those rows.
+/// Workers provide plugins, providers, stores, secrets, and host capabilities
+/// for the deployment that owns those rows.
 #[derive(Clone)]
 pub struct DurableProcessWorkerConfig {
     pub plugin_host: Arc<PluginHost>,
@@ -175,7 +175,6 @@ impl DurableProcessWorker {
         cancellation: CancellationToken,
     ) -> Result<ProcessAwaitOutput, PluginError> {
         self.ensure_stable_process_id(&registration)?;
-        self.ensure_host_profile_matches(&registration)?;
         self.ensure_durable_store_facets()?;
         if let ProcessInput::External { metadata } = registration.input.as_ref() {
             return Ok(ProcessAwaitOutput::Success {
@@ -624,21 +623,6 @@ impl DurableProcessWorker {
         }
         Ok(())
     }
-
-    fn ensure_host_profile_matches(
-        &self,
-        registration: &ProcessRegistration,
-    ) -> Result<(), PluginError> {
-        let actual = registration.provenance.host_profile_id.as_str();
-        let expected = self.config.runtime_host.profile.host_profile_id.as_str();
-        if actual.is_empty() || actual == expected {
-            return Ok(());
-        }
-        Err(PluginError::Session(format!(
-            "process `{}` was created for host profile `{actual}` but this worker is `{expected}`",
-            registration.id
-        )))
-    }
 }
 
 fn process_lease_renew_interval() -> Duration {
@@ -893,7 +877,7 @@ mod boundary_tests {
             ProcessInput::External {
                 metadata: serde_json::json!({}),
             },
-            crate::ProcessProvenance::host("default"),
+            crate::ProcessProvenance::host(),
         )
     }
 

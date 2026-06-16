@@ -139,7 +139,6 @@ CREATE TABLE IF NOT EXISTS processes (
     process_id            TEXT PRIMARY KEY,
     registration_hash     TEXT NOT NULL,
     owner_scope_id       TEXT NOT NULL,
-    host_profile_id       TEXT NOT NULL,
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL,
     status                TEXT NOT NULL,
@@ -199,7 +198,7 @@ CREATE TABLE IF NOT EXISTS process_leases (
 
 ";
 
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 6;
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 7;
 
 pub(crate) const TRIGGER_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS trigger_subscription_seq (
