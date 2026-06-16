@@ -42,11 +42,11 @@ pub(crate) fn trigger_handle_json(handle: &str) -> serde_json::Value {
 }
 
 pub(crate) async fn validate_target_process(
-    target: &lashlang::TriggerTargetIdentity,
-    event_ty: &lashlang::NamedDataType,
+    target: &lashlang::ProcessDefinitionIdentity,
+    source_type: &str,
     inputs: &lashlang::TriggerInputTemplate,
     artifact_store: &dyn lashlang::LashlangArtifactStore,
-) -> Result<lashlang::TriggerTargetValidation, PluginError> {
+) -> Result<lashlang::TriggerCompatibility, PluginError> {
     let artifact = artifact_store
         .get_module_artifact(&target.module_ref)
         .await
@@ -57,7 +57,12 @@ pub(crate) async fn validate_target_process(
                 target.module_ref
             ))
         })?;
-    let validation = lashlang::validate_trigger_target(target, event_ty, inputs, &artifact)
-        .map_err(|err| PluginError::Session(err.to_string()))?;
+    let validation = lashlang::check_trigger_compatibility(lashlang::TriggerCompatibilityRequest {
+        artifact: &artifact,
+        definition: target,
+        source_type,
+        inputs,
+    })
+    .map_err(|err| PluginError::Session(err.to_string()))?;
     Ok(validation)
 }

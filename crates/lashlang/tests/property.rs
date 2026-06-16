@@ -3,7 +3,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ExecutionOutcome, Record,
-    Snapshot, State, Value, parse,
+    Snapshot, State, Value, canonical_program_ir, canonical_program_source, parse,
 };
 use proptest::prelude::*;
 
@@ -273,6 +273,19 @@ proptest! {
         prop_assert_eq!(actual, expected.clone());
         let globals = state.globals();
         prop_assert_eq!(globals.get(&ident), Some(&expected));
+    }
+
+    #[test]
+    fn generated_value_programs_round_trip_through_canonical_source(
+        ident in ident_strategy(),
+        value in gen_value_strategy()
+    ) {
+        let source = format!("{ident} = {}\nsubmit {ident}\n", value.to_source());
+        let program = parse(&source).expect("generated source should parse");
+        let rendered = canonical_program_source(&program).expect("canonical source should render");
+        let reparsed = parse(&rendered).expect("canonical source should parse");
+
+        prop_assert_eq!(canonical_program_ir(reparsed), canonical_program_ir(program));
     }
 
     #[test]

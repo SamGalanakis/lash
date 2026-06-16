@@ -72,32 +72,18 @@ impl From<RemoteProcessProvenance> for lash_core::ProcessProvenance {
     }
 }
 
-impl From<lash_core::ProcessDefinitionSummary> for RemoteProcessDefinitionSummary {
-    fn from(value: lash_core::ProcessDefinitionSummary) -> Self {
-        let lash_core::ProcessDefinitionSummary { name } = value;
-        Self { name }
-    }
-}
-
-impl From<RemoteProcessDefinitionSummary> for lash_core::ProcessDefinitionSummary {
-    fn from(value: RemoteProcessDefinitionSummary) -> Self {
-        let RemoteProcessDefinitionSummary { name } = value;
-        Self { name }
-    }
-}
-
-impl From<lash_core::ProcessDefinitionSelector> for RemoteProcessDefinitionIdentity {
-    fn from(value: lash_core::ProcessDefinitionSelector) -> Self {
+impl From<lashlang::ProcessDefinitionIdentity> for RemoteProcessDefinitionIdentity {
+    fn from(value: lashlang::ProcessDefinitionIdentity) -> Self {
         Self {
-            module_ref: value.module_ref().as_str().to_string(),
-            host_requirements_ref: value.host_requirements_ref().as_str().to_string(),
-            process_ref: value.process_ref().clone().into(),
-            process_name: value.process_name().to_string(),
+            module_ref: value.module_ref.as_str().to_string(),
+            host_requirements_ref: value.host_requirements_ref.as_str().to_string(),
+            process_ref: value.process_ref.into(),
+            process_name: value.process_name,
         }
     }
 }
 
-impl TryFrom<RemoteProcessDefinitionIdentity> for lash_core::ProcessDefinitionSelector {
+impl TryFrom<RemoteProcessDefinitionIdentity> for lashlang::ProcessDefinitionIdentity {
     type Error = RemoteProtocolError;
 
     fn try_from(value: RemoteProcessDefinitionIdentity) -> Result<Self, Self::Error> {
@@ -108,7 +94,7 @@ impl TryFrom<RemoteProcessDefinitionIdentity> for lash_core::ProcessDefinitionSe
             process_ref,
             process_name,
         } = value;
-        Ok(lash_core::ProcessDefinitionSelector::new(
+        Ok(lashlang::ProcessDefinitionIdentity::new(
             decode_remote_lashlang_ref(
                 module_ref,
                 "RemoteProcessDefinitionIdentity",
@@ -1172,8 +1158,11 @@ impl From<lash_core::ProcessHandleSummary> for RemoteProcessSummary {
     }
 }
 
-impl From<RemoteProcessSummary> for lash_core::ProcessHandleSummary {
-    fn from(value: RemoteProcessSummary) -> Self {
+impl TryFrom<RemoteProcessSummary> for lash_core::ProcessHandleSummary {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteProcessSummary) -> Result<Self, Self::Error> {
+        value.validate("RemoteProcessSummary")?;
         let RemoteProcessSummary {
             handle_type,
             id,
@@ -1182,14 +1171,14 @@ impl From<RemoteProcessSummary> for lash_core::ProcessHandleSummary {
             definition,
             status,
         } = value;
-        Self {
+        Ok(Self {
             handle_type,
             id,
             process_id,
             descriptor: descriptor.into(),
-            definition: definition.map(Into::into),
+            definition: definition.map(TryInto::try_into).transpose()?,
             status: status.into(),
-        }
+        })
     }
 }
 

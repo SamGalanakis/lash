@@ -158,9 +158,23 @@ fn observed_process_summary(
         lash_core::ProcessHandleDescriptor::new(Some(process.kind), Some(process.label)),
         process.lifecycle,
     )
-    .with_definition(lash_core::ProcessDefinitionSummary::from_input(
-        &process.input,
-    ))
+    .with_definition(match &process.input {
+        lash_core::ProcessInput::LashlangProcess {
+            module_ref,
+            process_ref,
+            host_requirements_ref,
+            process_name,
+            ..
+        } => Some(lashlang::ProcessDefinitionIdentity::new(
+            module_ref.clone(),
+            host_requirements_ref.clone(),
+            process_ref.clone(),
+            process_name.clone(),
+        )),
+        lash_core::ProcessInput::ToolCall { .. }
+        | lash_core::ProcessInput::SessionTurn { .. }
+        | lash_core::ProcessInput::External { .. } => None,
+    })
 }
 
 async fn assert_remote_process_dto_surface(
@@ -260,7 +274,8 @@ fn assert_remote_process_summaries_round_trip(summaries: &[lash_core::ProcessHan
         remote
             .validate("LashE2eProcessSummary")
             .expect("remote process summary should validate");
-        let round_trip: lash_core::ProcessHandleSummary = remote.into();
+        let round_trip =
+            lash_core::ProcessHandleSummary::try_from(remote).expect("remote summary round trip");
         assert_eq!(&round_trip, summary);
     }
 }

@@ -495,7 +495,7 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         source_key: "source-key".to_string(),
         source: serde_json::json!({ "button": "blue" }),
         event_ty: serde_json::json!({ "kind": "any" }),
-        target: RemoteTriggerTargetIdentity {
+        target: RemoteProcessDefinitionIdentity {
             module_ref: "lashlang:v1:sha256:module".to_string(),
             host_requirements_ref: "lashlang-host-requirements:v1:sha256:host".to_string(),
             process_ref: remote_process_ref(),

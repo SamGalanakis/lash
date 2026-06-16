@@ -386,14 +386,17 @@ fn process_records_events_snapshots_and_results_round_trip_core_values() {
         lash_core::ProcessHandleDescriptor::new(Some("external"), Some("External")),
         lash_core::ProcessLifecycleStatus::Completed,
     )
-    .with_definition(Some(lash_core::ProcessDefinitionSummary {
-        name: "main".to_string(),
-    }));
+    .with_definition(Some(lashlang::ProcessDefinitionIdentity::new(
+        module_ref(),
+        host_requirements_ref(),
+        process_ref(),
+        "main",
+    )));
     let remote = RemoteProcessSummary::from(summary.clone());
     remote
         .validate("RemoteProcessSummary")
         .expect("valid summary");
-    let core = lash_core::ProcessHandleSummary::from(remote);
+    let core = lash_core::ProcessHandleSummary::try_from(remote).expect("core summary");
     assert_eq!(core.process_id, summary.process_id);
     assert_eq!(core.status, summary.status);
 
@@ -479,7 +482,7 @@ fn process_records_events_snapshots_and_results_round_trip_core_values() {
 #[test]
 fn process_list_cancel_signal_and_await_requests_convert_to_core_commands() {
     let filter = lash_core::ProcessListFilter {
-        definition: Some(lash_core::ProcessDefinitionSelector::new(
+        definition: Some(lashlang::ProcessDefinitionIdentity::new(
             module_ref(),
             host_requirements_ref(),
             process_ref(),
@@ -752,13 +755,13 @@ fn process_ref() -> lashlang::ProcessRef {
     lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1)
 }
 
-fn trigger_target_identity() -> lashlang::TriggerTargetIdentity {
-    lashlang::TriggerTargetIdentity {
-        module_ref: module_ref(),
-        host_requirements_ref: host_requirements_ref(),
-        process_ref: process_ref(),
-        process_name: "on_button".to_string(),
-    }
+fn trigger_target_identity() -> lashlang::ProcessDefinitionIdentity {
+    lashlang::ProcessDefinitionIdentity::new(
+        module_ref(),
+        host_requirements_ref(),
+        process_ref(),
+        "on_button",
+    )
 }
 
 fn trigger_input_template() -> lashlang::TriggerInputTemplate {

@@ -483,14 +483,9 @@ impl<'run> RuntimeExecutionContext<'run> {
         let source_type = request.source.source_type.clone();
         let source_value = request.source.value.clone();
         let source = request.source.to_json();
-        let event_type = lashlang::event_type_for_source(
-            &self.dispatch.plugins.lashlang_resources(),
-            &source_type,
-        )
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         let validation = crate::plugin::validate_target_process(
             &request.target,
-            &event_type,
+            &source_type,
             &request.inputs,
             self.lashlang_artifact_store.as_ref(),
         )
@@ -528,11 +523,11 @@ impl<'run> RuntimeExecutionContext<'run> {
                 source_type,
                 source_key,
                 source,
-                event_ty: validation.event_ty,
-                module_ref: request.target.module_ref,
-                host_requirements_ref: request.target.host_requirements_ref,
-                process_ref: request.target.process_ref,
-                process_name: request.target.process_name,
+                event_ty: validation.resolved_event_type,
+                module_ref: validation.definition.module_ref,
+                host_requirements_ref: validation.definition.host_requirements_ref,
+                process_ref: validation.definition.process_ref,
+                process_name: validation.definition.process_name,
                 input_template: validation.inputs,
             })
             .await?;

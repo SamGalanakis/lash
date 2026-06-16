@@ -149,7 +149,7 @@ impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscription
             enabled,
         } = value;
         let target = target
-            .map(lashlang::TriggerTargetIdentity::try_from)
+            .map(lashlang::ProcessDefinitionIdentity::try_from)
             .transpose()?;
         Ok(Self {
             session_id,
@@ -181,7 +181,7 @@ impl From<lash_core::TriggerSubscriptionFilter> for RemoteTriggerSubscriptionFil
             name,
             source_type,
             source_key,
-            target: target.map(RemoteTriggerTargetIdentity::from),
+            target: target.map(RemoteProcessDefinitionIdentity::from),
             enabled,
         }
     }
@@ -269,51 +269,6 @@ impl From<RemoteLashlangProcessRef> for lashlang::ProcessRef {
     }
 }
 
-impl From<lashlang::TriggerTargetIdentity> for RemoteTriggerTargetIdentity {
-    fn from(value: lashlang::TriggerTargetIdentity) -> Self {
-        let lashlang::TriggerTargetIdentity {
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            process_name,
-        } = value;
-        Self {
-            module_ref: module_ref.as_str().to_string(),
-            host_requirements_ref: host_requirements_ref.as_str().to_string(),
-            process_ref: process_ref.into(),
-            process_name,
-        }
-    }
-}
-
-impl TryFrom<RemoteTriggerTargetIdentity> for lashlang::TriggerTargetIdentity {
-    type Error = RemoteProtocolError;
-
-    fn try_from(value: RemoteTriggerTargetIdentity) -> Result<Self, Self::Error> {
-        value.validate("RemoteTriggerTargetIdentity")?;
-        let RemoteTriggerTargetIdentity {
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            process_name,
-        } = value;
-        Ok(Self {
-            module_ref: decode_remote_lashlang_ref(
-                module_ref,
-                "RemoteTriggerTargetIdentity",
-                "module_ref",
-            )?,
-            host_requirements_ref: decode_remote_lashlang_ref(
-                host_requirements_ref,
-                "RemoteTriggerTargetIdentity",
-                "host_requirements_ref",
-            )?,
-            process_ref: process_ref.into(),
-            process_name,
-        })
-    }
-}
-
 impl From<lashlang::TriggerInputTemplate> for RemoteTriggerInputTemplate {
     fn from(value: lashlang::TriggerInputTemplate) -> Self {
         let entries = value
@@ -374,7 +329,7 @@ impl TryFrom<RemoteTriggerSubscriptionDraft> for lash_core::TriggerSubscriptionD
             target,
             input_template,
         } = value;
-        let RemoteTriggerTargetIdentity {
+        let RemoteProcessDefinitionIdentity {
             module_ref,
             host_requirements_ref,
             process_ref,
@@ -437,7 +392,7 @@ impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraf
             source_key,
             source,
             event_ty: serde_json::to_value(event_ty).expect("lashlang type expression serializes"),
-            target: RemoteTriggerTargetIdentity {
+            target: RemoteProcessDefinitionIdentity {
                 module_ref: module_ref.as_str().to_string(),
                 host_requirements_ref: host_requirements_ref.as_str().to_string(),
                 process_ref: process_ref.into(),
@@ -481,7 +436,7 @@ impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRec
             source_key,
             source,
             event_ty: serde_json::to_value(event_ty).expect("lashlang type expression serializes"),
-            target: RemoteTriggerTargetIdentity {
+            target: RemoteProcessDefinitionIdentity {
                 module_ref: module_ref.as_str().to_string(),
                 host_requirements_ref: host_requirements_ref.as_str().to_string(),
                 process_ref: process_ref.into(),
@@ -517,7 +472,7 @@ impl TryFrom<RemoteTriggerSubscriptionRecord> for lash_core::TriggerSubscription
             created_at_ms,
             updated_at_ms,
         } = value;
-        let RemoteTriggerTargetIdentity {
+        let RemoteProcessDefinitionIdentity {
             module_ref,
             host_requirements_ref,
             process_ref,

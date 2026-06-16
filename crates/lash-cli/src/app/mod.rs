@@ -124,7 +124,7 @@ impl ProcessView {
             .descriptor
             .label
             .unwrap_or_else(|| summary.process_id.clone());
-        let definition = summary.definition.map(|definition| definition.name);
+        let definition = summary.definition.map(|definition| definition.process_name);
         Self {
             process_id: summary.process_id,
             kind,

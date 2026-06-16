@@ -80,17 +80,6 @@ impl RemoteProcessDefinitionIdentity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteProcessDefinitionSummary {
-    pub name: String,
-}
-
-impl RemoteProcessDefinitionSummary {
-    pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
-        require_non_empty(type_name, "definition.name", &self.name)
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProcessHandleDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -338,7 +327,7 @@ pub struct RemoteProcessSummary {
     pub process_id: String,
     pub descriptor: RemoteProcessHandleDescriptor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition: Option<RemoteProcessDefinitionSummary>,
+    pub definition: Option<RemoteProcessDefinitionIdentity>,
     pub status: RemoteProcessLifecycleStatus,
 }
 
