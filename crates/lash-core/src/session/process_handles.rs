@@ -489,7 +489,7 @@ mod tests {
                     ProcessInput::External {
                         metadata: serde_json::Value::Null,
                     },
-                    crate::ProcessProvenance::host("process-handle-test-host"),
+                    crate::ProcessProvenance::host(),
                 )
                 .with_extra_event_types(
                     crate::lashlang_process_event_types().into_iter().chain([
@@ -594,7 +594,7 @@ mod tests {
                 ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
-                crate::ProcessProvenance::host("process-handle-test-host"),
+                crate::ProcessProvenance::host(),
             ))
             .await
             .expect("register hidden process");

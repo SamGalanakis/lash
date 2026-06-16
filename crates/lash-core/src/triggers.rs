@@ -698,7 +698,6 @@ pub struct TriggerRouter {
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
     process_work_poke: Option<crate::ProcessWorkPoke>,
-    host_profile_id: String,
 }
 
 impl TriggerRouter {
@@ -707,14 +706,12 @@ impl TriggerRouter {
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
         process_work_poke: Option<crate::ProcessWorkPoke>,
-        host_profile_id: impl Into<String>,
     ) -> Self {
         Self {
             store,
             artifact_store,
             process_registry,
             process_work_poke,
-            host_profile_id: host_profile_id.into(),
         }
     }
 
@@ -827,11 +824,8 @@ impl TriggerRouter {
                 process_name: subscription.process_name.clone(),
                 args,
             },
-            crate::ProcessProvenance::new(
-                subscription.registrant.clone(),
-                self.host_profile_id.clone(),
-            )
-            .with_caused_by(trigger_occurrence_invocation.causal_ref()),
+            crate::ProcessProvenance::new(subscription.registrant.clone())
+                .with_caused_by(trigger_occurrence_invocation.causal_ref()),
         )
         .with_extra_event_types(
             crate::lashlang_process_event_types()

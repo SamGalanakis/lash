@@ -45,4 +45,32 @@ fn main() {
         kind: lash::remote::RemoteSessionProcessEventKind::Started,
         process_ids: vec!["process".to_string()],
     };
+
+    let process_start = lash::remote::RemoteProcessStartRequest {
+        protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
+        id: "process".to_string(),
+        input: lash::remote::RemoteProcessInput::External {
+            metadata: serde_json::json!({}),
+        },
+        env_spec: Some(lash::remote::RemoteProcessExecutionEnvSpec {
+            plugin_options: lash::remote::RemoteProcessPluginOptions::default(),
+            policy: lash::remote::RemoteProcessExecutionPolicy {
+                provider_id: "provider".to_string(),
+                model: lash::remote::RemoteProcessModelSpec {
+                    id: "model".to_string(),
+                    variant: None,
+                    limits: lash::remote::RemoteProcessModelLimits {
+                        context_window_tokens: 10,
+                        output_token_capacity: Some(1),
+                    },
+                },
+                ..Default::default()
+            },
+        }),
+        originator: lash::remote::RemoteProcessOriginator::Host,
+        wake_target: None,
+        grant: None,
+        event_types: Vec::new(),
+    };
+    process_start.validate().unwrap();
 }

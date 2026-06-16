@@ -110,7 +110,7 @@ pub struct Store {
 ///
 /// It is intentionally separate from [`Store`]: session databases persist one
 /// conversation, while this registry persists background process state and
-/// handle visibility across all sessions in the same host profile.
+/// handle visibility across all sessions sharing the registry.
 pub struct SqliteProcessRegistry {
     conn: SqliteConnection,
     notify: tokio::sync::Notify,
@@ -588,10 +588,7 @@ mod tests {
             ProcessInput::External {
                 metadata: serde_json::Value::Null,
             },
-            lash_core::ProcessProvenance::session(
-                lash_core::SessionScope::new("session"),
-                "test-host",
-            ),
+            lash_core::ProcessProvenance::session(lash_core::SessionScope::new("session")),
         )
     }
 

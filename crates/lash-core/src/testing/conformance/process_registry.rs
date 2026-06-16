@@ -62,7 +62,7 @@ fn registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
-        ProcessProvenance::host("conformance-host"),
+        ProcessProvenance::host(),
     )
 }
 
@@ -328,7 +328,7 @@ async fn custom_wake_events_preserve_typed_provenance_and_replay(
             registration("proc-provenance")
                 .with_extra_event_types([event_type])
                 .with_process_provenance(
-                    ProcessProvenance::session(SessionScope::new("owner-session"), "host-profile")
+                    ProcessProvenance::session(SessionScope::new("owner-session"))
                         .with_caused_by(Some(process_caused_by.clone())),
                 ),
         )

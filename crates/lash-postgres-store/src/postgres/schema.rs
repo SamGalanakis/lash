@@ -97,7 +97,6 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             process_id TEXT PRIMARY KEY,
             registration_hash TEXT NOT NULL,
             owner_scope_id TEXT NOT NULL,
-            host_profile_id TEXT NOT NULL,
             created_at_ms BIGINT NOT NULL,
             updated_at_ms BIGINT NOT NULL,
             status TEXT NOT NULL,

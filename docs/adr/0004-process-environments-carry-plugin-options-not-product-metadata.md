@@ -1,0 +1,5 @@
+# Process Environments Carry Plugin Options, Not Product Metadata
+
+Runtime Process execution environments are typed and closed: they carry policy plus plugin-owned process options that an installed plugin can decode to rebuild providers, Tool Catalog entries, Tool Grants, Tool Execution Bindings, and Lashlang Tool Bindings. Product-specific durable tool state belongs in an immutable Tool Authority Snapshot referenced by those Process Plugin Options, not as ad hoc fields in the process environment; unknown environment fields should be rejected so a missing capability fails at submission instead of during process recovery. Process start should validate the rebuilt snapshot against the linked Lashlang Host Requirements, while worker-time validation remains the final replay/recovery guard.
+
+Permanent snapshot failures, such as a missing snapshot, corrupt payload, or revoked authority, are process failures. Transient infrastructure failures, such as the remote executor or secret store being temporarily unavailable, remain worker/runtime failures and follow the existing retry/recovery path instead of terminalizing the process as a logical failure.

@@ -322,6 +322,19 @@ fn process_start_requests_round_trip_core_values() {
         },
         lash_core::ProcessOriginator::session(lash_core::SessionScope::new("session-a")),
     )
+    .with_env_spec(lash_core::ProcessExecutionEnvSpec::new(
+        lash_core::PluginOptions::typed(
+            "snapshot-tools",
+            serde_json::json!({ "snapshot_ref": "tool-authority:sha256:abc" }),
+        )
+        .expect("plugin options"),
+        lash_core::SessionPolicy {
+            provider_id: "process-provider".to_string(),
+            model: lash_core::ModelSpec::from_token_limits("process-model", None, 4096, Some(512))
+                .expect("model"),
+            ..Default::default()
+        },
+    ))
     .with_event_types([process_event_type()]);
     assert_process_start_roundtrip(lashlang);
 
@@ -838,7 +851,7 @@ fn process_record(process_id: &str) -> lash_core::ProcessRecord {
         lash_core::ProcessInput::External {
             metadata: serde_json::json!({ "label": "External" }),
         },
-        lash_core::ProcessProvenance::host("host").with_caused_by(Some(
+        lash_core::ProcessProvenance::host().with_caused_by(Some(
             lash_core::CausalRef::TriggerOccurrence {
                 occurrence_id: "trigger:1".to_string(),
             },

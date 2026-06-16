@@ -96,7 +96,7 @@ mod tests {
                 .as_ref()
                 .map(|grant| grant.descriptor.clone())
                 .unwrap_or_default();
-            let registration = request.into_registration("shell-test-host", env_ref);
+            let registration = request.into_registration(env_ref);
             let record = self
                 .start(
                     session_id,
@@ -276,7 +276,7 @@ mod tests {
                     lash_core::ProcessInput::External {
                         metadata: serde_json::json!({}),
                     },
-                    lash_core::ProcessProvenance::host("shell-test-host"),
+                    lash_core::ProcessProvenance::host(),
                 )
                 .with_extra_event_types([shell_signal_event_type()]),
             )

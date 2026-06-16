@@ -48,6 +48,10 @@ pub use validation::{
     PreparedProcessEventAppend, prepare_process_event_append, prepare_process_registration,
     process_event_payload_hash, require_event_replay,
 };
+pub(crate) use validation::{
+    ProcessEnvValidationRuntime, lashlang_host_environment_satisfies_requirements,
+    validate_lashlang_process_execution_env,
+};
 pub use wake::{
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text,

@@ -280,7 +280,7 @@ mod tests {
             ProcessInput::External {
                 metadata: json!({ "label": label }),
             },
-            ProcessProvenance::host("observer-test-host"),
+            ProcessProvenance::host(),
         )
     }
 
@@ -550,11 +550,8 @@ mod tests {
                 input,
                 ProcessInput::ToolCall { .. } | ProcessInput::LashlangProcess { .. }
             );
-            let mut registration = ProcessRegistration::new(
-                process_id,
-                input,
-                ProcessProvenance::host("observer-test-host"),
-            );
+            let mut registration =
+                ProcessRegistration::new(process_id, input, ProcessProvenance::host());
             if needs_env {
                 registration = registration.with_execution_env_ref(Some(
                     ProcessExecutionEnvRef::new(format!("process-env:test:{process_id}")),

@@ -539,10 +539,7 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
-                lash_core::ProcessProvenance::session(
-                    lash::process::SessionScope::new("root"),
-                    "workbench-test-host",
-                ),
+                lash_core::ProcessProvenance::session(lash::process::SessionScope::new("root")),
             ))
             .await
             .expect("register subagent process");
@@ -643,10 +640,9 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
-                lash_core::ProcessProvenance::session(
-                    lash::process::SessionScope::new(current_session_id),
-                    "workbench-test-host",
-                ),
+                lash_core::ProcessProvenance::session(lash::process::SessionScope::new(
+                    current_session_id,
+                )),
             ))
             .await
             .expect("register subagent process");
@@ -664,7 +660,7 @@ mod tests {
                 RuntimeInput::External {
                     metadata: json!({ "old": true }),
                 },
-                lash_core::ProcessProvenance::host("workbench-test-host"),
+                lash_core::ProcessProvenance::host(),
             ))
             .await
             .expect("register old process");

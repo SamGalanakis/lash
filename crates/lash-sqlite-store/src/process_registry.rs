@@ -234,15 +234,14 @@ impl ProcessRegistry for SqliteProcessRegistry {
                     let originator_scope_id = record.originator_scope_id();
                     tx.execute(
                         "INSERT INTO processes (
-                            process_id, registration_hash, owner_scope_id, host_profile_id,
+                            process_id, registration_hash, owner_scope_id,
                             created_at_ms, updated_at_ms, status, record_json
                          )
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             record.id.as_str(),
                             record.registration_hash.as_str(),
                             originator_scope_id.as_str(),
-                            record.host_profile_id(),
                             record.created_at_ms as i64,
                             record.updated_at_ms as i64,
                             process_status_label(&record),

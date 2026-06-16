@@ -126,6 +126,7 @@ impl fmt::Display for ProcessExecutionEnvRef {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessExecutionEnvSpec {
     #[serde(default)]
     pub plugin_options: crate::PluginOptions,
@@ -393,19 +394,11 @@ impl ProcessStartRequest {
         self
     }
 
-    pub fn into_registration(
-        self,
-        host_profile_id: impl Into<String>,
-        env_ref: Option<ProcessExecutionEnvRef>,
-    ) -> ProcessRegistration {
-        ProcessRegistration::new(
-            self.id,
-            self.input,
-            ProcessProvenance::new(self.originator, host_profile_id),
-        )
-        .with_event_types(self.event_types)
-        .with_execution_env_ref(env_ref)
-        .with_wake_target(self.wake_target)
+    pub fn into_registration(self, env_ref: Option<ProcessExecutionEnvRef>) -> ProcessRegistration {
+        ProcessRegistration::new(self.id, self.input, ProcessProvenance::new(self.originator))
+            .with_event_types(self.event_types)
+            .with_execution_env_ref(env_ref)
+            .with_wake_target(self.wake_target)
     }
 }
 
@@ -419,26 +412,24 @@ pub struct SessionScope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessProvenance {
     pub originator: ProcessOriginator,
-    pub host_profile_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<crate::CausalRef>,
 }
 
 impl ProcessProvenance {
-    pub fn new(originator: ProcessOriginator, host_profile_id: impl Into<String>) -> Self {
+    pub fn new(originator: ProcessOriginator) -> Self {
         Self {
             originator,
-            host_profile_id: host_profile_id.into(),
             caused_by: None,
         }
     }
 
-    pub fn host(host_profile_id: impl Into<String>) -> Self {
-        Self::new(ProcessOriginator::host(), host_profile_id)
+    pub fn host() -> Self {
+        Self::new(ProcessOriginator::host())
     }
 
-    pub fn session(scope: SessionScope, host_profile_id: impl Into<String>) -> Self {
-        Self::new(ProcessOriginator::session(scope), host_profile_id)
+    pub fn session(scope: SessionScope) -> Self {
+        Self::new(ProcessOriginator::session(scope))
     }
 
     pub fn with_caused_by(mut self, caused_by: Option<crate::CausalRef>) -> Self {
@@ -547,7 +538,7 @@ impl ProcessRegistration {
     }
 
     pub(crate) fn session_start_draft(id: impl Into<ProcessId>, input: ProcessInput) -> Self {
-        Self::new(id, input, ProcessProvenance::host("session-start-draft"))
+        Self::new(id, input, ProcessProvenance::host())
     }
 
     pub fn with_process_provenance(mut self, provenance: ProcessProvenance) -> Self {
@@ -732,10 +723,6 @@ impl ProcessRecord {
 
     pub fn originator_scope_id(&self) -> String {
         self.provenance.originator.scope_id()
-    }
-
-    pub fn host_profile_id(&self) -> &str {
-        &self.provenance.host_profile_id
     }
 }
 
@@ -1247,7 +1234,7 @@ mod tests {
                     process_name: process_name.to_string(),
                     args: serde_json::Map::new(),
                 },
-                ProcessProvenance::host("model-test-host"),
+                ProcessProvenance::host(),
             )
             .with_execution_env_ref(Some(ProcessExecutionEnvRef::new(format!(
                 "process-env:test:{process_id}"

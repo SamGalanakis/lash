@@ -610,7 +610,6 @@ async fn emit_test_occurrence(
         Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
         runtime.host.process_registry.clone(),
         runtime.host.process_work_poke.clone(),
-        runtime.host.core.profile.host_profile_id.clone(),
     );
     let scoped = runtime
         .host
@@ -647,7 +646,6 @@ async fn try_emit_test_occurrence(
         Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
         runtime.host.process_registry.clone(),
         runtime.host.process_work_poke.clone(),
-        runtime.host.core.profile.host_profile_id.clone(),
     );
     let scoped = runtime
         .host

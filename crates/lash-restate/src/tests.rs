@@ -113,7 +113,7 @@ fn external_registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
-        lash_core::ProcessProvenance::host("restate-test-host"),
+        lash_core::ProcessProvenance::host(),
     )
 }
 
@@ -1089,10 +1089,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
             process_name: "scan".to_string(),
             args: args.clone(),
         },
-        lash_core::ProcessProvenance::session(
-            lash_core::SessionScope::new("session"),
-            "restate-test-host",
-        ),
+        lash_core::ProcessProvenance::session(lash_core::SessionScope::new("session")),
     )
     .with_extra_event_types(lash_core::lashlang_process_event_types())
     .with_execution_env_ref(Some(lash_core::ProcessExecutionEnvRef::new(
@@ -1652,27 +1649,108 @@ impl lash_core::ToolProvider for RecoveryProcessTool {
     }
 }
 
+struct SnapshotRecoveryTool;
+
+impl SnapshotRecoveryTool {
+    fn definition() -> lash_core::ToolDefinition {
+        lash_core::ToolDefinition::raw(
+            "tool:snapshot_echo",
+            "snapshot_echo",
+            "Echo a line from a snapshot-backed process tool.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "line": { "type": "string" } },
+                "required": ["line"],
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "object" }),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::ToolProvider for SnapshotRecoveryTool {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![Self::definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "snapshot_echo").then(|| Arc::new(Self::definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        let line = call
+            .args
+            .get("line")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        lash_core::ToolResult::ok(serde_json::json!({ "echo": format!("snapshot:{line}") }))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SnapshotRecoveryToolOptions {
+    snapshot_ref: String,
+}
+
+fn snapshot_recovery_tool_options(snapshot_ref: &str) -> lash_core::PluginOptions {
+    lash_core::PluginOptions::typed(
+        "snapshot-recovery-tool",
+        serde_json::json!({ "snapshot_ref": snapshot_ref }),
+    )
+    .expect("snapshot recovery plugin options")
+}
+
+fn snapshot_recovery_tool_factory() -> Arc<dyn lash_core::PluginFactory> {
+    Arc::new(lash_core::plugin::PluginSpecFactory::new(
+        "snapshot-recovery-tool",
+        Arc::new(|ctx| {
+            let snapshot_available = ctx
+                .plugin_options
+                .decode::<SnapshotRecoveryToolOptions>("snapshot-recovery-tool")
+                .map_err(|err| {
+                    lash_core::PluginError::Registration(format!(
+                        "invalid snapshot recovery tool options: {err}"
+                    ))
+                })?
+                .is_some_and(|options| options.snapshot_ref == "tool-authority:sha256:ok");
+            let spec = if snapshot_available {
+                lash_core::PluginSpec::new().with_tool_provider(Arc::new(SnapshotRecoveryTool))
+            } else {
+                lash_core::PluginSpec::new()
+            };
+            Ok(spec)
+        }),
+    ))
+}
+
 fn recovery_worker(
     registry: Arc<dyn ProcessRegistry>,
     store_factory: Arc<dyn lash_core::SessionStoreFactory>,
 ) -> DurableProcessWorker {
+    recovery_worker_with_plugins(registry, store_factory, Vec::new())
+}
+
+fn recovery_worker_with_plugins(
+    registry: Arc<dyn ProcessRegistry>,
+    store_factory: Arc<dyn lash_core::SessionStoreFactory>,
+    extra_plugins: Vec<Arc<dyn lash_core::PluginFactory>>,
+) -> DurableProcessWorker {
     let tools: Arc<dyn lash_core::ToolProvider> = Arc::new(RecoveryProcessTool);
-    let plugin_host = lash_core::PluginHost::new(vec![
+    let mut plugins = vec![
         Arc::new(lash_protocol_standard::StandardProtocolPluginFactory::new())
             as Arc<dyn lash_core::PluginFactory>,
         Arc::new(lash_core::plugin::StaticPluginFactory::new(
             "recovery-tool",
             lash_core::PluginSpec::new().with_tool_provider(tools),
         )),
-    ]);
+    ];
+    plugins.extend(extra_plugins);
+    let plugin_host = lash_core::PluginHost::new(plugins);
     DurableProcessWorker::new(
         lash_core::DurableProcessWorkerConfig::new(
             Arc::new(plugin_host),
-            {
-                let mut config = lash_core::RuntimeHostConfig::in_memory();
-                config.profile.host_profile_id = "recovery-host".to_string();
-                config
-            },
+            lash_core::RuntimeHostConfig::in_memory(),
             store_factory,
             registry,
         )
@@ -1701,6 +1779,21 @@ async fn persist_recovery_env_ref() -> lash_core::ProcessExecutionEnvRef {
     .expect("persist recovery process execution env")
 }
 
+async fn persist_snapshot_recovery_env_ref(
+    snapshot_ref: &str,
+) -> lash_core::ProcessExecutionEnvRef {
+    let spec = lash_core::ProcessExecutionEnvSpec::new(
+        snapshot_recovery_tool_options(snapshot_ref),
+        recovery_session_policy(),
+    );
+    lash_core::runtime::persist_process_execution_env(
+        lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
+        &spec,
+    )
+    .await
+    .expect("persist snapshot recovery process execution env")
+}
+
 fn process_wake_event_type() -> lash_core::ProcessEventType {
     lash_core::ProcessEventType {
         name: "process.wake".to_string(),
@@ -1718,6 +1811,65 @@ fn process_wake_event_type() -> lash_core::ProcessEventType {
             ..lash_core::ProcessEventSemanticsSpec::default()
         },
     }
+}
+
+async fn snapshot_lashlang_registration(
+    process_id: &str,
+    env_ref: lash_core::ProcessExecutionEnvRef,
+) -> ProcessRegistration {
+    let module = lashlang::parse(
+        r#"
+        process main() {
+          called = await tools.snapshot_echo({ line: "restored" })?
+          finish called.echo
+        }
+        "#,
+    )
+    .expect("snapshot lashlang module");
+    let mut resources = lashlang::LashlangHostCatalog::new();
+    resources.add_module_operation(
+        ["tools"],
+        "Tools",
+        "snapshot_echo",
+        "snapshot_echo",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
+    let linked_module = lashlang::LinkedModule::link(
+        module,
+        lashlang::LashlangHostEnvironment::new(
+            resources,
+            lashlang::LashlangAbilities::default()
+                .with_processes()
+                .with_sleep()
+                .with_process_signals(),
+        ),
+    )
+    .expect("link snapshot lashlang module");
+    lashlang::LashlangArtifactStore::put_module_artifact(
+        lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
+        &linked_module.artifact,
+    )
+    .await
+    .expect("store snapshot lashlang module artifact");
+    let process_ref = linked_module
+        .artifact
+        .process_ref("main")
+        .expect("main process ref")
+        .clone();
+    ProcessRegistration::new(
+        process_id,
+        ProcessInput::LashlangProcess {
+            module_ref: linked_module.module_ref,
+            process_ref,
+            host_requirements_ref: linked_module.host_requirements_ref,
+            process_name: "main".to_string(),
+            args: serde_json::Map::new(),
+        },
+        lash_core::ProcessProvenance::host(),
+    )
+    .with_extra_event_types(lash_core::lashlang_process_event_types())
+    .with_execution_env_ref(Some(env_ref))
 }
 
 #[tokio::test]
@@ -1766,7 +1918,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                 prepared_payload: serde_json::Value::Null,
             },
         },
-        lash_core::ProcessProvenance::session(creator_scope.clone(), "recovery-host"),
+        lash_core::ProcessProvenance::session(creator_scope.clone()),
     )
     .with_extra_event_types([process_wake_event_type()])
     .with_execution_env_ref(Some(env_ref))
@@ -1876,6 +2028,100 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
     );
 }
 
+#[tokio::test]
+async fn sqlite_process_recovery_rebuilds_snapshot_plugin_options_after_worker_reopen() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let process_db = temp.path().join("processes.db");
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        temp.path().join("sessions"),
+    )) as Arc<dyn lash_core::SessionStoreFactory>;
+    let registry_a = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            .await
+            .expect("open registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let env_ref = persist_snapshot_recovery_env_ref("tool-authority:sha256:ok").await;
+    registry_a
+        .register_process(snapshot_lashlang_registration("snapshot-ok", env_ref).await)
+        .await
+        .expect("register snapshot-backed process");
+    drop(registry_a);
+
+    let registry_b = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            .await
+            .expect("reopen registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let worker_b = recovery_worker_with_plugins(
+        Arc::clone(&registry_b),
+        store_factory,
+        vec![snapshot_recovery_tool_factory()],
+    );
+    worker_b
+        .drive_pending_processes()
+        .await
+        .expect("recover snapshot-backed process");
+
+    assert_eq!(
+        registry_b
+            .await_process("snapshot-ok")
+            .await
+            .expect("await recovered snapshot-backed process"),
+        ProcessAwaitOutput::Success {
+            value: serde_json::json!("snapshot:restored"),
+            control: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn sqlite_process_recovery_terminalizes_revoked_snapshot_plugin_options() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let process_db = temp.path().join("processes.db");
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        temp.path().join("sessions"),
+    )) as Arc<dyn lash_core::SessionStoreFactory>;
+    let registry_a = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            .await
+            .expect("open registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let env_ref = persist_snapshot_recovery_env_ref("tool-authority:sha256:revoked").await;
+    registry_a
+        .register_process(snapshot_lashlang_registration("snapshot-revoked", env_ref).await)
+        .await
+        .expect("register revoked snapshot-backed process");
+    drop(registry_a);
+
+    let registry_b = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            .await
+            .expect("reopen registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let worker_b = recovery_worker_with_plugins(
+        Arc::clone(&registry_b),
+        store_factory,
+        vec![snapshot_recovery_tool_factory()],
+    );
+    worker_b
+        .drive_pending_processes()
+        .await
+        .expect("recover revoked snapshot-backed process");
+
+    let await_output = registry_b
+        .await_process("snapshot-revoked")
+        .await
+        .expect("await terminal revoked snapshot-backed process");
+    let ProcessAwaitOutput::Failure { code, message, .. } = await_output else {
+        panic!("expected revoked snapshot process failure, got {await_output:#?}");
+    };
+    assert_eq!(code, "process_host_environment_incompatible");
+    assert!(
+        message.contains("module `tools` does not expose operation `snapshot_echo`"),
+        "{message}"
+    );
+}
+
 /// Build a durable registration for a trigger-started lashlang process.
 ///
 /// A trigger/trigger-started process carries a [`ProcessInput::LashlangProcess`]
@@ -1920,14 +2166,12 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
             process_name: "notify".to_string(),
             args,
         },
-        lash_core::ProcessProvenance::session(
-            lash_core::SessionScope::new("root"),
-            "recovery-host",
-        )
-        .with_caused_by(Some(lash_core::CausalRef::SessionNode {
-            session_id: "root".to_string(),
-            node_id: "trigger:resource.updated".to_string(),
-        })),
+        lash_core::ProcessProvenance::session(lash_core::SessionScope::new("root")).with_caused_by(
+            Some(lash_core::CausalRef::SessionNode {
+                session_id: "root".to_string(),
+                node_id: "trigger:resource.updated".to_string(),
+            }),
+        ),
     )
     .with_extra_event_types(lash_core::lashlang_process_event_types())
     .with_execution_env_ref(Some(env_ref))

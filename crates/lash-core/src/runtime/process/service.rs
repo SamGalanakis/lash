@@ -374,7 +374,7 @@ mod tests {
                             ProcessInput::External {
                                 metadata: json!(null),
                             },
-                            ProcessProvenance::host("service-test-host"),
+                            ProcessProvenance::host(),
                         )),
                     )
                 })
@@ -523,7 +523,7 @@ mod tests {
             ProcessInput::External {
                 metadata: json!(null),
             },
-            ProcessProvenance::host("service-test-host"),
+            ProcessProvenance::host(),
         ));
         record.status = ProcessStatus::Cancelled {
             await_output: ProcessAwaitOutput::Cancelled {

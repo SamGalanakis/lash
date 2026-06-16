@@ -27,15 +27,14 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let record_json = serde_json::to_string(&record).map_err(process_decode_error)?;
         sqlx::query(
             "INSERT INTO lash_processes (
-                process_id, registration_hash, owner_scope_id, host_profile_id,
+                process_id, registration_hash, owner_scope_id,
                 created_at_ms, updated_at_ms, status, record_json
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&record.id)
         .bind(&record.registration_hash)
         .bind(record.originator_scope_id().as_str())
-        .bind(record.host_profile_id())
         .bind(record.created_at_ms as i64)
         .bind(record.updated_at_ms as i64)
         .bind(process_status_label(&record))

@@ -112,6 +112,14 @@ against — see `docs/adr/0001-self-contained-processes.md`) plus any handle
 grant to the registry. The rows survive restart. Turn starts carry turn
 causality; trigger deliveries carry `CausalRef::TriggerOccurrence { occurrence_id }`.
 Neither path carries a borrowed execution scope or a live session binding.
+The captured process environment is typed and closed: it contains Process
+Plugin Options plus policy, not product metadata. Before a
+`ProcessInput::LashlangProcess` row is registered, Lash rebuilds the candidate
+plugin session, Tool Catalog, and Lashlang Host Environment from those captured
+options and validates that environment against the target module artifact's Host
+Requirements. Trigger-started and turn-started processes both capture the same
+environment shape, and worker recovery repeats the Host Requirements guard
+before compiling or running the process.
 
 **2. Execution = a lash-owned durable worker with a per-process lease +
 recovery.** Turns use effect-host replay plus final commit stamps; processes use
@@ -282,7 +290,10 @@ terminal are carried as request config / tool-access, not lost.
 - `crates/lash/src/core.rs` — `ProcessWorkRunnerSlot` (lazy default-runner spawn
   on first open), `.process_registry(...)` / `.process_work_driver(...)`.
 - `crates/lash-core/src/runtime/process/model.rs` — `ProcessLease` /
-  `ProcessLeaseCompletion`.
+  `ProcessLeaseCompletion`, typed `ProcessExecutionEnvSpec`.
+- `crates/lash-core/src/runtime/process/validation.rs` — start-time and
+  worker-time Lashlang Host Requirements validation from captured Process Plugin
+  Options.
 - `crates/lash-core/src/runtime/process/registry.rs` — `ProcessRegistry`
   defaulted `durability_tier()` + `list_non_terminal()` and the lease ops.
 - `crates/lash-core/src/runtime/session_manager/process_runners/control.rs` —

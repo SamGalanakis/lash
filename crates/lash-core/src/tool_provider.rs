@@ -1374,7 +1374,7 @@ mod tests {
                     crate::ProcessInput::External {
                         metadata: serde_json::json!({}),
                     },
-                    crate::ProcessProvenance::host("test"),
+                    crate::ProcessProvenance::host(),
                 )
                 .with_extra_event_types([crate::ProcessEventType {
                     name: "tool.event".to_string(),

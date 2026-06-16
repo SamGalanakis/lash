@@ -53,15 +53,13 @@ impl RemoteProcessOriginator {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProcessProvenance {
     pub originator: RemoteProcessOriginator,
-    pub host_profile_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<RemoteCausalRef>,
 }
 
 impl RemoteProcessProvenance {
     pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
-        self.originator.validate(type_name)?;
-        require_non_empty(type_name, "host_profile_id", &self.host_profile_id)
+        self.originator.validate(type_name)
     }
 }
 
@@ -830,13 +828,97 @@ pub enum RemoteRuntimeEffectKind {
     DurableStep,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteProcessPluginOptions {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_remote_context_window_tokens() -> usize {
+    1
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteProcessModelLimits {
+    #[serde(default = "default_remote_context_window_tokens")]
+    pub context_window_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_capacity: Option<usize>,
+}
+
+impl Default for RemoteProcessModelLimits {
+    fn default() -> Self {
+        Self {
+            context_window_tokens: default_remote_context_window_tokens(),
+            output_token_capacity: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteProcessModelSpec {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(default)]
+    pub limits: RemoteProcessModelLimits,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteProcessExecutionPolicy {
+    #[serde(default)]
+    pub model: RemoteProcessModelSpec,
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub autonomous: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+    #[serde(default, skip_serializing_if = "RemotePromptLayer::is_empty")]
+    pub prompt: RemotePromptLayer,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteProcessExecutionEnvSpec {
+    #[serde(default, skip_serializing_if = "RemoteProcessPluginOptions::is_empty")]
+    pub plugin_options: RemoteProcessPluginOptions,
+    #[serde(default, skip_serializing_if = "RemoteProcessExecutionPolicy::is_empty")]
+    pub policy: RemoteProcessExecutionPolicy,
+}
+
+impl RemoteProcessPluginOptions {
+    pub fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+}
+
+impl RemoteProcessExecutionPolicy {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl RemoteProcessExecutionEnvSpec {
+    pub fn is_empty(&self) -> bool {
+        self.plugin_options.is_empty() && self.policy.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProcessStartRequest {
     pub protocol_version: u32,
     pub id: String,
     pub input: RemoteProcessInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_spec: Option<serde_json::Value>,
+    pub env_spec: Option<RemoteProcessExecutionEnvSpec>,
     pub originator: RemoteProcessOriginator,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<RemoteSessionScope>,
@@ -851,6 +933,29 @@ impl RemoteProcessStartRequest {
         ensure_protocol_version(self.protocol_version)?;
         require_non_empty("RemoteProcessStartRequest", "id", &self.id)?;
         self.input.validate("RemoteProcessStartRequest")?;
+        if let Some(env_spec) = &self.env_spec {
+            if env_spec.policy.model.limits.context_window_tokens == 0 {
+                return Err(RemoteProtocolError::InvalidEnvelope {
+                    type_name: "RemoteProcessStartRequest",
+                    message: "env_spec.policy.model.limits.context_window_tokens must be greater than zero"
+                        .to_string(),
+                });
+            }
+            if env_spec
+                .policy
+                .model
+                .limits
+                .output_token_capacity
+                .is_some_and(|value| value == 0)
+            {
+                return Err(RemoteProtocolError::InvalidEnvelope {
+                    type_name: "RemoteProcessStartRequest",
+                    message:
+                        "env_spec.policy.model.limits.output_token_capacity must be greater than zero"
+                            .to_string(),
+                });
+            }
+        }
         if let RemoteProcessInput::SessionTurn { turn_input, .. } = &self.input
             && turn_input.protocol_version != self.protocol_version
         {

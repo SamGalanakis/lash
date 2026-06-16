@@ -2,11 +2,12 @@
 mod tests {
     use super::*;
     use crate::runtime::tests::helpers::{
-        MockCall, RecordingStore, mock_provider, runtime_with_plugins,
+        EmptyTools, MockCall, RecordingStore, mock_provider, runtime_with_plugins,
         runtime_with_plugins_and_tools, runtime_with_plugins_and_tools_and_host_and_store,
         standard_test_policy, test_host_config,
     };
     use ::lashlang::LashlangArtifactStore;
+    use serde::Deserialize;
     use std::sync::Arc;
 
     fn test_process_op_scope(id: &str) -> crate::ProcessOpScope<'static> {
@@ -69,7 +70,7 @@ mod tests {
             crate::ProcessInput::External {
                 metadata: serde_json::json!({ "process_id": process_id }),
             },
-            crate::ProcessProvenance::host("test-host"),
+            crate::ProcessProvenance::host(),
         )
         .with_extra_event_types([probe_event_type()])
     }
@@ -216,6 +217,71 @@ mod tests {
         }
     }
 
+    struct RenamedProcessEchoTool;
+
+    fn renamed_process_echo_tool_definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            "tool:renamed_echo",
+            "renamed_echo",
+            "Echo process input under a changed host operation.",
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+        .with_lashlang_binding(crate::LashlangToolBinding::new(["tools"], "process_echo"))
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for RenamedProcessEchoTool {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            vec![renamed_process_echo_tool_definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "renamed_echo")
+                .then(|| Arc::new(renamed_process_echo_tool_definition().contract()))
+        }
+
+        async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
+            crate::ToolResult::ok(serde_json::json!({ "payload": "renamed" }))
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct SnapshotToolOptions {
+        snapshot_ref: String,
+    }
+
+    fn snapshot_tool_options(snapshot_ref: &str) -> crate::PluginOptions {
+        crate::PluginOptions::typed(
+            "snapshot-tools",
+            serde_json::json!({ "snapshot_ref": snapshot_ref }),
+        )
+        .expect("snapshot plugin options")
+    }
+
+    fn snapshot_tool_factory() -> Arc<dyn crate::PluginFactory> {
+        Arc::new(crate::PluginSpecFactory::new(
+            "snapshot-tools",
+            Arc::new(|ctx| {
+                let enabled = ctx
+                    .plugin_options
+                    .decode::<SnapshotToolOptions>("snapshot-tools")
+                    .map_err(|err| {
+                        crate::PluginError::Registration(format!(
+                            "invalid snapshot tool options: {err}"
+                        ))
+                    })?
+                    .is_some_and(|options| options.snapshot_ref == "tool-authority:sha256:ok");
+                let spec = if enabled {
+                    crate::PluginSpec::new().with_tool_provider(Arc::new(ProcessEchoTool))
+                } else {
+                    crate::PluginSpec::new()
+                };
+                Ok(spec)
+            }),
+        ))
+    }
+
     #[async_trait::async_trait]
     impl crate::ToolProvider for RecordingProcessEchoTool {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
@@ -261,6 +327,209 @@ mod tests {
             .expect("append probe event");
     }
 
+    fn process_echo_args() -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::new()
+    }
+
+    fn process_echo_program() -> ::lashlang::Program {
+        ::lashlang::parse(
+            r#"
+            process main() {
+              called = await tools.process_echo({ value: "start" })?
+              finish called.payload
+            }
+            "#,
+        )
+        .expect("process echo program")
+    }
+
+    fn missing_module_path_program() -> ::lashlang::Program {
+        ::lashlang::parse(
+            r#"
+            process main() {
+              called = await snapshot.tools.process_echo({ value: "start" })?
+              finish called.payload
+            }
+            "#,
+        )
+        .expect("missing module path program")
+    }
+
+    fn snapshot_tools_resources() -> ::lashlang::LashlangHostCatalog {
+        let mut resources = ::lashlang::LashlangHostCatalog::new();
+        resources.add_module_operation(
+            ["snapshot", "tools"],
+            "Tools",
+            "process_echo",
+            "process_echo",
+            ::lashlang::TypeExpr::Any,
+            ::lashlang::TypeExpr::Any,
+        );
+        resources
+    }
+
+    async fn start_process_for_validation(
+        runtime: &crate::LashRuntime,
+        registration: crate::ProcessRegistration,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        let manager =
+            RuntimeSessionServices::new(runtime, true, None).expect("runtime session manager");
+        manager
+            .processes
+            .start_process(
+                &manager.current,
+                &manager.managed,
+                "root",
+                registration,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("validation")),
+                ),
+                test_process_op_scope("validate-process-env"),
+            )
+            .await
+    }
+
+    async fn start_request_for_validation(
+        runtime: &crate::LashRuntime,
+        request: crate::ProcessStartRequest,
+    ) -> Result<crate::ProcessHandleSummary, crate::PluginError> {
+        let manager =
+            RuntimeSessionServices::new(runtime, true, None).expect("runtime session manager");
+        let service = RuntimeSessionProcessService {
+            services: Arc::new(manager),
+        };
+        service
+            .start_from_request("root", request, test_process_op_scope("validate-request-env"))
+            .await
+    }
+
+    #[tokio::test]
+    async fn process_start_validation_accepts_rebuilt_process_plugin_options() {
+        let runtime = runtime_with_processes(vec![snapshot_tool_factory()]).await;
+        let registration = lashlang_process_registration(
+            "validate-snapshot-present",
+            process_echo_program(),
+            process_echo_args(),
+        )
+        .await;
+        let request = crate::ProcessStartRequest::new(
+            "validate-snapshot-present",
+            registration.input.as_ref().clone(),
+            crate::ProcessOriginator::host(),
+        )
+        .with_env_spec(crate::ProcessExecutionEnvSpec::new(
+            snapshot_tool_options("tool-authority:sha256:ok"),
+            standard_test_policy(),
+        ))
+        .with_event_types(registration.event_types.clone());
+
+        let summary = start_request_for_validation(&runtime, request)
+            .await
+            .expect("process env should validate from snapshot options");
+        assert_eq!(summary.process_id, "validate-snapshot-present");
+        assert!(
+            runtime
+                .host
+                .process_registry
+                .as_ref()
+                .expect("process registry")
+                .get_process("validate-snapshot-present")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn process_start_validation_rejects_missing_module_path() {
+        let runtime =
+            runtime_with_processes_and_tools(Vec::new(), Arc::new(EmptyTools)).await;
+        let registration = try_lashlang_process_registration_with_resources(
+            "validate-missing-module",
+            missing_module_path_program(),
+            process_echo_args(),
+            snapshot_tools_resources(),
+        )
+        .await
+        .expect("link missing module path process");
+        let err = start_process_for_validation(&runtime, registration)
+            .await
+            .expect_err("missing module should reject before registration");
+        assert!(
+            err.to_string()
+                .contains("module `snapshot.tools` is not available"),
+            "{err}"
+        );
+        assert!(
+            runtime
+                .host
+                .process_registry
+                .as_ref()
+                .expect("process registry")
+                .get_process("validate-missing-module")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn process_start_validation_rejects_changed_host_operation_binding() {
+        let runtime =
+            runtime_with_processes_and_tools(Vec::new(), Arc::new(RenamedProcessEchoTool)).await;
+        let registration = lashlang_process_registration(
+            "validate-changed-binding",
+            process_echo_program(),
+            process_echo_args(),
+        )
+        .await;
+        let err = start_process_for_validation(&runtime, registration)
+            .await
+            .expect_err("changed host operation should reject before registration");
+        assert!(
+            err.to_string()
+                .contains("resolves to `renamed_echo`, expected `process_echo`"),
+            "{err}"
+        );
+        assert!(
+            runtime
+                .host
+                .process_registry
+                .as_ref()
+                .expect("process registry")
+                .get_process("validate-changed-binding")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn process_start_validation_rejects_missing_process_plugin_options() {
+        let runtime = runtime_with_processes(vec![snapshot_tool_factory()]).await;
+        let registration = lashlang_process_registration(
+            "validate-snapshot-missing",
+            process_echo_program(),
+            process_echo_args(),
+        )
+        .await;
+        let err = start_process_for_validation(&runtime, registration)
+            .await
+            .expect_err("missing snapshot plugin option should reject before registration");
+        assert!(
+            err.to_string()
+                .contains("module `tools` does not expose operation `process_echo`"),
+            "{err}"
+        );
+        assert!(
+            runtime
+                .host
+                .process_registry
+                .as_ref()
+                .expect("process registry")
+                .get_process("validate-snapshot-missing")
+                .await
+                .is_none()
+        );
+    }
+
     async fn grant_handle(
         registry: &Arc<dyn crate::ProcessRegistry>,
         session_scope: &crate::SessionScope,
@@ -279,7 +548,6 @@ mod tests {
     fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
         registration.with_process_provenance(crate::ProcessProvenance::session(
             crate::SessionScope::new("root"),
-            "worker-profile",
         ))
     }
 
@@ -320,7 +588,6 @@ mod tests {
     ) -> crate::DurableProcessWorker {
         process_worker_with_core(registry, factory, {
             let mut config = crate::RuntimeHostConfig::in_memory();
-            config.profile.host_profile_id = "worker-profile".to_string();
             config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
                 mock_provider(vec![MockCall {
                     stream_events: Vec::new(),
@@ -476,7 +743,6 @@ mod tests {
             factory as Arc<dyn crate::SessionStoreFactory>,
             {
                 let mut config = crate::RuntimeHostConfig::in_memory();
-                config.profile.host_profile_id = "worker-profile".to_string();
                 config.durability.lashlang_artifact_store = Arc::clone(&empty_artifact_store);
                 config
             },
@@ -532,7 +798,7 @@ mod tests {
                         serde_json::Value::Null,
                     ),
                 },
-                crate::ProcessProvenance::host("worker-profile"),
+                crate::ProcessProvenance::host(),
             ),
             ::lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
         )
@@ -644,7 +910,6 @@ mod tests {
                 Arc::new(plugin_host),
                 {
                     let mut config = crate::RuntimeHostConfig::in_memory();
-                    config.profile.host_profile_id = "worker-profile".to_string();
                     config.providers.provider_resolver = Arc::new(
                         crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
                     );
@@ -888,7 +1153,6 @@ mod tests {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let worker = process_worker_with_core(registry, factory, {
             let mut config = crate::RuntimeHostConfig::in_memory();
-            config.profile.host_profile_id = "worker-profile".to_string();
             config.control.effect_host = Arc::new(RejectingDeploymentEffectHost {
                 attempts: Arc::clone(&attempts),
             });
@@ -1296,11 +1560,7 @@ mod tests {
         let worker = process_worker_with_tools(
             Arc::clone(&registry),
             factory as Arc<dyn crate::SessionStoreFactory>,
-            {
-                let mut config = crate::RuntimeHostConfig::in_memory();
-                config.profile.host_profile_id = "worker-profile".to_string();
-                config
-            },
+            crate::RuntimeHostConfig::in_memory(),
             Arc::new(tool.clone()),
         );
         let mut input = serde_json::Map::new();
@@ -1487,7 +1747,6 @@ mod tests {
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
             {
                 let mut config = crate::RuntimeHostConfig::in_memory();
-                config.profile.host_profile_id = "worker-profile".to_string();
                 config.tracing.trace_sink =
                     Some(Arc::clone(&normal_trace) as Arc<dyn lash_trace::TraceSink>);
                 config.tracing.lashlang_execution_sink =
