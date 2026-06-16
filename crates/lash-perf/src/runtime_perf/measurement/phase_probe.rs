@@ -142,6 +142,7 @@ pub(crate) async fn run_once(
         | RuntimePerfScenario::RlmAsyncToolCompletion
         | RuntimePerfScenario::RlmProcessHandles
         | RuntimePerfScenario::RlmProcessAsyncToolCompletion
+        | RuntimePerfScenario::RlmSubagentSpawn
         | RuntimePerfScenario::RlmLlmQuery
         | RuntimePerfScenario::RlmGlobals
         | RuntimePerfScenario::RlmLargeToolCatalog

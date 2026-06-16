@@ -11,16 +11,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import profile_runtime_stack
 
-DEFAULT_STACK_SCENARIOS = [
-    "rlm_globals",
-    "rlm_large_tool_catalog",
-    "rlm_process_handles",
-    "rlm_process_async_tool_completion",
-    "tool_discovery_search",
-    "turn_checkpoint",
-    "sqlite_store_reopen",
-]
+DEFAULT_STACK_SCENARIOS = profile_runtime_stack.DEFAULT_SCENARIOS
 QUICK_STACKS = ["2m"]
 FULL_STACKS = ["64k", "128k", "256k", "320k", "512k", "1m", "2m", "8m"]
 STACK_BUDGET_BYTES = 2 * 1024 * 1024
@@ -337,6 +330,19 @@ def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
                     "scenario": scenario,
                     "actual": value,
                     "budget": STACK_BUDGET_BYTES,
+                }
+            )
+    for sample in stack.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        if sample.get("status") == "ok" and sample.get("stack_accounted") is not True:
+            findings.append(
+                {
+                    "kind": "stack_size_not_accounted",
+                    "section": "runtime_stack",
+                    "scenario": sample.get("scenario"),
+                    "stack_bytes": sample.get("stack_bytes"),
+                    "reported_worker_stack_bytes": sample.get("reported_worker_stack_bytes"),
                 }
             )
 

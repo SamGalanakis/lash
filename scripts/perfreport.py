@@ -251,6 +251,9 @@ def summarize_profile_guard(report: dict[str, Any]) -> str:
     summaries = runtime_report.get("summary", [])
     if summaries:
         lines.append("## runtime")
+        worker_stack = runtime_report.get("worker_stack_bytes")
+        if isinstance(worker_stack, int | float):
+            lines.append(f"  worker_stack={fmt_bytes(worker_stack)}")
         for item in summaries:
             counters = item.get("sample_extra_counters") or {}
             counter_text = ""
@@ -268,9 +271,19 @@ def summarize_profile_guard(report: dict[str, Any]) -> str:
     first_success = stack.get("first_success_stack_bytes", {})
     if first_success:
         lines.append("## runtime stack")
+        budget = stack.get("stack_budget_bytes")
+        if isinstance(budget, int | float):
+            lines.append(f"  budget={fmt_bytes(budget)}")
         for scenario, stack_bytes in sorted(first_success.items()):
             label = fmt_bytes(stack_bytes) if isinstance(stack_bytes, int | float) else "n/a"
             lines.append(f"  {scenario:28s} first_success={label}")
+        unaccounted = [
+            sample
+            for sample in stack.get("samples", [])
+            if sample.get("status") == "ok" and not sample.get("stack_accounted", False)
+        ]
+        if unaccounted:
+            lines.append(f"  unaccounted_stack_samples={len(unaccounted)}")
         lines.append("")
 
     ui_report = report.get("ui", {}).get("report", {})
@@ -323,6 +336,9 @@ def summarize_runtime_guard(report: dict[str, Any]) -> str:
     summaries = runtime_report.get("summary", [])
     if summaries:
         lines.append("## runtime lane")
+        worker_stack = runtime_report.get("worker_stack_bytes")
+        if isinstance(worker_stack, int | float):
+            lines.append(f"  worker_stack={fmt_bytes(worker_stack)}")
         for item in summaries:
             lines.append(
                 f"  {item.get('scenario', '?'):28s} "
@@ -338,11 +354,18 @@ def summarize_runtime_guard(report: dict[str, Any]) -> str:
     samples = stack.get("samples", [])
     if first_success:
         failures = sum(1 for sample in samples if sample.get("status") != "ok")
+        unaccounted = sum(
+            1
+            for sample in samples
+            if sample.get("status") == "ok" and not sample.get("stack_accounted", False)
+        )
         lines.append("## stack lane")
         for scenario, stack_bytes in sorted(first_success.items()):
             stack_label = fmt_bytes(stack_bytes) if isinstance(stack_bytes, int | float) else "n/a"
             lines.append(f"  {scenario:28s} first_success={stack_label}")
         lines.append(f"  failed_or_timeout_samples={failures}")
+        if unaccounted:
+            lines.append(f"  unaccounted_stack_samples={unaccounted}")
         lines.append("")
 
     dhat = report.get("dhat")

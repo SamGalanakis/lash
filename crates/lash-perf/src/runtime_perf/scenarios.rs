@@ -13,6 +13,7 @@ pub(crate) enum RuntimePerfScenario {
     RlmAsyncToolCompletion,
     RlmProcessHandles,
     RlmProcessAsyncToolCompletion,
+    RlmSubagentSpawn,
     RlmLlmQuery,
     RlmGlobals,
     RlmLargeToolCatalog,
@@ -36,7 +37,7 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 28] = [
+    pub(crate) const DEFAULTS: [Self; 29] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -45,6 +46,7 @@ impl RuntimePerfScenario {
         Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
         Self::RlmProcessAsyncToolCompletion,
+        Self::RlmSubagentSpawn,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
         Self::RlmLargeToolCatalog,
@@ -66,7 +68,7 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
     ];
-    pub(crate) const KNOWN: [Self; 28] = [
+    pub(crate) const KNOWN: [Self; 29] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -75,6 +77,7 @@ impl RuntimePerfScenario {
         Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
         Self::RlmProcessAsyncToolCompletion,
+        Self::RlmSubagentSpawn,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
         Self::RlmLargeToolCatalog,
@@ -107,6 +110,7 @@ impl RuntimePerfScenario {
             "rlm_async_tool_completion" => Some(Self::RlmAsyncToolCompletion),
             "rlm_process_handles" => Some(Self::RlmProcessHandles),
             "rlm_process_async_tool_completion" => Some(Self::RlmProcessAsyncToolCompletion),
+            "rlm_subagent_spawn" => Some(Self::RlmSubagentSpawn),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
             "rlm_globals" => Some(Self::RlmGlobals),
             "rlm_large_tool_catalog" => Some(Self::RlmLargeToolCatalog),
@@ -141,6 +145,7 @@ impl RuntimePerfScenario {
             Self::RlmAsyncToolCompletion => "rlm_async_tool_completion",
             Self::RlmProcessHandles => "rlm_process_handles",
             Self::RlmProcessAsyncToolCompletion => "rlm_process_async_tool_completion",
+            Self::RlmSubagentSpawn => "rlm_subagent_spawn",
             Self::RlmLlmQuery => "rlm_llm_query",
             Self::RlmGlobals => "rlm_globals",
             Self::RlmLargeToolCatalog => "rlm_large_tool_catalog",
@@ -189,6 +194,7 @@ impl RuntimePerfScenario {
             | Self::RlmAsyncToolCompletion
             | Self::RlmProcessHandles
             | Self::RlmProcessAsyncToolCompletion
+            | Self::RlmSubagentSpawn
             | Self::RlmLlmQuery
             | Self::RlmGlobals
             | Self::RlmLargeToolCatalog

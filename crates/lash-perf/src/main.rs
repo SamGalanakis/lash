@@ -83,14 +83,16 @@ fn tokio_thread_stack_bytes(args: &Args) -> usize {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let worker_stack_bytes = tokio_thread_stack_bytes(&args);
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
-    runtime.thread_stack_size(tokio_thread_stack_bytes(&args));
+    runtime.thread_stack_size(worker_stack_bytes);
     runtime.build()?.block_on(lash_perf::runtime_perf::run_cli(
         args.runtime_perf_out,
         args.runtime_perf_dhat,
         args.runtime_perf_dhat_out,
         args.runtime_perf_dhat_frames,
+        worker_stack_bytes,
         args.runtime_perf_runs,
         args.runtime_perf_warmups,
         args.runtime_perf_scenario,

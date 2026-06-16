@@ -39,8 +39,22 @@ use lash::durability::DurableProcessWorker;
 #[cfg(feature = "restate")]
 use lash_restate::{LashProcessWorkflow, RestateEffectHost, RestateProcessDeployment};
 
-#[tokio::main]
-async fn main() -> anyhow_like::Result<()> {
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+fn main() -> anyhow_like::Result<()> {
+    let stack_bytes = std::env::var("AGENT_SERVICE_TOKIO_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(stack_bytes)
+        .build()
+        .map_err(|err| format!("build agent-service Tokio runtime: {err}"))?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow_like::Result<()> {
     let _ = dotenvy::dotenv();
 
     let durability = AgentServiceDurability::configured()?;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -52,6 +53,33 @@ class ProfileGuardCoverageTests(unittest.TestCase):
             profile_runtime_stack.DEFAULT_SCENARIOS,
         )
 
+    def test_runtime_stack_defaults_cover_every_known_runtime_scenario(self) -> None:
+        self.assertEqual(
+            profile_runtime_stack.DEFAULT_SCENARIOS,
+            profile_runtime_stack.KNOWN_RUNTIME_SCENARIOS,
+        )
+        self.assertEqual(
+            len(profile_runtime_stack.DEFAULT_SCENARIOS),
+            len(set(profile_runtime_stack.DEFAULT_SCENARIOS)),
+        )
+        self.assertEqual(
+            profile_guard.DEFAULT_STACK_SCENARIOS,
+            profile_runtime_stack.DEFAULT_SCENARIOS,
+        )
+
+    def test_runtime_stack_defaults_match_rust_runtime_perf_scenarios(self) -> None:
+        scenarios_rs = (
+            SCRIPT_DIR.parent
+            / "crates"
+            / "lash-perf"
+            / "src"
+            / "runtime_perf"
+            / "scenarios.rs"
+        ).read_text()
+        rust_scenarios = re.findall(r'"([a-z0-9_]+)" => Some\(Self::', scenarios_rs)
+
+        self.assertEqual(profile_runtime_stack.KNOWN_RUNTIME_SCENARIOS, rust_scenarios)
+
     def test_coverage_passes_with_required_sections_and_stack_budget(self) -> None:
         payload = {
             "runtime": {
@@ -99,6 +127,14 @@ class ProfileGuardCoverageTests(unittest.TestCase):
                 "returncode": 0,
                 "expected_scenarios": ["standard"],
                 "first_success_stack_bytes": {"standard": 4 * 1024 * 1024},
+                "samples": [
+                    {
+                        "scenario": "standard",
+                        "stack_bytes": 4 * 1024 * 1024,
+                        "status": "ok",
+                        "stack_accounted": False,
+                    }
+                ],
             },
             "lashlang": {
                 "returncode": 0,
@@ -118,6 +154,7 @@ class ProfileGuardCoverageTests(unittest.TestCase):
         self.assertIn("missing_runtime_scenario", kinds)
         self.assertIn("runtime_budget_failed", kinds)
         self.assertIn("stack_budget_failed", kinds)
+        self.assertIn("stack_size_not_accounted", kinds)
         self.assertIn("missing_lashlang_perf_results", kinds)
 
 

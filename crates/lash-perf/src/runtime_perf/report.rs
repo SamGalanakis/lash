@@ -23,6 +23,7 @@ pub(crate) struct RuntimePerfReport {
     warmups: usize,
     runs: usize,
     chat_turns: usize,
+    worker_stack_bytes: usize,
     scenarios: Vec<String>,
     dhat_out: Option<PathBuf>,
     results: Vec<RuntimePerfRunResult>,
@@ -51,6 +52,7 @@ pub async fn run_cli(
     enable_dhat: bool,
     dhat_out: Option<PathBuf>,
     dhat_frames: Option<usize>,
+    worker_stack_bytes: usize,
     runs: usize,
     warmups: usize,
     scenario_filters: Vec<String>,
@@ -97,6 +99,7 @@ pub async fn run_cli(
         warmups,
         runs,
         chat_turns,
+        worker_stack_bytes,
         scenarios: scenarios
             .iter()
             .map(|scenario| scenario.name().to_string())
@@ -114,6 +117,7 @@ pub async fn run_cli(
         serde_json::to_string_pretty(&serde_json::json!({
             "out": out_path,
             "dhat_out": report.dhat_out,
+            "worker_stack_bytes": report.worker_stack_bytes,
             "summary": report.summary,
             "budget_results": report.budget_results,
         }))?

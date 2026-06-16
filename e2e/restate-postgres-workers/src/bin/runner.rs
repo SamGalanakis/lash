@@ -20,8 +20,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let stack_bytes = std::env::var("LASH_E2E_TOKIO_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(stack_bytes)
+        .build()
+        .context("build e2e runner Tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let database_url = lash_restate_postgres_workers_e2e::required_env("DATABASE_URL")?;
     let storage = wait_for_postgres(&database_url).await?;

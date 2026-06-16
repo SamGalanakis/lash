@@ -2645,6 +2645,7 @@ dependencies = [
  "lash-runtime",
  "lash-sqlite-store",
  "lash-standard-plugins",
+ "lash-subagents",
  "serde",
  "serde_json",
  "stats_alloc",

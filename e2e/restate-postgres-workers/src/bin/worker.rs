@@ -22,6 +22,8 @@ use lash_restate_postgres_workers_e2e::{
     record_turn_activity, record_worker_event, required_env, s3_store_from_env,
 };
 
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
 fn terminal_error(err: impl Display) -> TerminalError {
     TerminalError::new(err.to_string())
 }
@@ -485,8 +487,20 @@ impl E2eTurnWorkflow for E2eTurnWorkflowImpl {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let stack_bytes = std::env::var("LASH_E2E_TOKIO_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(stack_bytes)
+        .build()
+        .context("build e2e worker Tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let database_url = required_env("DATABASE_URL")?;
     let storage = PostgresStorage::connect(&database_url)
