@@ -490,6 +490,11 @@ submit "done via Restate E2E"
                 .await
                 .expect("open artifact store"),
         ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
+        let process_env_store = Arc::new(
+            lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
+                .await
+                .expect("open process env store"),
+        );
         let trigger_store = Arc::new(
             lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
                 .await
@@ -508,6 +513,7 @@ submit "done via Restate E2E"
                 data_dir.join("attachments"),
             )))
             .lashlang_artifact_store(artifact_store)
+            .process_env_store(process_env_store)
             .trigger_store(trigger_store)
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .process_work_driver(process_deployment.process_work_driver())

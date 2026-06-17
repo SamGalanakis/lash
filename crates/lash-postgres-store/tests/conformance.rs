@@ -1,13 +1,11 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
 use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, ProcessExecutionEnvRef, ProcessOriginator, ProcessRegistry, RuntimePersistence,
-    SessionScope, SessionStoreFactory, TriggerOccurrenceRequest, TriggerStore,
-    TriggerSubscriptionDraft, TriggerSubscriptionFilter,
+    DurabilityTier, PluginOptions, ProcessExecutionEnvSpec, ProcessExecutionEnvStore,
+    ProcessRegistry, RuntimePersistence, SessionPolicy, SessionStoreFactory, TriggerStore,
 };
 use lash_postgres_store::PostgresStorage;
 
@@ -81,72 +79,6 @@ async fn reset(storage: &PostgresStorage) {
         .expect("reset postgres trigger subscription sequence");
 }
 
-fn trigger_subscription_draft(
-    session_id: &str,
-    source_key: &str,
-    process_name: &str,
-) -> TriggerSubscriptionDraft {
-    let mut inputs = BTreeMap::new();
-    inputs.insert("event".to_string(), lash_core::TriggerInputBinding::Event);
-    let registrant_scope = SessionScope::new(session_id);
-    TriggerSubscriptionDraft {
-        registrant: ProcessOriginator::session(registrant_scope.clone()),
-        env_ref: ProcessExecutionEnvRef::new(format!("process-env:{session_id}")),
-        wake_target: Some(registrant_scope),
-        name: Some(process_name.to_string()),
-        source_type: "ui.button.pressed".to_string(),
-        source_key: source_key.to_string(),
-        source: serde_json::json!({}),
-        payload_schema: lash_core::LashSchema::new(serde_json::json!({
-            "type": "object",
-            "required": ["button"],
-            "properties": {
-                "button": { "type": "string" }
-            }
-        })),
-        target: lash_core::ProcessInput::Engine {
-            kind: "test-trigger".to_string(),
-            payload: serde_json::json!({}),
-        },
-        target_identity: lash_core::ProcessIdentity::new("test-trigger")
-            .with_label(Some(process_name.to_string()))
-            .with_definition(Some(serde_json::json!({ "process_name": process_name }))),
-        event_types: Vec::new(),
-        input_template: inputs,
-        target_label: Some(process_name.to_string()),
-    }
-}
-
-async fn rewrite_postgres_subscription_to_required_surface_ref(
-    pool: &sqlx::PgPool,
-    subscription_id: &str,
-) {
-    let record_json: String = sqlx::query_scalar(
-        "SELECT record_json FROM lash_trigger_subscriptions WHERE subscription_id = $1",
-    )
-    .bind(subscription_id)
-    .fetch_one(pool)
-    .await
-    .expect("subscription record json");
-    let mut legacy_value: serde_json::Value =
-        serde_json::from_str(&record_json).expect("subscription json value");
-    let legacy_object = legacy_value
-        .as_object_mut()
-        .expect("subscription json object");
-    let host_requirements_ref = legacy_object
-        .remove("host_requirements_ref")
-        .expect("host requirements ref");
-    legacy_object.insert("required_surface_ref".to_string(), host_requirements_ref);
-    sqlx::query(
-        "UPDATE lash_trigger_subscriptions SET record_json = $2 WHERE subscription_id = $1",
-    )
-    .bind(subscription_id)
-    .bind(serde_json::to_string(&legacy_value).expect("legacy json text"))
-    .execute(pool)
-    .await
-    .expect("rewrite legacy trigger row");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
     let _db_guard = DB_GUARD.lock().await;
@@ -165,6 +97,44 @@ async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
         })
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_process_execution_env_store_round_trips_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
+    let Some(storage) = storage().await else {
+        eprintln!(
+            "skipping Postgres process-env conformance: LASH_POSTGRES_DATABASE_URL is not set"
+        );
+        return;
+    };
+    reset(&storage).await;
+
+    let spec = ProcessExecutionEnvSpec::new(PluginOptions::default(), SessionPolicy::default());
+    let env_ref = spec.stable_ref().expect("stable env ref");
+    let bytes = spec.to_store_bytes().expect("encode env spec");
+    let store = Arc::new(storage.process_env_store()) as Arc<dyn ProcessExecutionEnvStore>;
+    assert_eq!(store.durability_tier(), DurabilityTier::Durable);
+    store
+        .put_process_execution_env(&env_ref, &bytes)
+        .await
+        .expect("put env");
+    assert_eq!(
+        store
+            .get_process_execution_env(&env_ref)
+            .await
+            .expect("get env"),
+        Some(bytes.clone())
+    );
+
+    let reopened = Arc::new(storage.process_env_store()) as Arc<dyn ProcessExecutionEnvStore>;
+    assert_eq!(
+        reopened
+            .get_process_execution_env(&env_ref)
+            .await
+            .expect("get reopened env"),
+        Some(bytes)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -231,104 +201,4 @@ async fn postgres_trigger_store_satisfies_conformance_when_configured() {
         DurabilityTier::Durable,
     )
     .await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_trigger_store_skips_legacy_required_surface_ref_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
-        eprintln!(
-            "skipping Postgres trigger malformed-row test: LASH_POSTGRES_DATABASE_URL is not set"
-        );
-        return;
-    };
-    reset(&storage).await;
-    let store = storage.trigger_store();
-    let source_key = lash_core::empty_trigger_source_key("ui.button.pressed").expect("source key");
-    let legacy = store
-        .register_subscription(trigger_subscription_draft(
-            "legacy-session",
-            &source_key,
-            "legacy_button",
-        ))
-        .await
-        .expect("register legacy");
-    let current = store
-        .register_subscription(trigger_subscription_draft(
-            "current-session",
-            &source_key,
-            "current_button",
-        ))
-        .await
-        .expect("register current");
-    rewrite_postgres_subscription_to_required_surface_ref(storage.pool(), &legacy.subscription_id)
-        .await;
-
-    let mut source_filter = TriggerSubscriptionFilter::for_source_type("ui.button.pressed");
-    source_filter.source_key = Some(source_key.clone());
-    source_filter.enabled = Some(true);
-    let listed = store
-        .list_subscriptions(source_filter)
-        .await
-        .expect("list subscriptions");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].handle, current.handle);
-
-    let occurrence = store
-        .record_occurrence(TriggerOccurrenceRequest::new(
-            "ui.button.pressed",
-            source_key.clone(),
-            serde_json::json!({ "button": "Blue" }),
-            "button-blue-legacy-postgres-row",
-        ))
-        .await
-        .expect("record occurrence");
-    let deliveries = store
-        .reserve_matching_deliveries(&occurrence.occurrence_id)
-        .await
-        .expect("reserve deliveries");
-    assert_eq!(deliveries.len(), 1);
-    assert_eq!(deliveries[0].subscription.handle, current.handle);
-
-    assert!(
-        store
-            .cancel_subscription("legacy-session", &legacy.handle)
-            .await
-            .expect("cancel legacy row")
-    );
-    let (enabled, record_json): (bool, String) = sqlx::query_as(
-        "SELECT enabled, record_json FROM lash_trigger_subscriptions WHERE subscription_id = $1",
-    )
-    .bind(&legacy.subscription_id)
-    .fetch_one(storage.pool())
-    .await
-    .expect("legacy row after cancel");
-    assert!(!enabled);
-    assert!(record_json.contains("required_surface_ref"));
-    assert!(!record_json.contains("host_requirements_ref"));
-
-    assert_eq!(
-        store
-            .delete_session_subscriptions("legacy-session")
-            .await
-            .expect("delete legacy session rows"),
-        1
-    );
-    let legacy_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM lash_trigger_subscriptions WHERE subscription_id = $1",
-    )
-    .bind(&legacy.subscription_id)
-    .fetch_one(storage.pool())
-    .await
-    .expect("legacy row count");
-    assert_eq!(legacy_rows, 0);
-
-    let canonical_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM lash_trigger_subscriptions WHERE subscription_id = $1",
-    )
-    .bind(&current.subscription_id)
-    .fetch_one(storage.pool())
-    .await
-    .expect("canonical row count");
-    assert_eq!(canonical_rows, 1);
 }

@@ -2,7 +2,8 @@
 //!
 //! One [`PostgresStorage`] owns a shared [`sqlx::PgPool`] and creates durable
 //! implementations for the runtime session store, process registry, trigger
-//! store, Lashlang artifact store, and attachment manifest.
+//! store, Lashlang artifact store, process execution environment store, and
+//! attachment manifest.
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -211,6 +212,12 @@ impl PostgresStorage {
     }
 
     pub fn lashlang_artifact_store(&self) -> PostgresLashlangArtifactStore {
+        PostgresLashlangArtifactStore {
+            pool: self.pool.clone(),
+        }
+    }
+
+    pub fn process_env_store(&self) -> PostgresLashlangArtifactStore {
         PostgresLashlangArtifactStore {
             pool: self.pool.clone(),
         }

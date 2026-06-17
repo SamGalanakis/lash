@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use lash::durability::EffectHost;
-use lash::persistence::{AttachmentStore, LashlangArtifactStore, SessionStoreFactory};
+use lash::persistence::{
+    AttachmentStore, LashlangArtifactStore, ProcessExecutionEnvStore, SessionStoreFactory,
+};
 use lash::plugins::{
     PluginExtensionContribution, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
@@ -476,6 +478,8 @@ pub struct E2eCoreConfig {
 pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::RlmCore> {
     let artifact_store =
         Arc::new(config.storage.lashlang_artifact_store()) as Arc<dyn LashlangArtifactStore>;
+    let process_env_store =
+        Arc::new(config.storage.process_env_store()) as Arc<dyn ProcessExecutionEnvStore>;
     let session_store_factory =
         Arc::new(config.storage.session_store_factory()) as Arc<dyn SessionStoreFactory>;
     let trigger_store =
@@ -505,6 +509,7 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::RlmCore> {
         .store_factory(session_store_factory)
         .attachment_store(config.attachment_store)
         .lashlang_artifact_store(artifact_store)
+        .process_env_store(process_env_store)
         .effect_host(Arc::new(RestateEffectHost::with_ingress_url(
             config.restate_ingress_url.clone(),
         )) as Arc<dyn EffectHost>)
