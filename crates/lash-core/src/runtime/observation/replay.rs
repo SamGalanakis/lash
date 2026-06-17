@@ -373,16 +373,38 @@ impl Default for InMemoryLiveReplayStore {
 struct LiveReplaySessionBuffer {
     events: VecDeque<StoredObservationEvent>,
     tail_position: u64,
-    sender: broadcast::Sender<SessionObservationEvent>,
+    sender: Option<broadcast::Sender<SessionObservationEvent>>,
 }
 
 impl LiveReplaySessionBuffer {
     fn new() -> Self {
-        let (sender, _) = broadcast::channel(DEFAULT_LIVE_REPLAY_CAPACITY);
         Self {
             events: VecDeque::new(),
             tail_position: 0,
-            sender,
+            sender: None,
+        }
+    }
+
+    fn subscribe(
+        &mut self,
+        channel_capacity: usize,
+    ) -> broadcast::Receiver<SessionObservationEvent> {
+        match self.sender.as_ref() {
+            Some(sender) => sender.subscribe(),
+            None => {
+                let (sender, receiver) = broadcast::channel(channel_capacity.max(1));
+                self.sender = Some(sender);
+                receiver
+            }
+        }
+    }
+
+    fn publish(&mut self, event: SessionObservationEvent) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        if sender.send(event).is_err() {
+            self.sender = None;
         }
     }
 }
@@ -459,7 +481,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
             event: event.clone(),
         });
         Self::trim_locked(&self.config, buffer);
-        let _ = buffer.sender.send(event.clone());
+        buffer.publish(event.clone());
         Ok(event)
     }
 
@@ -507,7 +529,6 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
             .entry(parsed.session_id.clone())
             .or_insert_with(LiveReplaySessionBuffer::new);
         Self::trim_locked(&self.config, buffer);
-        let receiver = buffer.sender.subscribe();
         if let Some(reason) = Self::gap_reason_for_cursor(Some(buffer), parsed.live_position) {
             return Ok(LiveReplaySubscribeResult::Gap(reason));
         }
@@ -517,6 +538,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
             .filter(|event| event.position > parsed.live_position)
             .map(|event| event.event.clone())
             .collect();
+        let receiver = buffer.subscribe(self.config.max_events_per_session);
         Ok(LiveReplaySubscribeResult::Subscribed(
             LiveReplaySubscription::new(replay, receiver),
         ))
@@ -673,6 +695,34 @@ mod tests {
             },
             _ => panic!("wrong payload"),
         }
+    }
+
+    #[test]
+    fn in_memory_replay_store_allocates_live_channel_lazily() {
+        let store = InMemoryLiveReplayStore::default();
+        let start = store.current_cursor("s", SessionRevision(0));
+        store
+            .append("s", SessionRevision(0), activity("a"))
+            .expect("append a");
+        {
+            let sessions = store.sessions.lock().expect("sessions");
+            assert!(sessions.get("s").expect("buffer").sender.is_none());
+        }
+        let LiveReplaySubscribeResult::Subscribed(subscription) =
+            store.subscribe_after_cursor(&start).expect("subscribe")
+        else {
+            panic!("expected subscription");
+        };
+        {
+            let sessions = store.sessions.lock().expect("sessions");
+            assert!(sessions.get("s").expect("buffer").sender.is_some());
+        }
+        drop(subscription);
+        store
+            .append("s", SessionRevision(0), activity("b"))
+            .expect("append b");
+        let sessions = store.sessions.lock().expect("sessions");
+        assert!(sessions.get("s").expect("buffer").sender.is_none());
     }
 
     #[test]

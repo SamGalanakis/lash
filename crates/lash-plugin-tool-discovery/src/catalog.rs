@@ -22,7 +22,7 @@ pub(crate) struct CatalogTool {
 }
 
 impl CatalogTool {
-    pub(crate) fn from_value(raw: Value) -> Option<Self> {
+    pub(crate) fn from_value(raw: &Value) -> Option<Self> {
         let obj = raw.as_object()?;
         let id = obj.get("id")?.as_str()?.to_string();
         let name = obj.get("name")?.as_str()?.to_string();

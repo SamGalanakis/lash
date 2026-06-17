@@ -27,6 +27,7 @@ pub async fn run_lashlang_process(
     context: lash_core::ProcessEngineRunContext<'_>,
     payload: serde_json::Value,
 ) -> lash_core::ProcessAwaitOutput {
+    let phase_probe = context.turn_phase_probe();
     let input = match LashlangProcessInput::from_payload(payload) {
         Ok(input) => input,
         Err(err) => {
@@ -37,28 +38,31 @@ pub async fn run_lashlang_process(
             );
         }
     };
-    let artifact = match engine
-        .artifact_store
-        .get_module_artifact(&input.module_ref)
-        .await
-    {
-        Ok(Some(artifact)) => artifact,
-        Ok(None) => {
-            return process_lashlang_failure(
-                "process_module_artifact_missing",
-                format!("missing lashlang module artifact `{}`", input.module_ref),
-                None,
-            );
-        }
-        Err(err) => {
-            return process_lashlang_failure(
-                "process_module_artifact_load_failed",
-                format!(
-                    "failed to load lashlang module artifact `{}`: {err}",
-                    input.module_ref
-                ),
-                None,
-            );
+    let artifact = {
+        let _phase = context.named_phase("rlm_process.load_artifact");
+        match engine
+            .artifact_store
+            .get_module_artifact(&input.module_ref)
+            .await
+        {
+            Ok(Some(artifact)) => artifact,
+            Ok(None) => {
+                return process_lashlang_failure(
+                    "process_module_artifact_missing",
+                    format!("missing lashlang module artifact `{}`", input.module_ref),
+                    None,
+                );
+            }
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_module_artifact_load_failed",
+                    format!(
+                        "failed to load lashlang module artifact `{}`: {err}",
+                        input.module_ref
+                    ),
+                    None,
+                );
+            }
         }
     };
     if artifact.host_requirements_ref != input.host_requirements_ref {
@@ -81,46 +85,57 @@ pub async fn run_lashlang_process(
             None,
         );
     }
-    let tool_catalog = match context.resolved_tool_catalog() {
-        Ok(tool_catalog) => tool_catalog,
-        Err(err) => {
-            return process_lashlang_failure("process_tool_catalog_failed", err.to_string(), None);
-        }
-    };
-    let surface = engine
-        .surface
-        .clone()
-        .for_process_registry(context.process_registry_available());
-    let host_environment = surface.host_environment(&tool_catalog);
-    if let Err(err) = lashlang_host_environment_satisfies_requirements(
-        &artifact.host_requirements,
-        &host_environment,
-    ) {
-        return process_lashlang_failure(
-            "process_host_environment_incompatible",
-            format!(
-                "lashlang process `{}` is incompatible with this host surface: {err}",
-                input.process_name
-            ),
-            None,
-        );
-    }
-    let compiled = match engine.process_cache.lock() {
-        Ok(mut cache) => {
-            cache.get_or_compile(&artifact, &input.process_ref, &input.host_requirements_ref)
-        }
-        Err(_) => Err(lashlang::RuntimeError::ValueError {
-            message: "lashlang compiled process cache lock poisoned".to_string(),
-        }),
-    };
-    let compiled = match compiled {
-        Ok(compiled) => compiled,
-        Err(err) => {
+    let (tool_catalog, host_environment) = {
+        let _phase = context.named_phase("rlm_process.resolve_environment");
+        let tool_catalog = match context.resolved_tool_catalog() {
+            Ok(tool_catalog) => tool_catalog,
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_tool_catalog_failed",
+                    err.to_string(),
+                    None,
+                );
+            }
+        };
+        let surface = engine
+            .surface
+            .clone()
+            .for_process_registry(context.process_registry_available());
+        let host_environment = surface.host_environment(&tool_catalog);
+        if let Err(err) = lashlang_host_environment_satisfies_requirements(
+            &artifact.host_requirements,
+            &host_environment,
+        ) {
             return process_lashlang_failure(
-                "process_compile_failed",
-                format!("failed to compile process `{}`: {err}", input.process_name),
+                "process_host_environment_incompatible",
+                format!(
+                    "lashlang process `{}` is incompatible with this host surface: {err}",
+                    input.process_name
+                ),
                 None,
             );
+        }
+        (tool_catalog, host_environment)
+    };
+    let compiled = {
+        let _phase = context.named_phase("rlm_process.compile");
+        let compiled = match engine.process_cache.lock() {
+            Ok(mut cache) => {
+                cache.get_or_compile(&artifact, &input.process_ref, &input.host_requirements_ref)
+            }
+            Err(_) => Err(lashlang::RuntimeError::ValueError {
+                message: "lashlang compiled process cache lock poisoned".to_string(),
+            }),
+        };
+        match compiled {
+            Ok(compiled) => compiled,
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_compile_failed",
+                    format!("failed to compile process `{}`: {err}", input.process_name),
+                    None,
+                );
+            }
         }
     };
     let process_id = context.registration().id.clone();
@@ -137,18 +152,26 @@ pub async fn run_lashlang_process(
     lashlang_execution_trace.emit_started(&artifact);
     let registry = context.registry();
     let cancellation = context.cancellation_token();
-    let runtime_context = match context.into_runtime_context(tool_catalog) {
-        Ok(runtime_context) => runtime_context,
-        Err(err) => {
-            return process_lashlang_failure("process_run_context_failed", err.to_string(), None);
+    let (ctx, guard, mut state) = {
+        let _phase = context.named_phase("rlm_process.build_context");
+        let runtime_context = match context.into_runtime_context(tool_catalog) {
+            Ok(runtime_context) => runtime_context,
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_run_context_failed",
+                    err.to_string(),
+                    None,
+                );
+            }
+        };
+        let (ctx, guard) = runtime_context.into_parts();
+        let mut globals = lashlang::Record::with_capacity(input.args.len());
+        for (name, value) in input.args {
+            globals.insert(name, lashlang::from_json(value));
         }
+        let state = lashlang::State::from_snapshot(lashlang::Snapshot { globals });
+        (ctx, guard, state)
     };
-    let (ctx, guard) = runtime_context.into_parts();
-    let mut globals = lashlang::Record::with_capacity(input.args.len());
-    for (name, value) in input.args {
-        globals.insert(name, lashlang::from_json(value));
-    }
-    let mut state = lashlang::State::from_snapshot(lashlang::Snapshot { globals });
     let host = LashlangProcessHost {
         ctx,
         host_environment,
@@ -163,10 +186,17 @@ pub async fn run_lashlang_process(
         signal_wait_ordinals: tokio::sync::Mutex::new(BTreeMap::new()),
     };
     let env = lashlang::ExecutionEnvironment::new(&host).process();
-    let output = execute_lashlang(compiled, &mut state, &env, cancellation.clone()).await;
+    let output = {
+        let _phase = host.ctx.named_phase("rlm_process.execute");
+        execute_lashlang(compiled, &mut state, &env, cancellation.clone()).await
+    };
     drop(env);
     drop(host);
-    guard.shutdown().await;
+    {
+        let _phase =
+            lash_core::runtime::RuntimeNamedPhase::begin(phase_probe, "rlm_process.shutdown");
+        guard.shutdown().await;
+    }
     lashlang_execution_trace.emit_finished(&output);
     output
 }
@@ -293,13 +323,15 @@ impl LashlangProcessHost<'_> {
         &self,
         handle: lashlang::Value,
     ) -> Result<lashlang::Value, ExecutionHostError> {
-        let reply = self
-            .ctx
-            .await_tool_handle(
-                uuid::Uuid::new_v4().to_string(),
-                lashlang_value_to_json(&handle)?,
-            )
-            .await;
+        let reply = {
+            let _phase = self.ctx.named_phase("rlm_process.await_handle");
+            self.ctx
+                .await_tool_handle(
+                    uuid::Uuid::new_v4().to_string(),
+                    lashlang_value_to_json(&handle)?,
+                )
+                .await
+        };
         protocol_tool_reply_to_lashlang_value(reply)
     }
 
@@ -321,13 +353,18 @@ impl LashlangProcessHost<'_> {
         &self,
         start: lashlang::ProcessStart,
     ) -> Result<lashlang::Value, ExecutionHostError> {
-        let prepared = prepare_lashlang_process_start(Arc::clone(&self.artifact_store), start)
-            .await
-            .map_err(ExecutionHostError::new)?;
-        let reply = self
-            .ctx
-            .start_child_process(prepared.registration, LASHLANG_ENGINE_KIND, prepared.label)
-            .await;
+        let prepared = {
+            let _phase = self.ctx.named_phase("rlm_process.prepare_start");
+            prepare_lashlang_process_start(Arc::clone(&self.artifact_store), start)
+                .await
+                .map_err(ExecutionHostError::new)?
+        };
+        let reply = {
+            let _phase = self.ctx.named_phase("rlm_process.start");
+            self.ctx
+                .start_child_process(prepared.registration, LASHLANG_ENGINE_KIND, prepared.label)
+                .await
+        };
         protocol_tool_reply_to_lashlang_value(reply)
     }
 

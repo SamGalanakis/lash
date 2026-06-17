@@ -88,6 +88,7 @@ pub struct ProcessEngineRunContext<'run> {
     queued_work_poke: Option<crate::QueuedWorkPoke>,
     process_registry_available: bool,
     cancellation: CancellationToken,
+    turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     runtime_context_builder: Option<RuntimeContextBuilder<'run>>,
 }
 
@@ -104,6 +105,7 @@ impl<'run> ProcessEngineRunContext<'run> {
         queued_work_poke: Option<crate::QueuedWorkPoke>,
         process_registry_available: bool,
         cancellation: CancellationToken,
+        turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
         runtime_context_builder: RuntimeContextBuilder<'run>,
     ) -> Self {
         Self {
@@ -117,6 +119,7 @@ impl<'run> ProcessEngineRunContext<'run> {
             queued_work_poke,
             process_registry_available,
             cancellation,
+            turn_phase_probe,
             runtime_context_builder: Some(runtime_context_builder),
         }
     }
@@ -159,6 +162,16 @@ impl<'run> ProcessEngineRunContext<'run> {
 
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn named_phase(&self, phase: &'static str) -> crate::runtime::RuntimeNamedPhase {
+        crate::runtime::RuntimeNamedPhase::begin(self.turn_phase_probe.clone(), phase)
+    }
+
+    #[doc(hidden)]
+    pub fn turn_phase_probe(&self) -> Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>> {
+        self.turn_phase_probe.clone()
     }
 
     pub fn resolved_tool_catalog(&self) -> Result<Arc<crate::ToolCatalog>, crate::PluginError> {

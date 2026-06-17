@@ -102,6 +102,7 @@ impl RuntimeSessionServices {
                 crate::TurnContext::default(),
             )
             .with_execution_env_spec(current_execution_env_spec(&services.current))
+            .with_turn_phase_probe(services.current.turn_phase_probe.clone())
             .with_process_registration_context(&registration_for_runtime)
             .with_process_event_context(
                 registration_for_runtime.id.clone(),
@@ -132,6 +133,7 @@ impl RuntimeSessionServices {
             queued_work_poke,
             process_registry_available,
             cancellation,
+            self.current.turn_phase_probe.clone(),
             builder,
         )
     }

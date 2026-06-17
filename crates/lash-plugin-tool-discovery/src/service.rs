@@ -48,7 +48,7 @@ impl ToolDiscoveryToolsProvider {
             return index;
         }
 
-        let index = Arc::new(ToolDiscoveryIndex::build(key, catalog.as_ref().clone()));
+        let index = Arc::new(ToolDiscoveryIndex::build(key, catalog.as_ref()));
         self.cache
             .write()
             .expect("tool discovery cache lock poisoned")

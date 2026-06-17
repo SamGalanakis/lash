@@ -390,25 +390,31 @@ impl HostBridge<'_> {
     }
 
     async fn start_process(&self, start: ProcessStart) -> Result<FlowValue, ExecutionHostError> {
-        let prepared =
+        let prepared = {
+            let _phase = self.ctx.named_phase("rlm_process.prepare_start");
             prepare_lashlang_process_start(std::sync::Arc::clone(&self.artifact_store), start)
                 .await
-                .map_err(ExecutionHostError::new)?;
-        let reply = self
-            .ctx
-            .start_child_process(prepared.registration, LASHLANG_ENGINE_KIND, prepared.label)
-            .await;
+                .map_err(ExecutionHostError::new)?
+        };
+        let reply = {
+            let _phase = self.ctx.named_phase("rlm_process.start");
+            self.ctx
+                .start_child_process(prepared.registration, LASHLANG_ENGINE_KIND, prepared.label)
+                .await
+        };
         self.consume_reply("start_process", reply)
     }
 
     async fn await_handle(&self, handle: FlowValue) -> Result<FlowValue, ExecutionHostError> {
-        let reply = self
-            .ctx
-            .await_tool_handle(
-                uuid::Uuid::new_v4().to_string(),
-                handle_to_json(&handle).await?,
-            )
-            .await;
+        let reply = {
+            let _phase = self.ctx.named_phase("rlm_process.await_handle");
+            self.ctx
+                .await_tool_handle(
+                    uuid::Uuid::new_v4().to_string(),
+                    handle_to_json(&handle).await?,
+                )
+                .await
+        };
         self.consume_reply("await_handle", reply)
     }
 

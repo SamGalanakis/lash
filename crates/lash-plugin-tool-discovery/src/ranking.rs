@@ -51,9 +51,9 @@ pub struct ToolDiscoveryIndex {
 }
 
 impl ToolDiscoveryIndex {
-    pub(crate) fn build(key: u64, catalog: Vec<Value>) -> Self {
+    pub(crate) fn build(key: u64, catalog: &[Value]) -> Self {
         let docs: Vec<DiscoveryDoc> = catalog
-            .into_iter()
+            .iter()
             .filter_map(CatalogTool::from_value)
             .filter(|tool| tool.searchable)
             .map(DiscoveryDoc::from_tool)
@@ -721,7 +721,7 @@ mod tests {
     fn exact_name_beats_fuzzy_typo() {
         let index = ToolDiscoveryIndex::build(
             1,
-            vec![
+            &[
                 catalog_tool("spotify_search_songs", "Find songs in Spotify"),
                 catalog_tool("spotty_notes", "Scratch notes"),
             ],
@@ -821,7 +821,7 @@ mod tests {
 
         let index = ToolDiscoveryIndex::build(
             1,
-            vec![
+            &[
                 catalog_tool_from_definition(filter_songs),
                 catalog_tool_from_definition(show_song),
             ],
@@ -898,7 +898,7 @@ mod tests {
             "search songs by genre".to_string(),
             "search songs by play count".to_string(),
         ]);
-        let index = ToolDiscoveryIndex::build(1, vec![catalog_tool_from_definition(spotify)]);
+        let index = ToolDiscoveryIndex::build(1, &[catalog_tool_from_definition(spotify)]);
 
         let results = index.search(&json!({ "query": "spotify" }));
         let signature = results[0]["signature"].as_str().expect("signature");
@@ -962,7 +962,7 @@ mod tests {
     fn ranked_names_extracts_result_names() {
         let index = ToolDiscoveryIndex::build(
             1,
-            vec![
+            &[
                 catalog_tool_with_metadata("read_file", "Read file contents", None, vec!["cat"]),
                 catalog_tool_with_metadata("search_web", "Search the web", None, vec!["web"]),
             ],

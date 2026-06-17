@@ -247,6 +247,9 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
             "additionalProperties": false
         }),
     )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["tools"], "benchmark_echo").with_authority_type("Tools"),
+    )
     .with_scheduling(ToolScheduling::Parallel)
 }
 
@@ -272,6 +275,9 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
             "required": ["value", "delay_ms"],
             "additionalProperties": false
         }),
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["tools"], "benchmark_slow").with_authority_type("Tools"),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -300,6 +306,9 @@ fn benchmark_async_tool_definition() -> ToolDefinition {
             "required": ["value", "mode", "delay_ms"],
             "additionalProperties": false
         }),
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["tools"], "benchmark_async").with_authority_type("Tools"),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }

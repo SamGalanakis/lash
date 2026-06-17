@@ -41,6 +41,9 @@ impl ExplicitEphemeralFacets for lash::StandardCoreBuilder {
     fn with_explicit_ephemeral_facets(self) -> Self {
         self.effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+            .process_env_store(Arc::new(
+                lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
     }
 }
 
@@ -51,6 +54,9 @@ impl ExplicitEphemeralFacets for lash::RlmCoreBuilder {
                 lash::persistence::InMemoryLashlangArtifactStore::new(),
             ))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+            .process_env_store(Arc::new(
+                lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
     }
 }
 
@@ -618,34 +624,46 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     let attachments_root = root.join("attachments");
     let artifacts_db = root.join("artifacts.db");
     let effects_db = root.join("effects.db");
+    let process_env_db = root.join("process-env.db");
     let process_db = root.join("processes.db");
     let triggers_db = root.join("triggers.db");
+    let effect_host = Arc::new(
+        lash_sqlite_store::SqliteEffectHost::open(&effects_db)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+    );
+    let attachment_store = Arc::new(lash::persistence::FileAttachmentStore::new(
+        attachments_root,
+    ));
+    let process_env_store = Arc::new(
+        lash_sqlite_store::Store::open(&process_env_db)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+    );
+    let process_registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+    );
+    let trigger_store = Arc::new(
+        lash_sqlite_store::SqliteTriggerStore::open(&triggers_db)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+    );
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        sessions_root,
+    ));
     let core = match mode_id {
         ExecutionMode::Standard => BenchmarkCore::Standard(
             lash::StandardCore::builder()
                 .provider(provider)
                 .model(benchmark_model_spec())
-                .effect_host(Arc::new(
-                    lash_sqlite_store::SqliteEffectHost::open(&effects_db)
-                        .await
-                        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                ))
-                .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
-                    attachments_root,
-                )))
-                .process_registry(Arc::new(
-                    lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-                        .await
-                        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                ))
-                .trigger_store(Arc::new(
-                    lash_sqlite_store::SqliteTriggerStore::open(&triggers_db)
-                        .await
-                        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                ))
-                .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-                    sessions_root,
-                )))
+                .effect_host(effect_host.clone())
+                .attachment_store(attachment_store.clone())
+                .process_env_store(process_env_store.clone())
+                .process_registry(process_registry.clone())
+                .trigger_store(trigger_store.clone())
+                .store_factory(store_factory.clone())
                 .plugins(plugin_stack)
                 .residency(lash::durability::Residency::ActivePathOnly)
                 .build()?,
@@ -654,32 +672,17 @@ pub(crate) async fn build_runtime_with_sqlite_store(
             lash::RlmCore::builder()
                 .provider(provider)
                 .model(benchmark_model_spec())
-                .effect_host(Arc::new(
-                    lash_sqlite_store::SqliteEffectHost::open(&effects_db)
-                        .await
-                        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                ))
-                .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
-                    attachments_root,
-                )))
+                .effect_host(effect_host.clone())
+                .attachment_store(attachment_store.clone())
+                .process_env_store(process_env_store.clone())
                 .lashlang_artifact_store(Arc::new(
                     lash_sqlite_store::Store::open(&artifacts_db)
                         .await
                         .map_err(|err| anyhow::anyhow!(err.to_string()))?,
                 ))
-                .process_registry(Arc::new(
-                    lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-                        .await
-                        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                ))
-                .trigger_store(Arc::new(
-                    lash_sqlite_store::SqliteTriggerStore::open(&triggers_db)
-                        .await
-                        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                ))
-                .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-                    sessions_root,
-                )))
+                .process_registry(process_registry.clone())
+                .trigger_store(trigger_store.clone())
+                .store_factory(store_factory.clone())
                 .plugins(plugin_stack)
                 .max_turns(RUNTIME_PERF_MAX_TURNS)
                 .residency(lash::durability::Residency::ActivePathOnly)

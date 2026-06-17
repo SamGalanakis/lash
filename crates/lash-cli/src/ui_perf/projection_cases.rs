@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use lash_core::{
     Message, MessageRole, Part, PartKind, PruneState, SessionReadView, SessionSnapshot,
-    ToolCallOutput, ToolCallRecord, ToolCancellation, ToolFailure, ToolFailureClass, ToolResult,
-    TurnActivity, TurnEvent,
+    ToolCallOutput, ToolCancellation, ToolFailure, ToolFailureClass, ToolResult, TurnActivity,
+    TurnEvent,
 };
 use serde_json::json;
 
@@ -285,22 +285,6 @@ fn part(id: &str, kind: PartKind, content: &str) -> Part {
         prune_state: PruneState::Intact,
         reasoning_meta: None,
         response_meta: None,
-    }
-}
-
-fn tool_record(
-    call_id: String,
-    tool: &'static str,
-    args: serde_json::Value,
-    output: ToolCallOutput,
-    duration_ms: u64,
-) -> ToolCallRecord {
-    ToolCallRecord {
-        call_id: Some(call_id),
-        tool: tool.to_string(),
-        args,
-        output,
-        duration_ms,
     }
 }
 
