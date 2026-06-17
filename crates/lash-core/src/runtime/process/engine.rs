@@ -7,7 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::events::ProcessAwaitOutput;
 use super::model::{
-    ProcessExecutionContext, ProcessExecutionEnvSpec, ProcessInput, ProcessRegistration,
+    ProcessExecutionContext, ProcessExecutionEnvSpec, ProcessIdentity, ProcessInput,
+    ProcessRegistration,
 };
 use super::registry::ProcessRegistry;
 
@@ -179,22 +180,29 @@ impl<'run> ProcessEngineRunContext<'run> {
 
 pub struct ProcessEngineValidationContext<'a> {
     plugin_host: &'a crate::PluginHost,
+    tool_catalog: Arc<crate::ToolCatalog>,
     process_registry_available: bool,
 }
 
 impl<'a> ProcessEngineValidationContext<'a> {
     pub(crate) fn new(
         plugin_host: &'a crate::PluginHost,
+        tool_catalog: Arc<crate::ToolCatalog>,
         process_registry_available: bool,
     ) -> Self {
         Self {
             plugin_host,
+            tool_catalog,
             process_registry_available,
         }
     }
 
     pub fn plugin_host(&self) -> &crate::PluginHost {
         self.plugin_host
+    }
+
+    pub fn tool_catalog(&self) -> &crate::ToolCatalog {
+        self.tool_catalog.as_ref()
     }
 
     pub fn process_registry_available(&self) -> bool {
@@ -227,8 +235,9 @@ pub trait ProcessEngine: Send + Sync {
         payload: serde_json::Value,
     ) -> ProcessAwaitOutput;
 
-    fn definition(&self, payload: &serde_json::Value) -> Option<serde_json::Value> {
-        payload.get("definition").cloned()
+    fn identity(&self, payload: &serde_json::Value) -> ProcessIdentity {
+        let _ = payload;
+        ProcessIdentity::new(self.kind())
     }
 }
 

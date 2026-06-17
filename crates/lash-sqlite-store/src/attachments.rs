@@ -14,6 +14,60 @@
 
 use super::*;
 
+impl Store {
+    async fn put_artifact_ref_blob(
+        &self,
+        artifact_ref: String,
+        descriptor: BlobArtifactDescriptor,
+        bytes: Vec<u8>,
+    ) -> Result<(), StoreError> {
+        let blob_profile = self.options.blob_profile;
+        self.conn
+            .write(move |tx| {
+                let blob_ref =
+                    Self::insert_artifact_blob_conn(tx, descriptor, &bytes, blob_profile)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
+                    params![artifact_ref, blob_ref.as_str()],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(sqlite_error)
+    }
+
+    async fn get_artifact_ref_blob(
+        &self,
+        artifact_ref: String,
+        missing_diagnostic: String,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let resolved = self
+            .conn
+            .call(move |conn| {
+                let blob_ref: Option<String> = conn
+                    .query_row(
+                        "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
+                        params![artifact_ref],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let Some(blob_ref) = blob_ref else {
+                    return Ok(None);
+                };
+                Ok(Some(Self::get_blob_conn(conn, &BlobRef(blob_ref))))
+            })
+            .await
+            .map_err(sqlite_error)?;
+        let Some(blob) = resolved else {
+            return Ok(None);
+        };
+        blob.ok_or_else(|| {
+            StoreError::Backend(format!("{missing_diagnostic} points at a missing blob"))
+        })
+        .map(Some)
+    }
+}
+
 #[async_trait::async_trait]
 impl lashlang::LashlangArtifactStore for Store {
     fn durability_tier(&self) -> lashlang::DurabilityTier {
@@ -27,24 +81,14 @@ impl lashlang::LashlangArtifactStore for Store {
         let bytes = artifact
             .to_store_bytes()
             .map_err(|err| lashlang::ArtifactStoreError::Encode(err.to_string()))?;
-        let blob_profile = self.options.blob_profile;
         let artifact_ref = artifact.module_ref.as_str().to_string();
-        self.conn
-            .write(move |tx| {
-                let blob_ref = Self::insert_artifact_blob_conn(
-                    tx,
-                    BlobArtifactDescriptor::lashlang_module(),
-                    &bytes,
-                    blob_profile,
-                )?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
-                    params![artifact_ref, blob_ref.as_str()],
-                )?;
-                Ok(())
-            })
-            .await
-            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        self.put_artifact_ref_blob(
+            artifact_ref,
+            BlobArtifactDescriptor::lashlang_module(),
+            bytes,
+        )
+        .await
+        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
         self.artifact_cache
             .lock()
             .map_err(|_| {
@@ -71,35 +115,16 @@ impl lashlang::LashlangArtifactStore for Store {
         }
 
         let artifact_ref = module_ref.as_str().to_string();
-        // `Option<Option<Vec<u8>>>`: the outer `None` means no `artifact_refs`
-        // row exists (return `Ok(None)`); the inner `None` means the row points
-        // at a missing blob (a hard error, matching the prior store).
-        let resolved = self
-            .conn
-            .call(move |conn| {
-                let blob_ref: Option<String> = conn
-                    .query_row(
-                        "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
-                        params![artifact_ref],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                let Some(blob_ref) = blob_ref else {
-                    return Ok(None);
-                };
-                Ok(Some(Self::get_blob_conn(conn, &BlobRef(blob_ref))))
-            })
+        let Some(bytes) = self
+            .get_artifact_ref_blob(
+                artifact_ref,
+                format!("lashlang module artifact `{module_ref}`"),
+            )
             .await
-            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
-        let Some(blob) = resolved else {
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?
+        else {
             return Ok(None);
         };
-        let bytes = blob.ok_or_else(|| {
-            lashlang::ArtifactStoreError::Backend(format!(
-                "lashlang module artifact `{}` points at a missing blob",
-                module_ref
-            ))
-        })?;
         let artifact = Arc::new(
             lashlang::ModuleArtifact::from_store_bytes(&bytes)
                 .map_err(lashlang::ArtifactStoreError::from)?,
@@ -119,23 +144,12 @@ impl lashlang::LashlangArtifactStore for Store {
         descriptor: &str,
         bytes: &[u8],
     ) -> Result<(), lashlang::ArtifactStoreError> {
-        let blob_profile = self.options.blob_profile;
         let artifact_ref = artifact_ref.to_string();
         let descriptor = match descriptor {
             "process_execution_env" => BlobArtifactDescriptor::process_execution_env(),
             _ => BlobArtifactDescriptor::new(PersistedArtifactKind::GenericBlob, Vec::new()),
         };
-        let bytes = bytes.to_vec();
-        self.conn
-            .write(move |tx| {
-                let blob_ref =
-                    Self::insert_artifact_blob_conn(tx, descriptor, &bytes, blob_profile)?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
-                    params![artifact_ref, blob_ref.as_str()],
-                )?;
-                Ok(())
-            })
+        self.put_artifact_ref_blob(artifact_ref, descriptor, bytes.to_vec())
             .await
             .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
@@ -145,33 +159,9 @@ impl lashlang::LashlangArtifactStore for Store {
         artifact_ref: &str,
     ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
         let artifact_ref = artifact_ref.to_string();
-        let diagnostic_ref = artifact_ref.clone();
-        let resolved = self
-            .conn
-            .call(move |conn| {
-                let blob_ref: Option<String> = conn
-                    .query_row(
-                        "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
-                        params![artifact_ref],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                let Some(blob_ref) = blob_ref else {
-                    return Ok(None);
-                };
-                Ok(Some(Self::get_blob_conn(conn, &BlobRef(blob_ref))))
-            })
+        self.get_artifact_ref_blob(artifact_ref.clone(), format!("artifact `{artifact_ref}`"))
             .await
-            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
-        let Some(blob) = resolved else {
-            return Ok(None);
-        };
-        let bytes = blob.ok_or_else(|| {
-            lashlang::ArtifactStoreError::Backend(format!(
-                "artifact `{diagnostic_ref}` points at a missing blob"
-            ))
-        })?;
-        Ok(Some(bytes))
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 }
 
@@ -186,25 +176,14 @@ impl lash_core::ProcessExecutionEnvStore for Store {
         env_ref: &lash_core::ProcessExecutionEnvRef,
         bytes: &[u8],
     ) -> Result<(), lash_core::PluginError> {
-        let blob_profile = self.options.blob_profile;
         let artifact_ref = env_ref.as_str().to_string();
-        let bytes = bytes.to_vec();
-        self.conn
-            .write(move |tx| {
-                let blob_ref = Self::insert_artifact_blob_conn(
-                    tx,
-                    BlobArtifactDescriptor::process_execution_env(),
-                    &bytes,
-                    blob_profile,
-                )?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
-                    params![artifact_ref, blob_ref.as_str()],
-                )?;
-                Ok(())
-            })
-            .await
-            .map_err(process_sqlite_error)
+        self.put_artifact_ref_blob(
+            artifact_ref,
+            BlobArtifactDescriptor::process_execution_env(),
+            bytes.to_vec(),
+        )
+        .await
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))
     }
 
     async fn get_process_execution_env(
@@ -212,33 +191,12 @@ impl lash_core::ProcessExecutionEnvStore for Store {
         env_ref: &lash_core::ProcessExecutionEnvRef,
     ) -> Result<Option<Vec<u8>>, lash_core::PluginError> {
         let artifact_ref = env_ref.as_str().to_string();
-        let diagnostic_ref = artifact_ref.clone();
-        let resolved = self
-            .conn
-            .call(move |conn| {
-                let blob_ref: Option<String> = conn
-                    .query_row(
-                        "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
-                        params![artifact_ref],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                let Some(blob_ref) = blob_ref else {
-                    return Ok(None);
-                };
-                Ok(Some(Self::get_blob_conn(conn, &BlobRef(blob_ref))))
-            })
-            .await
-            .map_err(process_sqlite_error)?;
-        let Some(blob) = resolved else {
-            return Ok(None);
-        };
-        blob.ok_or_else(|| {
-            lash_core::PluginError::Session(format!(
-                "process execution env `{diagnostic_ref}` points at a missing blob"
-            ))
-        })
-        .map(Some)
+        self.get_artifact_ref_blob(
+            artifact_ref.clone(),
+            format!("process execution env `{artifact_ref}`"),
+        )
+        .await
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))
     }
 }
 

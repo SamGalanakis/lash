@@ -464,6 +464,102 @@ impl LashlangProcessInput {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedLashlangProcessStart {
+    pub registration: lash_core::ProcessRegistration,
+    pub label: Option<String>,
+}
+
+pub async fn prepare_lashlang_process_start(
+    artifact_store: Arc<dyn LashlangArtifactStore>,
+    start: lashlang::ProcessStart,
+) -> Result<PreparedLashlangProcessStart, String> {
+    let display_name = Some(start.process_name.clone());
+    let artifact = artifact_store
+        .get_module_artifact(&start.module_ref)
+        .await
+        .map_err(|err| format!("failed to load lashlang module artifact: {err}"))?
+        .ok_or_else(|| {
+            format!(
+                "missing lashlang module artifact `{}` for process `{}`",
+                start.module_ref, start.process_name
+            )
+        })?;
+    if artifact.host_requirements_ref != start.host_requirements_ref {
+        return Err(format!(
+            "lashlang module artifact `{}` host requirements mismatch: process requested {}, artifact has {}",
+            start.module_ref, start.host_requirements_ref, artifact.host_requirements_ref
+        ));
+    }
+    if artifact.process_ref(&start.process_name) != Some(&start.process_ref) {
+        return Err(format!(
+            "lashlang module artifact `{}` does not export process `{}` as requested ref {:?}",
+            start.module_ref, start.process_name, start.process_ref
+        ));
+    }
+    let args = match serde_json::to_value(lashlang::Value::Record(Arc::new(start.args)))
+        .map_err(|err| format!("failed to serialize process args: {err}"))?
+    {
+        serde_json::Value::Object(map) => map,
+        _ => return Err("process args must serialize as a record".to_string()),
+    };
+    let signal_event_types = artifact
+        .canonical_ir
+        .process(&start.process_name)
+        .map(lashlang_process_signal_event_types)
+        .unwrap_or_default();
+    let process_input = LashlangProcessInput {
+        module_ref: start.module_ref,
+        process_ref: start.process_ref,
+        host_requirements_ref: start.host_requirements_ref,
+        process_name: start.process_name,
+        args,
+    };
+    let identity = lashlang_process_identity(&process_input);
+    let process_input = process_input
+        .into_process_input()
+        .map_err(|err| format!("failed to encode process input: {err}"))?;
+    let process_id = format!("process:{}", uuid::Uuid::new_v4());
+    let registration = lash_core::ProcessRegistration::new(
+        process_id,
+        process_input,
+        lash_core::ProcessProvenance::host(),
+    )
+    .with_identity(identity)
+    .with_extra_event_types(
+        lashlang_process_event_types()
+            .into_iter()
+            .chain(signal_event_types),
+    );
+    Ok(PreparedLashlangProcessStart {
+        registration,
+        label: display_name,
+    })
+}
+
+pub fn resolve_lashlang_module_operation(
+    host_environment: &lashlang::LashlangHostEnvironment,
+    receiver: &lashlang::ResourceHandle,
+    operation: &str,
+) -> Result<String, lashlang::ExecutionHostError> {
+    host_environment
+        .resources
+        .resolve_module_operation(&receiver.resource_type, &receiver.alias, operation)
+        .map(|binding| binding.host_operation.clone())
+        .ok_or_else(|| {
+            lashlang::ExecutionHostError::new(format!(
+                "module `{}` of type `{}` does not expose operation `{operation}`",
+                receiver.alias, receiver.resource_type
+            ))
+        })
+}
+
+fn lashlang_process_identity(input: &LashlangProcessInput) -> lash_core::ProcessIdentity {
+    lash_core::ProcessIdentity::new(LASHLANG_ENGINE_KIND)
+        .with_label(Some(input.process_name.clone()))
+        .with_definition(Some(input.definition()))
+}
+
 #[derive(Clone)]
 pub struct LashlangProcessEngine {
     artifact_store: Arc<dyn LashlangArtifactStore>,
@@ -545,10 +641,20 @@ impl lash_core::ProcessEngine for LashlangProcessEngine {
                 input.module_ref, input.process_name, input.process_ref
             )));
         }
-        let _surface = self
+        let surface = self
             .surface
             .clone()
             .for_process_registry(context.process_registry_available());
+        let host_environment = surface.host_environment(context.tool_catalog());
+        if let Err(err) = lashlang_host_environment_satisfies_requirements(
+            &artifact.host_requirements,
+            &host_environment,
+        ) {
+            return Err(lash_core::PluginError::Session(format!(
+                "lashlang process `{}` is incompatible with this host surface: {err}",
+                input.process_name
+            )));
+        }
         Ok(())
     }
 
@@ -560,10 +666,11 @@ impl lash_core::ProcessEngine for LashlangProcessEngine {
         process::run_lashlang_process(self.clone(), context, payload).await
     }
 
-    fn definition(&self, payload: &serde_json::Value) -> Option<serde_json::Value> {
-        LashlangProcessInput::from_payload(payload.clone())
-            .ok()
-            .map(|input| input.definition())
+    fn identity(&self, payload: &serde_json::Value) -> lash_core::ProcessIdentity {
+        match LashlangProcessInput::from_payload(payload.clone()) {
+            Ok(input) => lashlang_process_identity(&input),
+            Err(_) => lash_core::ProcessIdentity::new(LASHLANG_ENGINE_KIND),
+        }
     }
 }
 

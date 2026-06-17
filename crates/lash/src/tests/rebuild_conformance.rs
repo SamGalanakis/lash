@@ -107,11 +107,15 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
                 dir.join("attachments"),
             )) as Arc<dyn lash_core::AttachmentStore>;
             let artifact_db = dir.join("artifacts.db");
-            let artifact = Arc::new(sync_await(async move {
+            let artifact_store = Arc::new(sync_await(async move {
                 lash_sqlite_store::Store::open(&artifact_db)
                     .await
                     .expect("open durable artifact store")
-            })) as Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>;
+            }));
+            let artifact = Arc::clone(&artifact_store)
+                as Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>;
+            let process_env_store =
+                Arc::clone(&artifact_store) as Arc<dyn lash_core::ProcessExecutionEnvStore>;
             RuntimeRebuildBackend {
                 process_registry: registry,
                 build_core: Box::new(move |builder| {
@@ -119,6 +123,7 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
                         .store_factory(Arc::clone(&store_factory))
                         .attachment_store(Arc::clone(&attachment))
                         .lashlang_artifact_store(Arc::clone(&artifact))
+                        .process_env_store(Arc::clone(&process_env_store))
                         .trigger_store(Arc::clone(&trigger_store))
                         .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
                         .build()

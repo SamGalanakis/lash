@@ -11,7 +11,8 @@ use lash_lashlang_runtime::{
     LASHLANG_ENGINE_KIND, LashlangProcessInput, TraceLashlangChildExecution,
     TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, lashlang_process_event_types,
     lashlang_process_signal_event_types, lashlang_type_expr_schema, lashlang_value_to_json,
-    protocol_tool_output_to_lashlang_value, sleep_duration_ms,
+    prepare_lashlang_process_start, protocol_tool_output_to_lashlang_value,
+    resolve_lashlang_module_operation, sleep_duration_ms,
 };
 use lash_plugin_tool_output_budget::{ToolOutputBudgetConfig, project_observation_text};
 use lashlang::{
@@ -210,17 +211,8 @@ impl HostBridge<'_> {
                 )));
             }
         };
-        let host_operation = self
-            .host_environment
-            .resources
-            .resolve_module_operation(&receiver.resource_type, &receiver.alias, &operation)
-            .map(|binding| binding.host_operation.clone())
-            .ok_or_else(|| {
-                ExecutionHostError::new(format!(
-                    "module `{}` of type `{}` does not expose operation `{operation}`",
-                    receiver.alias, receiver.resource_type
-                ))
-            })?;
+        let host_operation =
+            resolve_lashlang_module_operation(&self.host_environment, receiver, &operation)?;
         let mut payload = if let [FlowValue::Record(record)] = args.as_slice() {
             flow_record_json(record).await
         } else {
@@ -305,6 +297,7 @@ impl HostBridge<'_> {
         let target = trigger_target_process_input(&request.target).map_err(|err| {
             ExecutionHostError::new(format!("failed to encode trigger target: {err}"))
         })?;
+        let target_identity = lashlang_process_identity_for_definition(&request.target);
         let process = artifact
             .canonical_ir
             .process(&request.target.process_name)
@@ -336,6 +329,7 @@ impl HostBridge<'_> {
                     &compatibility.resolved_event_type,
                 )),
                 target,
+                target_identity,
                 event_types,
                 input_template: core_trigger_input_template(&request.inputs),
                 target_label: Some(request.target.process_name.clone()),
@@ -396,82 +390,15 @@ impl HostBridge<'_> {
     }
 
     async fn start_process(&self, start: ProcessStart) -> Result<FlowValue, ExecutionHostError> {
-        let (registration, label) = self.prepare_process_start(start).await?;
+        let prepared =
+            prepare_lashlang_process_start(std::sync::Arc::clone(&self.artifact_store), start)
+                .await
+                .map_err(ExecutionHostError::new)?;
         let reply = self
             .ctx
-            .start_child_process(registration, LASHLANG_ENGINE_KIND, label)
+            .start_child_process(prepared.registration, LASHLANG_ENGINE_KIND, prepared.label)
             .await;
         self.consume_reply("start_process", reply)
-    }
-
-    async fn prepare_process_start(
-        &self,
-        start: ProcessStart,
-    ) -> Result<(lash_core::ProcessRegistration, Option<String>), ExecutionHostError> {
-        let display_name = Some(start.process_name.clone());
-        let artifact = self
-            .artifact_store
-            .get_module_artifact(&start.module_ref)
-            .await
-            .map_err(|err| {
-                ExecutionHostError::new(format!("failed to load lashlang module artifact: {err}"))
-            })?
-            .ok_or_else(|| {
-                ExecutionHostError::new(format!(
-                    "missing lashlang module artifact `{}` for process `{}`",
-                    start.module_ref, start.process_name
-                ))
-            })?;
-        if artifact.host_requirements_ref != start.host_requirements_ref {
-            return Err(ExecutionHostError::new(format!(
-                "lashlang module artifact `{}` host requirements mismatch: process requested {}, artifact has {}",
-                start.module_ref, start.host_requirements_ref, artifact.host_requirements_ref
-            )));
-        }
-        if artifact.process_ref(&start.process_name) != Some(&start.process_ref) {
-            return Err(ExecutionHostError::new(format!(
-                "lashlang module artifact `{}` does not export process `{}` as requested ref {:?}",
-                start.module_ref, start.process_name, start.process_ref
-            )));
-        }
-        let args =
-            match serde_json::to_value(lashlang::Value::Record(std::sync::Arc::new(start.args)))
-                .map_err(|err| {
-                    ExecutionHostError::new(format!("failed to serialize process args: {err}"))
-                })? {
-                serde_json::Value::Object(map) => map,
-                _ => {
-                    return Err(ExecutionHostError::new(
-                        "process args must serialize as a record",
-                    ));
-                }
-            };
-        let signal_event_types = artifact
-            .canonical_ir
-            .process(&start.process_name)
-            .map(lashlang_process_signal_event_types)
-            .unwrap_or_default();
-        let process_input = LashlangProcessInput {
-            module_ref: start.module_ref,
-            process_ref: start.process_ref,
-            host_requirements_ref: start.host_requirements_ref,
-            process_name: start.process_name,
-            args,
-        }
-        .into_process_input()
-        .map_err(|err| ExecutionHostError::new(format!("failed to encode process input: {err}")))?;
-        let process_id = format!("process:{}", uuid::Uuid::new_v4());
-        let registration = lash_core::ProcessRegistration::new(
-            process_id,
-            process_input,
-            lash_core::ProcessProvenance::host(),
-        )
-        .with_extra_event_types(
-            lashlang_process_event_types()
-                .into_iter()
-                .chain(signal_event_types),
-        );
-        Ok((registration, display_name))
     }
 
     async fn await_handle(&self, handle: FlowValue) -> Result<FlowValue, ExecutionHostError> {
@@ -699,18 +626,18 @@ fn lashlang_process_definition_for_identity(
     lashlang_process_input_for_definition(definition).definition()
 }
 
+fn lashlang_process_identity_for_definition(
+    definition: &lashlang::ProcessDefinitionIdentity,
+) -> lash_core::ProcessIdentity {
+    lash_core::ProcessIdentity::new(LASHLANG_ENGINE_KIND)
+        .with_label(Some(definition.process_name.clone()))
+        .with_definition(Some(lashlang_process_definition_for_identity(definition)))
+}
+
 fn trigger_target_process_input(
     definition: &lashlang::ProcessDefinitionIdentity,
 ) -> Result<lash_core::ProcessInput, serde_json::Error> {
-    let input = lashlang_process_input_for_definition(definition);
-    let process_definition = input.definition();
-    let mut process_input = input.into_process_input()?;
-    if let lash_core::ProcessInput::Engine { payload, .. } = &mut process_input
-        && let serde_json::Value::Object(object) = payload
-    {
-        object.insert("definition".to_string(), process_definition);
-    }
-    Ok(process_input)
+    lashlang_process_input_for_definition(definition).into_process_input()
 }
 
 fn core_trigger_input_template(

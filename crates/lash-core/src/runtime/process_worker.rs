@@ -283,6 +283,7 @@ impl DurableProcessWorker {
         let registration = ProcessRegistration {
             id: record.id,
             input: record.input,
+            identity: record.identity,
             event_types: record.event_types,
             provenance: record.provenance.clone(),
             env_ref: record.env_ref.clone(),

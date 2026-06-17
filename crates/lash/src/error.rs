@@ -20,6 +20,10 @@ pub enum EmbedError {
         "attachment store is required; provide an explicit attachment store with .attachment_store(...)"
     )]
     MissingAttachmentStore,
+    #[error(
+        "process execution environment store is required; provide an explicit process env store with .process_env_store(...)"
+    )]
+    MissingProcessEnvStore,
     #[error("failed to create store for session `{session_id}`: {message}")]
     StoreFactory { session_id: String, message: String },
     #[error("store is bound to session `{loaded}` but builder requested `{requested}`")]

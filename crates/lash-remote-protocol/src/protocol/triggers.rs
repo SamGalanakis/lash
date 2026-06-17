@@ -154,6 +154,7 @@ pub struct RemoteTriggerRegistration {
 pub struct RemoteTriggerTargetSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    pub identity: RemoteProcessIdentity,
     pub input: RemoteProcessInput,
     #[serde(default)]
     pub inputs: RemoteTriggerInputTemplate,
@@ -205,6 +206,7 @@ pub struct RemoteTriggerSubscriptionDraft {
     #[serde(default)]
     pub payload_schema: serde_json::Value,
     pub target: RemoteProcessInput,
+    pub target_identity: RemoteProcessIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_types: Vec<RemoteProcessEventType>,
     #[serde(default)]
@@ -232,6 +234,8 @@ impl RemoteTriggerSubscriptionDraft {
             &self.source_key,
         )?;
         self.target.validate("RemoteTriggerSubscriptionDraft")?;
+        self.target_identity
+            .validate("RemoteTriggerSubscriptionDraft")?;
         for event_type in &self.event_types {
             event_type.validate("RemoteTriggerSubscriptionDraft")?;
         }
@@ -257,6 +261,7 @@ pub struct RemoteTriggerSubscriptionRecord {
     #[serde(default)]
     pub payload_schema: serde_json::Value,
     pub target: RemoteProcessInput,
+    pub target_identity: RemoteProcessIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_types: Vec<RemoteProcessEventType>,
     #[serde(default)]
@@ -281,6 +286,7 @@ impl RemoteTriggerSubscriptionRecord {
         require_non_empty(type_name, "source_type", &self.source_type)?;
         require_non_empty(type_name, "source_key", &self.source_key)?;
         self.target.validate(type_name)?;
+        self.target_identity.validate(type_name)?;
         for event_type in &self.event_types {
             event_type.validate(type_name)?;
         }

@@ -212,6 +212,7 @@ fn trigger_dtos_round_trip_core_values() {
         source: serde_json::json!({}),
         target: lash_core::TriggerTargetSummary {
             label: Some("on_button".to_string()),
+            identity: engine_process_identity("on_button"),
             input: engine_process_input("on_button", serde_json::json!({})),
             inputs,
         },
@@ -795,13 +796,19 @@ fn process_definition_identity(process_name: &str) -> serde_json::Value {
 }
 
 fn engine_process_input(process_name: &str, args: serde_json::Value) -> lash_core::ProcessInput {
+    let _ = process_name;
     lash_core::ProcessInput::Engine {
         kind: "lashlang".to_string(),
         payload: serde_json::json!({
-            "definition": process_definition_identity(process_name),
             "args": args
         }),
     }
+}
+
+fn engine_process_identity(process_name: &str) -> lash_core::ProcessIdentity {
+    lash_core::ProcessIdentity::new("lashlang")
+        .with_label(Some(process_name.to_string()))
+        .with_definition(Some(process_definition_identity(process_name)))
 }
 
 fn trigger_target_identity() -> serde_json::Value {
@@ -833,6 +840,7 @@ fn trigger_subscription_draft() -> lash_core::TriggerSubscriptionDraft {
         source: serde_json::json!({ "button": "blue" }),
         payload_schema: lash_core::LashSchema::any(),
         target: engine_process_input("on_button", serde_json::json!({})),
+        target_identity: engine_process_identity("on_button"),
         event_types: vec![process_event_type()],
         input_template: trigger_input_template(),
         target_label: Some("on_button".to_string()),
@@ -853,6 +861,7 @@ fn trigger_subscription_record() -> lash_core::TriggerSubscriptionRecord {
         source: draft.source,
         payload_schema: draft.payload_schema,
         target: draft.target,
+        target_identity: draft.target_identity,
         event_types: draft.event_types,
         input_template: draft.input_template,
         target_label: draft.target_label,
@@ -959,6 +968,8 @@ fn observed_process() -> lash_core::ObservedProcess {
         process_id: "process:observed".to_string(),
         graph_key: "process:process:observed".to_string(),
         kind: "external".to_string(),
+        identity: lash_core::ProcessIdentity::new("external")
+            .with_label(Some("External".to_string())),
         lifecycle: lash_core::ProcessLifecycleStatus::Running,
         status_label: "running".to_string(),
         terminal: false,

@@ -84,6 +84,36 @@ impl From<RemoteProcessDefinitionIdentity> for serde_json::Value {
     }
 }
 
+impl From<lash_core::ProcessIdentity> for RemoteProcessIdentity {
+    fn from(value: lash_core::ProcessIdentity) -> Self {
+        let lash_core::ProcessIdentity {
+            kind,
+            label,
+            definition,
+        } = value;
+        Self {
+            kind,
+            label,
+            definition: definition.map(Into::into),
+        }
+    }
+}
+
+impl From<RemoteProcessIdentity> for lash_core::ProcessIdentity {
+    fn from(value: RemoteProcessIdentity) -> Self {
+        let RemoteProcessIdentity {
+            kind,
+            label,
+            definition,
+        } = value;
+        Self {
+            kind,
+            label,
+            definition: definition.map(Into::into),
+        }
+    }
+}
+
 impl From<lash_core::ProcessHandleDescriptor> for RemoteProcessHandleDescriptor {
     fn from(value: lash_core::ProcessHandleDescriptor) -> Self {
         let lash_core::ProcessHandleDescriptor { kind, label } = value;
@@ -1133,6 +1163,7 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
             id,
             registration_hash: _,
             input,
+            identity,
             event_types,
             provenance,
             env_ref,
@@ -1146,6 +1177,7 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
         Ok(Self {
             process_id: id,
             input: input.as_ref().clone().try_into()?,
+            identity: identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             provenance: provenance.into(),
             env_ref: env_ref.map(|env_ref| env_ref.as_str().to_string()),
@@ -1167,6 +1199,7 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
         let RemoteProcessRecord {
             process_id,
             input,
+            identity,
             event_types,
             provenance,
             env_ref,
@@ -1182,6 +1215,7 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
             input.try_into()?,
             provenance.into(),
         )
+        .with_identity(identity.into())
         .with_event_types(event_types.into_iter().map(Into::into))
         .with_execution_env_ref(env_ref.map(lash_core::ProcessExecutionEnvRef::new))
         .with_wake_target(wake_target.map(Into::into));
@@ -1203,6 +1237,7 @@ impl TryFrom<lash_core::ObservedProcess> for RemoteObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity,
             lifecycle,
             status_label,
             terminal,
@@ -1223,6 +1258,7 @@ impl TryFrom<lash_core::ObservedProcess> for RemoteObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity: identity.into(),
             lifecycle: lifecycle.into(),
             status_label,
             terminal,
@@ -1251,6 +1287,7 @@ impl TryFrom<RemoteObservedProcess> for lash_core::ObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity,
             lifecycle,
             status_label,
             terminal,
@@ -1271,6 +1308,7 @@ impl TryFrom<RemoteObservedProcess> for lash_core::ObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity: identity.into(),
             lifecycle: lifecycle.into(),
             status_label,
             terminal,

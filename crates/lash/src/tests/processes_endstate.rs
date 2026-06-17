@@ -63,6 +63,19 @@ impl LinkedTestProcess {
         .expect("lashlang process input serializes")
     }
 
+    fn process_identity(&self) -> lash_core::ProcessIdentity {
+        let input = lash_lashlang_runtime::LashlangProcessInput {
+            module_ref: self.module_ref.clone(),
+            process_ref: self.process_ref.clone(),
+            host_requirements_ref: self.host_requirements_ref.clone(),
+            process_name: self.process_name.clone(),
+            args: serde_json::Map::new(),
+        };
+        lash_core::ProcessIdentity::new(lash_lashlang_runtime::LASHLANG_ENGINE_KIND)
+            .with_label(Some(self.process_name.clone()))
+            .with_definition(Some(input.definition()))
+    }
+
     fn start_request(&self, process_id: &str) -> lash_core::ProcessStartRequest {
         lash_core::ProcessStartRequest::new(
             process_id,
@@ -93,6 +106,7 @@ impl LinkedTestProcess {
             source: serde_json::json!({}),
             payload_schema: lash_core::LashSchema::any(),
             target: self.process_input(),
+            target_identity: self.process_identity(),
             event_types: lash_lashlang_runtime::lashlang_process_event_types()
                 .into_iter()
                 .chain(self.signal_event_types.clone())

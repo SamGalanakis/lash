@@ -105,7 +105,7 @@ mod tests {
                     scope,
                 )
                 .await?;
-            let definition = record.input.as_ref().definition();
+            let definition = record.identity.definition.clone();
             Ok(lash_core::ProcessHandleSummary::new(
                 record.id,
                 descriptor,

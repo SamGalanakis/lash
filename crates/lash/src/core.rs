@@ -332,6 +332,7 @@ pub struct LashCoreBuilder {
     // `build()`, which errors if any is unset.
     effect_host: Option<Arc<dyn EffectHost>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
+    process_env_store: Option<Arc<dyn ProcessExecutionEnvStore>>,
     #[cfg(feature = "rlm")]
     lashlang_artifact_store: Option<Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>>,
     trigger_store: Option<Arc<dyn lash_core::TriggerStore>>,
@@ -418,6 +419,14 @@ impl LashCoreBuilder {
 
     pub fn attachment_store(mut self, attachment_store: Arc<dyn AttachmentStore>) -> Self {
         self.attachment_store = Some(attachment_store);
+        self
+    }
+
+    pub fn process_env_store(
+        mut self,
+        process_env_store: Arc<dyn ProcessExecutionEnvStore>,
+    ) -> Self {
+        self.process_env_store = Some(process_env_store);
         self
     }
 
@@ -527,7 +536,11 @@ impl LashCoreBuilder {
             .attachment_store
             .take()
             .ok_or(EmbedError::MissingAttachmentStore)?;
-        let core = RuntimeHostConfig::new(effect_host, attachment_store);
+        let process_env_store = self
+            .process_env_store
+            .take()
+            .ok_or(EmbedError::MissingProcessEnvStore)?;
+        let core = RuntimeHostConfig::new(effect_host, attachment_store, process_env_store);
         Ok(self.apply_core_overrides(core))
     }
 
@@ -538,6 +551,9 @@ impl LashCoreBuilder {
         }
         if let Some(attachment_store) = self.attachment_store.take() {
             core.durability.attachment_store = attachment_store;
+        }
+        if let Some(process_env_store) = self.process_env_store.take() {
+            core.durability.process_env_store = process_env_store;
         }
         if let Some(prompt) = self.prompt.take() {
             core.prompt.prompt = prompt;
@@ -583,7 +599,33 @@ impl LashCoreBuilder {
         let attachment_tier = self
             .attachment_store
             .as_ref()
-            .map(|store| store.persistence().durability_tier());
+            .map(|store| store.persistence().durability_tier())
+            .or_else(|| {
+                self.runtime_host_config.as_ref().map(|core| {
+                    core.durability
+                        .attachment_store
+                        .persistence()
+                        .durability_tier()
+                })
+            });
+        let process_env_tier = self
+            .process_env_store
+            .as_ref()
+            .map(|store| store.durability_tier())
+            .or_else(|| {
+                self.runtime_host_config
+                    .as_ref()
+                    .map(|core| core.durability.process_env_store.durability_tier())
+            });
+        let effect_host_tier = self
+            .effect_host
+            .as_ref()
+            .map(|host| host.durability_tier())
+            .or_else(|| {
+                self.runtime_host_config
+                    .as_ref()
+                    .map(|core| core.control.effect_host.durability_tier())
+            });
         #[cfg(feature = "rlm")]
         let artifact_tier = self
             .lashlang_artifact_store
@@ -598,6 +640,11 @@ impl LashCoreBuilder {
             if attachment_tier == Some(DurabilityTier::Inline) {
                 return Err(EmbedError::DurableStorePeerRequired {
                     facet: "attachment store",
+                });
+            }
+            if process_env_tier == Some(DurabilityTier::Inline) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "process execution environment store",
                 });
             }
             #[cfg(feature = "rlm")]
@@ -619,6 +666,11 @@ impl LashCoreBuilder {
                     facet: "trigger store",
                 });
             }
+            if process_env_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "process execution environment store",
+                });
+            }
         }
 
         if trigger_store_tier == Some(DurabilityTier::Durable) {
@@ -627,11 +679,29 @@ impl LashCoreBuilder {
                     facet: "session store factory",
                 });
             }
+            if process_env_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "process execution environment store",
+                });
+            }
             if let Some(process_registry) = self.process_work_source.process_registry().as_ref()
                 && process_registry.durability_tier() == DurabilityTier::Inline
             {
                 return Err(EmbedError::DurableStorePeerRequired {
                     facet: "process registry",
+                });
+            }
+        }
+
+        if effect_host_tier == Some(DurabilityTier::Durable) {
+            if attachment_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "attachment store",
+                });
+            }
+            if process_env_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "process execution environment store",
                 });
             }
         }

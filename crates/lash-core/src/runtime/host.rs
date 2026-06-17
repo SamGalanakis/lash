@@ -62,11 +62,12 @@ impl RuntimeHostConfig {
     pub fn new(
         effect_host: Arc<dyn EffectHost>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
+        process_env_store: Arc<dyn ProcessExecutionEnvStore>,
     ) -> Self {
         Self {
             durability: RuntimeDurabilityConfig {
                 attachment_store,
-                process_env_store: Arc::new(InMemoryProcessExecutionEnvStore::new()),
+                process_env_store,
             },
             process_engines: ProcessEngineRegistry::new(),
             providers: RuntimeProviderConfig {
@@ -97,6 +98,7 @@ impl RuntimeHostConfig {
         Self::new(
             Arc::new(InlineEffectHost::default()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(InMemoryProcessExecutionEnvStore::new()),
         )
     }
 

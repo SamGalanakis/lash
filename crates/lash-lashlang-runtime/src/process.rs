@@ -18,7 +18,8 @@ use crate::{
         lashlang_value_to_json, process_event_payload, protocol_tool_reply_to_lashlang_value,
         sleep_duration_ms,
     },
-    lashlang_host_environment_satisfies_requirements,
+    lashlang_host_environment_satisfies_requirements, prepare_lashlang_process_start,
+    resolve_lashlang_module_operation,
 };
 
 pub async fn run_lashlang_process(
@@ -223,23 +224,6 @@ impl LashlangProcessHost<'_> {
         Ok(payload)
     }
 
-    fn resolve_host_operation(
-        &self,
-        receiver: &lashlang::ResourceHandle,
-        operation: &str,
-    ) -> Result<String, ExecutionHostError> {
-        self.host_environment
-            .resources
-            .resolve_module_operation(&receiver.resource_type, &receiver.alias, operation)
-            .map(|binding| binding.host_operation.clone())
-            .ok_or_else(|| {
-                ExecutionHostError::new(format!(
-                    "module `{}` of type `{}` does not expose operation `{operation}`",
-                    receiver.alias, receiver.resource_type
-                ))
-            })
-    }
-
     fn resource_tool_call_id(
         &self,
         host_operation: &str,
@@ -273,7 +257,8 @@ impl LashlangProcessHost<'_> {
                 )));
             }
         };
-        let host_operation = self.resolve_host_operation(receiver, &operation)?;
+        let host_operation =
+            resolve_lashlang_module_operation(&self.host_environment, receiver, &operation)?;
         let manifest = self.ctx.callable_tool_manifest(&host_operation).ok_or_else(|| {
             ExecutionHostError::new(format!(
                 "module operation `{}` resolved to unavailable host operation `{host_operation}`",
@@ -336,77 +321,14 @@ impl LashlangProcessHost<'_> {
         &self,
         start: lashlang::ProcessStart,
     ) -> Result<lashlang::Value, ExecutionHostError> {
-        let (registration, label) = self
-            .prepare_process_start(start)
+        let prepared = prepare_lashlang_process_start(Arc::clone(&self.artifact_store), start)
             .await
             .map_err(ExecutionHostError::new)?;
         let reply = self
             .ctx
-            .start_child_process(registration, LASHLANG_ENGINE_KIND, label)
+            .start_child_process(prepared.registration, LASHLANG_ENGINE_KIND, prepared.label)
             .await;
         protocol_tool_reply_to_lashlang_value(reply)
-    }
-
-    async fn prepare_process_start(
-        &self,
-        start: lashlang::ProcessStart,
-    ) -> Result<(lash_core::ProcessRegistration, Option<String>), String> {
-        let display_name = Some(start.process_name.clone());
-        let artifact = self
-            .artifact_store
-            .get_module_artifact(&start.module_ref)
-            .await
-            .map_err(|err| format!("failed to load lashlang module artifact: {err}"))?
-            .ok_or_else(|| {
-                format!(
-                    "missing lashlang module artifact `{}` for process `{}`",
-                    start.module_ref, start.process_name
-                )
-            })?;
-        if artifact.host_requirements_ref != start.host_requirements_ref {
-            return Err(format!(
-                "lashlang module artifact `{}` host requirements mismatch: process requested {}, artifact has {}",
-                start.module_ref, start.host_requirements_ref, artifact.host_requirements_ref
-            ));
-        }
-        if artifact.process_ref(&start.process_name) != Some(&start.process_ref) {
-            return Err(format!(
-                "lashlang module artifact `{}` does not export process `{}` as requested ref {:?}",
-                start.module_ref, start.process_name, start.process_ref
-            ));
-        }
-        let args = match serde_json::to_value(lashlang::Value::Record(Arc::new(start.args)))
-            .map_err(|err| format!("failed to serialize process args: {err}"))?
-        {
-            serde_json::Value::Object(map) => map,
-            _ => return Err("process args must serialize as a record".to_string()),
-        };
-        let signal_event_types = artifact
-            .canonical_ir
-            .process(&start.process_name)
-            .map(lashlang_process_signal_event_types)
-            .unwrap_or_default();
-        let process_input = LashlangProcessInput {
-            module_ref: start.module_ref,
-            process_ref: start.process_ref,
-            host_requirements_ref: start.host_requirements_ref,
-            process_name: start.process_name,
-            args,
-        }
-        .into_process_input()
-        .map_err(|err| format!("failed to encode process input: {err}"))?;
-        let process_id = format!("process:{}", uuid::Uuid::new_v4());
-        let registration = lash_core::ProcessRegistration::new(
-            process_id,
-            process_input,
-            lash_core::ProcessProvenance::host(),
-        )
-        .with_extra_event_types(
-            lashlang_process_event_types()
-                .into_iter()
-                .chain(signal_event_types),
-        );
-        Ok((registration, display_name))
     }
 
     async fn process_event(&self, event: lashlang::ProcessEvent) -> Result<(), ExecutionHostError> {

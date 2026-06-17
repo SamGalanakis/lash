@@ -151,11 +151,11 @@ impl crate::ProcessService for RuntimeSessionProcessService {
             )
             .await?;
         Ok(crate::ProcessHandleSummary::new(
-            record.id,
+            record.id.clone(),
             descriptor,
-            crate::ProcessLifecycleStatus::from(record.status),
+            crate::ProcessLifecycleStatus::from(record.status.clone()),
         )
-        .with_definition(record.input.as_ref().definition()))
+        .with_definition(record.identity.definition))
     }
 
     async fn start(

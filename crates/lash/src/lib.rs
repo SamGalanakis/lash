@@ -129,7 +129,10 @@ pub mod persistence {
         RuntimeCommitResult, RuntimeTurnCommitStamp, SessionCheckpoint, SessionHead,
         SessionHeadMeta, load_persisted_session_state, load_persisted_session_state_active_path,
     };
-    pub use lash_core::{AttachmentStore, InMemoryAttachmentStore};
+    pub use lash_core::{
+        AttachmentStore, InMemoryAttachmentStore, InMemoryProcessExecutionEnvStore,
+        ProcessExecutionEnvStore,
+    };
     pub use lash_core::{
         BlobRef, GcReport, PersistedSessionConfig, PersistedTurnState, ProtocolEvent,
         RuntimePersistence, SessionEventRecord, SessionGraph, SessionMeta, SessionNodeRecord,

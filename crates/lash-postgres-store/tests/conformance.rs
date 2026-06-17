@@ -106,10 +106,11 @@ fn trigger_subscription_draft(
         })),
         target: lash_core::ProcessInput::Engine {
             kind: "test-trigger".to_string(),
-            payload: serde_json::json!({
-                "definition": { "process_name": process_name }
-            }),
+            payload: serde_json::json!({}),
         },
+        target_identity: lash_core::ProcessIdentity::new("test-trigger")
+            .with_label(Some(process_name.to_string()))
+            .with_definition(Some(serde_json::json!({ "process_name": process_name }))),
         event_types: Vec::new(),
         input_template: inputs,
         target_label: Some(process_name.to_string()),

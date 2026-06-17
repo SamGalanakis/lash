@@ -314,7 +314,8 @@ impl ProcessCapability {
             )
             .with_execution_env_ref(env_ref)
             .with_wake_target(wake_target);
-        self.validate_process_environment(current, &registration)
+        let registration = self
+            .prepare_process_environment(current, session_id, registration)
             .await?;
         let execution_context = options.execution_context(&scope);
         let runner = ProcessCommandRunner::new(
@@ -336,13 +337,14 @@ impl ProcessCapability {
             .await
     }
 
-    async fn validate_process_environment(
+    async fn prepare_process_environment(
         &self,
         current: &CurrentSessionCapability,
-        registration: &crate::ProcessRegistration,
-    ) -> Result<(), crate::PluginError> {
+        session_id: &str,
+        registration: crate::ProcessRegistration,
+    ) -> Result<crate::ProcessRegistration, crate::PluginError> {
         let crate::ProcessInput::Engine { kind, payload } = registration.input.as_ref() else {
-            return Ok(());
+            return Ok(registration);
         };
         let Some(env_ref) = registration.env_ref.as_ref() else {
             return Err(crate::PluginError::Session(format!(
@@ -356,16 +358,20 @@ impl ProcessCapability {
         )
         .await?;
         let engine = current.host.core.process_engines.require(kind)?;
+        let tool_catalog = current.plugins.resolved_tool_catalog(session_id)?;
         engine
             .validate_start(
                 crate::ProcessEngineValidationContext::new(
                     current.plugins.host(),
+                    tool_catalog,
                     current.host.process_registry.is_some(),
                 ),
                 payload,
                 Some(&env_spec),
             )
-            .await
+            .await?;
+        let identity = engine.identity(payload);
+        Ok(registration.with_identity(identity))
     }
 
     pub(in crate::runtime::session_manager) async fn await_process(

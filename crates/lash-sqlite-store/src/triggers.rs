@@ -92,6 +92,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         source: draft.source,
                         payload_schema: draft.payload_schema,
                         target: draft.target,
+                        target_identity: draft.target_identity,
                         event_types: draft.event_types,
                         input_template: draft.input_template,
                         target_label: draft.target_label,

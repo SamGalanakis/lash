@@ -69,6 +69,25 @@ impl RemoteProcessDefinitionIdentity {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteProcessIdentity {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<RemoteProcessDefinitionIdentity>,
+}
+
+impl RemoteProcessIdentity {
+    pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
+        require_non_empty(type_name, "identity.kind", &self.kind)?;
+        if let Some(definition) = &self.definition {
+            definition.validate(type_name)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProcessHandleDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,6 +342,7 @@ impl RemoteProcessSummary {
 pub struct RemoteProcessRecord {
     pub process_id: String,
     pub input: RemoteProcessInput,
+    pub identity: RemoteProcessIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_types: Vec<RemoteProcessEventType>,
     pub provenance: RemoteProcessProvenance,
@@ -344,6 +364,7 @@ impl RemoteProcessRecord {
     pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
         require_non_empty(type_name, "process_id", &self.process_id)?;
         self.input.validate(type_name)?;
+        self.identity.validate(type_name)?;
         for event_type in &self.event_types {
             event_type.validate(type_name)?;
         }
@@ -420,6 +441,7 @@ pub struct RemoteObservedProcess {
     pub process_id: String,
     pub graph_key: String,
     pub kind: String,
+    pub identity: RemoteProcessIdentity,
     pub lifecycle: RemoteProcessLifecycleStatus,
     pub status_label: String,
     pub terminal: bool,
@@ -449,6 +471,7 @@ impl RemoteObservedProcess {
         require_non_empty(type_name, "process_id", &self.process_id)?;
         require_non_empty(type_name, "graph_key", &self.graph_key)?;
         require_non_empty(type_name, "kind", &self.kind)?;
+        self.identity.validate(type_name)?;
         require_non_empty(type_name, "status_label", &self.status_label)?;
         self.input.validate(type_name)?;
         self.originator.validate(type_name)?;

@@ -124,10 +124,6 @@ impl ProcessInput {
             _ => None,
         }
     }
-
-    pub fn definition(&self) -> Option<serde_json::Value> {
-        process_definition_identity_from_input(self)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,6 +570,7 @@ impl SessionScope {
 pub struct ProcessRegistration {
     pub id: ProcessId,
     pub input: Arc<ProcessInput>,
+    pub identity: ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
     pub provenance: ProcessProvenance,
@@ -588,6 +585,7 @@ impl Clone for ProcessRegistration {
         Self {
             id: self.id.clone(),
             input: Arc::clone(&self.input),
+            identity: self.identity.clone(),
             event_types: self.event_types.clone(),
             provenance: self.provenance.clone(),
             env_ref: self.env_ref.clone(),
@@ -602,9 +600,11 @@ impl ProcessRegistration {
         input: ProcessInput,
         provenance: ProcessProvenance,
     ) -> Self {
+        let identity = ProcessIdentity::from_process_input(&input);
         Self {
             id: id.into(),
             input: Arc::new(input),
+            identity,
             event_types: default_process_event_types(),
             provenance,
             env_ref: None,
@@ -628,6 +628,11 @@ impl ProcessRegistration {
 
     pub fn with_wake_target(mut self, wake_target: Option<SessionScope>) -> Self {
         self.wake_target = wake_target;
+        self
+    }
+
+    pub fn with_identity(mut self, identity: ProcessIdentity) -> Self {
+        self.identity = identity;
         self
     }
 
@@ -725,6 +730,7 @@ pub struct ProcessRecord {
     pub id: ProcessId,
     pub registration_hash: String,
     pub input: Arc<ProcessInput>,
+    pub identity: ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
     pub provenance: ProcessProvenance,
@@ -780,6 +786,7 @@ impl ProcessRecord {
             id: registration.id,
             registration_hash,
             input: registration.input,
+            identity: registration.identity,
             event_types: registration.event_types,
             provenance: registration.provenance,
             env_ref: registration.env_ref,
@@ -810,6 +817,68 @@ impl ProcessRecord {
 
     pub fn originator_scope_id(&self) -> String {
         self.provenance.originator.scope_id()
+    }
+}
+
+/// Canonical process identity stored alongside every durable process row.
+///
+/// `ProcessInput::Engine` keeps its payload opaque to core. Engines therefore
+/// publish their visible kind, display label, and definition identity at the
+/// registration boundary; list, summary, trigger, and observation paths read
+/// this durable field instead of decoding engine payload conventions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessIdentity {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<serde_json::Value>,
+}
+
+impl ProcessIdentity {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            label: None,
+            definition: None,
+        }
+    }
+
+    pub fn with_label(mut self, label: Option<impl Into<String>>) -> Self {
+        self.label = label.map(Into::into);
+        self
+    }
+
+    pub fn with_definition(mut self, definition: Option<serde_json::Value>) -> Self {
+        self.definition = definition;
+        self
+    }
+
+    pub fn from_process_input(input: &ProcessInput) -> Self {
+        match input {
+            ProcessInput::ToolCall { call } => {
+                Self::new("tool").with_label(Some(call.tool_name.clone()))
+            }
+            ProcessInput::Engine { kind, .. } => Self::new(kind.clone()),
+            ProcessInput::SessionTurn { create_request, .. } => {
+                let label = create_request
+                    .subagent
+                    .as_ref()
+                    .map(|subagent| subagent.capability.clone())
+                    .or_else(|| create_request.usage_source.clone())
+                    .or_else(|| create_request.session_id.clone());
+                Self::new("session_turn").with_label(label)
+            }
+            ProcessInput::External { metadata } => {
+                let label = metadata
+                    .get("label")
+                    .or_else(|| metadata.get("name"))
+                    .or_else(|| metadata.get("title"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                Self::new("external").with_label(label)
+            }
+        }
     }
 }
 
@@ -979,7 +1048,7 @@ impl ProcessHandleSummary {
     }
 
     pub fn from_grant_record(grant: ProcessHandleGrant, record: ProcessRecord) -> Self {
-        let definition = process_definition_identity_from_input(record.input.as_ref());
+        let definition = record.identity.definition.clone();
         Self::new(
             record.id,
             grant.descriptor,
@@ -1007,15 +1076,6 @@ impl ProcessCancelSummary {
             process_id: record.id,
             status: ProcessLifecycleStatus::from(record.status),
         }
-    }
-}
-
-fn process_definition_identity_from_input(input: &ProcessInput) -> Option<serde_json::Value> {
-    match input {
-        ProcessInput::Engine { payload, .. } => payload.get("definition").cloned(),
-        ProcessInput::ToolCall { .. }
-        | ProcessInput::SessionTurn { .. }
-        | ProcessInput::External { .. } => None,
     }
 }
 
@@ -1112,14 +1172,7 @@ impl ProcessListFilter {
             && self
                 .definition
                 .as_ref()
-                .is_none_or(|definition| match record.input.as_ref() {
-                    ProcessInput::Engine { payload, .. } => {
-                        payload.get("definition") == Some(definition)
-                    }
-                    ProcessInput::ToolCall { .. }
-                    | ProcessInput::SessionTurn { .. }
-                    | ProcessInput::External { .. } => false,
-                })
+                .is_none_or(|definition| record.identity.definition.as_ref() == Some(definition))
             && self
                 .waiting
                 .is_none_or(|waiting| record.wait.is_some() == waiting)

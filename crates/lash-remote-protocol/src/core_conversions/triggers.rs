@@ -197,6 +197,7 @@ impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
         } = value;
         let lash_core::TriggerTargetSummary {
             label,
+            identity,
             input,
             inputs,
         } = target;
@@ -208,6 +209,7 @@ impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
             source,
             target: RemoteTriggerTargetSummary {
                 label,
+                identity: identity.into(),
                 input: input.try_into().expect("core process input serializes remotely"),
                 inputs: inputs.into(),
             },
@@ -231,6 +233,7 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
         } = value;
         let RemoteTriggerTargetSummary {
             label,
+            identity,
             input,
             inputs,
         } = target;
@@ -242,6 +245,7 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
             source,
             target: lash_core::TriggerTargetSummary {
                 label,
+                identity: identity.into(),
                 input: input.try_into()?,
                 inputs: inputs.into(),
             },
@@ -310,6 +314,7 @@ impl TryFrom<RemoteTriggerSubscriptionDraft> for lash_core::TriggerSubscriptionD
             source,
             payload_schema,
             target,
+            target_identity,
             event_types,
             input_template,
             target_label,
@@ -324,6 +329,7 @@ impl TryFrom<RemoteTriggerSubscriptionDraft> for lash_core::TriggerSubscriptionD
             source,
             payload_schema: lash_core::LashSchema::new(payload_schema),
             target: target.try_into()?,
+            target_identity: target_identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
             target_label,
@@ -343,6 +349,7 @@ impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraf
             source,
             payload_schema,
             target,
+            target_identity,
             event_types,
             input_template,
             target_label,
@@ -360,6 +367,7 @@ impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraf
             target: target
                 .try_into()
                 .expect("core process input serializes remotely"),
+            target_identity: target_identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
             target_label,
@@ -381,6 +389,7 @@ impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRec
             source,
             payload_schema,
             target,
+            target_identity,
             event_types,
             input_template,
             target_label,
@@ -402,6 +411,7 @@ impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRec
             target: target
                 .try_into()
                 .expect("core process input serializes remotely"),
+            target_identity: target_identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
             target_label,
@@ -429,6 +439,7 @@ impl TryFrom<RemoteTriggerSubscriptionRecord> for lash_core::TriggerSubscription
             source,
             payload_schema,
             target,
+            target_identity,
             event_types,
             input_template,
             target_label,
@@ -448,6 +459,7 @@ impl TryFrom<RemoteTriggerSubscriptionRecord> for lash_core::TriggerSubscription
             source,
             payload_schema: lash_core::LashSchema::new(payload_schema),
             target: target.try_into()?,
+            target_identity: target_identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
             target_label,

@@ -7,9 +7,9 @@ use crate::plugin::PluginError;
 
 use super::events::{ProcessAwaitOutput, ProcessEvent};
 use super::model::{
-    ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessId, ProcessInput,
-    ProcessLifecycleStatus, ProcessListFilter, ProcessOriginator, ProcessRecord,
-    ProcessStatusFilter, SessionScope, WaitState,
+    ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessId,
+    ProcessIdentity, ProcessInput, ProcessLifecycleStatus, ProcessListFilter, ProcessOriginator,
+    ProcessRecord, ProcessStatusFilter, SessionScope, WaitState,
 };
 use super::registry::ProcessRegistry;
 use super::time::epoch_ms_from_system_time;
@@ -41,6 +41,7 @@ pub struct ObservedProcess {
     pub graph_key: String,
     pub kind: String,
     pub lifecycle: ProcessLifecycleStatus,
+    pub identity: ProcessIdentity,
     pub status_label: String,
     pub terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,7 +111,7 @@ impl ProcessWorkObserver {
                 continue;
             }
             seen_process_ids.insert(record.id.clone());
-            let descriptor = descriptor_from_process_input(record.input.as_ref());
+            let descriptor = descriptor_from_process_identity(&record.identity);
             items.push(self.work_item_from_record(record, descriptor).await?);
         }
         items.sort_by(|left, right| {
@@ -145,8 +146,11 @@ impl ProcessWorkObserver {
             .map(ObservedProcessEvent::from)
             .collect();
         let process = ObservedProcess::from_record(record);
-        let kind = descriptor_kind(&descriptor, &process.input);
-        let label = typed_label(&process.input)
+        let kind = process.identity.kind.clone();
+        let label = process
+            .identity
+            .label
+            .clone()
             .or_else(|| descriptor.label.clone())
             .unwrap_or_else(|| kind.clone());
         Ok(ObservedWorkItem {
@@ -197,14 +201,16 @@ impl ObservedProcess {
     fn from_record(record: ProcessRecord) -> Self {
         let lifecycle = ProcessLifecycleStatus::from(&record.status);
         let input = record.input.as_ref().clone();
-        let kind = visible_kind(&input);
-        let label = typed_label(&input).unwrap_or_else(|| kind.clone());
+        let identity = record.identity;
+        let kind = identity.kind.clone();
+        let label = identity.label.clone().unwrap_or_else(|| kind.clone());
         let process_id = record.id;
         Self {
             graph_key: format!("process:{process_id}"),
             process_id,
             kind,
             lifecycle,
+            identity,
             status_label: lifecycle.label().to_string(),
             terminal: lifecycle.is_terminal(),
             error: terminal_error(&record.status),
@@ -258,71 +264,8 @@ fn process_visible_to_session(record: &ProcessRecord, session_id: &str) -> bool 
         .is_some_and(|scope| scope.session_id == session_id)
 }
 
-fn descriptor_from_process_input(input: &ProcessInput) -> ProcessHandleDescriptor {
-    let kind = visible_kind(input);
-    let label = typed_label(input).unwrap_or_else(|| kind.clone());
-    ProcessHandleDescriptor::new(Some(kind), Some(label))
-}
-
-fn descriptor_kind(descriptor: &ProcessHandleDescriptor, input: &ProcessInput) -> String {
-    let generic_kind = stable_kind(input);
-    let visible_kind = visible_kind(input);
-    descriptor
-        .kind
-        .as_deref()
-        .filter(|kind| input.engine_specific_kind().is_none() || *kind != generic_kind)
-        .map(str::to_string)
-        .unwrap_or(visible_kind)
-}
-
-fn typed_label(input: &ProcessInput) -> Option<String> {
-    match input {
-        ProcessInput::ToolCall { call } => Some(call.tool_name.clone()),
-        ProcessInput::Engine { payload, .. } => engine_payload_label(payload),
-        ProcessInput::SessionTurn { create_request, .. } => create_request
-            .subagent
-            .as_ref()
-            .map(|subagent| subagent.capability.clone())
-            .or_else(|| create_request.usage_source.clone())
-            .or_else(|| create_request.session_id.clone()),
-        ProcessInput::External { metadata } => metadata
-            .get("label")
-            .or_else(|| metadata.get("name"))
-            .or_else(|| metadata.get("title"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-    }
-}
-
-fn stable_kind(input: &ProcessInput) -> &'static str {
-    match input {
-        ProcessInput::ToolCall { .. } => "tool",
-        ProcessInput::Engine { .. } => "engine",
-        ProcessInput::SessionTurn { .. } => "session_turn",
-        ProcessInput::External { .. } => "external",
-    }
-}
-
-fn visible_kind(input: &ProcessInput) -> String {
-    input
-        .engine_specific_kind()
-        .unwrap_or_else(|| stable_kind(input))
-        .to_string()
-}
-
-fn engine_payload_label(payload: &serde_json::Value) -> Option<String> {
-    string_field(payload, &["label", "name", "title", "process_name"]).or_else(|| {
-        payload.get("definition").and_then(|definition| {
-            string_field(definition, &["label", "name", "title", "process_name"])
-        })
-    })
-}
-
-fn string_field(value: &serde_json::Value, fields: &[&str]) -> Option<String> {
-    fields
-        .iter()
-        .find_map(|field| value.get(*field).and_then(serde_json::Value::as_str))
-        .map(str::to_string)
+fn descriptor_from_process_identity(identity: &ProcessIdentity) -> ProcessHandleDescriptor {
+    ProcessHandleDescriptor::new(Some(identity.kind.clone()), identity.label.clone())
 }
 
 #[cfg(test)]
@@ -335,9 +278,9 @@ mod tests {
     use super::*;
     use crate::{
         InputItem, PluginOptions, PreparedToolCall, ProcessEventAppendRequest,
-        ProcessExecutionEnvRef, ProcessProvenance, ProcessRegistration, SessionCreateRequest,
-        SessionScope, SessionStartPoint, SubagentSessionContext, ToolFailureClass,
-        ToolOutputContract, TurnInput, WaitKind,
+        ProcessExecutionEnvRef, ProcessIdentity, ProcessProvenance, ProcessRegistration,
+        SessionCreateRequest, SessionScope, SessionStartPoint, SubagentSessionContext,
+        ToolFailureClass, ToolOutputContract, TurnInput, WaitKind,
     };
 
     fn observer(registry: Arc<dyn ProcessRegistry>) -> ProcessWorkObserver {
@@ -463,7 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_for_session_labels_engine_wake_targets_from_payload_without_handle_grants() {
+    async fn snapshot_for_session_labels_engine_wake_targets_from_identity_without_handle_grants() {
         let registry =
             Arc::new(super::super::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
         let scope = SessionScope::new("visible");
@@ -473,11 +416,12 @@ mod tests {
                     "engine-wake-targeted",
                     ProcessInput::Engine {
                         kind: "test-engine".to_string(),
-                        payload: json!({
-                            "definition": { "process_name": "remember" },
-                        }),
+                        payload: json!({}),
                     },
                     ProcessProvenance::host(),
+                )
+                .with_identity(
+                    ProcessIdentity::new("test-engine").with_label(Some("remember".to_string())),
                 )
                 .with_execution_env_ref(Some(ProcessExecutionEnvRef::new("process-env:test")))
                 .with_wake_target(Some(scope)),
@@ -671,12 +615,9 @@ mod tests {
                 "engine",
                 ProcessInput::Engine {
                     kind: "test-engine".to_string(),
-                    payload: json!({
-                        "label": "remember",
-                        "definition": { "name": "remember" }
-                    }),
+                    payload: json!({}),
                 },
-                "engine",
+                "test-engine",
                 "remember",
                 None,
             ),
@@ -701,13 +642,14 @@ mod tests {
                 None,
             ),
         ];
-        for (process_id, input, _kind, _label, _child_session_id) in cases {
+        for (process_id, input, kind, label, _child_session_id) in cases {
             let needs_env = matches!(
                 input,
                 ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. }
             );
             let mut registration =
-                ProcessRegistration::new(process_id, input, ProcessProvenance::host());
+                ProcessRegistration::new(process_id, input, ProcessProvenance::host())
+                    .with_identity(ProcessIdentity::new(kind).with_label(Some(label.to_string())));
             if needs_env {
                 registration = registration.with_execution_env_ref(Some(
                     ProcessExecutionEnvRef::new(format!("process-env:test:{process_id}")),

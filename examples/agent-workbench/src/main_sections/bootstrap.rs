@@ -125,8 +125,8 @@ async fn async_main() -> AnyhowResult<()> {
         Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )),
-    )
-    .with_process_env_store(artifact_store.clone());
+        artifact_store.clone(),
+    );
 
     let core = LashCore::builder()
         .install_mode(ModePreset::rlm_with_config(

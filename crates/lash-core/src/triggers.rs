@@ -254,6 +254,7 @@ pub struct TriggerRegistration {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerTargetSummary {
     pub label: Option<String>,
+    pub identity: crate::ProcessIdentity,
     pub input: crate::ProcessInput,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, TriggerInputBinding>,
@@ -279,6 +280,7 @@ pub struct TriggerSubscriptionDraft {
     pub source: serde_json::Value,
     pub payload_schema: crate::LashSchema,
     pub target: crate::ProcessInput,
+    pub target_identity: crate::ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<crate::ProcessEventType>,
     #[serde(default)]
@@ -302,6 +304,7 @@ pub struct TriggerSubscriptionRecord {
     pub source: serde_json::Value,
     pub payload_schema: crate::LashSchema,
     pub target: crate::ProcessInput,
+    pub target_identity: crate::ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<crate::ProcessEventType>,
     #[serde(default)]
@@ -337,6 +340,7 @@ impl From<&TriggerSubscriptionRecord> for TriggerRegistration {
             source: route.source.clone(),
             target: TriggerTargetSummary {
                 label: route.target_label.clone(),
+                identity: route.target_identity.clone(),
                 input: route.target.clone(),
                 inputs: route.input_template.clone(),
             },
@@ -402,7 +406,7 @@ impl TriggerSubscriptionFilter {
             && self
                 .target
                 .as_ref()
-                .is_none_or(|target| record.target.definition().as_ref() == Some(target))
+                .is_none_or(|target| record.target_identity.definition.as_ref() == Some(target))
     }
 }
 
@@ -497,6 +501,7 @@ impl TriggerStore for InMemoryTriggerStore {
             source: draft.source,
             payload_schema: draft.payload_schema,
             target: draft.target,
+            target_identity: draft.target_identity,
             event_types: draft.event_types,
             input_template: draft.input_template,
             target_label: draft.target_label,
@@ -810,13 +815,11 @@ impl TriggerRouter {
             crate::ProcessProvenance::new(subscription.registrant.clone())
                 .with_caused_by(trigger_occurrence_invocation.causal_ref()),
         )
+        .with_identity(subscription.target_identity.clone())
         .with_extra_event_types(subscription.event_types.clone())
         .with_execution_env_ref(Some(subscription.env_ref.clone()))
         .with_wake_target(subscription.wake_target.clone());
-        let descriptor_kind = target
-            .engine_specific_kind()
-            .unwrap_or_else(|| target.engine_kind())
-            .to_string();
+        let descriptor_kind = subscription.target_identity.kind.clone();
         let grant =
             subscription
                 .wake_target

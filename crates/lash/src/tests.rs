@@ -1231,6 +1231,9 @@ fn explicit_ephemeral_facets(
             crate::persistence::InMemoryLashlangArtifactStore::new(),
         ))
         .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            crate::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
 }
 
 fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message {

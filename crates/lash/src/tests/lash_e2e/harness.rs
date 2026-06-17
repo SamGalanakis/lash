@@ -158,7 +158,7 @@ fn observed_process_summary(
         lash_core::ProcessHandleDescriptor::new(Some(process.kind), Some(process.label)),
         process.lifecycle,
     )
-    .with_definition(process.input.definition())
+    .with_definition(process.identity.definition)
 }
 
 async fn assert_remote_process_dto_surface(

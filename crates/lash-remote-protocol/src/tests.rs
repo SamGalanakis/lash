@@ -216,10 +216,14 @@ fn remote_trigger_dtos_json_round_trip() {
         source: serde_json::json!({}),
         target: RemoteTriggerTargetSummary {
             label: Some("on_button".to_string()),
+            identity: RemoteProcessIdentity {
+                kind: "lashlang".to_string(),
+                label: Some("on_button".to_string()),
+                definition: Some(remote_process_definition_identity()),
+            },
             input: RemoteProcessInput::Engine {
                 kind: "lashlang".to_string(),
                 payload: serde_json::json!({
-                    "definition": remote_process_definition_identity().value,
                     "args": {}
                 }),
             },
@@ -354,6 +358,11 @@ fn remote_process_dtos_json_round_trip() {
                 process_id: "process:1".to_string(),
                 graph_key: "process:process:1".to_string(),
                 kind: "external".to_string(),
+                identity: RemoteProcessIdentity {
+                    kind: "external".to_string(),
+                    label: Some("Import".to_string()),
+                    definition: None,
+                },
                 lifecycle: RemoteProcessLifecycleStatus::Running,
                 status_label: "running".to_string(),
                 terminal: false,
@@ -507,9 +516,13 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         target: RemoteProcessInput::Engine {
             kind: "lashlang".to_string(),
             payload: serde_json::json!({
-                "definition": remote_process_definition_identity().value,
                 "args": {}
             }),
+        },
+        target_identity: RemoteProcessIdentity {
+            kind: "lashlang".to_string(),
+            label: Some("on_button".to_string()),
+            definition: Some(remote_process_definition_identity()),
         },
         event_types: vec![remote_process_event_type()],
         input_template: remote_trigger_input_template(),
@@ -533,6 +546,7 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         source: draft.source.clone(),
         payload_schema: draft.payload_schema.clone(),
         target: draft.target.clone(),
+        target_identity: draft.target_identity.clone(),
         event_types: draft.event_types.clone(),
         input_template: draft.input_template.clone(),
         target_label: draft.target_label.clone(),
@@ -802,6 +816,11 @@ fn remote_process_record() -> RemoteProcessRecord {
         process_id: "process:1".to_string(),
         input: RemoteProcessInput::External {
             metadata: serde_json::json!({ "label": "Import" }),
+        },
+        identity: RemoteProcessIdentity {
+            kind: "external".to_string(),
+            label: Some("Import".to_string()),
+            definition: None,
         },
         event_types: vec![remote_process_event_type()],
         provenance: RemoteProcessProvenance {

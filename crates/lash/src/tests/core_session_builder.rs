@@ -1292,6 +1292,16 @@ async fn durable_artifact_store(
     )
 }
 
+async fn durable_process_env_store(
+    dir: &std::path::Path,
+) -> Arc<dyn lash_core::ProcessExecutionEnvStore> {
+    Arc::new(
+        lash_sqlite_store::Store::open(&dir.join("process-env.db"))
+            .await
+            .expect("open durable process env store"),
+    )
+}
+
 async fn durable_trigger_store(dir: &std::path::Path) -> Arc<dyn lash_core::TriggerStore> {
     Arc::new(
         lash_sqlite_store::SqliteTriggerStore::open(&dir.join("triggers.db"))
@@ -1324,11 +1334,47 @@ async fn durable_session_store_rejects_ephemeral_attachment_store_at_build() {
 }
 
 #[tokio::test]
+async fn builder_requires_explicit_process_env_store_at_build() {
+    let result = peer_coherence_builder()
+        .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
+        .attachment_store(Arc::new(lash_core::InMemoryAttachmentStore::new()))
+        .build();
+    let err = expect_build_error(
+        result,
+        "builder must reject missing process execution environment store",
+    );
+
+    assert!(matches!(err, EmbedError::MissingProcessEnvStore));
+}
+
+#[tokio::test]
+async fn durable_session_store_rejects_ephemeral_process_env_store_at_build() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let result = explicit_ephemeral_facets(peer_coherence_builder())
+        .store_factory(durable_session_store_factory(dir.path()))
+        .attachment_store(durable_attachment_store(dir.path()))
+        .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
+        .build();
+    let err = expect_build_error(
+        result,
+        "durable session store + ephemeral process env store must be rejected",
+    );
+
+    assert!(matches!(
+        err,
+        EmbedError::DurableStorePeerRequired {
+            facet: "process execution environment store"
+        }
+    ));
+}
+
+#[tokio::test]
 async fn durable_session_store_rejects_ephemeral_artifact_store_at_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let result = explicit_ephemeral_facets(peer_coherence_builder())
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
+        .process_env_store(durable_process_env_store(dir.path()).await)
         // Explicit ephemeral artifact store; durable attachment clears the first
         // facet so the artifact facet is the one that must fail.
         .lashlang_artifact_store(Arc::new(
@@ -1388,6 +1434,7 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
         .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
+        .process_env_store(durable_process_env_store(dir.path()).await)
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
         .trigger_store(durable_trigger_store(dir.path()).await)
         .process_registry(registry)
@@ -1407,6 +1454,7 @@ async fn durable_process_registry_rejects_ephemeral_trigger_store_at_build() {
         .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
+        .process_env_store(durable_process_env_store(dir.path()).await)
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
         .process_registry(registry)
         .build();
@@ -1443,6 +1491,7 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
         .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
         .child_store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
+        .process_env_store(durable_process_env_store(dir.path()).await)
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
         .trigger_store(durable_trigger_store(dir.path()).await)
         .process_registry(registry)

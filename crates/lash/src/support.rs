@@ -10,9 +10,9 @@ pub(crate) use lash_core::runtime::{
 pub(crate) use lash_core::{
     DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, InMemoryLiveReplayStore,
     LashRuntime, LiveReplayStore, MessageRole, ModelSpec, PluginHost, PluginSpec, PluginStack,
-    ProcessHandleSummary, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner, QueuedWorkPoke,
-    RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig, RuntimeObservation, SessionPolicy,
-    SessionSpec,
+    ProcessExecutionEnvStore, ProcessHandleSummary, ProcessWorkDriver, ProcessWorkPoke,
+    ProcessWorkRunner, QueuedWorkPoke, RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig,
+    RuntimeObservation, SessionPolicy, SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
