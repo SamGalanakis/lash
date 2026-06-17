@@ -782,6 +782,14 @@ mod tests {
                 finish["registrations"][0]["name"],
                 serde_json::json!("remembered")
             );
+            assert_eq!(
+                finish["registrations"][0]["source"]["$lash_host_descriptor_type"],
+                serde_json::json!("timer.Schedule")
+            );
+            assert_eq!(
+                finish["registrations"][0]["source"]["$lash_host_descriptor_value"]["expr"],
+                serde_json::json!("0 8 * * *")
+            );
         });
     }
 

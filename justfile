@@ -197,6 +197,9 @@ restate-postgres-workers-e2e:
 stack-budget:
   bash "{{repo}}/scripts/ci-stack-budget.sh"
 
+push-gate:
+  bash "{{repo}}/scripts/push-gate.sh"
+
 perf-guard:
   python3 "{{repo}}/scripts/profile_guard.py" --profile quick --release --cli-cargo-feature fff-zlob --skip-dhat --enforce --out "{{repo}}/.benchmarks/perf-guard/local.json"
 

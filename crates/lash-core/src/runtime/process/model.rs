@@ -1237,11 +1237,16 @@ mod tests {
                 ProcessInput::Engine {
                     kind: "test-engine".to_string(),
                     payload: json!({
-                        "definition": definition,
+                        "definition": definition.clone(),
                         "label": process_name,
                     }),
                 },
                 ProcessProvenance::host(),
+            )
+            .with_identity(
+                ProcessIdentity::new("test-engine")
+                    .with_label(Some(process_name))
+                    .with_definition(Some(definition)),
             )
             .with_execution_env_ref(Some(ProcessExecutionEnvRef::new(format!(
                 "process-env:test:{process_id}"

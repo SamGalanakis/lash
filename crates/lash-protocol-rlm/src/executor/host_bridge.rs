@@ -324,7 +324,7 @@ impl HostBridge<'_> {
                 name: request.name.clone(),
                 source_type: request.source.source_type.clone(),
                 source_key,
-                source: request.source.value.clone(),
+                source: request.source.to_json(),
                 payload_schema: lash_core::LashSchema::new(lashlang_type_expr_schema(
                     &compatibility.resolved_event_type,
                 )),
