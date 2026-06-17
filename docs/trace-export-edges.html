@@ -922,7 +922,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">trace<span class="slash">/</span>edges</h1>
-    <p class="opener__lede">A mockup of the html exporter's two-edge model — <code>continue_as</code> renders as an inline AgentFrame divider, and <code>spawn_agent</code> renders as a drill-in card. Click any node to follow the call tree. <strong>This page is a design exploration, not implemented output:</strong> everything below is static, hand-written sample data, not a render produced by <code>lash-export</code>.</p>
+    <p class="opener__lede">A mockup of the html exporter's two-edge model: <code>continue_as</code> renders as an inline AgentFrame divider, and <code>spawn_agent</code> renders as a drill-in card. Click any node to follow the call tree. <strong>This page is a design exploration, not implemented output:</strong> everything below is static, hand-written sample data, not a render produced by <code>lash-export</code>.</p>
   </section>
 
   <div id="content">
@@ -1119,7 +1119,7 @@
             <div class="entry-body">
               <header class="entry-head">
                 <span class="entry-tag entry-tag--rlm">rlm step 2</span>
-                <span class="entry-headline">Both explorers returned. Context is at 78% — invoke continue_as with the synthesis seed.</span>
+                <span class="entry-headline">Both explorers returned. Context is at 78%. Invoke continue_as with the synthesis seed.</span>
                 <span class="entry-meta">1 call · 5.6s</span>
               </header>
             </div>
@@ -1207,7 +1207,7 @@
                 <span class="entry-meta entry-meta--ok">ok · session ended</span>
               </header>
               <div class="entry-content">
-                <p class="part-prose">1. <span class="chalk">cookie_jar.rs</span> — refresh-token rotation lands in the same write as <code>session_secret</code>; partition first. <span class="ash">~½ day</span><br>2. <span class="chalk">token_store.rs</span> — v5 adds <code>refresh_token_hash</code>, but the read path still falls back to plaintext on cache miss. <span class="ash">~1 day</span><br>3. …</p>
+                <p class="part-prose">1. <span class="chalk">cookie_jar.rs</span>: refresh-token rotation lands in the same write as <code>session_secret</code>; partition first. <span class="ash">~½ day</span><br>2. <span class="chalk">token_store.rs</span>: v5 adds <code>refresh_token_hash</code>, but the read path still falls back to plaintext on cache miss. <span class="ash">~1 day</span><br>3. …</p>
               </div>
             </div>
           </article>
@@ -1223,7 +1223,7 @@
         <div>
           <span class="eyebrow">subagent <span class="slash">·</span> s2·b9c1 <span class="slash">·</span> spawned from root</span>
           <h2>auth_files — list session-token handlers</h2>
-          <p>Subagent spawned from <code>root</code> at e2. Same shape as the root view — full transcript, full controls, full minimap. Use the breadcrumb above to return.</p>
+          <p>Subagent spawned from <code>root</code> at e2. Same shape as the root view: full transcript, full controls, full minimap. Use the breadcrumb above to return.</p>
         </div>
         <div class="hero-meta">
           <div class="meta-row"><span class="meta-key">view</span><span class="meta-val"><span class="accent">s2·b9c1</span> · subagent</span></div>
@@ -1473,7 +1473,7 @@
         <div>
           <span class="eyebrow">subagent <span class="slash">·</span> s3a·772b <span class="slash">·</span> depth 2</span>
           <h2>migration_v5 — risk-flagged columns</h2>
-          <p>Grandchild — spawned from <code>db_migrations</code>, which itself was spawned from <code>root</code>. The breadcrumb traces the whole way back.</p>
+          <p>Grandchild, spawned from <code>db_migrations</code>, which itself was spawned from <code>root</code>. The breadcrumb traces the whole way back.</p>
         </div>
         <div class="hero-meta">
           <div class="meta-row"><span class="meta-key">view</span><span class="meta-val"><span class="accent">s3a·772b</span> · subagent</span></div>
@@ -1570,7 +1570,7 @@
       </div>
       <div>
         <h2>▾ subagent · drill-in</h2>
-        <p>Spawn_agent becomes a card you click into. The subagent gets its own full view — same hero, same controls, same minimap as the root. No nesting hacks, no width-cascade problems, no awkward squeeze.</p>
+        <p>Spawn_agent becomes a card you click into. The subagent gets its own full view: same hero, same controls, same minimap as the root. No nesting hacks, no width-cascade problems, no awkward squeeze.</p>
       </div>
       <div>
         <h2>breadcrumb · always visible</h2>

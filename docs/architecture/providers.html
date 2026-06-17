@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">providers<span class="slash">/</span>transports</h1>
-    <p class="opener__lede">Every LLM call goes through a <code>ProviderHandle</code>. The runtime stays wire-agnostic — request shapes are <code>LlmRequest</code>, response shapes are <code>LlmResponse</code> — and each provider crate handles the schema normalization, auth flow, transport, model policy, and cache-marker placement specific to its vendor.</p>
+    <p class="opener__lede">Every LLM call goes through a <code>ProviderHandle</code>. The runtime stays wire-agnostic (request shapes are <code>LlmRequest</code>, response shapes are <code>LlmResponse</code>) and each provider crate handles the schema normalization, auth flow, transport, model policy, and cache-marker placement specific to its vendor.</p>
   </section>
 
   <main class="body" id="content">
@@ -44,7 +44,7 @@
         <div class="section">
           <div class="section-header">
             <h2>First-Party Providers</h2>
-            <p>Three provider crates ship with the workspace, contributing five provider kinds — <code>lash-provider-openai</code> supplies both the direct Responses path and the generic Chat Completions path. The CLI compiles in all five and materializes each from its provider factory keyed on the spec kind. App hosts pick the provider factories they need.</p>
+            <p>Three provider crates ship with the workspace, contributing five provider kinds: <code>lash-provider-openai</code> supplies both the direct Responses path and the generic Chat Completions path. The CLI compiles in all five and materializes each from its provider factory keyed on the spec kind. App hosts pick the provider factories they need.</p>
           </div>
           <div class="table">
             <table>
@@ -155,13 +155,13 @@ let reliability = ProviderReliability::default()
           </div>
           <div class="def-list-grid">
             <article class="panel"><h3>State</h3><p>Per-handle config: API key, base URL, default model, options like <code>thinking</code> exposure.</p></article>
-            <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime. OAuth backends (Codex, Google) share token storage and refresh primitives from <code>lash-provider-auth</code>; vendor-specific endpoints, device-code, and PKCE helpers live in each provider's OAuth module — <code>oauth.rs</code> for Google, <code>codex/oauth.rs</code> for Codex.</p></article>
+            <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow, whatever the vendor requires. Auth state is opaque to the runtime. OAuth backends (Codex, Google) share token storage and refresh primitives from <code>lash-provider-auth</code>; vendor-specific endpoints, device-code, and PKCE helpers live in each provider's OAuth module: <code>oauth.rs</code> for Google, <code>codex/oauth.rs</code> for Codex.</p></article>
             <article class="panel"><h3>Readiness</h3><p>Optional pre-flight check (token refresh, capability probe) that runs once per session.</p></article>
             <article class="panel"><h3>Transport</h3><p>The actual HTTP call. Translates <code>LlmRequest</code> to the wire format, streams the response, normalizes back to <code>LlmResponse</code> chunks.</p></article>
             <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to model-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
             <article class="panel"><h3>Factory</h3><p>Materializes host config into provider components; <code>ProviderHandle::new(components)</code> assembles the five pieces into the live handle the runtime can use.</p></article>
           </div>
-          <p>See <code>lash-provider-openai</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
+          <p>See <code>lash-provider-openai</code> as the most general template: it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
         </div>
   </main>
 

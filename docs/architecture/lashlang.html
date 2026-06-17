@@ -29,7 +29,7 @@
 <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities and language features exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, process signals, and optional static process-map labels are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents: <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities and language features exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, process signals, and optional static process-map labels are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
@@ -73,7 +73,7 @@ submit { board: board, move: move }</code></pre>
         <div class="section" id="program-form">
           <div class="section-header">
             <h2>Program Form</h2>
-            <p>The RLM protocol extracts the first closed <code>```lashlang</code> fence from model output. Only the <code>lashlang</code> language tag is recognised — <code>rlm</code> and other labels are treated as plain prose by <code>first_lashlang_fence_span</code>. Opening fences may be three or more backticks (CommonMark variable-length), the closer must match the opener length, and anything after the first closed block is ignored by the driver — so the block must contain the next action or final <code>submit</code>.</p>
+            <p>The RLM protocol extracts the first closed <code>```lashlang</code> fence from model output. Only the <code>lashlang</code> language tag is recognised; <code>rlm</code> and other labels are treated as plain prose by <code>first_lashlang_fence_span</code>. Opening fences may be three or more backticks (CommonMark variable-length), the closer must match the opener length, and anything after the first closed block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
           </div>
           <dl class="def-list">
             <dt>REPL state</dt>
@@ -163,7 +163,7 @@ await control.continue_as({
         <div class="section" id="assignment-and-mutation">
           <div class="section-header">
             <h2>Assignment And Mutation</h2>
-            <p>Assignments are rooted at named variables. Path assignment mutates the variable's current value through copy-on-write root updates, not through shared-alias mutation — there is no aliasing of inner records or lists.</p>
+            <p>Assignments are rooted at named variables. Path assignment mutates the variable's current value through copy-on-write root updates, not through shared-alias mutation. There is no aliasing of inner records or lists.</p>
           </div>
           <dl class="def-list">
             <dt>Supported targets</dt>

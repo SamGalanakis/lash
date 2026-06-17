@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">html<span class="slash">/</span>exporter</h1>
-    <p class="opener__lede">The trace exporter renders one persisted lash session — plus any child sessions created by <code>spawn_agent</code> — into a single self-contained HTML document. The visual language matches the rest of the docs (warm-iron / fast-amber). The forensic affordance is two-edge-aware: <code>continue_as</code> AgentFrame switches are linear seams inside the same session view; subagents are drill-in cards into child-session views.</p>
+    <p class="opener__lede">The trace exporter renders one persisted lash session (plus any child sessions created by <code>spawn_agent</code>) into a single self-contained HTML document. The visual language matches the rest of the docs (warm-iron / fast-amber). The forensic affordance is two-edge-aware: <code>continue_as</code> AgentFrame switches are linear seams inside the same session view; subagents are drill-in cards into child-session views.</p>
   </section>
 
   <main class="body" id="content">
@@ -105,7 +105,7 @@
         <div class="section" id="subagent-drill-in-card">
           <div class="section-header">
             <h2>Subagent drill-in card</h2>
-            <p>Spawn_agent is blocking but its result is a separate unit of work. Inlining the child transcript inside the parent's tool entry would force a width-cascade and lose the subagent's full hero / controls / minimap. Instead, the exporter gives the subagent its own full view reached by click-through navigation — the card below shows the affordance; in the shipped exporter the lineage strip and breadcrumb carry the <code>[data-go]</code> targets. The lichen accent keeps the child visually subordinate to the sodium AgentFrame switch seam.</p>
+            <p>Spawn_agent is blocking but its result is a separate unit of work. Inlining the child transcript inside the parent's tool entry would force a width-cascade and lose the subagent's full hero / controls / minimap. Instead, the exporter gives the subagent its own full view reached by click-through navigation. The card below shows the affordance; in the shipped exporter the lineage strip and breadcrumb carry the <code>[data-go]</code> targets. The lichen accent keeps the child visually subordinate to the sodium AgentFrame switch seam.</p>
           </div>
           <div class="sample-frame">
             <div class="sample-drill">
@@ -134,7 +134,7 @@
         <div class="section" id="breadcrumb-and-lineage">
           <div class="section-header">
             <h2>Breadcrumb &amp; lineage</h2>
-            <p>The breadcrumb is the primary "where am I" affordance — sticky at the top of the viewport so navigation context never scrolls away. It shows the lineage from root through any subagents the reader has drilled into. The separator is a quiet ash <code>›</code>; sodium-tinted arrows are reserved for the lineage strip's actual edge glyphs (<code>↪</code>, <code>▾</code>) one row down, so the two bars don't compete for the same accent.</p>
+            <p>The breadcrumb is the primary "where am I" affordance, sticky at the top of the viewport so navigation context never scrolls away. It shows the lineage from root through any subagents the reader has drilled into. The separator is a quiet ash <code>›</code>; sodium-tinted arrows are reserved for the lineage strip's actual edge glyphs (<code>↪</code>, <code>▾</code>) one row down, so the two bars don't compete for the same accent.</p>
           </div>
           <div class="sample-frame">
             <div class="sample-crumb">
@@ -168,7 +168,7 @@
         <div class="section" id="implementation-map">
           <div class="section-header">
             <h2>Implementation map</h2>
-            <p>The renderer is additive — single-session export still works as it always did. Child-session detection is automatic, and AgentFrame dividers come from the owning session's tool-control records.</p>
+            <p>The renderer is additive; single-session export still works as it always did. Child-session detection is automatic, and AgentFrame dividers come from the owning session's tool-control records.</p>
           </div>
           <ol class="principle-list">
             <li>
@@ -177,15 +177,15 @@
             </li>
             <li>
               <h3>View topology</h3>
-              <p>A <strong>view</strong> is one persisted session: the root or a spawned subagent. <code>html::tree::write_view</code> writes one <code>&lt;section class="view"&gt;</code> per session — hero, lineage strip, minimap spine, and transcript. <code>continue_as</code> AgentFrame switches stay inline in that session's transcript (they never split the view), and spawned subagents are reachable through <code>[data-go]</code> navigation in the lineage strip and breadcrumb that targets child-session views.</p>
+              <p>A <strong>view</strong> is one persisted session: the root or a spawned subagent. <code>html::tree::write_view</code> writes one <code>&lt;section class="view"&gt;</code> per session: hero, lineage strip, minimap spine, and transcript. <code>continue_as</code> AgentFrame switches stay inline in that session's transcript (they never split the view), and spawned subagents are reachable through <code>[data-go]</code> navigation in the lineage strip and breadcrumb that targets child-session views.</p>
             </li>
             <li>
               <h3>View switching</h3>
-              <p>Each view is rendered up-front and toggled by a tiny IIFE that reads <code>window.__lashTraceTree</code> (a serialized list of <code>{id, label, sid, parent}</code>, one entry per view head — root and each subagent — not one per session; <code>id</code> and <code>parent</code> are view IDs, <code>sid</code> is the head session's short id). Click handlers on <code>[data-go]</code> elements (drill-in cards, breadcrumb segments, lineage pills) call <code>history.pushState</code> and swap the active <code>.view</code>. The browser back button does the right thing through <code>popstate</code>.</p>
+              <p>Each view is rendered up-front and toggled by a tiny IIFE that reads <code>window.__lashTraceTree</code> (a serialized list of <code>{id, label, sid, parent}</code>, one entry per view head (root and each subagent), not one per session; <code>id</code> and <code>parent</code> are view IDs, <code>sid</code> is the head session's short id). Click handlers on <code>[data-go]</code> elements (drill-in cards, breadcrumb segments, lineage pills) call <code>history.pushState</code> and swap the active <code>.view</code>. The browser back button does the right thing through <code>popstate</code>.</p>
             </li>
             <li>
               <h3>Visual discipline</h3>
-              <p>Sodium is reserved for the active edge — AgentFrame switch seams, the breadcrumb's current step, the user's intent. Lichen marks the subagent affordance — drill rails, drill arrows, child status pills. Filter chips read as quiet chalk by default and gain a sodium strikethrough only when the user has actively filtered something off, so the controls strip never floods the page with accent. Ash structural lines do everything else.</p>
+              <p>Sodium is reserved for the active edge: AgentFrame switch seams, the breadcrumb's current step, the user's intent. Lichen marks the subagent affordance: drill rails, drill arrows, child status pills. Filter chips read as quiet chalk by default and gain a sodium strikethrough only when the user has actively filtered something off, so the controls strip never floods the page with accent. Ash structural lines do everything else.</p>
             </li>
           </ol>
         </div>
@@ -197,7 +197,7 @@
           </div>
           <div class="module-grid">
             <article class="panel"><h3><code>lash-export</code></h3><p>Tree discovery and edge classification. Returns a <code>LoadedSessionTree</code> with one <code>LoadedSessionNode</code> per discovered session; each carries its own chronological projection, partitioned LLM prompts, and the list of subagent edges anchored by parent <code>call_id</code>.</p></article>
-            <article class="panel"><h3><code>lash-export</code></h3><p>The public <code>render_tree(tree, format)</code> is the multi-view entry point; the writers in the <code>html::tree</code> submodule — <code>write_crumb_bar</code>, <code>write_view</code>, <code>write_view_hero</code>, <code>write_lineage</code>, and <code>render_tree_data_script</code> — own the multi-view elements, while <code>render_node_entries</code> reuses the existing message/tool/RLM-step renderers unchanged.</p></article>
+            <article class="panel"><h3><code>lash-export</code></h3><p>The public <code>render_tree(tree, format)</code> is the multi-view entry point; the writers in the <code>html::tree</code> submodule (<code>write_crumb_bar</code>, <code>write_view</code>, <code>write_view_hero</code>, <code>write_lineage</code>, and <code>render_tree_data_script</code>) own the multi-view elements, while <code>render_node_entries</code> reuses the existing message/tool/RLM-step renderers unchanged.</p></article>
             <article class="panel"><h3><code>lash-export</code></h3><p>Tokens are appended at the bottom under "multi-view: breadcrumb, lineage, drill, AgentFrame switch". The base trace stylesheet stays intact for single-session exports; multi-view rules only activate when the page contains <code>.view</code> sections.</p></article>
             <article class="panel"><h3><code>lash-export</code></h3><p>The view-switcher IIFE at the bottom reads <code>window.__lashTraceTree</code>, wires <code>[data-go]</code> click handlers, renders the breadcrumb, and listens for <code>popstate</code>. It exits cleanly if the tree global is absent (single-session export).</p></article>
           </div>

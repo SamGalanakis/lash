@@ -22,7 +22,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">triggers<span class="slash">/</span>ingress</h1>
-    <p class="opener__lede">Triggers are lash's typed inbound channel from the outside world. A trigger occurrence is <strong>session-agnostic</strong>: it is declared, emitted, recorded, and matched against registered trigger subscriptions, each of which names its own target. Session identity and turn-ordering enter exactly once — at the <strong>wake</strong> a matched process produces. This note consolidates the trigger model; the reactive substrate it feeds is covered in <a href="./durability.html">durability</a> and the deployment view in <a href="./scaling.html">scaling</a>.</p>
+    <p class="opener__lede">Triggers are lash's typed inbound channel from the outside world. A trigger occurrence is <strong>session-agnostic</strong>: it is declared, emitted, recorded, and matched against registered trigger subscriptions, each of which names its own target. Session identity and turn-ordering enter exactly once: at the <strong>wake</strong> a matched process produces. This note consolidates the trigger model; the reactive substrate it feeds is covered in <a href="./durability.html">durability</a> and the deployment view in <a href="./scaling.html">scaling</a>.</p>
   </section>
 
   <main class="body" id="content">
@@ -57,14 +57,14 @@ flowchart TB
           <ul class="bullets">
             <li><strong>Catalog.</strong> <code>TriggerEventCatalog</code> holds typed <code>TriggerEvent</code> declarations (<code>resource_type</code>, <code>alias</code>, <code>event</code>, and a named payload type). Identity is the <code>source_type</code> = <code>alias.event</code>; duplicate source types are rejected. Emitted payloads are validated against the declared type.</li>
             <li><strong>Sources.</strong> A host exposes configured pure source constructors such as <code>cron.Schedule(...)</code>; zero-config sources such as <code>ui.button.pressed({})</code> are derived from declared <code>TriggerEvent</code>s. In both cases the session catalog records protocol metadata that the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Declarative <code>trigger</code> syntax does not exist; programs pass a source value plus a process definition and explicit <code>inputs</code> to <code>triggers.register</code> / <code>triggers.list</code> / <code>triggers.cancel</code>.</li>
-            <li><strong>Subscriptions.</strong> <code>triggers.register</code> writes a durable subscription into the runtime trigger store, keyed for matching by <code>source_type</code> and <code>source_key</code>. Each subscription carries a registrant (<code>Host</code> or <code>Session</code>), a captured execution environment reference (<code>env_ref</code>), an optional wake target, the target process definition identity (module ref, host requirements ref, process ref, and process name), and an input template — <code>trigger.event</code> is the whole-event placeholder. Subscription handles are unique per registrant scope (<code>registrant_scope_id</code>), and session-side listing and cancellation filter by the registrant session. Deleting a session deletes that session's subscriptions; host-registered subscriptions are untouched. Session identity is optional metadata on those edges, not the substrate of trigger matching.</li>
+            <li><strong>Subscriptions.</strong> <code>triggers.register</code> writes a durable subscription into the runtime trigger store, keyed for matching by <code>source_type</code> and <code>source_key</code>. Each subscription carries a registrant (<code>Host</code> or <code>Session</code>), a captured execution environment reference (<code>env_ref</code>), an optional wake target, the target process definition identity (module ref, host requirements ref, process ref, and process name), and an input template; <code>trigger.event</code> is the whole-event placeholder. Subscription handles are unique per registrant scope (<code>registrant_scope_id</code>), and session-side listing and cancellation filter by the registrant session. Deleting a session deletes that session's subscriptions; host-registered subscriptions are untouched. Session identity is optional metadata on those edges, not the substrate of trigger matching.</li>
           </ul>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Emit, Match, Deliver</h2>
-            <p>A source owner emits an occurrence; the router records it and fans out to every matching subscription. The event itself names no session — the match supplies the targets.</p>
+            <p>A source owner emits an occurrence; the router records it and fans out to every matching subscription. The event itself names no session; the match supplies the targets.</p>
           </div>
           <div class="table">
             <table>
@@ -82,17 +82,17 @@ flowchart TB
         <div class="section">
           <div class="section-header">
             <h2>Only The Wake Is Session-Ordered</h2>
-            <p>Starting a process is safe at any time — it is independent background work. The one place a trigger occurrence touches a session's turn state is an optional <strong>wake</strong> the matched process emits.</p>
+            <p>Starting a process is safe at any time. It is independent background work. The one place a trigger occurrence touches a session's turn state is an optional <strong>wake</strong> the matched process emits.</p>
           </div>
-          <p>A trigger-started process is durable background work (lease-protected, crash-recovered through <code>DurableProcessWorker</code>); see <a href="./durability.html">durability</a>. When it has a wake target and wakes an agent, the wake is written to <em>that session's</em> input queue and delivered at <code>EarliestSafeBoundary</code> — immediately when the session is idle, at the next safe boundary while a turn runs. With no live wake target, the wake remains a process event and no delivery is materialized. Triggers are therefore a separate runtime-level ingress and never appear as queued session work themselves; only the resulting wake enters the queue. The full queued-work model is in <a href="./queued-work-ingress.md">queued-work ingress</a>.</p>
+          <p>A trigger-started process is durable background work (lease-protected, crash-recovered through <code>DurableProcessWorker</code>); see <a href="./durability.html">durability</a>. When it has a wake target and wakes an agent, the wake is written to <em>that session's</em> input queue and delivered at <code>EarliestSafeBoundary</code>: immediately when the session is idle, at the next safe boundary while a turn runs. With no live wake target, the wake remains a process event and no delivery is materialized. Triggers are therefore a separate runtime-level ingress and never appear as queued session work themselves; only the resulting wake enters the queue. The full queued-work model is in <a href="./queued-work-ingress.md">queued-work ingress</a>.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>The Store Is A Backend Seam</h2>
-            <p>Subscriptions, occurrences, and delivery reservations live behind a <code>TriggerStore</code> trait — parallel to <code>RuntimePersistence</code>, and separate from it.</p>
+            <p>Subscriptions, occurrences, and delivery reservations live behind a <code>TriggerStore</code> trait, parallel to <code>RuntimePersistence</code>, and separate from it.</p>
           </div>
-          <p>The default implementation is in-memory. Local durable hosts can use the first-party <code>SqliteTriggerStore</code>; shared-worker deployments can use <code>PostgresTriggerStore</code>; hosts can also provide another <code>TriggerStore</code> implementation when it preserves occurrence idempotency, matching, reservation, and delivery semantics. The distributed Restate/Postgres/MinIO E2E is one exercised deployment, not the interface contract. The trigger store is durable intent for delivery, not conversation history — durable session state remains in <code>RuntimePersistence</code>.</p>
+          <p>The default implementation is in-memory. Local durable hosts can use the first-party <code>SqliteTriggerStore</code>; shared-worker deployments can use <code>PostgresTriggerStore</code>; hosts can also provide another <code>TriggerStore</code> implementation when it preserves occurrence idempotency, matching, reservation, and delivery semantics. The distributed Restate/Postgres/MinIO E2E is one exercised deployment, not the interface contract. The trigger store is durable intent for delivery, not conversation history; durable session state remains in <code>RuntimePersistence</code>.</p>
         </div>
 
         <div class="section">
@@ -100,7 +100,7 @@ flowchart TB
             <h2>Timers And Cron</h2>
             <p>Timers and recurring jobs are host-owned source policies, not Lashlang syntax and not queued work.</p>
           </div>
-          <p>A source owner keeps its own schedules and, when a schedule fires, emits a declared trigger occurrence with a stored source key. From there it is an ordinary occurrence: matched by <code>source_type</code> plus <code>source_key</code> and delivered to subscribed processes through the same durable worker path. A cron firing is thus the same shape as a button press — there is no separate by-handle activation path.</p>
+          <p>A source owner keeps its own schedules and, when a schedule fires, emits a declared trigger occurrence with a stored source key. From there it is an ordinary occurrence: matched by <code>source_type</code> plus <code>source_key</code> and delivered to subscribed processes through the same durable worker path. A cron firing is thus the same shape as a button press; there is no separate by-handle activation path.</p>
         </div>
   </main>
 

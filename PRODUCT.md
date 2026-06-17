@@ -21,8 +21,9 @@ the active edge — prompt, plan, decisions — and almost nothing else gets
 the spotlight.
 
 Voice: declarative, lowercase headlines that don't try too hard, sentences
-that earn their place. Em-dashes over comma-stuffed lists. Concrete nouns
-over abstractions. No marketing voice anywhere.
+that earn their place. Reach for plain punctuation before em-dashes; an
+em-dash should stay rare enough to mean something, never the default joint.
+Concrete nouns over abstractions. No marketing voice anywhere.
 
 ### Aesthetic Direction
 

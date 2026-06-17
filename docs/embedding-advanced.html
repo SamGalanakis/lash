@@ -75,7 +75,7 @@ let core = LashCore::rlm()
         <div class="section" id="session-lifecycle">
           <div class="section-header">
             <h2>Session Lifecycle</h2>
-            <p>Two states: <strong>active</strong> (resident, ready) and <strong>parked</strong> (flushed; only id + store reference held). Opening an existing id rehydrates from the store — one read of the graph head plus referenced snapshots.</p>
+            <p>Two states: <strong>active</strong> (resident, ready) and <strong>parked</strong> (flushed; only id + store reference held). Opening an existing id rehydrates from the store: one read of the graph head plus referenced snapshots.</p>
           </div>
           <p>Sessions park automatically when the handle drops. Long-running servers can hold thousands of session ids cheaply. Residency policy controls in-memory trimming while a session is active:</p>
           <div class="two-col">
@@ -108,7 +108,7 @@ let core = LashCore::rlm()
     )))
     .residency(Residency::ActivePathOnly)
     .build()?;</code></pre>
-          <p>Plugin background work — tasks tracked via <code>ToolContext::processes()</code>, post-turn observation summaries, MCP warm-ups — continues past turn return. To drain it before returning (one-shot processes that need observations persisted before exit):</p>
+          <p>Plugin background work (tasks tracked via <code>ToolContext::processes()</code>, post-turn observation summaries, MCP warm-ups) continues past turn return. To drain it before returning (one-shot processes that need observations persisted before exit):</p>
           <pre data-lang="rust" data-snippet="embedding_advanced#await-all-processes"><code>session.processes().await_all().await?;</code></pre>
           <p>Exposed by the CLI as <code>--await-background-work</code> on <code>lash --print</code>. Embedders rarely need it outside short-lived processes.</p>
         </div>
@@ -216,7 +216,7 @@ println!(
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects — expensive LLM calls, long tool calls, process admin, mid-turn worker migration — wire an <code>EffectHost</code> on the builder and run each durable handler turn with <code>.turn_id(...).effects(&amp;controller).run()</code> or <code>.turn_id(...).effects(&amp;controller).stream_to(&amp;sink)</code>. The facade creates the turn <code>ExecutionScope</code> internally, while the handler still supplies the workflow controller explicitly. The <code>EffectHost</code> is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap; the default <code>InlineEffectHost</code> runs in process and is not in-flight durable.</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects (expensive LLM calls, long tool calls, process admin, mid-turn worker migration), wire an <code>EffectHost</code> on the builder and run each durable handler turn with <code>.turn_id(...).effects(&amp;controller).run()</code> or <code>.turn_id(...).effects(&amp;controller).stream_to(&amp;sink)</code>. The facade creates the turn <code>ExecutionScope</code> internally, while the handler still supplies the workflow controller explicitly. The <code>EffectHost</code> is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap; the default <code>InlineEffectHost</code> runs in process and is not in-flight durable.</p>
           </div>
           <p>Shape: the runtime driver polls <code>TurnMachine</code>. For each reply-producing turn effect it builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active <code>ScopedEffectController</code>, and feeds the returned outcome back as the matching response. The <code>InlineEffectHost</code> runs locally and is not in-flight durable. A durable workflow <code>EffectHost</code> such as Restate records effects in workflow history, uses durable timers for sleeps, and reruns the handler with the same turn id before Lash retries the final idempotent commit.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
@@ -250,7 +250,7 @@ let core = LashCore::rlm()
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .plugin(Arc::new(subagents) as Arc&lt;dyn PluginFactory&gt;)
     .build()?;</code></pre>
-          <p>Capabilities return <code>SessionSpec</code> overlays. <code>StaticCapability</code> pins exact child authority; <code>TierCapability</code> backs the built-in <code>explore</code> and <code>peer</code> tiers. Do not construct <code>SessionPolicy</code> directly — it's the resolved runtime artifact.</p>
+          <p>Capabilities return <code>SessionSpec</code> overlays. <code>StaticCapability</code> pins exact child authority; <code>TierCapability</code> backs the built-in <code>explore</code> and <code>peer</code> tiers. Do not construct <code>SessionPolicy</code> directly; it's the resolved runtime artifact.</p>
           <h3>Built-in tiers</h3>
           <div class="two-col">
             <article class="panel">
@@ -265,7 +265,7 @@ let core = LashCore::rlm()
           <p>Both tiers consult <code>tier_models</code> for an override, then fall back to the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
           <h3>Capability resolution</h3>
           <p><code>Capability::build_session_request(ctx)</code> sees the live parent <code>SessionPolicy</code> and returns a <code>SessionCreateRequest</code>. The runtime composes the capability's <code>SessionSpec</code> against parent policy to produce effective child config. The spec is what's persisted, so a resumed subagent re-derives the same authority.</p>
-          <p>Interactive-only tools such as <code>ask</code> and <code>showcase</code> would block a subagent indefinitely — nothing is listening on the other side. Hide them from every child surface with <code>SubagentsPluginFactory::with_hidden_tools(...)</code> or a custom <code>SessionToolAccess</code>; the CLI hides its five interactive tools this way. Recursion is bounded separately: at the maximum spawn depth (5) the runtime hides <code>spawn_agent</code> itself.</p>
+          <p>Interactive-only tools such as <code>ask</code> and <code>showcase</code> would block a subagent indefinitely; nothing is listening on the other side. Hide them from every child surface with <code>SubagentsPluginFactory::with_hidden_tools(...)</code> or a custom <code>SessionToolAccess</code>; the CLI hides its five interactive tools this way. Recursion is bounded separately: at the maximum spawn depth (5) the runtime hides <code>spawn_agent</code> itself.</p>
           <h3>Usage attribution</h3>
           <p>Child sessions emit <code>TurnEvent::ChildUsage</code> on the parent's stream, tagged with <code>source</code> (<code>"subagent"</code>, <code>"compaction"</code>, <code>"observer"</code>) and child <code>session_id</code>. <code>TurnResult.children_usage</code> rolls up per <code>(source, model)</code>; <code>total_usage()</code> sums parent + children. Finer splits: fold <code>ChildUsage</code> from the stream directly.</p>
         </div>
@@ -273,7 +273,7 @@ let core = LashCore::rlm()
         <div class="section" id="mcp-servers">
           <div class="section-header">
             <h2>MCP Servers</h2>
-            <p><code>lash-plugin-mcp</code> wraps the <code>rmcp</code> SDK with three transports: <code>stdio</code>, <code>streamable_http</code>, <code>sse</code>. The plugin keeps a shared connection pool — stdio servers spawn once per process, not per session.</p>
+            <p><code>lash-plugin-mcp</code> wraps the <code>rmcp</code> SDK with three transports: <code>stdio</code>, <code>streamable_http</code>, <code>sse</code>. The plugin keeps a shared connection pool; stdio servers spawn once per process, not per session.</p>
           </div>
           <pre data-lang="rust" data-snippet="embedding_advanced#mcp-core"><code>use std::collections::BTreeMap;
 
@@ -320,7 +320,7 @@ mcp.attach_server(
 .await?;
 
 mcp.detach_server("old-tool").await?;</code></pre>
-          <p>Failures are isolated: an exited child, a 500ing endpoint, or a dropped SSE stream surfaces as <code>ToolResult::err(...)</code> on the affected tool; other servers keep working. If a server is unreachable at <code>new</code> time, the call fails — use <code>McpPluginFactory::empty()</code> plus runtime <code>attach_server</code> when initial connectivity is unreliable.</p>
+          <p>Failures are isolated: an exited child, a 500ing endpoint, or a dropped SSE stream surfaces as <code>ToolResult::err(...)</code> on the affected tool; other servers keep working. If a server is unreachable at <code>new</code> time, the call fails; use <code>McpPluginFactory::empty()</code> plus runtime <code>attach_server</code> when initial connectivity is unreliable.</p>
         </div>
 
         <div class="section" id="advanced-runtime">
