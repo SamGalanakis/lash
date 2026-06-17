@@ -25,10 +25,10 @@ impl PluginFactory for WorkbenchPluginFactory {
     fn extension_contributions(&self) -> Vec<lash::plugins::PluginExtensionContribution> {
         vec![
             lash::plugins::PluginExtensionContribution::new(
-                lash::modes::LASHLANG_SURFACE_EXTENSION_ID,
-                lash::modes::LashlangSurfaceContribution::new(
+                lash::rlm::LASHLANG_SURFACE_EXTENSION_ID,
+                lash::rlm::LashlangSurfaceContribution::new(
                     workbench_lashlang_abilities(),
-                    lash::modes::LashlangLanguageFeatures::default(),
+                    lash::rlm::LashlangLanguageFeatures::default(),
                     workbench_lashlang_resources(),
                 ),
             )

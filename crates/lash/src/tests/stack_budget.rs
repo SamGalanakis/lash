@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn stack_budget_rlm_lashlang_process_turn() -> Result<()> {
     run_async_test_on_stack_budget("stack-budget-rlm-lashlang-process-turn", || async {
-        let core = explicit_ephemeral_facets(LashCore::rlm())
+        let core = explicit_ephemeral_facets(RlmCore::builder())
             .provider(queued_text_provider(vec![
                 r#"```lashlang
 process child(tools: Tools, value: str) {

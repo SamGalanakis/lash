@@ -1,20 +1,20 @@
 use anyhow::{Context, Result};
 use lash::durability::EffectHost;
-use lash::modes::{
-    LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangSurfaceContribution,
-    RlmProtocolPluginConfig,
-};
 use lash::persistence::{AttachmentStore, LashlangArtifactStore, SessionStoreFactory};
 use lash::plugins::{
     PluginExtensionContribution, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
 use lash::process::{ProcessRegistry, ProcessWorkDriver};
+use lash::rlm::{
+    LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog,
+    LashlangLanguageFeatures, LashlangSurfaceContribution, NamedDataType, RlmProtocolPluginConfig,
+    TypeExpr, TypeField,
+};
 use lash::tools::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
     ToolDefinitionLashlangExt, ToolProvider, ToolResult,
 };
-use lash::{ModeId, ModePreset};
 use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_restate::RestateEffectHost;
 use lash_s3_store::{S3AttachmentStore, S3AttachmentStoreConfig};
@@ -473,7 +473,7 @@ pub struct E2eCoreConfig {
     pub fail_once: bool,
 }
 
-pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
+pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::RlmCore> {
     let artifact_store =
         Arc::new(config.storage.lashlang_artifact_store()) as Arc<dyn LashlangArtifactStore>;
     let session_store_factory =
@@ -487,8 +487,8 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         )
         .into_components(),
     );
-    let mut builder = lash::LashCore::builder()
-        .install_mode(ModePreset::rlm_with_config(
+    let mut builder = lash::RlmCore::builder()
+        .rlm_protocol_config(
             RlmProtocolPluginConfig::default().with_lashlang_abilities(
                 LashlangAbilities::default()
                     .with_processes()
@@ -496,8 +496,7 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
                     .with_process_signals()
                     .with_triggers(),
             ),
-        ))
-        .default_mode(ModeId::rlm())
+        )
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("e2e-mock", None, 200_000, None)
@@ -552,11 +551,11 @@ impl PluginFactory for E2ePluginFactory {
             .with_sleep()
             .with_process_signals()
             .with_triggers();
-        let mut resources = lash::modes::LashlangHostCatalog::new();
+        let mut resources = LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
                 ["ui", "button", "pressed"],
-                lash::modes::TypeExpr::Object(vec![]),
+                TypeExpr::Object(vec![]),
                 button_pressed_event_type(),
             )
             .expect("valid e2e button trigger source");
@@ -565,7 +564,7 @@ impl PluginFactory for E2ePluginFactory {
                 LASHLANG_SURFACE_EXTENSION_ID,
                 LashlangSurfaceContribution::new(
                     abilities,
-                    lash::modes::LashlangLanguageFeatures::default(),
+                    LashlangLanguageFeatures::default(),
                     resources,
                 ),
             )
@@ -618,26 +617,26 @@ impl SessionPlugin for E2eSessionPlugin {
     }
 }
 
-fn button_pressed_event_type() -> lash::modes::NamedDataType {
-    lash::modes::NamedDataType::object(
+fn button_pressed_event_type() -> NamedDataType {
+    NamedDataType::object(
         "ui.button.Pressed",
         vec![
-            lash::modes::TypeField {
+            TypeField {
                 name: "button".into(),
-                ty: lash::modes::TypeExpr::Union(vec![
-                    lash::modes::TypeExpr::Enum(vec!["Red".into()]),
-                    lash::modes::TypeExpr::Enum(vec!["Blue".into()]),
+                ty: TypeExpr::Union(vec![
+                    TypeExpr::Enum(vec!["Red".into()]),
+                    TypeExpr::Enum(vec!["Blue".into()]),
                 ]),
                 optional: false,
             },
-            lash::modes::TypeField {
+            TypeField {
                 name: "message".into(),
-                ty: lash::modes::TypeExpr::Str,
+                ty: TypeExpr::Str,
                 optional: false,
             },
-            lash::modes::TypeField {
+            TypeField {
                 name: "pressed_at".into(),
-                ty: lash::modes::TypeExpr::Str,
+                ty: TypeExpr::Str,
                 optional: false,
             },
         ],

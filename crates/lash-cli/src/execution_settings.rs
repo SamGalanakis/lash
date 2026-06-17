@@ -1,14 +1,37 @@
 //! Execution-mode and standard-context-approach settings: parsing, labels,
 //! and the observational-memory tuning-flag overrides.
 
-use lash::ModeId;
 use lash_standard_plugins::{StandardContextApproach, StandardContextApproachKind};
 
-pub(crate) fn parse_execution_mode(input: &str) -> Result<ModeId, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecutionMode {
+    Standard,
+    Rlm,
+}
+
+impl ExecutionMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Rlm => "rlm",
+        }
+    }
+
+    pub(crate) fn is_standard(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+
+    pub(crate) fn is_rlm(self) -> bool {
+        matches!(self, Self::Rlm)
+    }
+}
+
+pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Execution mode cannot be empty.".to_string()),
-        "rlm" => Ok(ModeId::rlm()),
-        "standard" | "tools" => Ok(ModeId::standard()),
+        "rlm" => Ok(ExecutionMode::Rlm),
+        "standard" | "tools" => Ok(ExecutionMode::Standard),
         other => Err(format!(
             "Unknown execution mode `{other}`. Expected `rlm` or `standard`."
         )),
@@ -166,11 +189,13 @@ pub(crate) fn execution_mode_usage() -> &'static str {
     "<rlm|standard>"
 }
 
-pub(crate) fn ensure_supported_execution_mode(mode: ModeId) -> Result<ModeId, String> {
+pub(crate) fn ensure_supported_execution_mode(
+    mode: ExecutionMode,
+) -> Result<ExecutionMode, String> {
     Ok(mode)
 }
 
-pub(crate) fn execution_mode_label(mode: &ModeId) -> &str {
+pub(crate) fn execution_mode_label(mode: &ExecutionMode) -> &str {
     mode.as_str()
 }
 

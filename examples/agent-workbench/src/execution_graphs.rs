@@ -477,15 +477,12 @@ mod tests {
     fn test_process_observer(
         registry: Arc<dyn lash::process::ProcessRegistry>,
     ) -> lash::process::ProcessWorkObserver {
-        let core = lash::LashCore::standard()
+        let core = lash::StandardCore::builder()
             .model(
                 lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
                     .expect("model spec"),
             )
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-            .lashlang_artifact_store(Arc::new(
-                lash::persistence::InMemoryLashlangArtifactStore::new(),
-            ))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
             .store_factory(Arc::new(
                 lash::persistence::InMemorySessionStoreFactory::new(),

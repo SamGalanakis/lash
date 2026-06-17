@@ -43,13 +43,12 @@
           </div>
           <pre data-lang="rust" data-snippet="embedding_prompts#observational-memory-core"><code>use std::sync::Arc;
 
-use lash::LashCore;
 use lash_standard_plugins::{
     ObservationalMemoryConfig, StandardContextApproach, StandardToolStackOptions,
     standard_tool_stack,
 };
 
-let core = LashCore::standard()
+let core = lash::StandardCore::builder()
     .plugins(standard_tool_stack(StandardToolStackOptions {
         standard_context_approach: Some(StandardContextApproach::ObservationalMemory(
             ObservationalMemoryConfig::default(),
@@ -57,9 +56,6 @@ let core = LashCore::standard()
         ..Default::default()
     }))
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(
-        lash::persistence::InMemoryLashlangArtifactStore::new(),
-    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;</code></pre>
           <p>The CLI applies this only to the standard preset; RLM uses its protocol projection state and locked-down runtime stack instead. See <a href="./rlm.html#provider-request-shape">RLM provider request shape</a> for the model-visible request shape.</p>
@@ -89,7 +85,7 @@ use lash_protocol_rlm::{
 // Session-wide: applies to every turn the session runs.
 session
     .admin()
-    .mode()
+    .protocol()
     .apply_session_extension(rlm_session_projection_extension(
         RlmProjectedBindings::new()
             .bind_json("tenant_id", serde_json::json!("acme"))?
@@ -117,13 +113,12 @@ submit({ "move": move_idx, "tenant": tenant_id })
           <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostDescriptor&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, AgentFrame switches, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
           <pre data-lang="rust" data-snippet="embedding_prompts#lazy-projection"><code>use std::sync::Arc;
 
-use lash::{LashCore, ModeId, ModePreset, TurnInput, plugins::runtime_plugin_stack};
+use lash::{TurnInput, plugins::runtime_plugin_stack};
 use lash_protocol_rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
 
 let registry = Arc::new(ProjectionRegistry::new());
-let core = LashCore::builder()
-    .install_mode(ModePreset::rlm_with_projection_resolver(registry.clone()))
-    .default_mode(ModeId::rlm())
+let core = lash::RlmCore::builder()
+    .projection_resolver(registry.clone())
     .plugins(runtime_plugin_stack())
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
     .lashlang_artifact_store(Arc::new(
@@ -171,16 +166,13 @@ let template = PromptTemplate::new(vec![
     ),
 ]);
 
-let core = lash::LashCore::standard()
+let core = lash::StandardCore::builder()
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
             .expect("valid model metadata"),
     )
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(
-        lash::persistence::InMemoryLashlangArtifactStore::new(),
-    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .prompt_template(template)
     .prompt_contribution(PromptContribution::guidance(
@@ -333,7 +325,7 @@ impl ToneTurnExt for lash::TurnBuilder {
     }
 }</code></pre>
           <p>Install on the session; use the extension method before each run:</p>
-          <pre data-lang="rust" data-snippet="embedding_prompts#tone-session"><code>let core = LashCore::rlm()
+          <pre data-lang="rust" data-snippet="embedding_prompts#tone-session"><code>let core = lash::RlmCore::builder()
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -352,12 +344,11 @@ impl ToneTurnExt for lash::TurnBuilder {
 
 let session = core
     .session(chat_id)
-    .rlm()
     .plugin::&lt;TonePlugin&gt;(ToneConfig)
     .open()
     .await?;
 
-use lash::modes::RlmTurnBuilderExt as _;
+use lash::rlm::RlmTurnBuilderExt as _;
 
 let result = session
     .turn(TurnInput::text("Summarize this incident."))

@@ -13,9 +13,10 @@
 pub mod admin;
 mod core;
 mod error;
-mod mode;
 mod plugin_binding;
 mod prompt_layer;
+#[cfg(feature = "rlm")]
+pub mod rlm;
 mod session;
 mod support;
 #[cfg(all(test, feature = "rlm"))]
@@ -27,9 +28,12 @@ pub use crate::admin::{
     AdvancedToolAdmin, Completions, CoreTriggerAdmin, PluginActions, SessionCommandAdmin,
     SessionTriggerAdmin, ToolAdmin,
 };
-pub use crate::core::{LashCore, LashCoreBuilder, SessionDeleteReport};
+pub use crate::core::{
+    LashCore, LashCoreBuilder, SessionDeleteReport, StandardCore, StandardCoreBuilder,
+};
+#[cfg(feature = "rlm")]
+pub use crate::core::{RlmCore, RlmCoreBuilder};
 pub use crate::error::{EmbedError, Result};
-pub use crate::mode::{ModeId, ModePreset};
 pub use crate::plugin_binding::PluginBinding;
 pub use crate::prompt_layer::PromptLayerSink;
 pub use crate::session::{
@@ -55,14 +59,15 @@ pub use tokio_util::sync::CancellationToken;
 pub mod prelude {
     pub use crate::{
         AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, InputItem, LashCore,
-        LashCoreBuilder, LashSession, ModeId, ModePreset, ModelLimits, ModelSpec,
-        ObservableSession, PluginActions, PluginBinding, PluginStack, PromptLayerSink,
-        QueuedTurnBuilder, Result, SessionBuilder, SessionCommand, SessionCommandAdmin,
-        SessionCommandReceipt, SessionConfigPatch, SessionDeleteReport, SessionSpec,
-        SessionTriggerAdmin, ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId,
-        TurnActivitySink, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
-        message_role, message_text,
+        LashCoreBuilder, LashSession, ModelLimits, ModelSpec, ObservableSession, PluginActions,
+        PluginBinding, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
+        SessionCommand, SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch,
+        SessionDeleteReport, SessionSpec, SessionTriggerAdmin, StandardCore, StandardCoreBuilder,
+        ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder,
+        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream, message_role, message_text,
     };
+    #[cfg(feature = "rlm")]
+    pub use crate::{RlmCore, RlmCoreBuilder};
 }
 
 /// Session observation: cursors, resumable event streams, and live replay
@@ -164,25 +169,6 @@ pub mod plugins {
         ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
         tool_output_budget_stack as runtime_plugin_stack,
     };
-}
-
-pub mod modes {
-    #[cfg(feature = "rlm")]
-    pub use crate::mode::{RlmSessionBuilderExt, RlmTurnBuilderExt};
-    #[cfg(feature = "rlm")]
-    pub use lash_lashlang_runtime::{
-        LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog,
-        LashlangHostEnvironment, LashlangLanguageFeatures, LashlangProcessEngine,
-        LashlangProcessInput, LashlangSurface, LashlangSurfaceContribution, LashlangToolBinding,
-        ToolDefinitionLashlangExt, lashlang_process_event_types,
-        lashlang_process_signal_event_types,
-    };
-    #[cfg(feature = "rlm")]
-    pub use lash_protocol_rlm::{
-        NamedDataType, RlmProtocolPluginConfig, TypeExpr, TypeField, format_type_expr,
-    };
-    #[cfg(feature = "rlm")]
-    pub use lash_rlm_types::RlmFinalAnswerFormat;
 }
 
 pub mod messages {

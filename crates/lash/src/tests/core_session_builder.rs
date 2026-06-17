@@ -1,5 +1,5 @@
 use super::*;
-use crate::modes::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
+use crate::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
 #[tokio::test]
 async fn standard_core_runs_mock_turn() -> Result<()> {
@@ -31,8 +31,8 @@ async fn standard_core_runs_mock_turn() -> Result<()> {
 }
 
 #[test]
-fn mode_presets_require_explicit_store_choice() {
-    let err = match LashCore::standard()
+fn typed_core_builders_require_explicit_store_choice() {
+    let err = match StandardCore::builder()
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()
@@ -42,7 +42,7 @@ fn mode_presets_require_explicit_store_choice() {
     };
     assert!(matches!(err, EmbedError::MissingEffectHost));
 
-    let err = match LashCore::standard()
+    let err = match StandardCore::builder()
         .provider(mock_provider())
         .model(mock_model_spec())
         .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
@@ -53,7 +53,7 @@ fn mode_presets_require_explicit_store_choice() {
     };
     assert!(matches!(err, EmbedError::MissingAttachmentStore));
 
-    let err = match LashCore::rlm()
+    let err = match RlmCore::builder()
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()
@@ -63,7 +63,7 @@ fn mode_presets_require_explicit_store_choice() {
     };
     assert!(matches!(err, EmbedError::MissingLashlangArtifactStore));
 
-    let err = match LashCore::rlm()
+    let err = match RlmCore::builder()
         .provider(mock_provider())
         .model(mock_model_spec())
         .lashlang_artifact_store(Arc::new(
@@ -80,7 +80,7 @@ fn mode_presets_require_explicit_store_choice() {
 #[tokio::test]
 async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> Result<()> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(recording_prompt_provider(Arc::clone(&seen)))
         .model(mock_model_spec())
         .prompt_contribution(PromptContribution::guidance("Core", "core guidance"))
@@ -129,7 +129,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
 
 #[tokio::test]
 async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(text_provider("core-provider", "core-model", "core"))
         .model(model_spec("core-model", None, 200_000))
         .build()
@@ -179,7 +179,7 @@ async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Re
 #[tokio::test]
 async fn provider_only_overrides_use_provider_default_model_and_variant() -> Result<()> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(recording_text_provider(
             "core-provider",
             "core-model",
@@ -266,25 +266,18 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
 }
 
 #[tokio::test]
-async fn rlm_core_opens_rlm_session_and_rejects_standard_session() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+async fn rlm_core_opens_rlm_session() -> Result<()> {
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()?;
 
-    let rlm = core.session("rlm").open().await?;
-    assert_eq!(rlm.mode(), &ModeId::rlm());
-
-    let err = match core.session("standard").standard().open().await {
-        Ok(_) => panic!("standard mode should not be installed"),
-        Err(err) => err,
-    };
-    assert!(matches!(err, EmbedError::ModeNotInstalled { mode } if mode == ModeId::standard()));
+    core.session("rlm").open().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()> {
+async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result<()> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let provider = lash_core::testing::TestProvider::builder()
         .kind("rlm-abilities-prompt-test")
@@ -302,13 +295,12 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
         })
         .build()
         .into_handle();
-    let config: crate::modes::RlmProtocolPluginConfig = serde_json::from_value(serde_json::json!({
+    let config: crate::rlm::RlmProtocolPluginConfig = serde_json::from_value(serde_json::json!({
         "lashlang_abilities": { "processes": true, "triggers": true }
     }))
     .expect("rlm config");
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm_with_config(config))
-        .default_mode(ModeId::rlm())
+    let core = RlmCore::builder()
+        .rlm_protocol_config(config)
         .provider(provider)
         .model(mock_model_spec())
         .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
@@ -316,6 +308,9 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
             crate::persistence::InMemoryLashlangArtifactStore::new(),
         ))
         .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            crate::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
@@ -339,7 +334,7 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
 #[tokio::test]
 async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_raw() -> Result<()> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(recording_request_provider(Arc::clone(&seen)))
         .model(mock_model_spec())
         .build()?;
@@ -367,7 +362,7 @@ async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_ra
 
 #[tokio::test]
 async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()?;
@@ -414,14 +409,14 @@ async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()>
 async fn rlm_projection_errors_surface_from_protocol_extensions() -> Result<()> {
     use lash_protocol_rlm::{RlmProjectedBindings, RlmTurnInputExt};
 
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()?;
     let session = core.session("rlm").open().await?;
     session
         .admin()
-        .mode()
+        .protocol()
         .apply_session_extension(lash_protocol_rlm::rlm_session_projection_extension(
             RlmProjectedBindings::new()
                 .bind_json("current_query", serde_json::json!("session"))
@@ -447,41 +442,6 @@ async fn rlm_projection_errors_surface_from_protocol_extensions() -> Result<()> 
 }
 
 #[tokio::test]
-async fn explicit_dual_mode_install_allows_standard_parent_and_rlm_child() -> Result<()> {
-    let core = LashCore::builder()
-        .install_mode(ModePreset::standard())
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::standard())
-        .provider(mock_provider())
-        .model(mock_model_spec())
-        .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            crate::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
-        .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
-        .build()?;
-
-    let parent = core.session("main").standard().open().await?;
-    let child = core.session("child").rlm().parent("main").open().await?;
-
-    assert_eq!(parent.mode(), &ModeId::standard());
-    assert_eq!(child.mode(), &ModeId::rlm());
-    assert_eq!(child.parent_session_id(), Some("main"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn uninstalled_mode_fails_at_open_time() -> Result<()> {
-    let core = standard_core();
-    let err = match core.session("rlm").rlm().open().await {
-        Ok(_) => panic!("rlm mode should not be installed"),
-        Err(err) => err,
-    };
-    assert!(matches!(err, EmbedError::ModeNotInstalled { mode } if mode == ModeId::rlm()));
-    Ok(())
-}
-
-#[tokio::test]
 async fn store_factory_reopens_persisted_session_state() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "persisted".to_string(),
@@ -497,7 +457,7 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
         "already stored",
     )]);
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory { store }))
@@ -526,7 +486,7 @@ async fn open_fresh_ignores_persisted_state_and_replaces_it_on_commit() -> Resul
         "already stored",
     )]);
     let store = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
@@ -614,7 +574,7 @@ async fn persisted_provider_id_rebinds_to_live_provider_on_open() -> Result<()> 
         "stored",
     )]);
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory { store }))
@@ -648,7 +608,7 @@ async fn persisted_provider_id_mismatch_fails_at_turn_execution() -> Result<()> 
     };
     state.ensure_agent_frame_initialized();
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory { store }))
@@ -693,7 +653,7 @@ async fn agent_frame_provider_id_mismatch_fails_at_turn_execution() -> Result<()
         .policy
         .provider_id = "other-provider".to_string();
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory { store }))
@@ -732,7 +692,7 @@ async fn refreshed_head_provider_id_mismatch_fails_before_turn() -> Result<()> {
     };
     state.ensure_agent_frame_initialized();
     let store = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()?;
@@ -763,7 +723,7 @@ async fn refreshed_head_provider_id_mismatch_fails_before_turn() -> Result<()> {
 #[tokio::test]
 async fn explicit_provider_persists_reopens_and_runs_second_turn() -> Result<()> {
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::default());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()?;
@@ -794,7 +754,7 @@ async fn explicit_provider_persists_reopens_and_runs_second_turn() -> Result<()>
 #[tokio::test]
 async fn core_delete_session_removes_factory_backed_session_state() -> Result<()> {
     let factory = Arc::new(DeletingStoreFactory::default());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(factory)
@@ -841,7 +801,7 @@ async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
     state.append_active_conversation_messages(&[active_message]);
 
     let store = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
@@ -877,7 +837,7 @@ async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
         "already stored",
     )]);
     let store = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
@@ -903,7 +863,7 @@ async fn store_session_id_mismatch_is_rejected() -> Result<()> {
         ..Default::default()
     };
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory { store }))
@@ -940,7 +900,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         "manual input",
     )]);
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::default());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -998,7 +958,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
 #[tokio::test]
 async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
     let factory = Arc::new(RecordingStoreFactory::default());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(factory.clone())
@@ -1041,7 +1001,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
     let reused_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(BoundSessionStore {
         session_id: "root-store".to_string(),
     });
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
@@ -1083,7 +1043,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
 async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()> {
     let factory = Arc::new(RecordingStoreFactory::default());
     let explicit_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::default());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(factory.clone())
@@ -1146,7 +1106,7 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
         Arc::new(SnapshotStore::with_state(explicit_state));
     let factory_store: Arc<dyn lash_core::RuntimePersistence> =
         Arc::new(SnapshotStore::with_state(factory_state));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
@@ -1249,11 +1209,10 @@ fn turn_result_total_usage_sums_parent_and_children() {
 //
 // Ephemeral peers are the named in-memory implementations.
 
-/// A builder with a mode + model + provider already named, ready for the
+/// An RLM builder with a model + provider already named, ready for the
 /// peer-coherence dependency under test.
-fn peer_coherence_builder() -> crate::core::LashCoreBuilder {
-    LashCore::builder()
-        .install_mode(ModePreset::standard())
+fn peer_coherence_builder() -> crate::core::RlmCoreBuilder {
+    RlmCore::builder()
         .provider(mock_provider())
         .model(mock_model_spec())
 }
@@ -1272,10 +1231,7 @@ fn durable_attachment_store(dir: &std::path::Path) -> Arc<dyn lash_core::Attachm
 
 /// `LashCore` is not `Debug`, so `Result::expect_err` is unavailable; this
 /// extracts the build error or panics with the given message.
-fn expect_build_error(
-    result: std::result::Result<LashCore, EmbedError>,
-    message: &str,
-) -> EmbedError {
+fn expect_build_error<T>(result: std::result::Result<T, EmbedError>, message: &str) -> EmbedError {
     match result {
         Ok(_) => panic!("{message}"),
         Err(err) => err,
@@ -1338,6 +1294,9 @@ async fn builder_requires_explicit_process_env_store_at_build() {
     let result = peer_coherence_builder()
         .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash_core::InMemoryAttachmentStore::new()))
+        .lashlang_artifact_store(Arc::new(
+            crate::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
         .build();
     let err = expect_build_error(
         result,

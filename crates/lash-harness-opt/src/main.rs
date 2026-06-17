@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use lash::runtime::ProtocolTurnOptions;
-use lash::{LashCore, TurnActivity, TurnEvent};
+use lash::{RlmCore, TurnActivity, TurnEvent};
 use lash_cli::config::LashConfig;
 use lash_core::TurnInput;
 use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};
@@ -419,7 +419,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             None,
         )
         .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
-        let core_builder = LashCore::rlm()
+        let core_builder = RlmCore::builder()
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .lashlang_artifact_store(Arc::new(
                 lash::persistence::InMemoryLashlangArtifactStore::new(),
@@ -435,7 +435,6 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
                 "harness-opt-gepa-{}-{}",
                 request.run_id, request.generation
             ))
-            .rlm()
             .open()
             .await
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;

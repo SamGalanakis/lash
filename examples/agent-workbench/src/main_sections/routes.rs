@@ -188,7 +188,6 @@ async fn enqueue_tool_catalog_refresh(
     let session = state
         .core
         .session(session_id.clone())
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -301,7 +300,6 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
     let session = state
         .core
         .session(new_session_id)
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;

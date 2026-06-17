@@ -9,7 +9,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, Response};
 use bytes::Bytes;
-use lash::modes::RlmTurnBuilderExt as _;
+use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;

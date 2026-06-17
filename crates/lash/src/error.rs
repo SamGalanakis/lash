@@ -2,12 +2,10 @@ use crate::support::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
-    #[error("no mode presets installed; call install_mode(ModePreset::...) first")]
-    NoModesInstalled,
-    #[error("default mode `{mode}` is not installed on this LashCore")]
-    DefaultModeNotInstalled { mode: ModeId },
-    #[error("mode `{mode}` is not installed on this LashCore")]
-    ModeNotInstalled { mode: ModeId },
+    #[error(
+        "protocol plugin is required; call .protocol_plugin(...) or use StandardCore::builder()/RlmCore::builder()"
+    )]
+    MissingProtocolPlugin,
     #[error("model spec is required; hosts must supply explicit model metadata")]
     MissingModelSpec,
     #[error("effect host is required; provide an explicit effect host with .effect_host(...)")]

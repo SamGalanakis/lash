@@ -751,7 +751,7 @@ async fn wait_for_queued_work(
         trace_dir,
         fail_once: false,
     })?;
-    let session = core.session(DEFAULT_SESSION_ID).rlm().open().await?;
+    let session = core.session(DEFAULT_SESSION_ID).open().await?;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         let queued = session.queued_work().await?;
@@ -1314,7 +1314,7 @@ async fn assert_reopened_session_agrees(
         trace_dir,
         fail_once: false,
     })?;
-    let session = core.session(DEFAULT_SESSION_ID).rlm().open().await?;
+    let session = core.session(DEFAULT_SESSION_ID).open().await?;
     let read = storage
         .session_store(DEFAULT_SESSION_ID)
         .load_session(lash::persistence::SessionReadScope::FullGraph)

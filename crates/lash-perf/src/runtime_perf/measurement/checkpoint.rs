@@ -638,9 +638,7 @@ pub(crate) async fn run_once_embed(
     let store = Arc::new(RuntimePerfStore::default());
     let core = build_embed_core(scenario, Arc::clone(&store))?;
     let session = core
-        .session(format!("runtime-perf-{}", scenario.name()))
-        .mode(scenario.execution_mode())
-        .open()
+        .open_session(format!("runtime-perf-{}", scenario.name()))
         .await
         .with_context(|| format!("open embed session for {}", scenario.name()))?;
     let build_runtime_ms = elapsed_ms(build_started);

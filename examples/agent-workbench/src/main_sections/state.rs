@@ -1,6 +1,6 @@
 #[derive(Clone)]
 struct AppState {
-    core: LashCore,
+    core: RlmCore,
     process_observer: lash::process::ProcessWorkObserver,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,

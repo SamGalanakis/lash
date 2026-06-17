@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::Event as TermEvent;
 use lash::CancellationToken;
-use lash::{LashSession, ModeId, TurnEvent, provider::ProviderHandle};
+use lash::{LashSession, TurnEvent, provider::ProviderHandle};
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::session_model::Message;
 use lash_core::{TokenUsage, ToolState};
@@ -22,6 +22,7 @@ use crate::Args;
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::event::{AppEvent, AppEventPump};
+use crate::execution_settings::ExecutionMode;
 use crate::info::version_text;
 use crate::model_catalog::CachedModelCatalog;
 use crate::prompt_tool::CliPromptBridge;
@@ -88,7 +89,7 @@ pub(crate) async fn run_app(
     _store: Arc<Store>,
     mut toolset_hash: String,
     initial_model_variant: Option<String>,
-    initial_execution_mode: ModeId,
+    initial_execution_mode: ExecutionMode,
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
     let initial_session_id = session.session_id();

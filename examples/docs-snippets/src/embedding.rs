@@ -8,7 +8,7 @@ use lash::plugins::{
 };
 use lash::provider::ProviderHandle;
 use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
-use lash::{LashCore, LashSession, ModeId, ModePreset, SessionSpec, TurnActivity, TurnInput};
+use lash::{LashSession, SessionSpec, TurnActivity, TurnInput};
 
 struct AppTools;
 
@@ -67,9 +67,7 @@ async fn full_core(provider: ProviderHandle) -> anyhow::Result<()> {
     // docs:start:full-core
     use std::sync::Arc;
 
-    use lash::{
-        LashCore, ModeId, ModePreset, TurnEvent, TurnInput, plugins::runtime_plugin_stack, tools::*,
-    };
+    use lash::{TurnEvent, TurnInput, plugins::runtime_plugin_stack, tools::*};
 
     let data_dir = std::path::PathBuf::from(".lash-data");
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
@@ -78,10 +76,7 @@ async fn full_core(provider: ProviderHandle) -> anyhow::Result<()> {
     let artifact_store =
         Arc::new(lash_sqlite_store::Store::open(&data_dir.join("artifacts.db")).await?);
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::standard())
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
@@ -97,7 +92,7 @@ async fn full_core(provider: ProviderHandle) -> anyhow::Result<()> {
         )))
         .build()?;
 
-    let session = core.session("chat-123").rlm().open().await?;
+    let session = core.session("chat-123").open().await?;
     let result = session
         .turn(TurnInput::text("Use the app tools."))
         .run()
@@ -119,17 +114,14 @@ async fn preset_core(provider: ProviderHandle) -> anyhow::Result<()> {
     // docs:start:preset-core
     use std::sync::Arc;
 
-    use lash::{
-        LashCore, SessionSpec,
-        plugins::{PluginFactory, runtime_plugin_stack},
-    };
+    use lash::{SessionSpec, plugins::PluginFactory};
 
     let root_spec = SessionSpec::new().provider_id(provider.kind()).model(
         lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
             .expect("valid model metadata"),
     );
 
-    let core = LashCore::rlm()
+    let core = lash::RlmCore::builder()
         .session_spec(root_spec)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .lashlang_artifact_store(Arc::new(
@@ -154,9 +146,7 @@ async fn custom_stack(root_spec: SessionSpec) -> anyhow::Result<()> {
         plugins.push(Arc::new(AppPluginFactory) as Arc<dyn PluginFactory>);
     });
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    let core = lash::RlmCore::builder()
         .session_spec(root_spec)
         .plugins(plugins)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))

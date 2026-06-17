@@ -281,7 +281,7 @@ if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
           <div class="two-col">
             <article class="panel">
               <h3>Per-turn RLM options</h3>
-              <pre data-lang="rust" data-snippet="embedding_turns#rlm-terminal-contracts"><code>use lash::modes::RlmTurnBuilderExt as _;
+              <pre data-lang="rust" data-snippet="embedding_turns#rlm-terminal-contracts"><code>use lash::rlm::RlmTurnBuilderExt as _;
 
 let submitted = session
     .turn(TurnInput::text("Move on the board."))
@@ -308,11 +308,10 @@ let prose_or_submit = session
             </article>
           </div>
           <p>Use <code>require_submit_schema(...)</code> when the submitted value must match a JSON Schema. Use <code>RlmSessionBuilderExt::final_answer_format(...)</code> to set the session's normal submit presentation: root RLM sessions default to Markdown guidance, managed child sessions default to raw submit values, and schema-required turns ignore the presentation preference.</p>
-          <pre data-lang="rust" data-snippet="embedding_turns#submit-schema"><code>use lash::modes::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
+          <pre data-lang="rust" data-snippet="embedding_turns#submit-schema"><code>use lash::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
 let session = core
     .session("analysis")
-    .rlm()
     .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
     .open()
     .await?;

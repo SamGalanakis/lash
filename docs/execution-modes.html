@@ -68,7 +68,7 @@
 <pre data-lang="rust"><code>use lash::LashCore;
 
 // `standard()` selects native provider tool-calling, the default mode.
-let core = LashCore::standard()
+let core = StandardCore::builder()
     .provider(provider)
     .model(model)
     // ... in-memory or durable runtime facets ...
@@ -98,20 +98,15 @@ let session = core.session("chat-1").open().await?;</code></pre>
           <div class="listing__body"><p>State reads, repeated host calls, control flow, subagents, and background processes compose inside one turn that still commits exactly once.</p></div>
         </div>
       </div>
-<pre data-lang="rust"><code>use lash::{LashCore, ModeId, ModePreset};
-
-// Install the RLM mode + its runtime plugin stack, then default to it.
-let core = LashCore::builder()
-    .install_mode(ModePreset::rlm())
-    .default_mode(ModeId::rlm())
+<pre data-lang="rust"><code>// Build an RLM core for Lashlang-driven turns.
+let core = lash::RlmCore::builder()
     .plugins(lash::plugins::runtime_plugin_stack())
     .provider(provider)
     .model(model)
     // ... runtime facets ...
     .build()?;
 
-// `.rlm()` opens the session in RLM mode.
-let session = core.session("task-1").rlm().open().await?;</code></pre>
+let session = core.session("task-1").open().await?;</code></pre>
       <p>The <a href="./rlm.html">RLM protocol</a> page covers prompt construction, the execution loop, <code>submit</code> semantics, and failure modes; the <a href="./architecture/lashlang.html">Lashlang language</a> reference covers the syntax the model writes.</p>
     </div>
 

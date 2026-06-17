@@ -143,7 +143,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
 
 #[tokio::test]
 async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .plugin(Arc::new(StaticPluginFactory::new(
@@ -252,7 +252,7 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
 
 #[tokio::test]
 async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -284,7 +284,7 @@ async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
 
 #[tokio::test]
 async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -321,7 +321,7 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
 
 #[tokio::test]
 async fn process_start_and_cancel_emit_typed_observation_events() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -385,7 +385,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
         "pressed",
         lash_core::LashSchema::any(),
     );
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .plugin(Arc::new(StaticPluginFactory::new(
@@ -441,7 +441,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
 async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -484,12 +484,11 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
 async fn processes_cancel_uses_host_cancel_ability() -> Result<()> {
     let ability = Arc::new(DenyCancelAbility::default());
     let runtime_host = RuntimeHostConfig::in_memory().with_process_cancel_ability(ability.clone());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-        .advanced()
         .runtime_host_config(runtime_host)
         .build()?;
     let session = core.session("host-cancel").open().await?;
@@ -543,12 +542,11 @@ async fn processes_cancel_all_uses_host_cancel_ability() -> Result<()> {
         Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
     let runner = lash_core::ProcessWorkRunner::new(Arc::new(NoopProcessRunHandle));
     let driver = lash_core::ProcessWorkDriver::new(Arc::clone(&registry), runner.poke_handle());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_work_driver(driver)
-        .advanced()
         .runtime_host_config(runtime_host)
         .build()?;
     let session = core.session("host-cancel-all").open().await?;
@@ -626,7 +624,7 @@ async fn observation_updates_after_completed_turn() -> Result<()> {
 
 #[tokio::test]
 async fn config_and_tool_mutations_publish_observation_immediately() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))

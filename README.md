@@ -46,13 +46,10 @@ async fn main() -> anyhow::Result<()> {
         .map_err(anyhow::Error::msg)?;
 
     // one LashCore per app, cloned freely.
-    let core = LashCore::standard()
+    let core = lash::StandardCore::builder()
         .provider(provider)
         .model(model)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 

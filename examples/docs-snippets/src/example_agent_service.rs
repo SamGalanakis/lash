@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use lash::persistence::SessionStoreFactory;
 use lash::provider::{ProviderHandle, ProviderOptions};
 use lash::tracing::{TraceLevel, TraceSink};
-use lash::{LashCore, LashSession, ModeId, ModePreset, TurnInput, TurnResult};
+use lash::{LashSession, RlmCore, TurnInput, TurnResult};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 async fn service_core(
@@ -30,9 +30,7 @@ async fn service_core(
         lash_sqlite_store::Store::open(&data_dir.join("lash-artifacts.db")).await?,
     );
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(
@@ -59,12 +57,12 @@ async fn service_core(
 }
 
 struct AppState {
-    core: LashCore,
+    core: RlmCore,
 }
 
 impl AppState {
     async fn open_session(&self, chat_id: &str) -> anyhow::Result<LashSession> {
-        Ok(self.core.session(chat_id).rlm().open().await?)
+        Ok(self.core.session(chat_id).open().await?)
     }
 }
 
@@ -93,7 +91,7 @@ async fn service_turn(
     // docs:start:service-turn
     let session = state.open_session(&chat_id).await?;
 
-    use lash::modes::RlmTurnBuilderExt as _;
+    use lash::rlm::RlmTurnBuilderExt as _;
 
     let turn = session
         .turn(TurnInput::text(text))

@@ -198,7 +198,7 @@ async fn rlm_terminal_contracts(
     sink: lash::runtime::NoopTurnActivitySink,
 ) -> anyhow::Result<()> {
     // docs:start:rlm-terminal-contracts
-    use lash::modes::RlmTurnBuilderExt as _;
+    use lash::rlm::RlmTurnBuilderExt as _;
 
     let submitted = session
         .turn(TurnInput::text("Move on the board."))
@@ -269,13 +269,12 @@ fn terminal_value_match(result: TurnResult) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn submit_schema(core: &LashCore) -> anyhow::Result<()> {
+async fn submit_schema(core: &lash::RlmCore) -> anyhow::Result<()> {
     // docs:start:submit-schema
-    use lash::modes::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
+    use lash::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
     let session = core
         .session("analysis")
-        .rlm()
         .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
         .open()
         .await?;

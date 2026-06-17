@@ -128,12 +128,11 @@ async fn async_main() -> AnyhowResult<()> {
         artifact_store.clone(),
     );
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm_with_config(
-            lash::modes::RlmProtocolPluginConfig::default()
+    let core = RlmCore::builder()
+        .rlm_protocol_config(
+            lash::rlm::RlmProtocolPluginConfig::default()
                 .with_lashlang_abilities(workbench_lashlang_abilities()),
-        ))
-        .default_mode(ModeId::rlm())
+        )
         .provider(provider)
         .model(model_spec)
         .store_factory(Arc::clone(&core_store_factory))
@@ -159,7 +158,6 @@ async fn async_main() -> AnyhowResult<()> {
         })
         .process_work_driver(process_deployment.process_work_driver())
         .queued_work_poke(queued_work_poke.clone())
-        .advanced()
         .runtime_host_config(runtime_host_config)
         .build()
         .context("build Lash core")?;

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack, PromptLayerSink};
+use lash::{LashSession, PluginStack, PromptLayerSink, RlmCore, StandardCore};
 use lash_core::provider::ProviderHandle;
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::store::SessionHead;
@@ -20,6 +20,7 @@ use lash_core::{
 use lash_sqlite_store::Store;
 use lash_standard_plugins::StandardContextApproach;
 
+use crate::execution_settings::ExecutionMode;
 use crate::session_log::{self, SessionLogger, SessionStart};
 
 pub(crate) enum SessionBootstrapSource {
@@ -57,13 +58,13 @@ pub(crate) struct SessionBootstrap {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CliSessionHostConfig {
-    pub(crate) execution_mode: ModeId,
+    pub(crate) execution_mode: ExecutionMode,
     pub(crate) standard_context_approach: Option<StandardContextApproach>,
 }
 
 impl CliSessionHostConfig {
     pub(crate) fn new(
-        execution_mode: ModeId,
+        execution_mode: ExecutionMode,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Self {
         Self {
@@ -298,7 +299,7 @@ impl CliSessionOpener {
         &self,
         bootstrap: SessionBootstrap,
         fallback_policy: SessionPolicy,
-        fallback_execution_mode: ModeId,
+        fallback_execution_mode: ExecutionMode,
         fallback_standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         let session_id = bootstrap
@@ -323,8 +324,6 @@ impl CliSessionOpener {
             ..RuntimeSessionState::default()
         };
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
-        let artifact_store = Arc::new(Store::open(&bootstrap.artifacts_db_file()).await?)
-            as Arc<dyn lash::persistence::LashlangArtifactStore>;
         let effect_host = Arc::new(
             lash_sqlite_store::SqliteEffectHost::open(&bootstrap.effects_db_file()).await?,
         );
@@ -334,33 +333,58 @@ impl CliSessionOpener {
         let trigger_store = Arc::new(
             lash_sqlite_store::SqliteTriggerStore::open(&bootstrap.triggers_db_file()).await?,
         );
-        let mut core_builder = LashCore::builder()
-            .install_mode(ModePreset::standard())
-            .install_mode(ModePreset::rlm())
-            .default_mode(host_config.execution_mode.clone())
-            .provider(self.provider.clone())
-            .model(policy.model.clone())
-            .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-                bootstrap.sessions_dir().to_path_buf(),
-            )))
-            .plugins(self.plugin_stack.clone())
-            .prompt_layer(self.prompt_layer.clone())
-            .effect_host(effect_host)
-            .lashlang_artifact_store(artifact_store)
-            .attachment_store(Arc::clone(&self.attachment_store))
-            .trace_level(self.trace_level)
-            .process_registry(process_registry)
-            .trigger_store(trigger_store);
-        if let Some(trace_jsonl_path) = self.trace_jsonl_path.clone() {
-            core_builder = core_builder.trace_jsonl_path(trace_jsonl_path);
-        }
-        let core = core_builder.build()?;
-        let session = core
-            .session(session_id)
-            .mode(host_config.execution_mode.clone())
-            .store(store)
-            .open_with_state(state)
-            .await?;
+        let child_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            bootstrap.sessions_dir().to_path_buf(),
+        ));
+        let session = match host_config.execution_mode {
+            ExecutionMode::Standard => {
+                let mut core_builder = StandardCore::builder()
+                    .provider(self.provider.clone())
+                    .model(policy.model.clone())
+                    .child_store_factory(child_store_factory)
+                    .plugins(self.plugin_stack.clone())
+                    .prompt_layer(self.prompt_layer.clone())
+                    .effect_host(effect_host)
+                    .attachment_store(Arc::clone(&self.attachment_store))
+                    .trace_level(self.trace_level)
+                    .process_registry(process_registry)
+                    .trigger_store(trigger_store);
+                if let Some(trace_jsonl_path) = self.trace_jsonl_path.clone() {
+                    core_builder = core_builder.trace_jsonl_path(trace_jsonl_path);
+                }
+                core_builder
+                    .build()?
+                    .session(session_id)
+                    .store(store)
+                    .open_with_state(state)
+                    .await?
+            }
+            ExecutionMode::Rlm => {
+                let artifact_store = Arc::new(Store::open(&bootstrap.artifacts_db_file()).await?)
+                    as Arc<dyn lash::persistence::LashlangArtifactStore>;
+                let mut core_builder = RlmCore::builder()
+                    .provider(self.provider.clone())
+                    .model(policy.model.clone())
+                    .child_store_factory(child_store_factory)
+                    .plugins(self.plugin_stack.clone())
+                    .prompt_layer(self.prompt_layer.clone())
+                    .effect_host(effect_host)
+                    .lashlang_artifact_store(artifact_store)
+                    .attachment_store(Arc::clone(&self.attachment_store))
+                    .trace_level(self.trace_level)
+                    .process_registry(process_registry)
+                    .trigger_store(trigger_store);
+                if let Some(trace_jsonl_path) = self.trace_jsonl_path.clone() {
+                    core_builder = core_builder.trace_jsonl_path(trace_jsonl_path);
+                }
+                core_builder
+                    .build()?
+                    .session(session_id)
+                    .store(store)
+                    .open_with_state(state)
+                    .await?
+            }
+        };
         Ok(OpenedCliLashSession {
             bootstrap,
             logger,
@@ -371,7 +395,7 @@ impl CliSessionOpener {
     pub(crate) async fn fresh(
         &self,
         fallback_policy: SessionPolicy,
-        execution_mode: ModeId,
+        execution_mode: ExecutionMode,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         let bootstrap = SessionBootstrap::open(SessionBootstrapSource::Fresh).await?;
@@ -388,7 +412,7 @@ impl CliSessionOpener {
         &self,
         identifier: &str,
         fallback_policy: SessionPolicy,
-        execution_mode: ModeId,
+        execution_mode: ExecutionMode,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         let bootstrap = SessionBootstrap::open(
@@ -439,7 +463,7 @@ mod tests {
         let opened = opener
             .fresh(
                 policy,
-                ModeId::standard(),
+                ExecutionMode::Rlm,
                 Some(StandardContextApproach::default()),
             )
             .await?;

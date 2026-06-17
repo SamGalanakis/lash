@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use lash::{LashCore, LashSession};
+use lash::{LashSession, RlmCore};
 use serde_json::json;
 
 use crate::db::AppDb;
@@ -13,7 +13,7 @@ pub(crate) type AppResult<T> = Result<T, AppError>;
 
 #[derive(Clone)]
 pub(crate) struct AppStateData {
-    core: LashCore,
+    core: RlmCore,
     db: Arc<Mutex<AppDb>>,
     default_model: String,
     default_model_variant: Option<String>,
@@ -28,7 +28,7 @@ pub(crate) struct AppStateData {
 impl AppStateData {
     #[cfg(feature = "restate")]
     pub(crate) fn from_shared_db(
-        core: LashCore,
+        core: RlmCore,
         db: Arc<Mutex<AppDb>>,
         default_model: String,
         default_model_variant: Option<String>,
@@ -48,7 +48,7 @@ impl AppStateData {
 
     #[cfg(not(feature = "restate"))]
     pub(crate) fn new(
-        core: LashCore,
+        core: RlmCore,
         db: AppDb,
         default_model: String,
         default_model_variant: Option<String>,
@@ -90,7 +90,6 @@ impl AppStateData {
         Ok(self
             .core
             .session(chat_id)
-            .rlm()
             .plugin::<DemoPlugin>(DemoPluginConfig {
                 db: Arc::clone(&self.db),
             })

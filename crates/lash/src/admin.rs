@@ -353,8 +353,8 @@ impl SessionAdmin {
         }
     }
 
-    pub fn mode(&self) -> ModeAdmin {
-        ModeAdmin {
+    pub fn protocol(&self) -> ProtocolAdmin {
+        ProtocolAdmin {
             control: self.clone(),
         }
     }
@@ -1293,11 +1293,11 @@ impl InjectionAdmin {
 }
 
 #[derive(Clone)]
-pub struct ModeAdmin {
+pub struct ProtocolAdmin {
     control: SessionAdmin,
 }
 
-impl ModeAdmin {
+impl ProtocolAdmin {
     pub async fn apply_session_extension(
         &self,
         extension: lash_core::ProtocolSessionExtensionHandle,

@@ -60,16 +60,13 @@
       </div>
           <pre data-lang="rust" data-snippet="persistence#sqlite-core"><code>use std::sync::Arc;
 
-use lash::{LashCore, ModeId, ModePreset};
 use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
 let data_dir = std::path::PathBuf::from("./.lash-data");
 let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
 let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db")).await?);
 
-let core = LashCore::builder()
-    .install_mode(ModePreset::rlm())
-    .default_mode(ModeId::rlm())
+let core = lash::RlmCore::builder()
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -118,13 +115,13 @@ let attachments = S3AttachmentStore::builder("lash-attachments", "us-east-1")
     .prefix("prod/lash")
     .build()?;
 
-let core = LashCore::builder()
+let core = lash::RlmCore::builder()
     .store_factory(Arc::new(storage.session_store_factory()))
     .process_registry(Arc::new(storage.process_registry()))
     .trigger_store(Arc::new(storage.trigger_store()))
     .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
     .attachment_store(Arc::new(attachments))
-    // provider, mode, model, effect host...
+    // provider, model, effect host...
     .build()?;</code></pre>
       <p><code>PostgresStorage::connect</code> creates the exact supported schema on an empty database and rejects mismatched component versions. Runtime checkpoints, queued work, process rows, triggers, attachment manifests, and Lashlang artifacts live in Postgres. Attachment bytes live in S3-compatible object storage under content-addressed keys; MinIO uses the same implementation with an endpoint URL and path-style mode.</p>
       <p><code>PostgresStoreConfig</code> applies connection-level backstops by default: a 10 second <code>lock_timeout</code> and a 30 second <code>statement_timeout</code>. Session commits are optimistic CAS writes on the head revision; Postgres serialization failures, deadlocks, and lock-acquisition timeouts on that write surface as <code>HeadRevisionConflict</code> so hosts can reload and retry instead of treating ordinary write contention as an opaque backend failure.</p>
@@ -217,9 +214,7 @@ let store_factory = Arc::new(SqliteSessionStoreFactory::new(
 let artifact_store =
     Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("lash-artifacts.db")).await?);
 
-let core = LashCore::builder()
-    .install_mode(ModePreset::rlm())
-    .default_mode(ModeId::rlm())
+let core = lash::RlmCore::builder()
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits(
@@ -239,7 +234,7 @@ let core = LashCore::builder()
     .build()?;
 
 // Per request: open a session keyed by the app's chat id.
-let session = core.session(chat_id).rlm().open().await?;</code></pre>
+let session = core.session(chat_id).open().await?;</code></pre>
       <p>Full source: <code>examples/agent-service</code>.</p>
     </div>
 

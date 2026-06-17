@@ -1,6 +1,5 @@
 //! Version/info text and the Info/Help/Controls document overlays.
 
-use lash::ModeId;
 use lash::provider::ProviderHandle;
 use lash_standard_plugins::StandardContextApproach;
 use lash_tui_extensions::TuiExtensions;
@@ -8,7 +7,7 @@ use lash_tui_extensions::TuiExtensions;
 use crate::SkillCatalog;
 use crate::command;
 use crate::execution_settings::{
-    execution_mode_label, execution_mode_usage, standard_context_approach_label,
+    ExecutionMode, execution_mode_label, execution_mode_usage, standard_context_approach_label,
 };
 use crate::keybindings::shortcut_help_rows;
 use crate::model_selection::provider_display_label;
@@ -23,7 +22,7 @@ lash-sansio {}",
     )
 }
 
-pub(crate) fn info_text_unconfigured(execution_mode: &ModeId, cwd: &str) -> String {
+pub(crate) fn info_text_unconfigured(execution_mode: &ExecutionMode, cwd: &str) -> String {
     [
         format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash_core::SANSIO_VERSION),
@@ -43,7 +42,7 @@ pub(crate) fn info_text(
     provider: &ProviderHandle,
     configured_model: &str,
     model_variant: Option<&str>,
-    execution_mode: &ModeId,
+    execution_mode: &ExecutionMode,
     standard_context_approach: Option<&StandardContextApproach>,
     context_window: Option<u64>,
     tool_summary: Option<(usize, &str)>,
@@ -66,7 +65,7 @@ pub(crate) fn info_text(
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
     ];
-    if *execution_mode == ModeId::standard()
+    if *execution_mode == ExecutionMode::Standard
         && let Some(standard_context_approach) = standard_context_approach
     {
         lines.push(format!(
@@ -108,7 +107,7 @@ pub(crate) fn info_document(
     provider: &ProviderHandle,
     configured_model: &str,
     model_variant: Option<&str>,
-    execution_mode: &ModeId,
+    execution_mode: &ExecutionMode,
     standard_context_approach: Option<&StandardContextApproach>,
     context_window: Option<u64>,
     tool_summary: Option<(usize, &str)>,
@@ -139,7 +138,7 @@ pub(crate) fn info_document(
             value: variant.to_string(),
         });
     }
-    if *execution_mode == ModeId::standard()
+    if *execution_mode == ExecutionMode::Standard
         && let Some(standard_context_approach) = standard_context_approach
     {
         model_rows.push(DocumentRow::KeyValue {
@@ -340,7 +339,7 @@ mod tests {
             &provider,
             "google/gemini-3-flash-preview",
             None,
-            &ModeId::rlm(),
+            &ExecutionMode::Rlm,
             None,
             Some(123_000),
             Some((7, "abcd1234")),
@@ -370,7 +369,7 @@ mod tests {
             &provider,
             "google/gemini-3-flash-preview",
             Some("medium"),
-            &ModeId::standard(),
+            &ExecutionMode::Standard,
             Some(&StandardContextApproach::RollingHistory(Default::default())),
             Some(123_000),
             Some((7, "abcd1234")),
@@ -442,7 +441,7 @@ mod tests {
             &provider,
             "google/gemini-3-flash-preview",
             Some("medium"),
-            &ModeId::standard(),
+            &ExecutionMode::Standard,
             Some(&StandardContextApproach::RollingHistory(Default::default())),
             Some(123_000),
             Some((7, "abcd1234")),

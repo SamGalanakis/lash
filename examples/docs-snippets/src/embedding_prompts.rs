@@ -7,19 +7,18 @@ use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::provider::ProviderHandle;
-use lash::{LashCore, LashSession, TurnInput};
+use lash::{LashSession, TurnInput};
 
 async fn observational_memory_core() -> anyhow::Result<()> {
     // docs:start:observational-memory-core
     use std::sync::Arc;
 
-    use lash::LashCore;
     use lash_standard_plugins::{
         ObservationalMemoryConfig, StandardContextApproach, StandardToolStackOptions,
         standard_tool_stack,
     };
 
-    let core = LashCore::standard()
+    let core = lash::StandardCore::builder()
         .plugins(standard_tool_stack(StandardToolStackOptions {
             standard_context_approach: Some(StandardContextApproach::ObservationalMemory(
                 ObservationalMemoryConfig::default(),
@@ -27,9 +26,6 @@ async fn observational_memory_core() -> anyhow::Result<()> {
             ..Default::default()
         }))
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
     // docs:end:observational-memory-core
@@ -57,7 +53,7 @@ async fn projected_bindings(session: &LashSession, task: Task, board: Board) -> 
     // Session-wide: applies to every turn the session runs.
     session
         .admin()
-        .mode()
+        .protocol()
         .apply_session_extension(rlm_session_projection_extension(
             RlmProjectedBindings::new()
                 .bind_json("tenant_id", serde_json::json!("acme"))?
@@ -88,13 +84,12 @@ async fn lazy_projection() -> anyhow::Result<()> {
     // docs:start:lazy-projection
     use std::sync::Arc;
 
-    use lash::{LashCore, ModeId, ModePreset, TurnInput, plugins::runtime_plugin_stack};
+    use lash::{TurnInput, plugins::runtime_plugin_stack};
     use lash_protocol_rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
 
     let registry = Arc::new(ProjectionRegistry::new());
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm_with_projection_resolver(registry.clone()))
-        .default_mode(ModeId::rlm())
+    let core = lash::RlmCore::builder()
+        .projection_resolver(registry.clone())
         .plugins(runtime_plugin_stack())
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .lashlang_artifact_store(Arc::new(
@@ -132,16 +127,13 @@ async fn prompt_template(provider: ProviderHandle) -> anyhow::Result<()> {
         ),
     ]);
 
-    let core = lash::LashCore::standard()
+    let core = lash::StandardCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
                 .expect("valid model metadata"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .prompt_template(template)
         .prompt_contribution(PromptContribution::guidance(
@@ -319,7 +311,7 @@ async fn tone_session(
     sink: lash::runtime::NoopTurnActivitySink,
 ) -> anyhow::Result<()> {
     // docs:start:tone-session
-    let core = LashCore::rlm()
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -338,12 +330,11 @@ async fn tone_session(
 
     let session = core
         .session(chat_id)
-        .rlm()
         .plugin::<TonePlugin>(ToneConfig)
         .open()
         .await?;
 
-    use lash::modes::RlmTurnBuilderExt as _;
+    use lash::rlm::RlmTurnBuilderExt as _;
 
     let result = session
         .turn(TurnInput::text("Summarize this incident."))

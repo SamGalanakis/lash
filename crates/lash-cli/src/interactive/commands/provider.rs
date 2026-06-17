@@ -3,12 +3,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::LashConfig;
 use lash::admin::SessionConfigPatch;
-use lash::{LashSession, ModeId, provider::ProviderHandle};
+use lash::{LashSession, provider::ProviderHandle};
 use lash_tui::Terminal;
 
 use crate::app::App;
 use crate::execution_settings::{
-    ensure_supported_execution_mode, execution_mode_label, execution_mode_usage,
+    ExecutionMode, ensure_supported_execution_mode, execution_mode_label, execution_mode_usage,
     parse_execution_mode,
 };
 use crate::model_catalog::CachedModelCatalog;
@@ -203,7 +203,7 @@ pub(super) async fn handle_variant(
 pub(super) fn handle_mode(
     new_mode: Option<String>,
     app: &mut App,
-    current_execution_mode: &ModeId,
+    current_execution_mode: &ExecutionMode,
 ) -> anyhow::Result<bool> {
     let Some(new_mode) = new_mode else {
         push_system_message(

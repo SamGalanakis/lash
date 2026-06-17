@@ -15,16 +15,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // one LashCore per app, cloned freely.
-    let core = LashCore::standard()
+    let core = lash::StandardCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
                 .expect("valid model metadata"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 

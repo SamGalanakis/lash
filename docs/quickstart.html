@@ -94,16 +94,13 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     );
 
     // one LashCore per app, cloned freely.
-    let core = LashCore::standard()
+    let core = lash::StandardCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
                 .expect("valid model metadata"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
@@ -153,9 +150,9 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
           </div>
         </div>
         <div class="listing__row">
-          <div class="listing__label">rlm mode</div>
+          <div class="listing__label">rlm core</div>
           <div class="listing__body">
-            <p>Install <code>ModePreset::rlm()</code> for Lashlang-driven agentic turns with structured submit / AgentFrame switch semantics. See the <a href="./rlm.html">RLM protocol guide</a>.</p>
+            <p>Use <code>RlmCore::builder()</code> for Lashlang-driven agentic turns with structured submit / AgentFrame switch semantics. See the <a href="./rlm.html">RLM protocol guide</a>.</p>
           </div>
         </div>
         <div class="listing__row">

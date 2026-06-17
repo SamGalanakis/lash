@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use bytes::Bytes;
-use lash::modes::RlmTurnBuilderExt as _;
+use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{TurnInput, TurnOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -290,7 +290,7 @@ mod restate_tests {
     use crate::demo_plugin::{DemoPlugin, DemoPluginConfig};
     use crate::state::AgentServiceDurability;
     use lash::PluginBinding;
-    use lash::{LashCore, ModeId, ModePreset};
+    use lash::RlmCore;
     use lash_core::LlmOutputPart;
     use lash_core::llm::types::LlmResponse;
     use lash_restate::LashProcessWorkflow;
@@ -497,9 +497,7 @@ submit "done via Restate E2E"
         );
         let process_deployment =
             lash_restate::RestateProcessDeployment::new(ingress_url, Arc::clone(&process_registry));
-        let core = LashCore::builder()
-            .install_mode(ModePreset::rlm())
-            .default_mode(ModeId::rlm())
+        let core = RlmCore::builder()
             .provider(provider)
             .model(
                 lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
