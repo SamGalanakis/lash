@@ -6,49 +6,11 @@ use tokio_util::sync::CancellationToken;
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{TurnActivity, TurnActivityId, TurnEvent};
 
-pub(crate) fn lashlang_host_environment_from_tool_catalog(
-    catalog: &crate::ToolCatalog,
-    abilities: lashlang::LashlangAbilities,
-    language_features: lashlang::LashlangLanguageFeatures,
-    host_resources: lashlang::LashlangHostCatalog,
-) -> lashlang::LashlangHostEnvironment {
-    let mut resources = lashlang_resources_from_tool_catalog(catalog);
-    resources.extend(host_resources);
-    lashlang::LashlangHostEnvironment::new(resources, abilities)
-        .with_language_features(language_features)
-}
-
-pub(crate) fn lashlang_resources_from_tool_catalog(
-    catalog: &crate::ToolCatalog,
-) -> lashlang::LashlangHostCatalog {
-    let mut host_catalog = lashlang::LashlangHostCatalog::new();
-    for entry in catalog.tools.iter() {
-        if entry.availability.is_callable() {
-            let lashlang_binding = entry
-                .manifest
-                .lashlang_binding
-                .executable_for(&entry.manifest.name);
-            host_catalog.add_module_operation(
-                lashlang_binding.module_path.iter().map(String::as_str),
-                lashlang_binding.authority_type.clone(),
-                lashlang_binding.operation.clone(),
-                entry.manifest.name.clone(),
-                lashlang::TypeExpr::Any,
-                lashlang::TypeExpr::Any,
-            );
-        }
-    }
-    host_catalog
-}
-
 #[derive(Clone)]
 pub struct RuntimeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
-    lashlang_abilities: lashlang::LashlangAbilities,
-    lashlang_language_features: lashlang::LashlangLanguageFeatures,
-    lashlang_host_environment: lashlang::LashlangHostEnvironment,
-    lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
     protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
@@ -60,8 +22,6 @@ pub struct RuntimeExecutionContext<'run> {
     process_env_ref: Option<crate::ProcessExecutionEnvRef>,
     process_wake_target: Option<crate::SessionScope>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
-    lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
-    lashlang_execution_context: lash_trace::TraceContext,
     turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
@@ -107,27 +67,16 @@ impl<'run> RuntimeExecutionContext<'run> {
     pub(crate) fn new(
         session_id: String,
         dispatch: Arc<ToolDispatchContext<'run>>,
-        lashlang_abilities: lashlang::LashlangAbilities,
-        lashlang_language_features: lashlang::LashlangLanguageFeatures,
-        lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+        process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
     ) -> Self {
-        let lashlang_host_environment = lashlang_host_environment_from_tool_catalog(
-            &dispatch.tool_catalog,
-            lashlang_abilities,
-            lashlang_language_features,
-            dispatch.plugins.lashlang_resources(),
-        );
         Self {
             session_id,
             dispatch,
-            lashlang_abilities,
-            lashlang_language_features,
-            lashlang_host_environment,
-            lashlang_artifact_store,
+            process_env_store,
             attachment_store,
             chronological_projection,
             protocol_extension,
@@ -143,8 +92,6 @@ impl<'run> RuntimeExecutionContext<'run> {
             process_env_ref: None,
             process_wake_target: None,
             parent_invocation: None,
-            lashlang_execution_sink: None,
-            lashlang_execution_context: lash_trace::TraceContext::default(),
             turn_phase_probe: None,
             turn_event_tx: None,
             cancellation_token: None,
@@ -155,18 +102,45 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self.session_id
     }
 
+    pub fn session_scope(&self) -> crate::SessionScope {
+        self.dispatch
+            .agent_frame_id
+            .as_str()
+            .is_empty()
+            .then(|| crate::SessionScope::new(self.session_id.clone()))
+            .unwrap_or_else(|| {
+                crate::SessionScope::for_agent_frame(
+                    self.session_id.clone(),
+                    self.dispatch.agent_frame_id.clone(),
+                )
+            })
+    }
+
+    pub fn trigger_store(&self) -> Option<Arc<dyn crate::TriggerStore>> {
+        self.dispatch
+            .trigger_router
+            .as_ref()
+            .map(crate::TriggerRouter::store)
+    }
+
+    pub fn trigger_registration_originator(&self) -> crate::ProcessOriginator {
+        self.process_originator
+            .clone()
+            .unwrap_or_else(|| crate::ProcessOriginator::session(self.session_scope()))
+    }
+
+    pub fn trigger_registration_wake_target(&self) -> Option<crate::SessionScope> {
+        self.process_wake_target
+            .clone()
+            .or_else(|| Some(self.session_scope()))
+    }
+
     pub fn attachment_store(&self) -> Arc<dyn crate::AttachmentStore> {
         Arc::clone(&self.attachment_store)
     }
 
-    pub async fn put_lashlang_module_artifact(
-        &self,
-        artifact: &lashlang::ModuleArtifact,
-    ) -> Result<(), String> {
-        self.lashlang_artifact_store
-            .put_module_artifact(artifact)
-            .await
-            .map_err(|err| err.to_string())
+    pub fn process_env_store(&self) -> Arc<dyn crate::ProcessExecutionEnvStore> {
+        Arc::clone(&self.process_env_store)
     }
 
     pub fn chronological_projection(&self) -> Arc<crate::ChronologicalProjection> {
@@ -181,6 +155,10 @@ impl<'run> RuntimeExecutionContext<'run> {
 
     pub fn turn_context(&self) -> &crate::TurnContext {
         &self.turn_context
+    }
+
+    pub fn tool_catalog(&self) -> Arc<crate::ToolCatalog> {
+        Arc::clone(&self.dispatch.tool_catalog)
     }
 
     pub(crate) fn session_graph_service(&self) -> &dyn crate::plugin::SessionGraphService {
@@ -278,7 +256,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             return Ok(registration);
         }
         match registration.input.as_ref() {
-            crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::LashlangProcess { .. } => {
+            crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::Engine { .. } => {
                 let env_ref = self.captured_process_execution_env_ref().await?;
                 Ok(registration.with_execution_env_ref(Some(env_ref)))
             }
@@ -288,27 +266,17 @@ impl<'run> RuntimeExecutionContext<'run> {
         }
     }
 
-    async fn captured_process_execution_env_ref(
+    pub async fn captured_process_execution_env_ref(
         &self,
     ) -> Result<crate::ProcessExecutionEnvRef, crate::PluginError> {
         if let Some(env_ref) = self.process_env_ref.clone() {
             return Ok(env_ref);
         }
         crate::persist_process_execution_env(
-            self.lashlang_artifact_store.as_ref(),
+            self.process_env_store.as_ref(),
             &self.execution_env_spec,
         )
         .await
-    }
-
-    pub(crate) fn with_lashlang_execution_trace(
-        mut self,
-        sink: Option<Arc<dyn lash_trace::TraceSink>>,
-        context: lash_trace::TraceContext,
-    ) -> Self {
-        self.lashlang_execution_sink = sink;
-        self.lashlang_execution_context = context;
-        self
     }
 
     pub(crate) fn with_turn_phase_probe(
@@ -328,14 +296,6 @@ impl<'run> RuntimeExecutionContext<'run> {
         self.parent_invocation.as_ref()
     }
 
-    pub fn lashlang_execution_sink(&self) -> Option<Arc<dyn lash_trace::TraceSink>> {
-        self.lashlang_execution_sink.clone()
-    }
-
-    pub fn lashlang_execution_context(&self) -> &lash_trace::TraceContext {
-        &self.lashlang_execution_context
-    }
-
     pub(crate) fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = Some(cancellation_token);
         self
@@ -353,229 +313,6 @@ impl<'run> RuntimeExecutionContext<'run> {
         crate::tool_dispatch::resolve_callable_manifest_by_id(&self.dispatch, id)
     }
 
-    pub fn resolve_lashlang_host_operation(
-        &self,
-        receiver: &lashlang::ResourceHandle,
-        operation: &str,
-    ) -> Result<String, String> {
-        self.lashlang_host_environment
-            .resources
-            .resolve_module_operation(&receiver.resource_type, &receiver.alias, operation)
-            .map(|binding| binding.host_operation.clone())
-            .ok_or_else(|| {
-                format!(
-                    "module `{}` of type `{}` does not expose operation `{operation}`",
-                    receiver.alias, receiver.resource_type
-                )
-            })
-    }
-
-    pub async fn prepare_lashlang_process_start(
-        &self,
-        start: lashlang::ProcessStart,
-    ) -> Result<(crate::ProcessRegistration, Option<String>), String> {
-        let _phase = self.named_phase("rlm_process.prepare_start");
-        let display_name = Some(start.process_name.clone());
-        let artifact = self
-            .lashlang_artifact_store
-            .get_module_artifact(&start.module_ref)
-            .await
-            .map_err(|err| format!("failed to load lashlang module artifact: {err}"))?
-            .ok_or_else(|| {
-                format!(
-                    "missing lashlang module artifact `{}` for process `{}`",
-                    start.module_ref, start.process_name
-                )
-            })?;
-        if artifact.host_requirements_ref != start.host_requirements_ref {
-            return Err(format!(
-                "lashlang module artifact `{}` host requirements mismatch: process requested {}, artifact has {}",
-                start.module_ref, start.host_requirements_ref, artifact.host_requirements_ref
-            ));
-        }
-        if artifact.process_ref(&start.process_name) != Some(&start.process_ref) {
-            return Err(format!(
-                "lashlang module artifact `{}` does not export process `{}` as requested ref {:?}",
-                start.module_ref, start.process_name, start.process_ref
-            ));
-        }
-        let args = match serde_json::to_value(lashlang::Value::Record(Arc::new(start.args)))
-            .map_err(|err| format!("failed to serialize process args: {err}"))?
-        {
-            serde_json::Value::Object(map) => map,
-            _ => return Err("process args must serialize as a record".to_string()),
-        };
-        let signal_event_types = artifact
-            .canonical_ir
-            .process(&start.process_name)
-            .map(crate::lashlang_process_signal_event_types)
-            .unwrap_or_default();
-        let process_id = format!("process:{}", uuid::Uuid::new_v4());
-        let registration = crate::ProcessRegistration::session_start_draft(
-            process_id,
-            crate::ProcessInput::LashlangProcess {
-                module_ref: start.module_ref,
-                process_ref: start.process_ref,
-                host_requirements_ref: start.host_requirements_ref,
-                process_name: start.process_name,
-                args,
-            },
-        )
-        .with_extra_event_types(
-            crate::lashlang_process_event_types()
-                .into_iter()
-                .chain(signal_event_types),
-        );
-        Ok((registration, display_name))
-    }
-
-    pub fn lashlang_host_environment(&self) -> &lashlang::LashlangHostEnvironment {
-        &self.lashlang_host_environment
-    }
-
-    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
-        self.lashlang_abilities
-    }
-
-    pub fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
-        self.lashlang_language_features
-    }
-
-    pub fn link_lashlang_module(
-        &self,
-        program: lashlang::Program,
-    ) -> Result<lashlang::LinkedModule, String> {
-        lashlang::LinkedModule::link(program, self.lashlang_host_environment())
-            .map_err(|err| err.to_string())
-    }
-
-    pub async fn perform_lashlang_trigger_operation(
-        &self,
-        operation: &str,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        match lashlang::TriggerHostOperation::from_host_operation(operation) {
-            Some(lashlang::TriggerHostOperation::Register) => self
-                .register_trigger_subscription(payload)
-                .await
-                .map_err(|err| err.to_string()),
-            Some(lashlang::TriggerHostOperation::List) => self
-                .list_trigger_subscriptions(payload)
-                .await
-                .map_err(|err| err.to_string()),
-            Some(lashlang::TriggerHostOperation::Cancel) => self
-                .cancel_trigger_subscription(payload)
-                .await
-                .map_err(|err| err.to_string()),
-            None => Err(format!("unknown trigger operation `{operation}`")),
-        }
-    }
-
-    async fn register_trigger_subscription(
-        &self,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, crate::PluginError> {
-        let router = self.dispatch.trigger_router.as_ref().ok_or_else(|| {
-            crate::PluginError::Session("trigger store is unavailable in this runtime".to_string())
-        })?;
-        let request = lashlang::TriggerRegistrationRequest::decode(&payload)
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let source_type = request.source.source_type.clone();
-        let source_value = request.source.value.clone();
-        let source = request.source.to_json();
-        let validation = crate::plugin::validate_target_process(
-            &request.target,
-            &source_type,
-            &request.inputs,
-            self.lashlang_artifact_store.as_ref(),
-        )
-        .await?;
-        let store = router.store();
-        let source_key = store
-            .source_key_for_subscription(&source_type, &source_value)
-            .await?;
-        let env_ref = match self.process_env_ref.clone() {
-            Some(env_ref) => env_ref,
-            None => {
-                crate::persist_process_execution_env(
-                    self.lashlang_artifact_store.as_ref(),
-                    &self.execution_env_spec,
-                )
-                .await?
-            }
-        };
-        let registrant = self.process_originator.clone().unwrap_or_else(|| {
-            crate::ProcessOriginator::session(crate::SessionScope::new(self.session_id.clone()))
-        });
-        let wake_target = self
-            .process_wake_target
-            .clone()
-            .or_else(|| match &registrant {
-                crate::ProcessOriginator::Session { scope } => Some(scope.clone()),
-                crate::ProcessOriginator::Host => None,
-            });
-        let record = store
-            .register_subscription(crate::TriggerSubscriptionDraft {
-                registrant,
-                env_ref,
-                wake_target,
-                name: request.name,
-                source_type,
-                source_key,
-                source,
-                event_ty: validation.resolved_event_type,
-                module_ref: validation.definition.module_ref,
-                host_requirements_ref: validation.definition.host_requirements_ref,
-                process_ref: validation.definition.process_ref,
-                process_name: validation.definition.process_name,
-                input_template: validation.inputs,
-            })
-            .await?;
-        Ok(crate::plugin::trigger_handle_json(&record.handle))
-    }
-
-    async fn list_trigger_subscriptions(
-        &self,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, crate::PluginError> {
-        let router = self.dispatch.trigger_router.as_ref().ok_or_else(|| {
-            crate::PluginError::Session("trigger store is unavailable in this runtime".to_string())
-        })?;
-        let request = lashlang::TriggerListRequest::decode(&payload)
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let mut filter = crate::TriggerSubscriptionFilter::for_session(&self.session_id);
-        filter.target = request.target;
-        filter.name = request.name;
-        filter.source_type = request.source_type;
-        filter.enabled = request.enabled;
-        let registrations = router
-            .store()
-            .list_subscriptions(filter)
-            .await?
-            .iter()
-            .map(crate::TriggerRegistration::from)
-            .collect::<Vec<_>>();
-        serde_json::to_value(registrations).map_err(|err| {
-            crate::PluginError::Session(format!("failed to encode trigger registrations: {err}"))
-        })
-    }
-
-    async fn cancel_trigger_subscription(
-        &self,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, crate::PluginError> {
-        let router = self.dispatch.trigger_router.as_ref().ok_or_else(|| {
-            crate::PluginError::Session("trigger store is unavailable in this runtime".to_string())
-        })?;
-        let request = lashlang::TriggerCancelRequest::decode(&payload)
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let changed = router
-            .store()
-            .cancel_subscription(&self.session_id, &request.handle)
-            .await?;
-        Ok(serde_json::json!(changed))
-    }
-
     pub fn tool_argument_projection_policy(
         &self,
         name: &str,
@@ -583,12 +320,13 @@ impl<'run> RuntimeExecutionContext<'run> {
         crate::tool_dispatch::resolve_tool_argument_projection_policy(&self.dispatch, name)
     }
 
-    pub async fn start_lashlang_process(
+    pub async fn start_child_process(
         &self,
         registration: crate::ProcessRegistration,
+        kind: impl Into<String>,
         label: Option<String>,
     ) -> crate::ToolInvocationReply {
-        let _phase = self.named_phase("rlm_process.start");
+        let _phase = self.named_phase("process.start_child");
         let registration = match self
             .attach_captured_process_execution_env(registration)
             .await
@@ -600,7 +338,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         };
         let process_id = registration.id.clone();
         let mut options = crate::ProcessStartOptions::new()
-            .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label));
+            .with_descriptor(crate::ProcessHandleDescriptor::new(Some(kind), label));
         if let Some(spawn) = self.process_spawn_provenance() {
             options = options.with_spawn_provenance(spawn);
         }
@@ -617,22 +355,20 @@ impl<'run> RuntimeExecutionContext<'run> {
         {
             Ok(_) => {
                 self.record_started_process(&process_id);
-                crate::ToolInvocationReply::success(crate::lashlang_bridge::process_handle_json(
-                    &process_id,
-                ))
+                crate::ToolInvocationReply::success(Self::process_handle_json(&process_id))
             }
             Err(err) => crate::ToolInvocationReply::error(serde_json::json!(err.to_string())),
         }
     }
 
-    pub async fn sleep_lashlang(
+    pub async fn sleep_process(
         &self,
         scope: &str,
         sequence: u64,
         duration_ms: u64,
     ) -> Result<(), crate::RuntimeEffectControllerError> {
         let cancellation = self.cancellation_token.clone().unwrap_or_default();
-        let invocation = crate::runtime::causal::lashlang_sleep_invocation(
+        let invocation = crate::runtime::causal::process_sleep_invocation(
             &self.session_id,
             self.parent_invocation.as_ref(),
             scope,
@@ -659,12 +395,10 @@ impl<'run> RuntimeExecutionContext<'run> {
         }
     }
 
-    pub async fn await_process_event_lashlang(
+    pub async fn await_process_signal_event(
         &self,
-        _registry: Arc<dyn crate::ProcessRegistry>,
         process_id: &str,
         signal_name: &str,
-        _event_type: &str,
         event_ordinal: u64,
     ) -> Result<serde_json::Value, crate::RuntimeEffectControllerError> {
         let cancellation = self.cancellation_token.clone().unwrap_or_default();
@@ -681,7 +415,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 ),
             )
             .await?;
-        let invocation = crate::runtime::causal::lashlang_await_event_invocation(
+        let invocation = crate::runtime::causal::process_await_event_invocation(
             &self.session_id,
             self.parent_invocation.as_ref(),
             process_id,
@@ -717,7 +451,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         }
     }
 
-    pub async fn signal_lashlang_process(
+    pub async fn signal_process_by_id(
         &self,
         registry: Arc<dyn crate::ProcessRegistry>,
         process_id: &str,
@@ -811,6 +545,26 @@ impl<'run> RuntimeExecutionContext<'run> {
             )),
         }
     }
+
+    pub async fn append_process_event(
+        &self,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        process_id: &str,
+        request: crate::ProcessEventAppendRequest,
+    ) -> Result<crate::ProcessEvent, crate::PluginError> {
+        let result = registry.append_event(process_id, request).await?;
+        if let Some(context) = self.process_event_context.as_ref() {
+            crate::tool_provider::process_events::enqueue_wake_delivery(
+                context.store.clone(),
+                context.session_store_factory.as_ref(),
+                result.wake_delivery,
+                Some(self.session_graph_service()),
+                context.queued_work_poke.as_ref(),
+            )
+            .await?;
+        }
+        Ok(result.event)
+    }
 }
 
 #[cfg(test)]
@@ -887,9 +641,7 @@ mod tests {
         let ctx = RuntimeExecutionContext::new(
             "session".to_string(),
             dispatch,
-            Default::default(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -904,290 +656,5 @@ mod tests {
             ctx.tool_argument_projection_policy("missing"),
             crate::ToolArgumentProjectionPolicy::MaterializeProjectedValues
         );
-    }
-
-    #[tokio::test]
-    async fn prepare_lashlang_process_start_captures_tool_ids_and_explicit_input() {
-        let tool = crate::ToolDefinition::raw(
-            "tool:alpha",
-            "alpha",
-            "Alpha tool.",
-            crate::ToolDefinition::default_input_schema(),
-            serde_json::json!({ "type": "object", "additionalProperties": true }),
-        );
-        let plugins = crate::plugin::PluginHost::empty()
-            .build_session("session", None)
-            .expect("plugin session");
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
-        let dispatch = Arc::new(ToolDispatchContext {
-            plugins,
-            tools: Arc::new(NoopTools),
-            tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
-                vec![tool.manifest()],
-                std::collections::BTreeMap::new(),
-            )),
-            sessions: Arc::new(crate::testing::MockSessionManager::default()),
-            session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
-            session_graph: Arc::new(crate::testing::MockSessionManager::default()),
-            processes: Arc::new(crate::UnavailableProcessService),
-            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            trigger_router: None,
-            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
-            )),
-            direct_completions: crate::DirectCompletionClient::unavailable(
-                "direct completions are unavailable in this test context",
-            ),
-            parent_invocation: None,
-            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
-                crate::PluginOptions::default(),
-                crate::SessionPolicy::default(),
-            ),
-            session_id: "session".to_string(),
-            agent_frame_id: String::new(),
-            event_tx,
-            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            turn_context: crate::TurnContext::default(),
-        });
-        let ctx = RuntimeExecutionContext::new(
-            "session".to_string(),
-            dispatch,
-            lashlang::LashlangAbilities::default().with_processes(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
-            Arc::new(crate::ChronologicalProjection::default()),
-            None,
-            crate::TurnContext::default(),
-        );
-        let mut input = lashlang::Record::new();
-        input.insert("root".to_string(), lashlang::Value::String(".".into()));
-        let linked = ctx
-            .link_lashlang_module(
-                lashlang::parse("process scan(root: str) { finish root }").expect("process module"),
-            )
-            .expect("link process module");
-        ctx.put_lashlang_module_artifact(&linked.artifact)
-            .await
-            .expect("store module artifact");
-        let process_ref = linked
-            .artifact
-            .process_ref("scan")
-            .expect("scan process ref")
-            .clone();
-        let (registration, label) = ctx
-            .prepare_lashlang_process_start(lashlang::ProcessStart {
-                module_ref: linked.module_ref.clone(),
-                process_ref,
-                host_requirements_ref: linked.host_requirements_ref.clone(),
-                process_name: "scan".to_string(),
-                args: input,
-            })
-            .await
-            .expect("process start should prepare");
-
-        assert_eq!(label.as_deref(), Some("scan"));
-        assert!(
-            registration
-                .event_types
-                .iter()
-                .any(|event_type| event_type.name == "process.wake")
-        );
-        let crate::ProcessInput::LashlangProcess {
-            args, process_name, ..
-        } = registration.input.as_ref()
-        else {
-            panic!("expected lashlang process input");
-        };
-        assert_eq!(process_name, "scan");
-        assert_eq!(args.get("root"), Some(&serde_json::json!(".")));
-    }
-
-    #[test]
-    fn lashlang_host_environment_reflects_host_abilities() {
-        let tool = crate::ToolDefinition::raw(
-            "tool:alpha",
-            "alpha",
-            "Alpha tool.",
-            crate::ToolDefinition::default_input_schema(),
-            serde_json::json!({ "type": "object", "additionalProperties": true }),
-        );
-        let plugins = crate::plugin::PluginHost::empty()
-            .build_session("session", None)
-            .expect("plugin session");
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
-        let dispatch = Arc::new(ToolDispatchContext {
-            plugins,
-            tools: Arc::new(NoopTools),
-            tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
-                vec![tool.manifest()],
-                std::collections::BTreeMap::new(),
-            )),
-            sessions: Arc::new(crate::testing::MockSessionManager::default()),
-            session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
-            session_graph: Arc::new(crate::testing::MockSessionManager::default()),
-            processes: Arc::new(crate::UnavailableProcessService),
-            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            trigger_router: None,
-            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
-            )),
-            direct_completions: crate::DirectCompletionClient::unavailable(
-                "direct completions are unavailable in this test context",
-            ),
-            parent_invocation: None,
-            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
-                crate::PluginOptions::default(),
-                crate::SessionPolicy::default(),
-            ),
-            session_id: "session".to_string(),
-            agent_frame_id: String::new(),
-            event_tx,
-            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            turn_context: crate::TurnContext::default(),
-        });
-        let ctx = RuntimeExecutionContext::new(
-            "session".to_string(),
-            dispatch,
-            lashlang::LashlangAbilities::default()
-                .with_sleep()
-                .with_processes()
-                .with_process_signals(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
-            Arc::new(crate::ChronologicalProjection::default()),
-            None,
-            crate::TurnContext::default(),
-        );
-
-        let environment = ctx.lashlang_host_environment();
-
-        assert!(std::ptr::eq(environment, ctx.lashlang_host_environment()));
-        assert!(environment.abilities.processes);
-        assert!(environment.abilities.sleep);
-        assert!(environment.abilities.process_signals);
-        assert!(!environment.abilities.triggers);
-        assert!(
-            environment
-                .resources
-                .resolve_operation("Tools", "alpha")
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn lashlang_host_environment_reflects_host_resource_contributions() {
-        let mut resources = lashlang::LashlangHostCatalog::new();
-        resources
-            .add_trigger_source_constructor(
-                ["clock", "Alarm"],
-                lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-                    name: "at".into(),
-                    ty: lashlang::TypeExpr::Str,
-                    optional: false,
-                }]),
-                lashlang::NamedDataType::object(
-                    "clock.Tick",
-                    vec![lashlang::TypeField {
-                        name: "fired_at".into(),
-                        ty: lashlang::TypeExpr::Str,
-                        optional: false,
-                    }],
-                )
-                .expect("valid clock tick type"),
-            )
-            .expect("valid clock trigger source");
-        let plugin_host = crate::plugin::PluginHost::empty();
-        let mut merged_resources = plugin_host.lashlang_resources();
-        merged_resources.extend(resources);
-        let plugins = plugin_host
-            .with_lashlang_resources(merged_resources)
-            .build_session("session", None)
-            .expect("plugin session");
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
-        let dispatch = Arc::new(ToolDispatchContext {
-            plugins,
-            tools: Arc::new(NoopTools),
-            tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
-                Vec::new(),
-                std::collections::BTreeMap::new(),
-            )),
-            sessions: Arc::new(crate::testing::MockSessionManager::default()),
-            session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
-            session_graph: Arc::new(crate::testing::MockSessionManager::default()),
-            processes: Arc::new(crate::UnavailableProcessService),
-            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-            trigger_router: None,
-            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
-            )),
-            direct_completions: crate::DirectCompletionClient::unavailable(
-                "direct completions are unavailable in this test context",
-            ),
-            parent_invocation: None,
-            execution_env_spec: crate::ProcessExecutionEnvSpec::new(
-                crate::PluginOptions::default(),
-                crate::SessionPolicy::default(),
-            ),
-            session_id: "session".to_string(),
-            agent_frame_id: String::new(),
-            event_tx,
-            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            turn_context: crate::TurnContext::default(),
-        });
-        let ctx = RuntimeExecutionContext::new(
-            "session".to_string(),
-            dispatch,
-            lashlang::LashlangAbilities::default()
-                .with_processes()
-                .with_triggers(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
-            Arc::new(crate::ChronologicalProjection::default()),
-            None,
-            crate::TurnContext::default(),
-        );
-
-        let host_environment = ctx.lashlang_host_environment();
-
-        assert!(
-            host_environment
-                .resources
-                .resolve_value_constructor(&["clock", "Alarm"])
-                .is_some()
-        );
-        assert!(
-            host_environment
-                .resources
-                .resolve_trigger_source("clock.Alarm")
-                .is_some()
-        );
-        lashlang::LinkedModule::link(
-            lashlang::parse(
-                r#"
-                process remember(tick: clock.Tick) {
-                  finish true
-                }
-
-                source = clock.Alarm({ at: "08:00" })
-                await triggers.register({
-                  source: source,
-                  target: remember,
-                  inputs: { tick: trigger.event }
-                })?
-                "#,
-            )
-            .expect("parse trigger registry module"),
-            host_environment,
-        )
-        .expect("host resource contribution should be linkable");
     }
 }

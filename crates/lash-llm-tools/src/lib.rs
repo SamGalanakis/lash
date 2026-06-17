@@ -7,7 +7,9 @@ use lash_core::{
     PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult,
     ToolScheduling,
 };
-use lash_tool_support::{StaticToolExecute, StaticToolProvider};
+use lash_tool_support::{
+    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
+};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Default)]
@@ -149,7 +151,7 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
         ],
         ToolScheduling::Parallel,
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["llm"], "query"))
+    .with_lashlang_binding(LashlangToolBinding::new(["llm"], "query"))
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
 }
 
@@ -167,11 +169,14 @@ pub fn parse_output_schema(value: Option<&Value>) -> Result<Option<Value>, Strin
         return Err("at least one output field is required".to_string());
     }
 
-    if output.len() == 1
-        && let Some(schema) = output.get(lashlang::LASH_TYPE_KEY)
+    #[cfg(feature = "lashlang")]
     {
-        validate_schema(schema)?;
-        return Ok(Some(schema.clone()));
+        if output.len() == 1
+            && let Some(schema) = output.get(lash_lashlang_runtime::LASH_TYPE_KEY)
+        {
+            validate_schema(schema)?;
+            return Ok(Some(schema.clone()));
+        }
     }
 
     let mut properties = serde_json::Map::new();
@@ -320,6 +325,7 @@ fn required_string(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required parameter: {key}"))
 }
 
+#[cfg(feature = "lashlang")]
 fn validate_schema(schema: &Value) -> Result<(), String> {
     let object = schema
         .as_object()
@@ -462,6 +468,14 @@ mod tests {
             manifests[0].effective_availability(),
             lash_core::ToolAvailability::Showcased
         );
+        #[cfg(not(feature = "lashlang"))]
+        assert!(manifests[0].bindings.is_empty());
+        #[cfg(feature = "lashlang")]
+        assert!(
+            manifests[0]
+                .bindings
+                .contains_key(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
+        );
     }
 
     #[test]
@@ -478,8 +492,11 @@ mod tests {
         assert_eq!(schema["properties"]["items"]["type"], json!("array"));
     }
 
+    #[cfg(feature = "lashlang")]
     #[test]
     fn output_schema_passes_through_lash_type_wrapper() {
+        use lash_lashlang_runtime::LASH_TYPE_KEY;
+
         let inner_schema = json!({
             "type": "object",
             "properties": {
@@ -490,24 +507,30 @@ mod tests {
             "required": ["name", "tags", "status"],
             "additionalProperties": false
         });
-        let wrapped = json!({ lashlang::LASH_TYPE_KEY: inner_schema.clone() });
+        let wrapped = json!({ LASH_TYPE_KEY: inner_schema.clone() });
         let schema = parse_output_schema(Some(&wrapped))
             .expect("schema")
             .expect("present");
         assert_eq!(schema, inner_schema);
     }
 
+    #[cfg(feature = "lashlang")]
     #[test]
     fn output_schema_rejects_lash_type_without_type_field() {
-        let wrapped = json!({ lashlang::LASH_TYPE_KEY: {"properties": {}} });
+        use lash_lashlang_runtime::LASH_TYPE_KEY;
+
+        let wrapped = json!({ LASH_TYPE_KEY: {"properties": {}} });
         let err = parse_output_schema(Some(&wrapped)).expect_err("missing type");
         assert!(err.contains("type"), "error: {err}");
     }
 
+    #[cfg(feature = "lashlang")]
     #[test]
     fn output_schema_accepts_array_top_level_type() {
+        use lash_lashlang_runtime::LASH_TYPE_KEY;
+
         let wrapped = json!({
-            lashlang::LASH_TYPE_KEY: {
+            LASH_TYPE_KEY: {
                 "type": "array",
                 "items": {"type": "string"}
             }

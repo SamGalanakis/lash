@@ -33,7 +33,7 @@ impl ToolSessionProcessAdmin<'_> {
         if request.env_spec.is_none()
             && matches!(
                 &request.input,
-                crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::LashlangProcess { .. }
+                crate::ProcessInput::ToolCall { .. } | crate::ProcessInput::Engine { .. }
             )
         {
             request.env_spec = Some(self.execution_env_spec.clone());

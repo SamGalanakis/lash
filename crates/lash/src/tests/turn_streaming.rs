@@ -1,5 +1,5 @@
 use super::*;
-use crate::modes::RlmTurnBuilderExt as _;
+use crate::rlm::RlmTurnBuilderExt as _;
 
 #[derive(Clone, Debug)]
 struct DurableEffectInvocation {
@@ -85,6 +85,33 @@ impl lash_core::RuntimeEffectController for RecordingInlineEffectController {
 }
 
 #[derive(Default)]
+struct DurableInMemoryProcessEnvStore {
+    inner: lash_core::InMemoryProcessExecutionEnvStore,
+}
+
+#[async_trait]
+impl lash_core::ProcessExecutionEnvStore for DurableInMemoryProcessEnvStore {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    async fn put_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+        bytes: &[u8],
+    ) -> std::result::Result<(), lash_core::PluginError> {
+        self.inner.put_process_execution_env(env_ref, bytes).await
+    }
+
+    async fn get_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+    ) -> std::result::Result<Option<Vec<u8>>, lash_core::PluginError> {
+        self.inner.get_process_execution_env(env_ref).await
+    }
+}
+
+#[derive(Default)]
 struct DurableNoopEffectHost;
 
 impl lash_core::EffectHost for DurableNoopEffectHost {
@@ -156,7 +183,7 @@ impl ToolProvider for BlockingAppTools {
 async fn turn_run_uses_configured_inline_effect_host_without_explicit_effects() -> Result<()> {
     let recorder = Arc::new(RecordingInlineEffectController::default());
     let effect_controller: Arc<dyn lash_core::RuntimeEffectController> = recorder.clone();
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .effect_host(Arc::new(lash_core::InlineEffectHost::new(
             effect_controller,
         )))
@@ -185,7 +212,15 @@ async fn turn_run_uses_configured_inline_effect_host_without_explicit_effects() 
 
 #[tokio::test]
 async fn durable_configured_effect_host_requires_explicit_handler_effects() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let dir = tempfile::tempdir().expect("tempdir");
+    let core = RlmCore::builder()
+        .lashlang_artifact_store(Arc::new(
+            crate::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(crate::persistence::FileAttachmentStore::new(
+            dir.path().join("attachments"),
+        )))
+        .process_env_store(Arc::new(DurableInMemoryProcessEnvStore::default()))
         .effect_host(Arc::new(DurableNoopEffectHost))
         .provider(mock_provider())
         .model(mock_model_spec())
@@ -209,7 +244,7 @@ async fn durable_configured_effect_host_requires_explicit_handler_effects() -> R
 async fn turn_id_sets_execution_scope_and_trace_identity() -> Result<()> {
     let recorder = Arc::new(RecordingInlineEffectController::default());
     let effect_controller: Arc<dyn lash_core::RuntimeEffectController> = recorder.clone();
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .effect_host(Arc::new(lash_core::InlineEffectHost::new(
             effect_controller,
         )))
@@ -263,7 +298,7 @@ async fn explicit_effect_controller_creates_turn_scope_internally() -> Result<()
 
 #[tokio::test]
 async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -290,7 +325,7 @@ async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Resul
 #[tokio::test]
 async fn queued_turn_explicit_effects_create_queue_drain_scope_internally() -> Result<()> {
     let recorder = RecordingInlineEffectController::default();
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -458,7 +493,7 @@ fn observation_assistant_delta(event: &lash_core::SessionObservationEvent) -> Op
 
 #[tokio::test]
 async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(semantic_group_provider())
         .model(mock_model_spec())
         .build()?;
@@ -479,7 +514,7 @@ async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
 
 #[tokio::test]
 async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(semantic_group_provider())
         .model(mock_model_spec())
         .build()?;
@@ -494,7 +529,7 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
 
 #[tokio::test]
 async fn retry_status_streams_as_semantic_turn_event() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(retry_once_provider())
         .model(mock_model_spec())
         .build()?;
@@ -549,7 +584,7 @@ async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
 async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -640,7 +675,7 @@ async fn cancel_running_turns_stops_inflight_turn() -> Result<()> {
         })
         .build()
         .into_handle();
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(provider)
         .model(mock_model_spec())
         .build()
@@ -693,7 +728,7 @@ async fn cancel_running_turns_sweeps_lock_queued_turns() -> Result<()> {
     // instead of starting a fresh provider call after the user pressed stop.
     let (started_tx, started_rx) = oneshot::channel::<()>();
     let provider = hang_on_signal_provider(Arc::new(StdMutex::new(vec![started_tx])));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(provider)
         .model(mock_model_spec())
         .build()
@@ -726,7 +761,7 @@ async fn cancel_running_turns_does_not_cross_separately_opened_handles() -> Resu
     // scope of cancel_running_turns is the opened handle and its clones.
     let (started_tx, started_rx) = oneshot::channel::<()>();
     let provider = hang_on_signal_provider(Arc::new(StdMutex::new(vec![started_tx])));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(provider)
         .model(mock_model_spec())
         .build()
@@ -759,7 +794,7 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
     // turns, so a stop sweep reaches them too.
     let (started_tx, started_rx) = oneshot::channel::<()>();
     let provider = hang_on_signal_provider(Arc::new(StdMutex::new(vec![started_tx])));
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(provider)
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -795,7 +830,7 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
 
 #[tokio::test]
 async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -833,7 +868,7 @@ async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
 
 #[tokio::test]
 async fn await_queued_work_batch_resolves_immediately_for_unknown_batch() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -974,7 +1009,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
 #[tokio::test]
 async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
     let live = Arc::new(RecordingEvents::default());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -1017,7 +1052,7 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
 async fn pending_host_tool_completion_parks_turn_and_resolves_through_core_ingress() -> Result<()> {
     let (key_tx, key_rx) = oneshot::channel();
     let events = Arc::new(RecordingEvents::default());
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(PendingAppTools::new(key_tx)))
@@ -1133,7 +1168,7 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
 
 #[tokio::test]
 async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -1189,7 +1224,7 @@ fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
 }
 
 async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
         ]))
@@ -1315,7 +1350,7 @@ fn rlm_pending_host_tool_completion_resumes_lashlang_await() -> Result<()> {
 async fn rlm_pending_host_tool_completion_resumes_lashlang_await_inner() -> Result<()> {
     let (key_tx, key_rx) = oneshot::channel();
     let events = Arc::new(RecordingEvents::default());
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit value\n```",
         ]))
@@ -1389,7 +1424,7 @@ fn rlm_process_pending_host_tool_completion_resumes_process_await() -> Result<()
 async fn rlm_process_pending_host_tool_completion_resumes_process_await_inner() -> Result<()> {
     let (key_tx, key_rx) = oneshot::channel();
     let events = Arc::new(RecordingEvents::default());
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             r#"```lashlang
 process lookup(tools: Tools) {
@@ -1469,7 +1504,7 @@ fn continue_as_observation_emits_frame_switch_then_commit() -> Result<()> {
 }
 
 async fn continue_as_observation_emits_frame_switch_then_commit_inner() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             "```lashlang\nawait control.continue_as({ task: \"finish in a fresh frame\" })?\n```",
             "```lashlang\nsubmit \"done after continue_as\"\n```",
@@ -1517,28 +1552,13 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         dir.path().join("sessions"),
     ));
-    let artifact_store = Arc::new(
-        lash_sqlite_store::Store::open(&dir.path().join("artifacts.db"))
-            .await
-            .expect("open artifact store"),
-    );
-    let process_registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
-            .await
-            .expect("open process registry"),
-    );
-    let trigger_store = Arc::new(
-        lash_sqlite_store::SqliteTriggerStore::open(&dir.path().join("triggers.db"))
-            .await
-            .expect("open trigger store"),
-    );
     let controller = Arc::new(RecordingDurableEffectController::default());
     let scoped_effect_controller = ScopedEffectController::borrowed(
         controller.as_ref(),
         lash_core::ExecutionScope::turn(session_id, root_turn_id),
     )
     .expect("scoped durable effect controller");
-    let core = explicit_ephemeral_facets(LashCore::standard())
+    let core = StandardCore::builder()
         .provider(agent_frame_switch_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AgentFrameSwitchTools))
@@ -1546,9 +1566,8 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
         .attachment_store(Arc::new(crate::persistence::FileAttachmentStore::new(
             dir.path().join("attachments"),
         )))
-        .lashlang_artifact_store(artifact_store)
-        .trigger_store(trigger_store)
-        .process_registry(process_registry)
+        .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
+        .process_env_store(Arc::new(DurableInMemoryProcessEnvStore::default()))
         .build()?;
     let session = core.session(session_id).open().await?;
     let mut input = TurnInput::text("switch frames");
@@ -1615,7 +1634,7 @@ fn processes_lists_started_lashlang_process_until_awaited() -> Result<()> {
 async fn processes_lists_started_lashlang_process_until_awaited_inner() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             r#"```lashlang
 process lookup(tools: Tools) {
@@ -1686,7 +1705,7 @@ async fn lashlang_execution_graph_store_observes_lashlang_process_from_facade_in
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let graph_store = Arc::new(crate::tracing::TraceLashlangGraphStore::default());
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             r#"```lashlang
 process lookup(tools: Tools) {
@@ -1731,7 +1750,10 @@ submit value
     assert_eq!(graph.graph_key, format!("process:{}", running.process_id));
     assert_eq!(graph.entry_kind, "process");
     assert_eq!(graph.entry_name, "lookup");
-    assert_eq!(graph.status, lash_core::TraceLashlangStatus::Running);
+    assert_eq!(
+        graph.status,
+        lash_lashlang_runtime::TraceLashlangStatus::Running
+    );
     assert!(!graph.nodes.is_empty());
     assert!(
         graph_store
@@ -1747,7 +1769,7 @@ submit value
 
 #[tokio::test]
 async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec!["done in prose"]))
         .model(mock_model_spec())
         .build()?;
@@ -1783,7 +1805,7 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
 
 #[tokio::test]
 async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             "```lashlang\nsubmit \"done via submit\"\n```",
         ]))
@@ -1823,7 +1845,7 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
 
 #[tokio::test]
 async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Result<()> {
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             "```lashlang\nthis is not valid lashlang\n```",
             "```lashlang\nsubmit \"recovered\"\n```",

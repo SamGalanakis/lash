@@ -37,6 +37,21 @@ async fn append_process_wake_to_queue(
     wake
 }
 
+fn process_wake_event_type() -> crate::ProcessEventType {
+    crate::ProcessEventType {
+        name: "process.wake".to_string(),
+        payload_schema: crate::LashSchema::any(),
+        semantics: crate::ProcessEventSemanticsSpec {
+            wake: Some(crate::ProcessWakeSpec {
+                when: None,
+                input: crate::ProcessValueSelector::Pointer("/text".to_string()),
+                dedupe_key: crate::ProcessWakeDedupeKey::EventIdentity,
+            }),
+            ..crate::ProcessEventSemanticsSpec::default()
+        },
+    }
+}
+
 async fn enqueue_turn_input_for_checkpoint(
     store: &RecordingStore,
     session_id: &str,
@@ -709,7 +724,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
                 crate::ProcessProvenance::session(target_scope.clone())
                     .with_caused_by(Some(process_caused_by.clone())),
             )
-            .with_extra_event_types(crate::lashlang_process_event_types()),
+            .with_extra_event_types([process_wake_event_type()]),
         )
         .await
         .expect("register wake process");
@@ -881,7 +896,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
                 crate::ProcessProvenance::session(target_scope.clone())
                     .with_caused_by(Some(process_caused_by.clone())),
             )
-            .with_extra_event_types(crate::lashlang_process_event_types()),
+            .with_extra_event_types([process_wake_event_type()]),
         )
         .await
         .expect("register wake process");

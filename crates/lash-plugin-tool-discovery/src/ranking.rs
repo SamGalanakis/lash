@@ -2,12 +2,16 @@ use std::collections::{BTreeSet, HashMap};
 #[cfg(feature = "semantic-tool-search")]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(all(test, feature = "lashlang"))]
+use lash_lashlang_runtime::tool_lashlang_binding;
 use serde_json::Value;
 
 use crate::catalog::CatalogTool;
+#[cfg(feature = "lashlang")]
+use crate::common::module_filter;
 use crate::common::{
-    FUZZY_SCORE_CAP, RRF_K, SEMANTIC_CANDIDATE_FLOOR, exclude_filter, limit_from_args,
-    module_filter, round_score, tokenize,
+    FUZZY_SCORE_CAP, RRF_K, SEMANTIC_CANDIDATE_FLOOR, exclude_filter, limit_from_args, round_score,
+    tokenize,
 };
 #[cfg(feature = "semantic-tool-search")]
 use crate::schema_index::semantic_index_text;
@@ -47,9 +51,9 @@ pub struct ToolDiscoveryIndex {
 }
 
 impl ToolDiscoveryIndex {
-    pub(crate) fn build(key: u64, catalog: Vec<Value>) -> Self {
+    pub(crate) fn build(key: u64, catalog: &[Value]) -> Self {
         let docs: Vec<DiscoveryDoc> = catalog
-            .into_iter()
+            .iter()
             .filter_map(CatalogTool::from_value)
             .filter(|tool| tool.searchable)
             .map(DiscoveryDoc::from_tool)
@@ -256,8 +260,11 @@ impl ToolDiscoveryIndex {
 impl DiscoveryDoc {
     fn from_tool(tool: CatalogTool) -> Self {
         let mut fields = Vec::new();
+        push_field(&mut fields, "id", vec![tool.id.clone()], 4.0, true);
         push_field(&mut fields, "name", vec![tool.name.clone()], 9.0, true);
+        #[cfg(feature = "lashlang")]
         push_field(&mut fields, "call", vec![tool.call.clone()], 9.0, true);
+        #[cfg(feature = "lashlang")]
         push_field(
             &mut fields,
             "module",
@@ -265,6 +272,7 @@ impl DiscoveryDoc {
             3.0,
             true,
         );
+        #[cfg(feature = "lashlang")]
         push_field(&mut fields, "aliases", tool.aliases.clone(), 8.0, true);
         push_field(
             &mut fields,
@@ -317,18 +325,21 @@ impl DiscoveryDoc {
     }
 
     fn matches_filters(&self, args: &Value) -> bool {
-        let modules = module_filter(args.get("module"));
-        if !modules.is_empty()
-            && !self
-                .tool
-                .module_path
-                .iter()
-                .any(|segment| modules.iter().any(|candidate| candidate == segment))
-            && !modules
-                .iter()
-                .any(|candidate| candidate == &self.tool.module_path.join("."))
+        #[cfg(feature = "lashlang")]
         {
-            return false;
+            let modules = module_filter(args.get("module"));
+            if !modules.is_empty()
+                && !self
+                    .tool
+                    .module_path
+                    .iter()
+                    .any(|segment| modules.iter().any(|candidate| candidate == segment))
+                && !modules
+                    .iter()
+                    .any(|candidate| candidate == &self.tool.module_path.join("."))
+            {
+                return false;
+            }
         }
         !exclude_filter(args.get("exclude")).contains(&self.tool.name)
     }
@@ -609,7 +620,8 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{LashlangToolBinding, ToolContract, ToolDefinition};
+    use lash_core::{ToolContract, ToolDefinition};
+    use lash_tool_support::{LashlangToolBinding, ToolDefinitionLashlangExt};
     use serde_json::{Value, json};
 
     fn catalog_tool(name: &str, description: &str) -> Value {
@@ -653,23 +665,43 @@ mod tests {
 
     fn catalog_tool_from_definition(tool: ToolDefinition) -> Value {
         let manifest = tool.manifest();
-        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
-        let call = lashlang_binding.call_path();
-        json!({
+        let projected = json!({
             "id": manifest.id,
             "name": manifest.name,
-            "module_path": lashlang_binding.module_path.clone(),
-            "operation": lashlang_binding.operation.clone(),
-            "call": call,
             "description": manifest.description,
-            "aliases": lashlang_binding.aliases.clone(),
             "availability": "searchable",
             "callable": false,
             "showcased": false,
             "searchable": true,
             "activation": manifest.activation,
-            "contract": manifest.compact_contract.expect("compact contract"),
-        })
+            "contract": manifest.compact_contract.clone().expect("compact contract"),
+        });
+
+        #[cfg(feature = "lashlang")]
+        {
+            let mut projected = projected;
+            let lashlang_binding = tool_lashlang_binding(&manifest).executable_for(&manifest.name);
+            let call = lashlang_binding.call_path();
+            let projected_object = projected.as_object_mut().expect("catalog object");
+            projected_object.insert(
+                "module_path".to_string(),
+                json!(lashlang_binding.module_path.clone()),
+            );
+            projected_object.insert(
+                "operation".to_string(),
+                json!(lashlang_binding.operation.clone()),
+            );
+            projected_object.insert("call".to_string(), json!(call));
+            projected_object.insert(
+                "aliases".to_string(),
+                json!(lashlang_binding.aliases.clone()),
+            );
+            projected
+        }
+        #[cfg(not(feature = "lashlang"))]
+        {
+            projected
+        }
     }
 
     fn ranked_names(results: &[Value]) -> Vec<String> {
@@ -689,15 +721,15 @@ mod tests {
     fn exact_name_beats_fuzzy_typo() {
         let index = ToolDiscoveryIndex::build(
             1,
-            vec![
+            &[
                 catalog_tool("spotify_search_songs", "Find songs in Spotify"),
                 catalog_tool("spotty_notes", "Scratch notes"),
             ],
         );
         let results = index.search(&json!({ "query": "spotify songs" }));
-        assert_eq!(results[0]["name"], json!("tools.spotify_search_songs"));
+        assert_eq!(results[0]["name"], json!("spotify_search_songs"));
         let typo = index.search(&json!({ "query": "spotfy songs" }));
-        assert_eq!(typo[0]["name"], json!("tools.spotify_search_songs"));
+        assert_eq!(typo[0]["name"], json!("spotify_search_songs"));
     }
 
     #[test]
@@ -789,7 +821,7 @@ mod tests {
 
         let index = ToolDiscoveryIndex::build(
             1,
-            vec![
+            &[
                 catalog_tool_from_definition(filter_songs),
                 catalog_tool_from_definition(show_song),
             ],
@@ -799,7 +831,10 @@ mod tests {
             "module": "appworld"
         }));
 
-        assert_eq!(results[0]["name"], json!("appworld.spotify_show_song"));
+        assert_eq!(
+            results[0]["name"],
+            json!("mcp__appworld__spotify_show_song")
+        );
     }
 
     #[test]
@@ -863,7 +898,7 @@ mod tests {
             "search songs by genre".to_string(),
             "search songs by play count".to_string(),
         ]);
-        let index = ToolDiscoveryIndex::build(1, vec![catalog_tool_from_definition(spotify)]);
+        let index = ToolDiscoveryIndex::build(1, &[catalog_tool_from_definition(spotify)]);
 
         let results = index.search(&json!({ "query": "spotify" }));
         let signature = results[0]["signature"].as_str().expect("signature");
@@ -927,15 +962,15 @@ mod tests {
     fn ranked_names_extracts_result_names() {
         let index = ToolDiscoveryIndex::build(
             1,
-            vec![
+            &[
                 catalog_tool_with_metadata("read_file", "Read file contents", None, vec!["cat"]),
                 catalog_tool_with_metadata("search_web", "Search the web", None, vec!["web"]),
             ],
         );
 
         assert_eq!(
-            ranked_names(&index.search(&json!({ "query": "cat" }))),
-            vec!["files.read"]
+            ranked_names(&index.search(&json!({ "query": "read file" }))),
+            vec!["read_file"]
         );
     }
 }

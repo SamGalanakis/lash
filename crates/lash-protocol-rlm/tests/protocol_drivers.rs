@@ -849,7 +849,7 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
 
     let effects = drain_effects(&mut machine);
     let exec_effect = effects.iter().find_map(|e| match e {
-        Effect::ExecCode { id, code } => Some((*id, code.clone())),
+        Effect::ExecCode { id, code, .. } => Some((*id, code.clone())),
         _ => None,
     });
     assert_eq!(
@@ -1072,7 +1072,7 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     let (exec_id, code) = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::ExecCode { id, code } => Some((*id, code.clone())),
+            Effect::ExecCode { id, code, .. } => Some((*id, code.clone())),
             _ => None,
         })
         .expect("exec effect");
@@ -1085,7 +1085,7 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     let (restored_exec_id, restored_code) = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::ExecCode { id, code } => Some((*id, code.clone())),
+            Effect::ExecCode { id, code, .. } => Some((*id, code.clone())),
             _ => None,
         })
         .expect("restored exec effect");

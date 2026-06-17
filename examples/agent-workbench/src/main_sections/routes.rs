@@ -188,7 +188,6 @@ async fn enqueue_tool_catalog_refresh(
     let session = state
         .core
         .session(session_id.clone())
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -301,7 +300,6 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
     let session = state
         .core
         .session(new_session_id)
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -498,33 +496,6 @@ pub(crate) async fn enqueue_mail_received_trigger_command(
         )
         .await
         .context("emit mail received trigger occurrence")
-}
-
-fn button_trigger_event_type() -> lashlang::NamedDataType {
-    lashlang::NamedDataType::object(
-        "ui.button.Pressed",
-        vec![
-            lashlang::TypeField {
-                name: "button".into(),
-                ty: lashlang::TypeExpr::Union(vec![
-                    lashlang::TypeExpr::Enum(vec!["Red".into()]),
-                    lashlang::TypeExpr::Enum(vec!["Blue".into()]),
-                ]),
-                optional: false,
-            },
-            lashlang::TypeField {
-                name: "message".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            },
-            lashlang::TypeField {
-                name: "pressed_at".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            },
-        ],
-    )
-    .expect("valid button trigger event type")
 }
 
 fn workbench_lashlang_abilities() -> lashlang::LashlangAbilities {

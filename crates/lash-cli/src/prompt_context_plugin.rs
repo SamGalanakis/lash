@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use lash::ModeId;
 use lash_core::PreparedContext;
 use lash_core::PromptContribution;
 use lash_core::plugin::{
@@ -10,6 +9,8 @@ use lash_core::plugin::{
     PluginSessionContext, TurnContextTransform, TurnTransformContext,
 };
 use lash_core::{Message, MessageRole, Part, PartKind, PluginMessage, PruneState, shared_parts};
+
+use crate::execution_settings::ExecutionMode;
 
 /// Host-provided source for project instructions.
 ///
@@ -39,14 +40,14 @@ impl Default for PromptContextPluginConfig {
 pub struct PromptContextPluginFactory {
     instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
-    execution_mode: ModeId,
+    execution_mode: ExecutionMode,
 }
 
 impl PromptContextPluginFactory {
     pub fn new(
         instruction_source: Arc<dyn InstructionSource>,
         config: PromptContextPluginConfig,
-        execution_mode: ModeId,
+        execution_mode: ExecutionMode,
     ) -> Self {
         Self {
             instruction_source,
@@ -68,7 +69,7 @@ impl PluginFactory for PromptContextPluginFactory {
         Ok(Arc::new(PromptContextPlugin {
             instruction_source: Arc::clone(&self.instruction_source),
             config: self.config.clone(),
-            execution_mode: self.execution_mode.clone(),
+            execution_mode: self.execution_mode,
         }))
     }
 }
@@ -76,7 +77,7 @@ impl PluginFactory for PromptContextPluginFactory {
 struct PromptContextPlugin {
     instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
-    execution_mode: ModeId,
+    execution_mode: ExecutionMode,
 }
 
 impl lash_core::SessionPlugin for PromptContextPlugin {
@@ -126,7 +127,7 @@ impl lash_core::SessionPlugin for PromptContextPlugin {
             })
         }));
 
-        if self.config.include_environment && self.execution_mode == ModeId::standard() {
+        if self.config.include_environment && self.execution_mode.is_standard() {
             reg.context()
                 .prepare_turn(50, Arc::new(EnvironmentTailTransform));
         }
@@ -252,7 +253,7 @@ mod tests {
                 read_text: String::new(),
             }),
             PromptContextPluginConfig::default(),
-            ModeId::standard(),
+            ExecutionMode::Standard,
         )));
         let host = PluginHost::new(factories);
         let session = host.build_session("root", None).expect("session");

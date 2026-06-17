@@ -22,7 +22,7 @@ use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
     ProviderOptions, RuntimeSessionState, SessionPolicy, TokenUsage, TurnFinish, TurnOutcome,
-    TurnStop, UnavailableProcessService,
+    TurnStop,
 };
 
 type CompletionFuture =
@@ -261,6 +261,97 @@ where
     )
 }
 
+struct EmptyToolProvider;
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for EmptyToolProvider {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        Vec::new()
+    }
+
+    fn resolve_contract(&self, _name: &str) -> Option<Arc<crate::ToolContract>> {
+        None
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        crate::ToolResult::err(serde_json::json!(format!(
+            "test tool provider has no tool `{}`",
+            call.name
+        )))
+    }
+}
+
+pub fn code_execution_context_with_tool_catalog(
+    tool_catalog: crate::ToolCatalog,
+) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_tool_catalog_and_trigger_router(tool_catalog, None)
+}
+
+fn code_execution_context_with_tool_catalog_and_trigger_router(
+    tool_catalog: crate::ToolCatalog,
+    trigger_router: Option<crate::TriggerRouter>,
+) -> crate::RuntimeExecutionContext<'static> {
+    let plugins = crate::plugin::PluginHost::new(test_code_protocol_factories())
+        .build_session("test-session", None)
+        .expect("test plugin session");
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+    let execution_env_spec = crate::ProcessExecutionEnvSpec::new(
+        crate::PluginOptions::default(),
+        crate::SessionPolicy::default(),
+    );
+    let attachment_store: Arc<dyn crate::AttachmentStore> =
+        Arc::new(crate::InMemoryAttachmentStore::new());
+    let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
+        plugins,
+        tools: Arc::new(EmptyToolProvider),
+        tool_catalog: Arc::new(tool_catalog),
+        sessions: Arc::new(MockSessionManager::default()),
+        session_lifecycle: Arc::new(MockSessionManager::default()),
+        session_graph: Arc::new(MockSessionManager::default()),
+        processes: Arc::new(crate::UnavailableProcessService),
+        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        trigger_router,
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+            crate::InlineRuntimeEffectController,
+        )),
+        direct_completions: crate::DirectCompletionClient::unavailable(
+            "direct completions are unavailable in this test context",
+        ),
+        parent_invocation: None,
+        execution_env_spec: execution_env_spec.clone(),
+        session_id: "test-session".to_string(),
+        agent_frame_id: String::new(),
+        event_tx,
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
+        attachment_store: Arc::clone(&attachment_store),
+        turn_context: crate::TurnContext::default(),
+    });
+    crate::RuntimeExecutionContext::new(
+        "test-session".to_string(),
+        dispatch,
+        Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
+        attachment_store,
+        Arc::new(crate::ChronologicalProjection::default()),
+        None,
+        crate::TurnContext::default(),
+    )
+    .with_execution_env_spec(execution_env_spec)
+}
+
+pub fn code_execution_context() -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_tool_catalog(crate::ToolCatalog::from_tool_definitions(Vec::new()))
+}
+
+pub fn code_execution_context_with_trigger_store(
+    trigger_store: Arc<dyn crate::TriggerStore>,
+) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_tool_catalog_and_trigger_router(
+        crate::ToolCatalog::from_tool_definitions(Vec::new()),
+        Some(crate::TriggerRouter::new(trigger_store, None, None)),
+    )
+}
+
 /// Convenience helper for the common tool-test shape: build a
 /// [`mock_tool_context`], wrap `name` + `args` in a `ToolCall`, and `await`
 /// the provider's `execute`. Use this for unit tests that don't need to
@@ -278,103 +369,6 @@ where
         progress: None,
     })
     .await
-}
-
-struct EmptyCodeExecutionTools;
-
-#[async_trait::async_trait]
-impl crate::ToolProvider for EmptyCodeExecutionTools {
-    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-        Vec::new()
-    }
-
-    fn resolve_contract(&self, _name: &str) -> Option<Arc<crate::ToolContract>> {
-        None
-    }
-
-    async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
-        crate::ToolResult::err_fmt("test code execution context has no tools")
-    }
-}
-
-pub fn code_execution_context_with_lashlang_abilities(
-    abilities: lashlang::LashlangAbilities,
-) -> crate::RuntimeExecutionContext<'static> {
-    code_execution_context_with_lashlang_abilities_and_resources(
-        abilities,
-        lashlang::LashlangHostCatalog::new(),
-    )
-}
-
-pub fn code_execution_context_with_lashlang_abilities_and_resources(
-    abilities: lashlang::LashlangAbilities,
-    resources: lashlang::LashlangHostCatalog,
-) -> crate::RuntimeExecutionContext<'static> {
-    let session_id = "test-session".to_string();
-    let plugin_host = crate::PluginHost::new(test_rlm_protocol_factories());
-    let mut merged_resources = plugin_host.lashlang_resources();
-    merged_resources.extend(resources);
-    let plugins = plugin_host
-        .with_lashlang_abilities(abilities)
-        .with_lashlang_resources(merged_resources)
-        .build_session(session_id.clone(), None)
-        .expect("test plugin session");
-    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
-    let attachment_store = Arc::new(crate::InMemoryAttachmentStore::new());
-    let artifact_store: Arc<dyn lashlang::LashlangArtifactStore> =
-        Arc::new(lashlang::InMemoryLashlangArtifactStore::new());
-    let trigger_store = Arc::new(crate::InMemoryTriggerStore::default());
-    let process_registry: Arc<dyn crate::ProcessRegistry> =
-        Arc::new(crate::TestLocalProcessRegistry::default());
-    let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
-        plugins,
-        tools: Arc::new(EmptyCodeExecutionTools),
-        tool_catalog: Arc::new(crate::ToolCatalog::from_tools(
-            Vec::new(),
-            std::collections::BTreeMap::new(),
-        )),
-        sessions: Arc::new(MockSessionManager::default()),
-        session_lifecycle: Arc::new(MockSessionManager::default()),
-        session_graph: Arc::new(MockSessionManager::default()),
-        processes: Arc::new(UnavailableProcessService),
-        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        trigger_router: Some(crate::TriggerRouter::new(
-            trigger_store,
-            Arc::clone(&artifact_store),
-            Some(process_registry),
-            None,
-        )),
-        effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
-        )),
-        direct_completions: crate::DirectCompletionClient::unavailable(
-            "direct completions are unavailable in this test context",
-        ),
-        parent_invocation: None,
-        execution_env_spec: crate::ProcessExecutionEnvSpec::new(
-            crate::PluginOptions::default(),
-            crate::SessionPolicy::default(),
-        ),
-        session_id: session_id.clone(),
-        agent_frame_id: String::new(),
-        event_tx,
-        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: attachment_store.clone(),
-        turn_context: crate::TurnContext::default(),
-    });
-
-    crate::RuntimeExecutionContext::new(
-        session_id,
-        dispatch,
-        abilities,
-        Default::default(),
-        artifact_store,
-        attachment_store,
-        Arc::new(crate::ChronologicalProjection::default()),
-        None,
-        crate::TurnContext::default(),
-    )
 }
 
 /// Build an empty `AssembledTurn` whose assistant text is `summary`.
@@ -749,10 +743,9 @@ impl crate::ProcessService for MockSessionManager {
 //
 // Exposed publicly under the `testing` feature so downstream plugin
 // crates can wire a minimal fake protocol plugin into integration tests
-// without depending on the real standard / RLM protocol crates
-// crates.
+// without depending on concrete protocol crates.
 // ─────────────────────────────────────────────────────────────────────
-pub use test_protocol_fakes::{test_rlm_protocol_factories, test_standard_protocol_factories};
+pub use test_protocol_fakes::{test_code_protocol_factories, test_standard_protocol_factories};
 
 mod test_protocol_fakes {
     use std::sync::Arc;
@@ -777,22 +770,22 @@ mod test_protocol_fakes {
         vec![Arc::new(TestProtocolFactory {
             id: "protocol_standard",
             include_batch: true,
-            decode_rlm_create_options: false,
+            decode_code_create_options: false,
         })]
     }
 
-    pub fn test_rlm_protocol_factories() -> Vec<Arc<dyn PluginFactory>> {
+    pub fn test_code_protocol_factories() -> Vec<Arc<dyn PluginFactory>> {
         vec![Arc::new(TestProtocolFactory {
-            id: "protocol_rlm",
+            id: "protocol_code",
             include_batch: false,
-            decode_rlm_create_options: true,
+            decode_code_create_options: true,
         })]
     }
 
     struct TestProtocolFactory {
         id: &'static str,
         include_batch: bool,
-        decode_rlm_create_options: bool,
+        decode_code_create_options: bool,
     }
 
     impl PluginFactory for TestProtocolFactory {
@@ -807,7 +800,7 @@ mod test_protocol_fakes {
             Ok(Arc::new(TestProtocolPlugin {
                 id: self.id,
                 include_batch: self.include_batch,
-                decode_rlm_create_options: self.decode_rlm_create_options,
+                decode_code_create_options: self.decode_code_create_options,
             }))
         }
     }
@@ -815,7 +808,7 @@ mod test_protocol_fakes {
     struct TestProtocolPlugin {
         id: &'static str,
         include_batch: bool,
-        decode_rlm_create_options: bool,
+        decode_code_create_options: bool,
     }
 
     impl SessionPlugin for TestProtocolPlugin {
@@ -825,7 +818,7 @@ mod test_protocol_fakes {
 
         fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
             reg.protocol().session(Arc::new(TestProtocolSession {
-                decode_rlm_create_options: self.decode_rlm_create_options,
+                decode_code_create_options: self.decode_code_create_options,
             }))?;
             if self.include_batch {
                 reg.tools().provider(Arc::new(TestProtocolTools))?;
@@ -837,7 +830,7 @@ mod test_protocol_fakes {
     }
 
     struct TestProtocolSession {
-        decode_rlm_create_options: bool,
+        decode_code_create_options: bool,
     }
 
     #[async_trait]
@@ -854,14 +847,16 @@ mod test_protocol_fakes {
             mut ctx: ProtocolRuntimeContext<'_>,
             request: &crate::SessionCreateRequest,
         ) -> Result<(), crate::SessionError> {
-            if !self.decode_rlm_create_options {
+            if !self.decode_code_create_options {
                 return Ok(());
             }
             if let Some(extras) = request
                 .plugin_options
-                .decode::<TestRlmCreateExtras>("rlm_protocol")
+                .decode::<TestCodeCreateExtras>("code_protocol")
                 .map_err(|err| {
-                    crate::SessionError::Protocol(format!("invalid test RLM create options: {err}"))
+                    crate::SessionError::Protocol(format!(
+                        "invalid test code create options: {err}"
+                    ))
                 })?
             {
                 let options = crate::ProtocolTurnOptions::typed(extras)?;
@@ -873,22 +868,22 @@ mod test_protocol_fakes {
 
     #[derive(serde::Deserialize, serde::Serialize)]
     #[serde(default, deny_unknown_fields)]
-    struct TestRlmCreateExtras {
+    struct TestCodeCreateExtras {
         termination: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         final_answer_format: Option<serde_json::Value>,
     }
 
-    impl Default for TestRlmCreateExtras {
+    impl Default for TestCodeCreateExtras {
         fn default() -> Self {
             Self {
-                termination: default_test_rlm_termination(),
+                termination: default_test_code_termination(),
                 final_answer_format: None,
             }
         }
     }
 
-    fn default_test_rlm_termination() -> serde_json::Value {
+    fn default_test_code_termination() -> serde_json::Value {
         serde_json::json!({
             "kind": "submit_required",
             "schema": null,
@@ -945,9 +940,6 @@ mod test_protocol_fakes {
                 "additionalProperties": false,
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
-        )
-        .with_lashlang_binding(
-            crate::LashlangToolBinding::new(["tools"], "batch").with_aliases(["parallel_tools"]),
         )
         .with_scheduling(crate::ToolScheduling::Parallel)
     }

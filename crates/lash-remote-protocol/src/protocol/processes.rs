@@ -1,16 +1,4 @@
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteLashlangProcessRef {
-    pub component: String,
-    pub pos: u32,
-}
-
-impl RemoteLashlangProcessRef {
-    pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
-        require_non_empty(type_name, "process_ref.component", &self.component)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteSessionScope {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,20 +51,40 @@ impl RemoteProcessProvenance {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProcessDefinitionIdentity {
-    pub module_ref: String,
-    pub host_requirements_ref: String,
-    pub process_ref: RemoteLashlangProcessRef,
-    pub process_name: String,
+    #[serde(default)]
+    pub value: serde_json::Value,
 }
 
 impl RemoteProcessDefinitionIdentity {
     pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
-        require_non_empty(type_name, "module_ref", &self.module_ref)?;
-        require_non_empty(type_name, "host_requirements_ref", &self.host_requirements_ref)?;
-        self.process_ref.validate(type_name)?;
-        require_non_empty(type_name, "process_name", &self.process_name)
+        if self.value.is_null() {
+            return Err(RemoteProtocolError::InvalidEnvelope {
+                type_name,
+                message: "definition value cannot be null".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteProcessIdentity {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<RemoteProcessDefinitionIdentity>,
+}
+
+impl RemoteProcessIdentity {
+    pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
+        require_non_empty(type_name, "identity.kind", &self.kind)?;
+        if let Some(definition) = &self.definition {
+            definition.validate(type_name)?;
+        }
+        Ok(())
     }
 }
 
@@ -120,13 +128,10 @@ pub enum RemoteProcessInput {
         #[serde(default)]
         prepared_tool_call: serde_json::Value,
     },
-    LashlangProcess {
-        module_ref: String,
-        process_ref: RemoteLashlangProcessRef,
-        host_requirements_ref: String,
-        process_name: String,
-        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
-        args: serde_json::Map<String, serde_json::Value>,
+    Engine {
+        kind: String,
+        #[serde(default)]
+        payload: serde_json::Value,
     },
     SessionTurn {
         #[serde(default)]
@@ -147,18 +152,7 @@ impl RemoteProcessInput {
             Self::ToolCall {
                 prepared_tool_call: _,
             } => Ok(()),
-            Self::LashlangProcess {
-                module_ref,
-                process_ref,
-                host_requirements_ref,
-                process_name,
-                args: _,
-            } => {
-                require_non_empty(type_name, "module_ref", module_ref)?;
-                process_ref.validate(type_name)?;
-                require_non_empty(type_name, "host_requirements_ref", host_requirements_ref)?;
-                require_non_empty(type_name, "process_name", process_name)
-            }
+            Self::Engine { kind, payload: _ } => require_non_empty(type_name, "kind", kind),
             Self::SessionTurn {
                 create_request: _,
                 turn_input,
@@ -348,6 +342,7 @@ impl RemoteProcessSummary {
 pub struct RemoteProcessRecord {
     pub process_id: String,
     pub input: RemoteProcessInput,
+    pub identity: RemoteProcessIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_types: Vec<RemoteProcessEventType>,
     pub provenance: RemoteProcessProvenance,
@@ -369,6 +364,7 @@ impl RemoteProcessRecord {
     pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
         require_non_empty(type_name, "process_id", &self.process_id)?;
         self.input.validate(type_name)?;
+        self.identity.validate(type_name)?;
         for event_type in &self.event_types {
             event_type.validate(type_name)?;
         }
@@ -445,6 +441,7 @@ pub struct RemoteObservedProcess {
     pub process_id: String,
     pub graph_key: String,
     pub kind: String,
+    pub identity: RemoteProcessIdentity,
     pub lifecycle: RemoteProcessLifecycleStatus,
     pub status_label: String,
     pub terminal: bool,
@@ -474,6 +471,7 @@ impl RemoteObservedProcess {
         require_non_empty(type_name, "process_id", &self.process_id)?;
         require_non_empty(type_name, "graph_key", &self.graph_key)?;
         require_non_empty(type_name, "kind", &self.kind)?;
+        self.identity.validate(type_name)?;
         require_non_empty(type_name, "status_label", &self.status_label)?;
         self.input.validate(type_name)?;
         self.originator.validate(type_name)?;
@@ -999,7 +997,7 @@ pub enum RemoteProcessStatusFilter {
     Any,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProcessListFilter {
     pub protocol_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

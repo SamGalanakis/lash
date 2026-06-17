@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::plugin::PluginError;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerEvent {
     pub resource_type: String,
     pub alias: String,
     pub event: String,
-    pub payload_ty: lashlang::NamedDataType,
+    pub payload_schema: crate::LashSchema,
 }
 
 impl TriggerEvent {
@@ -18,18 +18,18 @@ impl TriggerEvent {
         resource_type: impl Into<String>,
         alias: impl Into<String>,
         event: impl Into<String>,
-        payload_ty: lashlang::NamedDataType,
+        payload_schema: crate::LashSchema,
     ) -> Self {
         Self {
             resource_type: resource_type.into(),
             alias: alias.into(),
             event: event.into(),
-            payload_ty,
+            payload_schema,
         }
     }
 
-    pub fn payload_type(&self) -> &lashlang::NamedDataType {
-        &self.payload_ty
+    pub fn payload_schema(&self) -> &crate::LashSchema {
+        &self.payload_schema
     }
 
     pub fn key(&self) -> TriggerEventKey {
@@ -74,7 +74,7 @@ pub fn trigger_event_type(alias: &str, event: &str) -> String {
     format!("{alias}.{event}")
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TriggerEventCatalog {
     events: BTreeMap<TriggerEventKey, TriggerEvent>,
 }
@@ -253,8 +253,18 @@ pub struct TriggerRegistration {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerTargetSummary {
-    pub process_name: String,
-    pub inputs: lashlang::TriggerInputTemplate,
+    pub label: Option<String>,
+    pub identity: crate::ProcessIdentity,
+    pub input: crate::ProcessInput,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, TriggerInputBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerInputBinding {
+    Event,
+    Fixed { value: serde_json::Value },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,12 +278,15 @@ pub struct TriggerSubscriptionDraft {
     pub source_type: String,
     pub source_key: String,
     pub source: serde_json::Value,
-    pub event_ty: lashlang::TypeExpr,
-    pub module_ref: lashlang::ModuleRef,
-    pub host_requirements_ref: lashlang::HostRequirementsRef,
-    pub process_ref: lashlang::ProcessRef,
-    pub process_name: String,
-    pub input_template: lashlang::TriggerInputTemplate,
+    pub payload_schema: crate::LashSchema,
+    pub target: crate::ProcessInput,
+    pub target_identity: crate::ProcessIdentity,
+    #[serde(default)]
+    pub event_types: Vec<crate::ProcessEventType>,
+    #[serde(default)]
+    pub input_template: BTreeMap<String, TriggerInputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_label: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -289,12 +302,15 @@ pub struct TriggerSubscriptionRecord {
     pub source_type: String,
     pub source_key: String,
     pub source: serde_json::Value,
-    pub event_ty: lashlang::TypeExpr,
-    pub module_ref: lashlang::ModuleRef,
-    pub host_requirements_ref: lashlang::HostRequirementsRef,
-    pub process_ref: lashlang::ProcessRef,
-    pub process_name: String,
-    pub input_template: lashlang::TriggerInputTemplate,
+    pub payload_schema: crate::LashSchema,
+    pub target: crate::ProcessInput,
+    pub target_identity: crate::ProcessIdentity,
+    #[serde(default)]
+    pub event_types: Vec<crate::ProcessEventType>,
+    #[serde(default)]
+    pub input_template: BTreeMap<String, TriggerInputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_label: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     pub created_at_ms: u64,
@@ -323,7 +339,9 @@ impl From<&TriggerSubscriptionRecord> for TriggerRegistration {
             source_type: TriggerEventType::new(route.source_type.clone()),
             source: route.source.clone(),
             target: TriggerTargetSummary {
-                process_name: route.process_name.clone(),
+                label: route.target_label.clone(),
+                identity: route.target_identity.clone(),
+                input: route.target.clone(),
                 inputs: route.input_template.clone(),
             },
             enabled: route.enabled,
@@ -344,7 +362,7 @@ pub struct TriggerSubscriptionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<lashlang::ProcessDefinitionIdentity>,
+    pub target: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
@@ -385,18 +403,14 @@ impl TriggerSubscriptionFilter {
                 .as_deref()
                 .is_none_or(|source_key| record.source_key == source_key)
             && self.enabled.is_none_or(|enabled| record.enabled == enabled)
-            && self.target.as_ref().is_none_or(|target| {
-                target.matches_input_refs(
-                    &record.module_ref,
-                    &record.host_requirements_ref,
-                    &record.process_ref,
-                    &record.process_name,
-                )
-            })
+            && self
+                .target
+                .as_ref()
+                .is_none_or(|target| record.target_identity.definition.as_ref() == Some(target))
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerDeliveryReservation {
     pub occurrence: TriggerOccurrenceRecord,
     pub subscription: TriggerSubscriptionRecord,
@@ -485,12 +499,12 @@ impl TriggerStore for InMemoryTriggerStore {
             source_type: draft.source_type,
             source_key: draft.source_key,
             source: draft.source,
-            event_ty: draft.event_ty,
-            module_ref: draft.module_ref,
-            host_requirements_ref: draft.host_requirements_ref,
-            process_ref: draft.process_ref,
-            process_name: draft.process_name,
+            payload_schema: draft.payload_schema,
+            target: draft.target,
+            target_identity: draft.target_identity,
+            event_types: draft.event_types,
             input_template: draft.input_template,
+            target_label: draft.target_label,
             enabled: true,
             created_at_ms: now,
             updated_at_ms: now,
@@ -695,7 +709,6 @@ pub fn deterministic_delivery_process_id(
 #[derive(Clone)]
 pub struct TriggerRouter {
     store: Arc<dyn TriggerStore>,
-    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
     process_work_poke: Option<crate::ProcessWorkPoke>,
 }
@@ -703,13 +716,11 @@ pub struct TriggerRouter {
 impl TriggerRouter {
     pub fn new(
         store: Arc<dyn TriggerStore>,
-        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
         process_work_poke: Option<crate::ProcessWorkPoke>,
     ) -> Self {
         Self {
             store,
-            artifact_store,
             process_registry,
             process_work_poke,
         }
@@ -781,35 +792,18 @@ impl TriggerRouter {
     ) -> Result<(), PluginError> {
         let subscription = &reservation.subscription;
         let occurrence = &reservation.occurrence;
-        validate_payload(&occurrence.payload, &subscription.event_ty).map_err(|message| {
-            PluginError::Session(format!(
-                "invalid payload for trigger `{}`: {message}",
-                subscription.handle
-            ))
-        })?;
-        let artifact = self
-            .artifact_store
-            .get_module_artifact(&subscription.module_ref)
-            .await
+        subscription
+            .payload_schema
+            .validate(&occurrence.payload)
             .map_err(|err| {
                 PluginError::Session(format!(
-                    "failed to load trigger target module `{}`: {err}",
-                    subscription.module_ref
-                ))
-            })?
-            .ok_or_else(|| {
-                PluginError::Session(format!(
-                    "missing trigger target module `{}`",
-                    subscription.module_ref
+                    "invalid payload for trigger `{}`: {err}",
+                    subscription.handle
                 ))
             })?;
-        let signal_event_types = artifact
-            .canonical_ir
-            .process(&subscription.process_name)
-            .map(crate::lashlang_process_signal_event_types)
-            .unwrap_or_default();
         let args =
             materialize_trigger_process_args(&subscription.input_template, &occurrence.payload)?;
+        let target = apply_trigger_inputs(subscription.target.clone(), args)?;
         let originator_scope_id = subscription.registrant_scope_id();
         let trigger_occurrence_invocation = crate::runtime::causal::trigger_occurrence_invocation(
             &originator_scope_id,
@@ -817,23 +811,15 @@ impl TriggerRouter {
         );
         let registration = crate::ProcessRegistration::new(
             reservation.process_id.clone(),
-            crate::ProcessInput::LashlangProcess {
-                module_ref: subscription.module_ref.clone(),
-                process_ref: subscription.process_ref.clone(),
-                host_requirements_ref: subscription.host_requirements_ref.clone(),
-                process_name: subscription.process_name.clone(),
-                args,
-            },
+            target.clone(),
             crate::ProcessProvenance::new(subscription.registrant.clone())
                 .with_caused_by(trigger_occurrence_invocation.causal_ref()),
         )
-        .with_extra_event_types(
-            crate::lashlang_process_event_types()
-                .into_iter()
-                .chain(signal_event_types),
-        )
+        .with_identity(subscription.target_identity.clone())
+        .with_extra_event_types(subscription.event_types.clone())
         .with_execution_env_ref(Some(subscription.env_ref.clone()))
         .with_wake_target(subscription.wake_target.clone());
+        let descriptor_kind = subscription.target_identity.kind.clone();
         let grant =
             subscription
                 .wake_target
@@ -841,8 +827,8 @@ impl TriggerRouter {
                 .map(|session_scope| crate::ProcessStartGrant {
                     session_scope,
                     descriptor: crate::ProcessHandleDescriptor::new(
-                        Some("lashlang"),
-                        Some(subscription.process_name.as_str()),
+                        Some(descriptor_kind.as_str()),
+                        subscription.target_label.as_deref(),
                     ),
                 });
         let execution_context = crate::ProcessExecutionContext::default()
@@ -899,68 +885,38 @@ fn trigger_delivery_failure_summary(errors: &[String]) -> Option<String> {
 }
 
 fn materialize_trigger_process_args(
-    input_template: &lashlang::TriggerInputTemplate,
+    input_template: &BTreeMap<String, TriggerInputBinding>,
     event_payload: &serde_json::Value,
 ) -> Result<serde_json::Map<String, serde_json::Value>, PluginError> {
-    let mut args = lashlang::Record::default();
-    for (input_name, input) in input_template.entries() {
+    let mut args = serde_json::Map::new();
+    for (input_name, input) in input_template {
         let value = match input {
-            lashlang::TriggerInputBinding::Event => event_payload.clone(),
-            lashlang::TriggerInputBinding::Fixed { value } => value.clone(),
+            TriggerInputBinding::Event => event_payload.clone(),
+            TriggerInputBinding::Fixed { value } => value.clone(),
         };
-        args.insert(input_name.to_string(), lashlang::from_json(value));
+        args.insert(input_name.to_string(), value);
     }
-    match serde_json::to_value(lashlang::Value::Record(Arc::new(args)))
-        .map_err(|err| PluginError::Session(format!("serialize trigger process args: {err}")))?
-    {
-        serde_json::Value::Object(map) => Ok(map),
-        _ => Err(PluginError::Session(
-            "trigger process args must serialize as an object".to_string(),
-        )),
-    }
+    Ok(args)
 }
 
-pub fn validate_payload(value: &serde_json::Value, ty: &lashlang::TypeExpr) -> Result<(), String> {
-    if json_matches_type(value, ty) {
-        Ok(())
-    } else {
-        Err(format!("expected {}", lashlang::format_type_expr(ty)))
-    }
-}
-
-fn json_matches_type(value: &serde_json::Value, ty: &lashlang::TypeExpr) -> bool {
-    match ty {
-        lashlang::TypeExpr::Any => true,
-        lashlang::TypeExpr::Ref(_) => false,
-        lashlang::TypeExpr::Str => value.is_string(),
-        lashlang::TypeExpr::Int => value.as_i64().is_some() || value.as_u64().is_some(),
-        lashlang::TypeExpr::Float => value.is_number(),
-        lashlang::TypeExpr::Bool => value.is_boolean(),
-        lashlang::TypeExpr::Dict => value.is_object(),
-        lashlang::TypeExpr::Null => value.is_null(),
-        lashlang::TypeExpr::Enum(values) => value
-            .as_str()
-            .is_some_and(|value| values.iter().any(|candidate| candidate.as_str() == value)),
-        lashlang::TypeExpr::List(item) => value.as_array().is_some_and(|items| {
-            items
-                .iter()
-                .all(|item_value| json_matches_type(item_value, item))
-        }),
-        lashlang::TypeExpr::Object(fields) => {
-            let Some(map) = value.as_object() else {
-                return false;
-            };
-            fields
-                .iter()
-                .all(|field| match map.get(field.name.as_str()) {
-                    Some(field_value) => json_matches_type(field_value, &field.ty),
-                    None => field.optional,
-                })
+fn apply_trigger_inputs(
+    mut target: crate::ProcessInput,
+    args: serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::ProcessInput, PluginError> {
+    match &mut target {
+        crate::ProcessInput::Engine { payload, .. } => {
+            let object = payload.as_object_mut().ok_or_else(|| {
+                PluginError::Session(
+                    "trigger engine target payload must be a JSON object".to_string(),
+                )
+            })?;
+            object.insert("args".to_string(), serde_json::Value::Object(args));
+            Ok(target)
         }
-        lashlang::TypeExpr::Union(items) => items.iter().any(|item| json_matches_type(value, item)),
-        lashlang::TypeExpr::Process { .. } | lashlang::TypeExpr::TriggerHandle(_) => {
-            value.is_object()
-        }
+        other => Err(PluginError::Session(format!(
+            "trigger target must be an engine process, got {}",
+            other.engine_kind()
+        ))),
     }
 }
 
@@ -1001,16 +957,8 @@ pub fn trigger_occurrence_request_hash(
 mod tests {
     use super::*;
 
-    fn button_payload_type() -> lashlang::NamedDataType {
-        lashlang::NamedDataType::object(
-            "ui.button.Pressed",
-            vec![lashlang::TypeField {
-                name: "button".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            }],
-        )
-        .expect("valid trigger occurrence payload")
+    fn button_payload_schema() -> crate::LashSchema {
+        crate::LashSchema::any()
     }
 
     #[test]
@@ -1021,7 +969,7 @@ mod tests {
                 "Button",
                 "ui.button",
                 "pressed",
-                button_payload_type(),
+                button_payload_schema(),
             ))
             .expect("first trigger occurrence");
 
@@ -1030,53 +978,10 @@ mod tests {
                 "AlternateButton",
                 "ui.button",
                 "pressed",
-                button_payload_type(),
+                button_payload_schema(),
             ))
             .expect_err("duplicate public source identity should be rejected");
 
         assert!(err.contains("duplicate trigger source `ui.button.pressed`"));
-    }
-
-    #[test]
-    fn trigger_subscription_record_rejects_legacy_required_surface_ref() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
-        let record = TriggerSubscriptionRecord {
-            subscription_id: "subscription:1".to_string(),
-            registrant: crate::ProcessOriginator::session(crate::SessionScope::new("session-a")),
-            env_ref: crate::ProcessExecutionEnvRef::new("process-env:session-a"),
-            wake_target: Some(crate::SessionScope::new("session-a")),
-            handle: "trigger:1".to_string(),
-            name: Some("button watcher".to_string()),
-            source_type: "ui.button.pressed".to_string(),
-            source_key: empty_trigger_source_key("ui.button.pressed").expect("source key"),
-            source: serde_json::json!({}),
-            event_ty: lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-                name: "button".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            }]),
-            module_ref: lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
-            host_requirements_ref: lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new(
-                "surface",
-            )),
-            process_ref: lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 0),
-            process_name: "on_button".to_string(),
-            input_template: lashlang::TriggerInputTemplate::new(inputs),
-            enabled: true,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-        };
-        let mut value = serde_json::to_value(record).expect("record json");
-        let object = value.as_object_mut().expect("record object");
-        let legacy_ref = object
-            .remove("host_requirements_ref")
-            .expect("host requirements ref");
-        object.insert("required_surface_ref".to_string(), legacy_ref);
-
-        let err = serde_json::from_value::<TriggerSubscriptionRecord>(value)
-            .expect_err("legacy record must be malformed");
-
-        assert!(err.to_string().contains("host_requirements_ref"));
     }
 }

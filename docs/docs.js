@@ -271,6 +271,12 @@
           kind: "internal",
         },
         {
+          title: "Kernel surface",
+          href: "architecture/kernel-surface.html",
+          summary: "The explicit lash-core kernel contract: primitive mechanisms, extension traits, and protocol/process boundaries.",
+          kind: "internal",
+        },
+        {
           title: "Crate map",
           href: "architecture/modules.html",
           summary: "Workspace module boundaries and which crates own which responsibilities.",

@@ -1,20 +1,3 @@
-impl From<&RemoteLashlangToolBinding> for lash_core::LashlangToolBinding {
-    fn from(value: &RemoteLashlangToolBinding) -> Self {
-        let RemoteLashlangToolBinding {
-            module_path,
-            operation,
-            authority_type,
-            aliases,
-        } = value;
-        let mut binding =
-            lash_core::LashlangToolBinding::new(module_path.clone(), operation.clone());
-        if let Some(authority_type) = authority_type.as_ref() {
-            binding = binding.with_authority_type(authority_type.clone());
-        }
-        binding.with_aliases(aliases.clone())
-    }
-}
-
 impl From<lash_core::SchemaProjectionOverride> for RemoteSchemaProjectionOverride {
     fn from(value: lash_core::SchemaProjectionOverride) -> Self {
         let lash_core::SchemaProjectionOverride { profile, schema } = value;
@@ -159,24 +142,18 @@ impl TryFrom<&RemoteToolGrant> for ToolDefinition {
             argument_projection,
             scheduling,
             retry_policy,
-            lashlang_binding,
+            bindings,
         } = value;
         let mut definition = ToolDefinition::raw_with_id(
-            id.clone()
-                .unwrap_or_else(|| format!("remote-tool:{}", value.call_path().unwrap())),
+            id.clone().unwrap_or_else(|| format!("remote-tool:{}", name)),
             name.clone(),
             description.clone(),
             input_schema.clone(),
             output_schema.clone(),
         )
-        .with_lashlang_binding(
-            lashlang_binding
-                .as_ref()
-                .expect("validated lashlang binding")
-                .into(),
-        )
         .with_examples(examples.clone())
         .with_output_contract(output_contract.clone().into());
+        definition.manifest.bindings = bindings.clone();
         if let Some(availability) = *availability {
             definition = definition
                 .with_availability(lash_core::ToolAvailabilityConfig::same(availability.into()));

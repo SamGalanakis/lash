@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use lash::ModeId;
 use lash::plugins::PluginFactory;
 use lash::prompt::{
     PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
@@ -21,6 +20,7 @@ use lash_standard_plugins::{
 };
 use lash_subagents::{SubagentsPluginFactory, default_registry};
 
+use crate::execution_settings::ExecutionMode;
 use crate::prompt_context_plugin::{
     InstructionSource, PromptContextPluginConfig, PromptContextPluginFactory,
 };
@@ -32,7 +32,7 @@ const CLI_RLM_SUBMISSION_GUIDANCE: &str = "- When calling `submit`, keep the sub
 
 pub(super) struct PluginFactorySurfaceInput<'a> {
     pub(super) autonomous: bool,
-    pub(super) execution_mode: ModeId,
+    pub(super) execution_mode: ExecutionMode,
     pub(super) standard_context_approach: Option<StandardContextApproach>,
     pub(super) tavily_key: String,
     pub(super) instruction_source: Arc<dyn InstructionSource>,
@@ -56,7 +56,7 @@ pub(super) fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>)
 
     let runtime_options = StandardToolStackOptions {
         standard_context_approach: standard_context_approach.clone(),
-        include_cancel_process: execution_mode == ModeId::standard(),
+        include_cancel_process: execution_mode.is_standard(),
         tavily_api_key: if tavily_key.is_empty() {
             None
         } else {
@@ -68,7 +68,7 @@ pub(super) fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>)
     plugin_stack.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
-        execution_mode.clone(),
+        execution_mode,
     )) as Arc<dyn PluginFactory>);
     if !autonomous {
         if let Some(host_docs_dir) = host_docs_dir {
@@ -89,7 +89,7 @@ pub(super) fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>)
         plugin_stack.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    if execution_mode == ModeId::rlm() {
+    if execution_mode.is_rlm() {
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
         plugin_stack.push(Arc::new(
             SubagentsPluginFactory::new(capability_registry)
@@ -151,7 +151,7 @@ fn retain_autonomous_tools(snapshot: &mut ToolState) {
     snapshot.retain(|name, _| autonomous_tool_allowed(name));
 }
 
-pub(super) fn cli_prompt_config(autonomous: bool, execution_mode: &ModeId) -> PromptLayer {
+pub(super) fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
     let mut intro_entries = vec![PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro)];
     intro_entries.push(PromptTemplateEntry::slot(PromptSlot::Intro));
 
@@ -191,7 +191,7 @@ pub(super) fn cli_prompt_config(autonomous: bool, execution_mode: &ModeId) -> Pr
                 .with_priority(100),
         );
     }
-    if *execution_mode == ModeId::rlm() {
+    if execution_mode.is_rlm() {
         layer.add_contribution(
             PromptContribution::new(
                 PromptSlot::Execution,
@@ -262,7 +262,7 @@ mod tests {
         let agent_model_specs = BTreeMap::new();
         plugin_factories_for_surface(PluginFactorySurfaceInput {
             autonomous,
-            execution_mode: ModeId::standard(),
+            execution_mode: ExecutionMode::Standard,
             standard_context_approach: None,
             tavily_key: String::new(),
             instruction_source: Arc::new(FsInstructionSource::default()),
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_surface_stack_does_not_install_mode_factories() {
+    fn cli_surface_stack_does_not_install_protocol_factories() {
         let ids = plugin_factory_ids_for_autonomous(false);
 
         assert!(!ids.contains(&"standard_protocol"));
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn rlm_prompt_config_uses_execution_slot_and_contribution() {
-        let layer = cli_prompt_config(false, &ModeId::rlm());
+        let layer = cli_prompt_config(false, &ExecutionMode::Rlm);
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
             .slots
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn standard_prompt_config_omits_rlm_contribution() {
-        let layer = cli_prompt_config(false, &ModeId::standard());
+        let layer = cli_prompt_config(false, &ExecutionMode::Standard);
         let contributions = layer
             .slots
             .values()
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn autonomous_prompt_config_uses_neutral_slots() {
-        let layer = cli_prompt_config(true, &ModeId::standard());
+        let layer = cli_prompt_config(true, &ExecutionMode::Standard);
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
             .slots

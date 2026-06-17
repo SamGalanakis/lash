@@ -260,12 +260,15 @@ mod tests {
                 lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
                 lash_core::ProcessLifecycleStatus::Running,
             )
-            .with_definition(Some(lashlang::ProcessDefinitionIdentity::new(
-                lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
-                lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host")),
-                lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
-                "responder",
-            ))),
+            .with_definition(Some(
+                serde_json::to_value(lashlang::ProcessDefinitionIdentity::new(
+                    lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
+                    lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host")),
+                    lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
+                    "responder",
+                ))
+                .expect("process definition serializes"),
+            )),
         ]);
         app.select_next_process();
 

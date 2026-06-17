@@ -28,14 +28,14 @@ path = "src/main.rs"
 
 [dependencies]
 lash-core = { workspace = true }
-lash = { workspace = true }
-lash-plugin-mcp = { workspace = true }
+lash = { workspace = true, features = ["rlm"] }
+lash-plugin-mcp = { workspace = true, features = ["lashlang"] }
 lash-perf = { path = "../lash-perf", optional = true }
-lash-plugin-process-controls = { workspace = true }
+lash-plugin-process-controls = { workspace = true, features = ["lashlang"] }
 lash-sqlite-store = { workspace = true }
-lash-llm-tools = { workspace = true }
-lash-search-tools = { workspace = true }
-lash-standard-plugins = { workspace = true }
+lash-llm-tools = { workspace = true, features = ["lashlang"] }
+lash-search-tools = { workspace = true, features = ["lashlang"] }
+lash-standard-plugins = { workspace = true, features = ["lashlang"] }
 lash-protocol-rlm = { workspace = true }
 lash-protocol-standard = { workspace = true }
 lash-rlm-types = { workspace = true }

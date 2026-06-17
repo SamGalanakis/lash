@@ -127,33 +127,31 @@ pub struct ToolContext<'run> {
     pub(crate) durable_effects: ToolDurableEffectState,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
     pub(crate) execution_env_spec: crate::ProcessExecutionEnvSpec,
-    pub(crate) lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
+    pub(crate) child_execution_trace_hook: Option<ToolChildExecutionTraceHook>,
 }
 
 #[derive(Clone)]
-pub struct ToolLashlangExecutionCallSite {
-    sink: Arc<dyn lash_trace::TraceSink>,
-    base_context: lash_trace::TraceContext,
-    identity: lash_trace::TraceLashlangExecutionIdentity,
-    parent_node_id: String,
-    occurrence: u64,
+pub struct ToolChildProcessStarted {
+    pub process_id: String,
+    pub child_entry_name: Option<String>,
 }
 
-impl ToolLashlangExecutionCallSite {
+#[derive(Clone)]
+pub struct ToolChildExecutionTraceHook {
+    on_child_process_started: Arc<dyn Fn(ToolChildProcessStarted) + Send + Sync>,
+}
+
+impl ToolChildExecutionTraceHook {
     pub fn new(
-        sink: Arc<dyn lash_trace::TraceSink>,
-        base_context: lash_trace::TraceContext,
-        identity: lash_trace::TraceLashlangExecutionIdentity,
-        parent_node_id: impl Into<String>,
-        occurrence: u64,
+        on_child_process_started: impl Fn(ToolChildProcessStarted) + Send + Sync + 'static,
     ) -> Self {
         Self {
-            sink,
-            base_context,
-            identity,
-            parent_node_id: parent_node_id.into(),
-            occurrence,
+            on_child_process_started: Arc::new(on_child_process_started),
         }
+    }
+
+    pub fn child_process_started(&self, event: ToolChildProcessStarted) {
+        (self.on_child_process_started)(event);
     }
 }
 
@@ -189,7 +187,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     durable_effects: ToolDurableEffectState,
     parent_invocation: Option<crate::RuntimeInvocation>,
     execution_env_spec: crate::ProcessExecutionEnvSpec,
-    lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
+    child_execution_trace_hook: Option<ToolChildExecutionTraceHook>,
 }
 
 impl<'run> ToolContextBuilder<'run> {
@@ -218,7 +216,7 @@ impl<'run> ToolContextBuilder<'run> {
             durable_effects: ToolDurableEffectState::default(),
             parent_invocation: dispatch.parent_invocation.clone(),
             execution_env_spec: dispatch.execution_env_spec.clone(),
-            lashlang_execution_call_site: None,
+            child_execution_trace_hook: None,
         }
     }
 
@@ -281,11 +279,11 @@ impl<'run> ToolContextBuilder<'run> {
         self
     }
 
-    pub(crate) fn lashlang_execution_call_site(
+    pub(crate) fn child_execution_trace_hook(
         mut self,
-        call_site: Option<ToolLashlangExecutionCallSite>,
+        hook: Option<ToolChildExecutionTraceHook>,
     ) -> Self {
-        self.lashlang_execution_call_site = call_site;
+        self.child_execution_trace_hook = hook;
         self
     }
 
@@ -314,7 +312,7 @@ impl<'run> ToolContextBuilder<'run> {
             durable_effects: self.durable_effects,
             parent_invocation: self.parent_invocation,
             execution_env_spec: self.execution_env_spec,
-            lashlang_execution_call_site: self.lashlang_execution_call_site,
+            child_execution_trace_hook: self.child_execution_trace_hook,
         }
     }
 }
@@ -361,7 +359,7 @@ impl<'run> ToolContext<'run> {
                 crate::PluginOptions::default(),
                 crate::SessionPolicy::default(),
             ),
-            lashlang_execution_call_site: None,
+            child_execution_trace_hook: None,
         }
     }
 
@@ -413,59 +411,18 @@ impl<'run> ToolContext<'run> {
         }
     }
 
-    pub fn emit_lashlang_child_process_started(
+    pub fn emit_child_process_started(
         &self,
         process_id: impl Into<String>,
         child_entry_name: Option<String>,
     ) {
-        let Some(call_site) = &self.lashlang_execution_call_site else {
+        let Some(hook) = &self.child_execution_trace_hook else {
             return;
         };
-        let child = lash_trace::TraceLashlangChildExecution {
-            scope: call_site.identity.scope.clone(),
-            subject: lash_trace::TraceRuntimeSubject::Process {
-                process_id: process_id.into(),
-            },
-            module_ref: None,
-            entry_ref: None,
-            entry_name: child_entry_name,
-        };
-        let child_graph_key = child.graph_key();
-        let event = lash_trace::TraceLashlangExecutionEvent::ChildStarted {
-            event_key: format!(
-                "lashlang_execution:{}:child:{}:{}:{}",
-                call_site.identity.graph_key(),
-                call_site.parent_node_id,
-                call_site.occurrence,
-                child_graph_key
-            ),
-            identity: call_site.identity.clone(),
-            parent_node_id: call_site.parent_node_id.clone(),
-            occurrence: call_site.occurrence,
-            child,
-        };
-        let mut context = lash_trace::TraceContext::default()
-            .for_session(call_site.identity.scope.session_id.clone());
-        if let Some(turn_id) = &call_site.identity.scope.turn_id {
-            context = context.for_turn(turn_id.clone());
-        }
-        if let Some(turn_index) = call_site.identity.scope.turn_index {
-            context = context.for_turn_index(turn_index);
-        }
-        if let Some(protocol_iteration) = call_site.identity.scope.protocol_iteration {
-            context = context.for_protocol_iteration(protocol_iteration);
-        }
-        if let lash_trace::TraceRuntimeSubject::Effect { effect_id, .. } =
-            &call_site.identity.subject
-        {
-            context.effect_id = Some(effect_id.clone());
-        }
-        crate::trace::emit_trace(
-            &Some(Arc::clone(&call_site.sink)),
-            &call_site.base_context,
-            context,
-            lash_trace::TraceEvent::LashlangExecution { event },
-        );
+        hook.child_process_started(ToolChildProcessStarted {
+            process_id: process_id.into(),
+            child_entry_name,
+        });
     }
 
     pub fn direct_completions(&self) -> ToolDirectCompletionClient<'run> {

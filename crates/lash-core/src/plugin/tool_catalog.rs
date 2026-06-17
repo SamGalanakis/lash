@@ -11,7 +11,7 @@ pub struct ToolCatalogContext {
     pub resolve_contract: Option<lash_sansio::ToolContractResolver>,
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionContext>,
-    pub lashlang_abilities: lashlang::LashlangAbilities,
+    pub extensions: PluginExtensions,
 }
 
 #[derive(Clone, Debug)]

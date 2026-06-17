@@ -1,17 +1,13 @@
 use std::{path::Path, sync::Arc};
 
-use lash::{LashCore, ModeId, ModePreset};
-
 async fn durable_core_without_advanced(
     provider: lash::provider::ProviderHandle,
     data_dir: &Path,
-) -> lash::Result<lash::LashCore> {
+) -> lash::Result<lash::RlmCore> {
     let model = lash::ModelSpec::from_token_limits("compile-only", None, 4096, None)
         .expect("valid model metadata");
 
-    LashCore::builder()
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    lash::RlmCore::builder()
         .provider(provider)
         .model(model)
         .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(

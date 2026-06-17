@@ -575,6 +575,29 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             preserved_process_ids.push(process_id);
                         }
                     }
+                    let wake_targeted = {
+                        let mut stmt = tx
+                            .prepare("SELECT process_id, record_json FROM processes ORDER BY process_id ASC")
+                            .map_err(process_sqlite_error)?;
+                        let rows = stmt
+                            .query_map([], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                            })
+                            .map_err(process_sqlite_error)?;
+                        let mut records = Vec::new();
+                        for row in rows {
+                            let (process_id, record_json) = row.map_err(process_sqlite_error)?;
+                            let record: ProcessRecord =
+                                serde_json::from_str(&record_json).map_err(process_decode_error)?;
+                            records.push((process_id, record));
+                        }
+                        records
+                    };
+                    for (_process_id, mut record) in wake_targeted {
+                        if record.clear_wake_target_for_session(&session_id) {
+                            Self::save_process_conn(tx, &record)?;
+                        }
+                    }
                     Ok((
                         revoked_handle_count,
                         deleted_wake_count,

@@ -170,10 +170,6 @@ impl CurrentSessionCapability {
         }
     }
 
-    fn named_phase(&self, phase: &'static str) -> RuntimeNamedPhase {
-        RuntimeNamedPhase::begin(self.turn_phase_probe.clone(), phase)
-    }
-
     fn resolve_policy(&self) -> Result<RuntimeSessionPolicy, crate::PluginError> {
         self.host
             .resolve_session_policy(&self.session_id, self.policy.clone())
@@ -263,7 +259,6 @@ impl RuntimeSessionServices {
         self.current.host.trigger_store.as_ref().map(|store| {
             crate::TriggerRouter::new(
                 Arc::clone(store),
-                Arc::clone(&self.current.host.core.durability.lashlang_artifact_store),
                 self.current.host.process_registry.clone(),
                 self.current.host.process_work_poke.clone(),
             )

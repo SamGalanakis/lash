@@ -15,9 +15,11 @@ categories = ["asynchronous", "api-bindings"]
 
 [features]
 default = []
+lashlang = ["dep:lash-lashlang-runtime"]
 
 [dependencies]
 lash-core = { workspace = true }
+lash-lashlang-runtime = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 serde = { workspace = true, features = ["derive"] }

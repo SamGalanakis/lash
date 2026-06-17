@@ -1391,7 +1391,9 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
     for process_id in ["sole", "shared", "terminal"] {
         registry
             .register_process(
-                registration(process_id).with_extra_event_types([wake_event_type("producer.wake")]),
+                registration(process_id)
+                    .with_extra_event_types([wake_event_type("producer.wake")])
+                    .with_wake_target(Some(deleted_scope.clone())),
             )
             .await
             .expect("register");
@@ -1466,6 +1468,17 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
     assert_eq!(report.deleted_wake_count, 0);
     assert_eq!(report.orphaned_process_ids, vec!["sole".to_string()]);
     assert_eq!(report.preserved_process_ids, vec!["shared".to_string()]);
+    for process_id in ["sole", "shared", "terminal"] {
+        assert!(
+            registry
+                .get_process(process_id)
+                .await
+                .expect("process survives session delete")
+                .wake_target
+                .is_none(),
+            "session deletion should detach process wake target for {process_id}"
+        );
+    }
     assert!(
         registry
             .list_handle_grants(&deleted_scope)

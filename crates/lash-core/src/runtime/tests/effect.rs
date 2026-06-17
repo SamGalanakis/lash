@@ -73,11 +73,11 @@ fn runtime_host_config_with_provider(provider: crate::ProviderHandle) -> Runtime
 
 fn runtime_host_config_with_durability(
     attachment_store: Arc<dyn crate::AttachmentStore>,
-    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
 ) -> RuntimeHostConfig {
     let mut config = RuntimeHostConfig::in_memory();
     config.durability.attachment_store = attachment_store;
-    config.durability.lashlang_artifact_store = artifact_store;
+    config.durability.process_env_store = process_env_store;
     config
 }
 
@@ -280,8 +280,8 @@ impl RuntimeEffectController for DurableAttachmentRequiredController {
 }
 
 /// An attachment store that reports a durable persistence tier while keeping the
-/// in-memory backing. Lets the store-facet scope checks reach the
-/// artifact/session facets without standing up a real durable backend.
+/// in-memory backing. Lets the store-facet scope checks reach the process-env
+/// and session facets without standing up a real durable backend.
 #[derive(Default)]
 struct DurableInMemoryAttachmentStore {
     inner: crate::InMemoryAttachmentStore,
@@ -309,48 +309,31 @@ impl crate::AttachmentStore for DurableInMemoryAttachmentStore {
     }
 }
 
-/// A Lashlang artifact store that reports a durable tier over in-memory storage.
+/// A process env store that reports a durable tier over in-memory storage.
 #[derive(Default)]
-struct DurableInMemoryArtifactStore {
-    inner: lashlang::InMemoryLashlangArtifactStore,
+struct DurableInMemoryProcessEnvStore {
+    inner: crate::InMemoryProcessExecutionEnvStore,
 }
 
 #[async_trait::async_trait]
-impl lashlang::LashlangArtifactStore for DurableInMemoryArtifactStore {
+impl crate::ProcessExecutionEnvStore for DurableInMemoryProcessEnvStore {
     fn durability_tier(&self) -> crate::DurabilityTier {
         crate::DurabilityTier::Durable
     }
 
-    async fn put_module_artifact(
+    async fn put_process_execution_env(
         &self,
-        artifact: &lashlang::ModuleArtifact,
-    ) -> Result<(), lashlang::ArtifactStoreError> {
-        self.inner.put_module_artifact(artifact).await
-    }
-
-    async fn get_module_artifact(
-        &self,
-        module_ref: &lashlang::ModuleRef,
-    ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
-        self.inner.get_module_artifact(module_ref).await
-    }
-
-    async fn put_artifact_bytes(
-        &self,
-        artifact_ref: &str,
-        descriptor: &str,
+        env_ref: &crate::ProcessExecutionEnvRef,
         bytes: &[u8],
-    ) -> Result<(), lashlang::ArtifactStoreError> {
-        self.inner
-            .put_artifact_bytes(artifact_ref, descriptor, bytes)
-            .await
+    ) -> Result<(), crate::PluginError> {
+        self.inner.put_process_execution_env(env_ref, bytes).await
     }
 
-    async fn get_artifact_bytes(
+    async fn get_process_execution_env(
         &self,
-        artifact_ref: &str,
-    ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
-        self.inner.get_artifact_bytes(artifact_ref).await
+        env_ref: &crate::ProcessExecutionEnvRef,
+    ) -> Result<Option<Vec<u8>>, crate::PluginError> {
+        self.inner.get_process_execution_env(env_ref).await
     }
 }
 
@@ -681,9 +664,9 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
 }
 
 #[tokio::test]
-async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() {
+async fn durable_controller_rejects_ephemeral_process_env_store_before_turn_runs() {
     // Durable attachment store clears the first facet check, so the scope
-    // boundary must reject on the ephemeral Lashlang artifact store next.
+    // boundary must reject on the ephemeral process env store next.
     let controller = DurableAttachmentRequiredController;
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         Vec::new(),
@@ -697,7 +680,7 @@ async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() 
         }),
     )
     .await;
-    let scoped_effect_controller = scoped_test_turn(&controller, "durable-artifact-turn");
+    let scoped_effect_controller = scoped_test_turn(&controller, "durable-process-env-turn");
 
     let err = runtime
         .stream_turn(
@@ -706,19 +689,19 @@ async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() 
                 .with_events(&NoopEventSink),
         )
         .await
-        .expect_err("ephemeral artifact store should be rejected");
+        .expect_err("ephemeral process env store should be rejected");
 
     assert_eq!(
         err.code,
         crate::RuntimeErrorCode::DurableStoreRequired {
-            facet: crate::DurableStoreFacet::ArtifactStore,
+            facet: crate::DurableStoreFacet::ProcessEnvStore,
         }
     );
 }
 
 #[tokio::test]
 async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
-    // Durable attachment + artifact stores clear the first two facet checks, so
+    // Durable attachment + process env stores clear the first two facet checks, so
     // an ephemeral (default-tier) session store backing the turn must be the
     // facet that fails. The in-memory `RecordingStore` reports the Inline tier.
     let controller = DurableAttachmentRequiredController;
@@ -729,7 +712,7 @@ async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
         done_once_provider(),
         EmbeddedRuntimeHost::new(runtime_host_config_with_durability(
             Arc::new(DurableInMemoryAttachmentStore::default()),
-            Arc::new(DurableInMemoryArtifactStore::default()),
+            Arc::new(DurableInMemoryProcessEnvStore::default()),
         )),
         store,
     )
@@ -755,7 +738,7 @@ async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
 
 #[tokio::test]
 async fn durable_controller_rejects_ephemeral_process_registry_before_turn_runs() {
-    // Durable attachment + artifact stores clear the earlier facet checks. The
+    // Durable attachment + process env stores clear the earlier facet checks. The
     // common test helper installs the default inline process registry, so this
     // runtime must fail on the process-registry store facet before exposing
     // process commands under a durable host.
@@ -766,7 +749,7 @@ async fn durable_controller_rejects_ephemeral_process_registry_before_turn_runs(
         done_once_provider(),
         EmbeddedRuntimeHost::new(runtime_host_config_with_durability(
             Arc::new(DurableInMemoryAttachmentStore::default()),
-            Arc::new(DurableInMemoryArtifactStore::default()),
+            Arc::new(DurableInMemoryProcessEnvStore::default()),
         )),
     )
     .await;
@@ -801,7 +784,7 @@ async fn durable_controller_with_all_durable_stores_runs_turn() {
         done_once_provider(),
         EmbeddedRuntimeHost::new(runtime_host_config_with_durability(
             Arc::new(DurableInMemoryAttachmentStore::default()),
-            Arc::new(DurableInMemoryArtifactStore::default()),
+            Arc::new(DurableInMemoryProcessEnvStore::default()),
         )),
     )
     .await;
@@ -1061,12 +1044,8 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
     config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
         mock_provider(Vec::new()).into_handle(),
     ));
-    let trigger = crate::TriggerEvent::new(
-        "Button",
-        "ui.button",
-        "pressed",
-        lashlang::NamedDataType::object("ui.button.Pressed", Vec::new()).expect("event type"),
-    );
+    let trigger =
+        crate::TriggerEvent::new("Button", "ui.button", "pressed", crate::LashSchema::any());
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         vec![Arc::new(StaticPluginFactory::new(
             "button-triggers",
@@ -1932,6 +1911,7 @@ impl lash_sansio::ProtocolDriverHandle<crate::HostTurnProtocol> for EffectContro
         _ctx: crate::DriverContextView<'_>,
     ) -> Vec<crate::DriverAction> {
         vec![crate::DriverAction::StartExec {
+            language: "code".to_string(),
             code: "print('effect controller')".to_string(),
             driver_state: crate::ProtocolDriverState::new(
                 "effect_controller_test_protocol",

@@ -20,7 +20,7 @@ pub enum PluginActionInvokeError {
 pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
-    pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    pub process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
@@ -45,7 +45,7 @@ impl RuntimeServices {
         Self {
             plugins,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
+            process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             store: None,
         }
     }
@@ -58,11 +58,11 @@ impl RuntimeServices {
         self
     }
 
-    pub(crate) fn with_lashlang_artifact_store(
+    pub(crate) fn with_process_env_store(
         mut self,
-        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+        process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
     ) -> Self {
-        self.lashlang_artifact_store = artifact_store;
+        self.process_env_store = process_env_store;
         self
     }
 }
@@ -75,7 +75,7 @@ impl PersistentRuntimeServices {
         Self(RuntimeServices {
             plugins,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
+            process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             store: Some(store),
         })
     }

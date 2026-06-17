@@ -97,7 +97,7 @@ impl LashRuntime {
         self.update_session_config(None, None, Some(prompt)).await;
     }
 
-    /// Re-register the current tool catalog in the live RLM session.
+    /// Re-register the current tool catalog in the live protocol session.
     pub async fn refresh_session_tool_catalog(&mut self) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(

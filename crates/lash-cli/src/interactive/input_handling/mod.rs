@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 
 use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 use lash::CancellationToken;
-use lash::{LashSession, ModeId, provider::ProviderHandle};
+use lash::{LashSession, provider::ProviderHandle};
 use lash_core::ToolState;
 use lash_core::session_model::Message;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
@@ -24,6 +24,7 @@ use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome};
 
 use crate::Args;
 use crate::app::App;
+use crate::execution_settings::ExecutionMode;
 use crate::model_catalog::CachedModelCatalog;
 use crate::render;
 use crate::session_log::SessionLogger;
@@ -64,7 +65,7 @@ pub(super) struct SessionCtx<'a> {
     pub active_stream_id: &'a mut u64,
     pub provider: &'a mut ProviderHandle,
     pub current_model_variant: &'a mut Option<String>,
-    pub current_execution_mode: &'a mut ModeId,
+    pub current_execution_mode: &'a mut ExecutionMode,
     pub active_tool_state: &'a mut ToolState,
     pub model_catalog: &'a CachedModelCatalog,
     pub toolset_hash: &'a mut String,

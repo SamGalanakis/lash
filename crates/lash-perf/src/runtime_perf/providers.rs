@@ -9,9 +9,12 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    LashlangToolBinding, Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract,
-    ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract, ToolDefinition,
+    ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
 };
+#[cfg(test)]
+use lash_lashlang_runtime::tool_lashlang_binding;
+use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 
 use super::scenarios::RuntimePerfScenario;
 
@@ -244,6 +247,9 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
             "additionalProperties": false
         }),
     )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["tools"], "benchmark_echo").with_authority_type("Tools"),
+    )
     .with_scheduling(ToolScheduling::Parallel)
 }
 
@@ -269,6 +275,9 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
             "required": ["value", "delay_ms"],
             "additionalProperties": false
         }),
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["tools"], "benchmark_slow").with_authority_type("Tools"),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -297,6 +306,9 @@ fn benchmark_async_tool_definition() -> ToolDefinition {
             "required": ["value", "mode", "delay_ms"],
             "additionalProperties": false
         }),
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["tools"], "benchmark_async").with_authority_type("Tools"),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -1100,8 +1112,9 @@ mod tests {
         let defs = BenchmarkLargeToolCatalog::build_tool_definitions();
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
+            let binding = tool_lashlang_binding(&def.manifest);
             def.manifest.availability.base == ToolAvailability::Callable
-                && def.manifest.lashlang_binding.module_path == vec!["gmail".to_string()]
+                && binding.module_path == vec!["gmail".to_string()]
                 && !def.contract.input_schema["properties"]
                     .as_object()
                     .expect("object schema")

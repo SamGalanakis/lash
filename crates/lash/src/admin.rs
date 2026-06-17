@@ -43,7 +43,6 @@ impl CoreTriggerAdmin {
         let process_work_poke = self.core.process_work_runner.poke().await;
         let router = lash_core::TriggerRouter::new(
             Arc::clone(store),
-            Arc::clone(&self.core.env.core.durability.lashlang_artifact_store),
             self.core.env.process_registry.clone(),
             process_work_poke,
         );
@@ -137,12 +136,7 @@ impl Processes {
         let env_ref = match request.env_spec.as_ref() {
             Some(env_spec) => Some(
                 lash_core::runtime::persist_process_execution_env(
-                    self.core
-                        .env
-                        .core
-                        .durability
-                        .lashlang_artifact_store
-                        .as_ref(),
+                    self.core.env.core.durability.process_env_store.as_ref(),
                     env_spec,
                 )
                 .await?,
@@ -359,8 +353,8 @@ impl SessionAdmin {
         }
     }
 
-    pub fn mode(&self) -> ModeAdmin {
-        ModeAdmin {
+    pub fn protocol(&self) -> ProtocolAdmin {
+        ProtocolAdmin {
             control: self.clone(),
         }
     }
@@ -553,25 +547,23 @@ impl SessionAdmin {
         .await
     }
 
-    async fn list_lashlang_trigger_registrations(
-        &self,
-    ) -> Result<Vec<lash_core::TriggerRegistration>> {
+    async fn list_trigger_registrations(&self) -> Result<Vec<lash_core::TriggerRegistration>> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
-                .list_lashlang_trigger_registrations()
+                .list_trigger_registrations()
                 .await
                 .map_err(Into::into)
         })
         .await
     }
 
-    async fn lashlang_trigger_registrations_by_source_type(
+    async fn trigger_registrations_by_source_type(
         &self,
         source_type: impl Into<lash_core::TriggerEventType>,
     ) -> Result<Vec<lash_core::TriggerRegistration>> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
-                .lashlang_trigger_registrations_by_source_type(source_type)
+                .trigger_registrations_by_source_type(source_type)
                 .await
                 .map_err(Into::into)
         })
@@ -1119,7 +1111,7 @@ impl SessionTriggerAdmin {
     /// [`Self::by_source_type`] so they only inspect registrations for the
     /// concrete source type they own.
     pub async fn list_all(&self) -> Result<Vec<lash_core::TriggerRegistration>> {
-        self.control.list_lashlang_trigger_registrations().await
+        self.control.list_trigger_registrations().await
     }
 
     /// Return registrations whose source value has the given host descriptor type.
@@ -1131,7 +1123,7 @@ impl SessionTriggerAdmin {
         source_type: impl Into<lash_core::TriggerEventType>,
     ) -> Result<Vec<lash_core::TriggerRegistration>> {
         self.control
-            .lashlang_trigger_registrations_by_source_type(source_type)
+            .trigger_registrations_by_source_type(source_type)
             .await
     }
 }
@@ -1301,11 +1293,11 @@ impl InjectionAdmin {
 }
 
 #[derive(Clone)]
-pub struct ModeAdmin {
+pub struct ProtocolAdmin {
     control: SessionAdmin,
 }
 
-impl ModeAdmin {
+impl ProtocolAdmin {
     pub async fn apply_session_extension(
         &self,
         extension: lash_core::ProtocolSessionExtensionHandle,

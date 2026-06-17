@@ -13,7 +13,6 @@
 mod attachment_store;
 mod effect_host;
 mod helpers;
-mod lashlang_artifact_store;
 mod live_replay;
 mod process_registry;
 mod runtime_persistence;
@@ -23,7 +22,6 @@ mod trigger_store;
 pub use attachment_store::*;
 pub use effect_host::*;
 pub use helpers::*;
-pub use lashlang_artifact_store::*;
 pub use live_replay::*;
 pub use process_registry::*;
 pub use runtime_persistence::*;
@@ -49,10 +47,7 @@ use crate::{
     SessionRevision, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnActivity,
     TurnEvent, TurnInput,
 };
-use crate::{
-    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
-    LashlangArtifactStore,
-};
+use crate::{AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier};
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
     ProcessEventType, ProcessExternalRef, ProcessHandleDescriptor, ProcessInput,
@@ -72,18 +67,6 @@ mod tests {
         attachment_store(
             || Arc::new(crate::InMemoryAttachmentStore::new()) as Arc<dyn AttachmentStore>,
             AttachmentStorePersistence::Ephemeral,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn in_memory_lashlang_artifact_store_satisfies_conformance() {
-        lashlang_artifact_store(
-            || {
-                Arc::new(crate::InMemoryLashlangArtifactStore::new())
-                    as Arc<dyn LashlangArtifactStore>
-            },
-            DurabilityTier::Inline,
         )
         .await;
     }
@@ -186,12 +169,5 @@ mod tests {
             records[0].replay_key.as_deref(),
             Some("trigger:button-1:sleep-effect")
         );
-    }
-
-    #[test]
-    fn module_artifact_rejects_corrupted_store_bytes() {
-        let err = lashlang::ModuleArtifact::from_store_bytes(b"not an artifact")
-            .expect_err("corrupted artifact bytes must be rejected");
-        assert!(matches!(err, lashlang::ModuleArtifactError::Codec(_)));
     }
 }

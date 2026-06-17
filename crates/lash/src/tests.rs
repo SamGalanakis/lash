@@ -7,6 +7,7 @@ use lash_core::llm::transport::LlmTransportError;
 use lash_core::llm::types::{
     LlmContentBlock, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, ResponseTextMeta,
 };
+use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 
 #[derive(Default)]
@@ -674,7 +675,7 @@ fn durable_input_tool_definition() -> lash_core::ToolDefinition {
             "additionalProperties": true
         }),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
         ["tools"],
         "mock_input_request",
     ))
@@ -739,7 +740,10 @@ fn app_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "object" }),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "app_lookup",
+    ))
 }
 
 struct LongTextTools;
@@ -771,7 +775,10 @@ fn long_text_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "string" }),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "app_lookup",
+    ))
 }
 
 struct SurfacePluginFactory;
@@ -1182,8 +1189,8 @@ fn checkpoint_gated_provider(
         .into_handle()
 }
 
-fn standard_core() -> LashCore {
-    explicit_ephemeral_facets(LashCore::standard())
+fn standard_core() -> StandardCore {
+    explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()
@@ -1215,15 +1222,46 @@ fn session_delete_scope(session_id: &str) -> lash_core::ScopedEffectController<'
     inline_scope(lash_core::ExecutionScope::session_delete(session_id))
 }
 
-fn explicit_ephemeral_facets(
-    builder: crate::core::LashCoreBuilder,
-) -> crate::core::LashCoreBuilder {
-    builder
-        .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            crate::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
-        .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
+trait ExplicitEphemeralFacets: Sized {
+    fn explicit_ephemeral_facets(self) -> Self;
+}
+
+impl ExplicitEphemeralFacets for crate::core::LashCoreBuilder {
+    fn explicit_ephemeral_facets(self) -> Self {
+        self.effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
+            .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
+            .process_env_store(Arc::new(
+                crate::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
+    }
+}
+
+impl ExplicitEphemeralFacets for crate::core::StandardCoreBuilder {
+    fn explicit_ephemeral_facets(self) -> Self {
+        self.effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
+            .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
+            .process_env_store(Arc::new(
+                crate::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
+    }
+}
+
+#[cfg(feature = "rlm")]
+impl ExplicitEphemeralFacets for crate::core::RlmCoreBuilder {
+    fn explicit_ephemeral_facets(self) -> Self {
+        self.effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
+            .lashlang_artifact_store(Arc::new(
+                crate::persistence::InMemoryLashlangArtifactStore::new(),
+            ))
+            .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
+            .process_env_store(Arc::new(
+                crate::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
+    }
+}
+
+fn explicit_ephemeral_facets<B: ExplicitEphemeralFacets>(builder: B) -> B {
+    builder.explicit_ephemeral_facets()
 }
 
 fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message {

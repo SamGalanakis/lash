@@ -3,6 +3,7 @@ use lash_core::{
     ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContract, ToolControl,
     ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
+use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     .with_examples(vec![
         r#"await control.continue_as({ task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } })?"#.into(),
     ])
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["control"], "continue_as"))
+    .with_lashlang_binding(LashlangToolBinding::new(["control"], "continue_as"))
     .with_argument_projection(ToolArgumentProjectionPolicy::preserve_projected_refs_in_field(
         "seed",
     ))

@@ -10,6 +10,7 @@ use lash_core::{
     LlmRequest, ProjectorContext, PromptContribution, PromptUsage, ProtocolBuildInput,
     TurnDriverConfig, TurnDriverPreamble,
 };
+use lash_lashlang_runtime::LashlangSurface;
 use lash_rlm_types::{RlmCreateExtras, RlmFinalAnswerFormat, RlmTermination};
 
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub struct RlmProjectorConfig {
     pub max_budget_tokens: Option<usize>,
     pub last_prompt_usage: SharedPromptUsage,
     pub prompt_features: crate::protocol::RlmPromptFeatures,
+    pub lashlang_surface: LashlangSurface,
 }
 
 impl Default for RlmProjectorConfig {
@@ -45,6 +47,7 @@ impl Default for RlmProjectorConfig {
             max_budget_tokens: None,
             last_prompt_usage: Arc::new(RwLock::new(None)),
             prompt_features: crate::protocol::RlmPromptFeatures::default(),
+            lashlang_surface: LashlangSurface::default(),
         }
     }
 }
@@ -64,6 +67,7 @@ pub fn build_rlm_preamble(
         prompt_contributions.push(PromptContribution::execution("Showcased Tools", tool_docs));
     }
     prompt_contributions.extend(input.extra_prompt_contributions);
+    let lashlang_host_environment = config.lashlang_surface.host_environment(tool_catalog);
 
     TurnDriverPreamble {
         config: TurnDriverConfig {
@@ -82,7 +86,7 @@ pub fn build_rlm_preamble(
         omitted_tool_count,
         execution_prompt: Arc::from(crate::protocol::rlm_execution_section_for_host_environment(
             config.prompt_features,
-            &input.lashlang_host_environment,
+            &lashlang_host_environment,
         )),
         prompt_contributions,
     }
@@ -128,13 +132,18 @@ mod catalogue_tests {
         let preamble = build_rlm_preamble(
             lash_core::ProtocolBuildInput {
                 tool_catalog: Arc::new(surface),
-                lashlang_host_environment: lashlang::LashlangHostEnvironment::new(
-                    lashlang::LashlangHostCatalog::tool_default(["search_tools", "grep"]),
-                    lashlang::LashlangAbilities::all(),
-                ),
+                plugin_extensions: Default::default(),
+                trigger_events: Default::default(),
                 extra_prompt_contributions: Vec::new(),
             },
-            RlmProjectorConfig::default(),
+            RlmProjectorConfig {
+                lashlang_surface: LashlangSurface::new(
+                    lashlang::LashlangAbilities::all(),
+                    lashlang::LashlangLanguageFeatures::default(),
+                    lashlang::LashlangHostCatalog::tool_default(["search_tools", "grep"]),
+                ),
+                ..RlmProjectorConfig::default()
+            },
         );
 
         assert_eq!(preamble.omitted_tool_count, 0);
@@ -167,13 +176,18 @@ mod catalogue_tests {
         let preamble = build_rlm_preamble(
             lash_core::ProtocolBuildInput {
                 tool_catalog: Arc::new(surface),
-                lashlang_host_environment: lashlang::LashlangHostEnvironment::new(
-                    lashlang::LashlangHostCatalog::tool_default(["grep"]),
-                    lashlang::LashlangAbilities::default(),
-                ),
+                plugin_extensions: Default::default(),
+                trigger_events: Default::default(),
                 extra_prompt_contributions: Vec::new(),
             },
-            RlmProjectorConfig::default(),
+            RlmProjectorConfig {
+                lashlang_surface: LashlangSurface::new(
+                    lashlang::LashlangAbilities::default(),
+                    lashlang::LashlangLanguageFeatures::default(),
+                    lashlang::LashlangHostCatalog::tool_default(["grep"]),
+                ),
+                ..RlmProjectorConfig::default()
+            },
         );
 
         assert!(!preamble.execution_prompt.contains("process name"));

@@ -133,7 +133,7 @@ impl crate::ProcessService for RuntimeSessionProcessService {
                         .host
                         .core
                         .durability
-                        .lashlang_artifact_store
+                        .process_env_store
                         .as_ref(),
                     env_spec,
                 )
@@ -150,29 +150,12 @@ impl crate::ProcessService for RuntimeSessionProcessService {
                 scope,
             )
             .await?;
-        let definition = match record.input.as_ref() {
-            crate::ProcessInput::LashlangProcess {
-                module_ref,
-                process_ref,
-                host_requirements_ref,
-                process_name,
-                ..
-            } => Some(lashlang::ProcessDefinitionIdentity::new(
-                module_ref.clone(),
-                host_requirements_ref.clone(),
-                process_ref.clone(),
-                process_name.clone(),
-            )),
-            crate::ProcessInput::ToolCall { .. }
-            | crate::ProcessInput::SessionTurn { .. }
-            | crate::ProcessInput::External { .. } => None,
-        };
         Ok(crate::ProcessHandleSummary::new(
-            record.id,
+            record.id.clone(),
             descriptor,
-            crate::ProcessLifecycleStatus::from(record.status),
+            crate::ProcessLifecycleStatus::from(record.status.clone()),
         )
-        .with_definition(definition))
+        .with_definition(record.identity.definition))
     }
 
     async fn start(

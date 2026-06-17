@@ -5,23 +5,20 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use lash::provider::ProviderHandle;
-use lash::{LashCore, LashSession, ModeId, ModePreset, TurnInput, TurnOutput};
+use lash::{LashCore, LashSession, TurnInput, TurnOutput};
 use lash_sqlite_store::SqliteSessionStoreFactory;
 
 async fn sqlite_core(provider: ProviderHandle, model: String) -> anyhow::Result<()> {
     // docs:start:sqlite-core
     use std::sync::Arc;
 
-    use lash::{LashCore, ModeId, ModePreset};
     use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
     let data_dir = std::path::PathBuf::from("./.lash-data");
     let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
     let artifact_store = Arc::new(Store::open(&data_dir.join("artifacts.db")).await?);
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -69,13 +66,13 @@ async fn postgres_core(database_url: String) -> anyhow::Result<()> {
         .prefix("prod/lash")
         .build()?;
 
-    let core = LashCore::builder()
+    let core = lash::RlmCore::builder()
         .store_factory(Arc::new(storage.session_store_factory()))
         .process_registry(Arc::new(storage.process_registry()))
         .trigger_store(Arc::new(storage.trigger_store()))
         .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
         .attachment_store(Arc::new(attachments))
-        // provider, mode, model, effect host...
+        // provider, model, effect host...
         .build()?;
     // docs:end:postgres-core
     Ok(())
@@ -145,9 +142,7 @@ async fn shared_factory(
     let artifact_store =
         Arc::new(lash_sqlite_store::Store::open(&data_dir.join("lash-artifacts.db")).await?);
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(
@@ -167,7 +162,7 @@ async fn shared_factory(
         .build()?;
 
     // Per request: open a session keyed by the app's chat id.
-    let session = core.session(chat_id).rlm().open().await?;
+    let session = core.session(chat_id).open().await?;
     // docs:end:shared-factory
     Ok(())
 }

@@ -4,9 +4,11 @@ use super::*;
 use bytes::{BufMut, Bytes, BytesMut};
 use http_body_util::{BodyExt, Empty, Full};
 use lash_core::{ProcessInput, ProcessRegistration};
+use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use restate_sdk::prelude::Endpoint;
 use restate_sdk::service::Discoverable;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -141,6 +143,12 @@ fn process_registry() -> Arc<dyn ProcessRegistry> {
     }))
 }
 
+fn lashlang_process_input(input: lash_lashlang_runtime::LashlangProcessInput) -> ProcessInput {
+    input
+        .into_process_input()
+        .expect("serialize lashlang process input")
+}
+
 #[derive(Default)]
 struct DurableMemoryAttachmentStore {
     inner: lash_core::InMemoryAttachmentStore,
@@ -167,6 +175,36 @@ impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
         self.inner.get(id).await
     }
 }
+
+#[derive(Default)]
+struct DurableMemoryProcessEnvStore {
+    inner: lash_core::InMemoryProcessExecutionEnvStore,
+}
+
+#[async_trait::async_trait]
+impl lash_core::ProcessExecutionEnvStore for DurableMemoryProcessEnvStore {
+    fn durability_tier(&self) -> lash_core::DurabilityTier {
+        lash_core::DurabilityTier::Durable
+    }
+
+    async fn put_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+        bytes: &[u8],
+    ) -> Result<(), lash_core::PluginError> {
+        self.inner.put_process_execution_env(env_ref, bytes).await
+    }
+
+    async fn get_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+    ) -> Result<Option<Vec<u8>>, lash_core::PluginError> {
+        self.inner.get_process_execution_env(env_ref).await
+    }
+}
+
+static RECOVERY_PROCESS_ENV_STORE: LazyLock<Arc<DurableMemoryProcessEnvStore>> =
+    LazyLock::new(|| Arc::new(DurableMemoryProcessEnvStore::default()));
 
 struct CommitRetryStore {
     inner: Arc<dyn lash_core::RuntimePersistence>,
@@ -420,6 +458,7 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
         ),
         (
             RuntimeEffectCommand::ExecCode {
+                language: "code".to_string(),
                 code: "1 + 1".to_string(),
             },
             RestateEffectExecution::JournaledRun,
@@ -721,6 +760,7 @@ async fn restate_controller_executes_non_sleep_effect_inside_run() {
             RuntimeEffectEnvelope::new(
                 runtime_invocation(RuntimeEffectKind::ExecCode, "exec"),
                 RuntimeEffectCommand::ExecCode {
+                    language: "code".to_string(),
                     code: "1 + 1".to_string(),
                 },
             ),
@@ -916,11 +956,7 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
     let mut host = lash_core::RuntimeHostConfig::in_memory();
     host.providers.provider_resolver = Arc::new(lash_core::SingleProviderResolver::new(provider));
     host.durability.attachment_store = Arc::new(DurableMemoryAttachmentStore::default());
-    host.durability.lashlang_artifact_store = Arc::new(
-        lash_sqlite_store::Store::open(&dir.path().join("artifacts.db"))
-            .await
-            .expect("open artifact store"),
-    );
+    host.durability.process_env_store = Arc::new(DurableMemoryProcessEnvStore::default());
     let store = Arc::new(
         lash_sqlite_store::Store::open(&dir.path().join("session.db"))
             .await
@@ -1082,16 +1118,16 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     args.insert("root".to_string(), serde_json::json!("."));
     let registration = ProcessRegistration::new(
         "process-1",
-        ProcessInput::LashlangProcess {
+        lashlang_process_input(lash_lashlang_runtime::LashlangProcessInput {
             module_ref: linked_module.module_ref.clone(),
             process_ref: process_ref.clone(),
             host_requirements_ref: linked_module.host_requirements_ref.clone(),
             process_name: "scan".to_string(),
             args: args.clone(),
-        },
+        }),
         lash_core::ProcessProvenance::session(lash_core::SessionScope::new("session")),
     )
-    .with_extra_event_types(lash_core::lashlang_process_event_types())
+    .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
     .with_execution_env_ref(Some(lash_core::ProcessExecutionEnvRef::new(
         "process-env:test:process-1",
     )))
@@ -1137,22 +1173,20 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
     );
     let started = context.started.lock().expect("started lock").clone();
     assert_eq!(started.len(), 1);
-    let ProcessInput::LashlangProcess {
-        module_ref,
-        process_ref: sent_process_ref,
-        host_requirements_ref,
-        process_name,
-        args: sent_args,
-        ..
-    } = started[0].input.as_ref()
-    else {
-        panic!("expected lashlang process input");
+    let ProcessInput::Engine { kind, payload } = started[0].input.as_ref() else {
+        panic!("expected engine process input");
     };
-    assert_eq!(module_ref, &linked_module.module_ref);
-    assert_eq!(sent_process_ref, &process_ref);
-    assert_eq!(host_requirements_ref, &linked_module.host_requirements_ref);
-    assert_eq!(process_name, "scan");
-    assert_eq!(sent_args, &args);
+    assert_eq!(kind, lash_lashlang_runtime::LASHLANG_ENGINE_KIND);
+    let sent = lash_lashlang_runtime::LashlangProcessInput::from_payload(payload.clone())
+        .expect("typed lashlang payload");
+    assert_eq!(sent.module_ref, linked_module.module_ref);
+    assert_eq!(sent.process_ref, process_ref);
+    assert_eq!(
+        sent.host_requirements_ref,
+        linked_module.host_requirements_ref
+    );
+    assert_eq!(sent.process_name, "scan");
+    assert_eq!(sent.args, args);
     assert_eq!(
         context
             .started
@@ -1258,7 +1292,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
     registry
         .register_process(
             external_registration("task-signal")
-                .with_extra_event_types(lash_core::lashlang_process_event_types())
+                .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
                 .with_extra_event_types([lash_core::ProcessEventType {
                     name: "signal.notify".to_string(),
                     payload_schema: lash_core::LashSchema::any(),
@@ -1665,6 +1699,7 @@ impl SnapshotRecoveryTool {
             }),
             serde_json::json!({ "type": "object" }),
         )
+        .with_lashlang_binding(LashlangToolBinding::new(["tools"], "snapshot_echo"))
     }
 }
 
@@ -1747,10 +1782,19 @@ fn recovery_worker_with_plugins(
     ];
     plugins.extend(extra_plugins);
     let plugin_host = lash_core::PluginHost::new(plugins);
+    let process_env_store: Arc<dyn lash_core::ProcessExecutionEnvStore> =
+        RECOVERY_PROCESS_ENV_STORE.clone();
+    let runtime_host = lash_core::RuntimeHostConfig::in_memory()
+        .with_process_env_store(process_env_store)
+        .with_process_engine(Arc::new(
+            lash_lashlang_runtime::LashlangProcessEngine::in_memory(
+                lash_lashlang_runtime::LashlangSurface::default(),
+            ),
+        ));
     DurableProcessWorker::new(
         lash_core::DurableProcessWorkerConfig::new(
             Arc::new(plugin_host),
-            lash_core::RuntimeHostConfig::in_memory(),
+            runtime_host,
             store_factory,
             registry,
         )
@@ -1771,12 +1815,9 @@ async fn persist_recovery_env_ref() -> lash_core::ProcessExecutionEnvRef {
         lash_core::PluginOptions::empty(),
         recovery_session_policy(),
     );
-    lash_core::runtime::persist_process_execution_env(
-        lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
-        &spec,
-    )
-    .await
-    .expect("persist recovery process execution env")
+    lash_core::runtime::persist_process_execution_env(RECOVERY_PROCESS_ENV_STORE.as_ref(), &spec)
+        .await
+        .expect("persist recovery process execution env")
 }
 
 async fn persist_snapshot_recovery_env_ref(
@@ -1786,12 +1827,9 @@ async fn persist_snapshot_recovery_env_ref(
         snapshot_recovery_tool_options(snapshot_ref),
         recovery_session_policy(),
     );
-    lash_core::runtime::persist_process_execution_env(
-        lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
-        &spec,
-    )
-    .await
-    .expect("persist snapshot recovery process execution env")
+    lash_core::runtime::persist_process_execution_env(RECOVERY_PROCESS_ENV_STORE.as_ref(), &spec)
+        .await
+        .expect("persist snapshot recovery process execution env")
 }
 
 fn process_wake_event_type() -> lash_core::ProcessEventType {
@@ -1859,16 +1897,16 @@ async fn snapshot_lashlang_registration(
         .clone();
     ProcessRegistration::new(
         process_id,
-        ProcessInput::LashlangProcess {
+        lashlang_process_input(lash_lashlang_runtime::LashlangProcessInput {
             module_ref: linked_module.module_ref,
             process_ref,
             host_requirements_ref: linked_module.host_requirements_ref,
             process_name: "main".to_string(),
             args: serde_json::Map::new(),
-        },
+        }),
         lash_core::ProcessProvenance::host(),
     )
-    .with_extra_event_types(lash_core::lashlang_process_event_types())
+    .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
     .with_execution_env_ref(Some(env_ref))
 }
 
@@ -2122,10 +2160,10 @@ async fn sqlite_process_recovery_terminalizes_revoked_snapshot_plugin_options() 
     );
 }
 
-/// Build a durable registration for a trigger-started lashlang process.
+/// Build a durable registration for a trigger-started Lashlang engine process.
 ///
-/// A trigger/trigger-started process carries a [`ProcessInput::LashlangProcess`]
-/// (the trigger route's process body) and provenance whose `caused_by` is the
+/// A trigger-started process carries the trigger route's engine payload and
+/// provenance whose `caused_by` is the
 /// trigger occurrence that fired it — distinct from a turn-started process, whose
 /// provenance traces to a live turn/tool call. The module artifact is stored
 /// in the process-global in-memory artifact store, mirroring how a trigger
@@ -2159,13 +2197,13 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
     let env_ref = persist_recovery_env_ref().await;
     ProcessRegistration::new(
         process_id,
-        ProcessInput::LashlangProcess {
+        lashlang_process_input(lash_lashlang_runtime::LashlangProcessInput {
             module_ref: linked_module.module_ref,
             process_ref,
             host_requirements_ref: linked_module.host_requirements_ref,
             process_name: "notify".to_string(),
             args,
-        },
+        }),
         lash_core::ProcessProvenance::session(lash_core::SessionScope::new("root")).with_caused_by(
             Some(lash_core::CausalRef::SessionNode {
                 session_id: "root".to_string(),
@@ -2173,8 +2211,30 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
             }),
         ),
     )
-    .with_extra_event_types(lash_core::lashlang_process_event_types())
+    .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
     .with_execution_env_ref(Some(env_ref))
+}
+
+fn assert_lashlang_engine_record(
+    record: &lash_core::ProcessRecord,
+    expected_process_name: &str,
+    expected_args: serde_json::Map<String, serde_json::Value>,
+) {
+    let ProcessInput::Engine { kind, payload } = record.input.as_ref() else {
+        panic!(
+            "persisted Lashlang process must use generic engine input, got {:?}",
+            record.input
+        );
+    };
+    assert_eq!(
+        kind,
+        lash_lashlang_runtime::LASHLANG_ENGINE_KIND,
+        "persisted row must dispatch through the registered Lashlang process engine"
+    );
+    let decoded = lash_lashlang_runtime::LashlangProcessInput::from_payload(payload.clone())
+        .expect("persisted Lashlang engine payload must decode after registry reopen");
+    assert_eq!(decoded.process_name, expected_process_name);
+    assert_eq!(decoded.args, expected_args);
 }
 
 /// Phase-B recovery: a TRIGGER-started process whose worker died mid-flight is
@@ -2183,7 +2243,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
 /// durable re-execution guarantee a turn-started process has (invariant 3).
 ///
 /// Mirrors `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
-/// but the process is started by a trigger/trigger occurrence (a `LashlangProcess` row
+/// but the process is started by a trigger occurrence (a `lashlang` engine row
 /// with trigger provenance), not by a live turn's tool call. It also pins
 /// the lease single-owner / fencing contract: an active lease fences a
 /// competing owner and a superseded (stale) writer is rejected (invariant 4).
@@ -2207,11 +2267,12 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
         .register_process(trigger_lashlang_registration("trigger-notify", "issue-42").await)
         .await
         .expect("register trigger-started process");
+    let persisted_before_rebuild = registry_a
+        .get_process("trigger-notify")
+        .await
+        .expect("persisted trigger-started process before recovery");
     assert!(
-        registry_a
-            .get_process("trigger-notify")
-            .await
-            .is_some_and(|record| !record.is_terminal()),
+        !persisted_before_rebuild.is_terminal(),
         "freshly trigger-started process must be non-terminal before recovery"
     );
     drop(registry_a);
@@ -2225,6 +2286,15 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
             .await
             .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
+    let reopened_record = registry_b
+        .get_process("trigger-notify")
+        .await
+        .expect("trigger-started process survives registry reopen");
+    assert_lashlang_engine_record(
+        &reopened_record,
+        "notify",
+        serde_json::Map::from_iter([("resource".to_string(), serde_json::json!("issue-42"))]),
+    );
     assert_eq!(
         registry_b
             .list_non_terminal()

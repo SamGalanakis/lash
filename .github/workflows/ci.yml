@@ -80,6 +80,20 @@ jobs:
           # shellcheck disable=SC2086
           cargo check --workspace --all-targets --locked ${LASH_CI_FEATURES}
 
+      - name: Check lash-runtime feature boundary
+        run: |
+          cargo check -p lash-runtime --no-default-features --locked
+
+          if cargo tree -p lash-runtime -e normal --no-default-features --locked | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
+            echo "default-off lash-runtime pulled RLM/Lashlang dependencies"
+            exit 1
+          fi
+
+          if cargo tree -p lash-runtime -e normal --locked | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
+            echo "default lash-runtime pulled RLM/Lashlang dependencies"
+            exit 1
+          fi
+
       # Workspace-wide: every crate's tests run, not a hand-maintained crate
       # list. Live tests (Restate e2e, Postgres conformance without a
       # database URL) are #[ignore]d or self-skip.

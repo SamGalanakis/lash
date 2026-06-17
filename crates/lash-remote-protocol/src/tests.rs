@@ -1,5 +1,7 @@
 use super::*;
 
+const EXAMPLE_BINDING_KEY: &str = "example.call_path";
+
 #[derive(Clone)]
 struct VecRegistry(Vec<RemoteToolGrant>);
 
@@ -213,7 +215,18 @@ fn remote_trigger_dtos_json_round_trip() {
         source_type: "ui.button.pressed".to_string(),
         source: serde_json::json!({}),
         target: RemoteTriggerTargetSummary {
-            process_name: "on_button".to_string(),
+            label: Some("on_button".to_string()),
+            identity: RemoteProcessIdentity {
+                kind: "lashlang".to_string(),
+                label: Some("on_button".to_string()),
+                definition: Some(remote_process_definition_identity()),
+            },
+            input: RemoteProcessInput::Engine {
+                kind: "lashlang".to_string(),
+                payload: serde_json::json!({
+                    "args": {}
+                }),
+            },
             inputs: remote_trigger_input_template(),
         },
         enabled: true,
@@ -222,7 +235,7 @@ fn remote_trigger_dtos_json_round_trip() {
         serde_json::to_value(&registration).expect("serialize registration"),
     )
     .expect("deserialize registration");
-    assert_eq!(decoded.target.process_name, "on_button");
+    assert_eq!(decoded.target.label.as_deref(), Some("on_button"));
 
     let cause = RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
@@ -345,6 +358,11 @@ fn remote_process_dtos_json_round_trip() {
                 process_id: "process:1".to_string(),
                 graph_key: "process:process:1".to_string(),
                 kind: "external".to_string(),
+                identity: RemoteProcessIdentity {
+                    kind: "external".to_string(),
+                    label: Some("Import".to_string()),
+                    definition: None,
+                },
                 lifecycle: RemoteProcessLifecycleStatus::Running,
                 status_label: "running".to_string(),
                 terminal: false,
@@ -494,14 +512,21 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         source_type: "ui.button.pressed".to_string(),
         source_key: "source-key".to_string(),
         source: serde_json::json!({ "button": "blue" }),
-        event_ty: serde_json::json!({ "kind": "any" }),
-        target: RemoteProcessDefinitionIdentity {
-            module_ref: "lashlang:v1:sha256:module".to_string(),
-            host_requirements_ref: "lashlang-host-requirements:v1:sha256:host".to_string(),
-            process_ref: remote_process_ref(),
-            process_name: "on_button".to_string(),
+        payload_schema: serde_json::json!({ "kind": "any" }),
+        target: RemoteProcessInput::Engine {
+            kind: "lashlang".to_string(),
+            payload: serde_json::json!({
+                "args": {}
+            }),
         },
+        target_identity: RemoteProcessIdentity {
+            kind: "lashlang".to_string(),
+            label: Some("on_button".to_string()),
+            definition: Some(remote_process_definition_identity()),
+        },
+        event_types: vec![remote_process_event_type()],
         input_template: remote_trigger_input_template(),
+        target_label: Some("on_button".to_string()),
     };
     draft.validate().expect("valid trigger draft");
     let decoded: RemoteTriggerSubscriptionDraft =
@@ -519,9 +544,12 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         source_type: draft.source_type.clone(),
         source_key: draft.source_key.clone(),
         source: draft.source.clone(),
-        event_ty: draft.event_ty.clone(),
+        payload_schema: draft.payload_schema.clone(),
         target: draft.target.clone(),
+        target_identity: draft.target_identity.clone(),
+        event_types: draft.event_types.clone(),
         input_template: draft.input_template.clone(),
+        target_label: draft.target_label.clone(),
         enabled: true,
         created_at_ms: 1,
         updated_at_ms: 2,
@@ -717,7 +745,13 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         argument_projection: None,
         scheduling: None,
         retry_policy: None,
-        lashlang_binding: Some(RemoteLashlangToolBinding::new([module], operation)),
+        bindings: BTreeMap::from([(
+            EXAMPLE_BINDING_KEY.to_string(),
+            serde_json::json!({
+                "module_path": [module],
+                "operation": operation
+            }),
+        )]),
     }
 }
 
@@ -743,19 +777,17 @@ fn remote_trigger_input_template() -> RemoteTriggerInputTemplate {
     ]))
 }
 
-fn remote_process_ref() -> RemoteLashlangProcessRef {
-    RemoteLashlangProcessRef {
-        component: "process-component".to_string(),
-        pos: 1,
-    }
-}
-
 fn remote_process_definition_identity() -> RemoteProcessDefinitionIdentity {
     RemoteProcessDefinitionIdentity {
-        module_ref: "lashlang:v1:sha256:module".to_string(),
-        host_requirements_ref: "lashlang-host-requirements:v1:sha256:host".to_string(),
-        process_ref: remote_process_ref(),
-        process_name: "main".to_string(),
+        value: serde_json::json!({
+            "module_ref": "lashlang:v1:sha256:module",
+            "host_requirements_ref": "lashlang-host-requirements:v1:sha256:host",
+            "process_ref": {
+                "component": "process-component",
+                "pos": 1
+            },
+            "process_name": "main"
+        }),
     }
 }
 
@@ -784,6 +816,11 @@ fn remote_process_record() -> RemoteProcessRecord {
         process_id: "process:1".to_string(),
         input: RemoteProcessInput::External {
             metadata: serde_json::json!({ "label": "Import" }),
+        },
+        identity: RemoteProcessIdentity {
+            kind: "external".to_string(),
+            label: Some("Import".to_string()),
+            definition: None,
         },
         event_types: vec![remote_process_event_type()],
         provenance: RemoteProcessProvenance {

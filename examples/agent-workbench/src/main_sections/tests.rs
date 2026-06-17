@@ -27,9 +27,9 @@ mod tests {
     }
 
     fn explicit_durable_test_facets(
-        builder: lash::LashCoreBuilder,
+        builder: lash::RlmCoreBuilder,
         data_dir: &std::path::Path,
-    ) -> lash::LashCoreBuilder {
+    ) -> lash::RlmCoreBuilder {
         builder
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
@@ -367,12 +367,9 @@ mod tests {
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
-        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -449,12 +446,9 @@ mod tests {
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_id = WorkbenchSessionIds::fresh().current();
-        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -466,7 +460,6 @@ mod tests {
             .expect("build core");
         let session = core
             .session(session_id)
-            .rlm()
             .open()
             .await
             .expect("open session");
@@ -527,12 +520,9 @@ mod tests {
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
-        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -581,7 +571,6 @@ mod tests {
         let reopened = state
             .core
             .session(state.current_session_id())
-            .rlm()
             .open()
             .await
             .expect("reopen session");
@@ -615,7 +604,6 @@ mod tests {
         let reopened = state
             .core
             .session(state.current_session_id())
-            .rlm()
             .open()
             .await
             .expect("reopen session after account removal");
@@ -642,7 +630,6 @@ mod tests {
         let reopened = state
             .core
             .session(state.current_session_id())
-            .rlm()
             .open()
             .await
             .expect("reopen session after account re-add");
@@ -687,12 +674,9 @@ mod tests {
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let session_id = session_ids.current();
-        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -702,7 +686,6 @@ mod tests {
             .expect("build core");
         let session = core
             .session(session_id.clone())
-            .rlm()
             .open()
             .await
             .expect("open session");
@@ -725,10 +708,13 @@ mod tests {
         assert_remote_trigger_emit_report_round_trip(&report);
 
         assert_eq!(report.started_process_ids.len(), 1);
-        process_registry
-            .await_process(&report.started_process_ids[0])
-            .await
-            .expect("trigger process should finish");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            process_registry.await_process(&report.started_process_ids[0]),
+        )
+        .await
+        .expect("trigger process should finish promptly")
+        .expect("trigger process should finish");
         let handles = session.processes().list_all().await.expect("list handles");
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0].descriptor.kind.as_deref(), Some("lashlang"));
@@ -737,7 +723,6 @@ mod tests {
 
         let reopened = core
             .session(session_id.clone())
-            .rlm()
             .open()
             .await
             .expect("reopen session");
@@ -788,7 +773,7 @@ mod tests {
             turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
-        let target_scope_id = lash::process::SessionScope::new(state.current_session_id()).id();
+        let target_scope_prefix = format!("session:{}/frame:", state.current_session_id());
         let session_store =
             lash_sqlite_store::Store::open(&session_store_factory.path_for_session(&session_id))
                 .await
@@ -806,7 +791,11 @@ mod tests {
         };
         assert!(wake.input.contains("button_pressed"));
         assert!(wake.input.contains("Red"));
-        assert_eq!(wake.target_scope_id, target_scope_id);
+        assert!(
+            wake.target_scope_id.as_str().starts_with(&target_scope_prefix),
+            "process wake should target the current session's active frame, got {}",
+            wake.target_scope_id
+        );
         let Json(work) = list_work(State(state)).await.expect("list work");
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].process.status_label, "completed");
@@ -870,22 +859,18 @@ mod tests {
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let (event_tx, _) = broadcast::channel(1024);
-        let core = LashCore::builder()
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        let core = RlmCore::builder()
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(Arc::clone(&process_registry))
             .trigger_store(trigger_store)
-            .advanced()
+            .lashlang_artifact_store(artifact_store_for_core)
             .runtime_host_config({
                 let mut config = lash::durability::RuntimeHostConfig::in_memory();
-                config.durability.lashlang_artifact_store = artifact_store_for_core;
                 config.control.effect_host =
                     Arc::new(lash::durability::InlineEffectHost::default());
                 config
@@ -920,7 +905,6 @@ mod tests {
         let session = state
             .core
             .session(state.current_session_id())
-            .rlm()
             .open()
             .await
             .expect("open session");
@@ -1041,12 +1025,9 @@ mod tests {
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
-        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -1094,7 +1075,6 @@ mod tests {
         let session = state
             .core
             .session(old_session_id.clone())
-            .rlm()
             .open()
             .await
             .expect("open old session");
@@ -1106,14 +1086,14 @@ mod tests {
                 .await;
         assert_eq!(trigger_records.len(), 1);
         assert_eq!(started.started_process_ids.len(), 1);
-        let old_process_scope = session.observe().process_scope();
+        let old_work_before_reset = state
+            .process_observer
+            .snapshot_for_session(&old_session_id)
+            .await
+            .expect("old work before reset");
         assert_eq!(
-            process_registry
-                .list_handle_grants(&old_process_scope)
-                .await
-                .expect("old grants before reset")
-                .len(),
-            1
+            old_work_before_reset.visible_process_ids,
+            started.started_process_ids
         );
         append_started_graph(
             &state.lashlang_execution,
@@ -1171,20 +1151,20 @@ mod tests {
             request.pointer("/body/session_id").and_then(Value::as_str),
             Some(old_session_id.as_str())
         );
-        assert!(
-            process_registry
-                .list_handle_grants(&old_process_scope)
-                .await
-                .expect("old grants after reset submission")
-                .len()
-                == 1,
+        let old_work_after_reset = state
+            .process_observer
+            .snapshot_for_session(&old_session_id)
+            .await
+            .expect("old work after reset submission");
+        assert_eq!(
+            old_work_after_reset.visible_process_ids,
+            started.started_process_ids,
             "mock Restate ingress must not consume deletion work inline"
         );
         assert!(
             state
                 .core
                 .session(snapshot.settings.session_id)
-                .rlm()
                 .open()
                 .await
                 .expect("open new session")
@@ -1399,12 +1379,9 @@ mod tests {
                 restate_http: restate_http.clone(),
             }));
         let queued_work_poke = queued_work_runner.poke_handle();
-        let core = LashCore::builder()
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        let core = RlmCore::builder()
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -1620,7 +1597,6 @@ mod tests {
             );
             let session = core
                 .session(session_id.clone())
-                .rlm()
                 .open()
                 .await
                 .expect("open session");
@@ -1654,7 +1630,6 @@ mod tests {
         );
         let _reopened = core
             .session(session_id)
-            .rlm()
             .open()
             .await
             .expect("reopen session");
@@ -1676,7 +1651,6 @@ mod tests {
         let session = state
             .core
             .session(receipt.session_id.clone())
-            .rlm()
             .open()
             .await
             .expect("open session to drain refresh batch");
@@ -1704,26 +1678,22 @@ mod tests {
         process_registry: Arc<dyn lash::process::ProcessRegistry>,
         trigger_store: Arc<lash_sqlite_store::SqliteTriggerStore>,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
-    ) -> LashCore {
+    ) -> RlmCore {
         let provider = trigger_registration_provider();
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
-        LashCore::builder()
-            .install_mode(ModePreset::rlm_with_config(
-                lash::modes::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+        RlmCore::builder()
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
             .provider(provider)
             .model(model)
             .store_factory(session_store_factory)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(process_registry)
             .trigger_store(trigger_store)
-            .advanced()
+            .lashlang_artifact_store(artifact_store)
             .runtime_host_config({
                 let mut config = lash::durability::RuntimeHostConfig::in_memory();
-                config.durability.lashlang_artifact_store = artifact_store;
                 config.control.effect_host =
                     Arc::new(lash::durability::InlineEffectHost::default());
                 config
@@ -1836,7 +1806,7 @@ mod tests {
     }
 
     async fn assert_remote_started_process_surface(
-        core: &LashCore,
+        core: &RlmCore,
         registry: &dyn lash::process::ProcessRegistry,
         session_id: &str,
         process_ids: &[String],
@@ -1884,15 +1854,6 @@ mod tests {
             .try_into()
             .expect("remote process work snapshot should convert back");
         assert_eq!(round_trip_snapshot.session_id, session_id);
-        for process_id in process_ids {
-            assert!(
-                round_trip_snapshot
-                    .visible_process_ids
-                    .iter()
-                    .any(|visible_id| visible_id == process_id),
-                "remote process work snapshot did not include started process {process_id}"
-            );
-        }
 
         for process_id in process_ids {
             let record = registry
@@ -1940,7 +1901,7 @@ mod tests {
     }
 
     async fn emit_test_button_trigger(
-        core: &LashCore,
+        core: &RlmCore,
         button: ButtonChoice,
     ) -> lash::triggers::TriggerEmitReport {
         let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)

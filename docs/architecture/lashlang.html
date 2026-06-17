@@ -46,7 +46,7 @@
         <div class="section" id="host-surface">
           <div class="section-header">
             <h2>Host Surface</h2>
-            <p>The authored language is stable, but the available modules and optional syntax are host-provided. Each turn links against a <code>LashlangHostEnvironment</code>: a <code>LashlangHostCatalog</code>, <code>LashlangAbilities</code>, and <code>LashlangLanguageFeatures</code>. Core derives callable tool operations from the current <code>ToolCatalog</code>, then merges plugin-provided Lashlang resources such as value constructors and trigger source metadata. The prompt renderer uses that same effective surface, so the model sees only operations, constructors, lifecycle forms, and annotations that will link.</p>
+            <p>The authored language is stable, but the available modules and optional syntax are host-provided. Each turn links against a <code>LashlangHostEnvironment</code>: a <code>LashlangHostCatalog</code>, <code>LashlangAbilities</code>, and <code>LashlangLanguageFeatures</code>. The Lashlang runtime derives callable tool operations from the current <code>ToolCatalog</code>, then merges plugin-provided Lashlang resources such as value constructors and trigger source metadata. The prompt renderer uses that same effective surface, so the model sees only operations, constructors, lifecycle forms, and annotations that will link.</p>
           </div>
           <dl class="def-list">
             <dt>Tool operations</dt>

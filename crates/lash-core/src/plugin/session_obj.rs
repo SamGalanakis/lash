@@ -89,9 +89,7 @@ pub struct PluginSession {
     pub(super) tool_catalog_overlay: ToolCatalogContribution,
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionContext>,
-    pub(super) lashlang_abilities: lashlang::LashlangAbilities,
-    pub(super) lashlang_language_features: lashlang::LashlangLanguageFeatures,
-    pub(super) lashlang_resources: lashlang::LashlangHostCatalog,
+    pub(super) extensions: PluginExtensions,
     pub(super) triggers: crate::TriggerEventCatalog,
     pub(super) contributions: PluginContributions,
 }
@@ -108,16 +106,8 @@ impl PluginSession {
         self.subagent.as_ref()
     }
 
-    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
-        self.lashlang_abilities
-    }
-
-    pub fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
-        self.lashlang_language_features
-    }
-
-    pub fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
-        self.lashlang_resources.clone()
+    pub fn extensions(&self) -> &PluginExtensions {
+        &self.extensions
     }
 
     pub fn triggers(&self) -> &crate::TriggerEventCatalog {

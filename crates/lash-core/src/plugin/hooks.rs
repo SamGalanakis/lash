@@ -240,8 +240,8 @@ pub struct AssistantStreamTransform {
     /// moment this hook returns and finalizes the turn using whatever
     /// text has been streamed so far. Any plugin may set this — the
     /// first to raise it wins. Used by protocol plugins to enforce
-    /// one-block-per-turn contracts (e.g. the RLM stream mask aborts
-    /// as soon as the first lashlang fence closes).
+    /// one-block-per-turn contracts (for example, aborting as soon as
+    /// the first protocol-owned code fence closes).
     pub abort_stream: bool,
 }
 

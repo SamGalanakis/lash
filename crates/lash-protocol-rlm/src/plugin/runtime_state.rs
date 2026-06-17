@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use lash_core::plugin::{CodeExecutorPlugin, ProtocolSessionContext};
 use lash_core::{PromptContribution, SessionError, SessionEventRecord};
+use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface};
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmProtocolEvent};
 
 use super::RlmProtocolPluginConfig;
-use crate::executor::{RlmExecutionState, execute_code};
+use crate::executor::{RlmExecutionState, RlmLashlangExecutionTraceConfig, execute_code};
 use crate::projection::{
     ProjectionResolver, RlmProjectedBindings, RlmProjectionExtension, decode_rlm_protocol_event,
 };
@@ -15,6 +16,9 @@ use crate::rlm_support::{BoundVariableRenderCache, render_bound_variables};
 pub(super) struct RlmRuntimeState {
     config: RlmProtocolPluginConfig,
     projection_resolver: Arc<dyn ProjectionResolver>,
+    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    lashlang_surface: LashlangSurface,
+    lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
     session_projected_bindings: tokio::sync::Mutex<RlmProjectedBindings>,
     execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
     active_agent_frame_id: tokio::sync::Mutex<Option<String>>,
@@ -25,6 +29,9 @@ impl RlmRuntimeState {
     pub(super) fn new(
         config: RlmProtocolPluginConfig,
         projection_resolver: Arc<dyn ProjectionResolver>,
+        artifact_store: Arc<dyn LashlangArtifactStore>,
+        lashlang_surface: LashlangSurface,
+        lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
     ) -> Result<Self, SessionError> {
         Ok(Self {
             execution: tokio::sync::Mutex::new(Some(RlmExecutionState::new(
@@ -32,6 +39,9 @@ impl RlmRuntimeState {
             )?)),
             config,
             projection_resolver,
+            artifact_store,
+            lashlang_surface,
+            lashlang_execution_trace_config,
             session_projected_bindings: tokio::sync::Mutex::new(RlmProjectedBindings::new()),
             active_agent_frame_id: tokio::sync::Mutex::new(None),
             bound_variable_render_cache: tokio::sync::Mutex::new(
@@ -194,8 +204,11 @@ impl RlmRuntimeState {
             state,
             ctx,
             request,
+            Arc::clone(&self.artifact_store),
+            self.lashlang_surface.clone(),
             session_projected_bindings,
             Arc::clone(&self.projection_resolver),
+            self.lashlang_execution_trace_config.clone(),
         )
         .await;
         match result {

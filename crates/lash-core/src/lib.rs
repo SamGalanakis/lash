@@ -1,7 +1,18 @@
+//! Runtime kernel for Lash.
+//!
+//! The process kernel intentionally understands `ToolCall`, `SessionTurn`, and
+//! `External` because those inputs carry runtime mechanisms core must enforce:
+//! tool orchestration, child-session turns, and externally completed work. New
+//! process runtimes should use `ProcessInput::Engine { kind, payload }` unless
+//! core must understand their semantics to enforce a kernel mechanism.
+//!
+//! Protocols follow the same boundary: core owns the `HostTurnProtocol` state
+//! shape and the `ProtocolDriverPlugin` slot, while external protocol crates
+//! provide the driver implementation.
+
 pub mod attachments;
 pub mod chronological;
 pub mod direct;
-pub mod lashlang_bridge;
 pub mod llm;
 mod model;
 pub mod plugin;
@@ -29,14 +40,17 @@ pub use lash_sansio::sansio;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurabilityTier {
+    Inline,
+    Durable,
+}
+
 // Re-exports
 pub use attachments::{
     AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, FileAttachmentStore,
     InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
 };
-// The Lashlang artifact store is a host-owned durability dependency of
-// `RuntimeHostConfig`; re-export it so the `lash` facade can name it without a
-// direct `lashlang` dependency.
 pub use chronological::{
     BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,
     ChronologicalEntry, ChronologicalPayload, ChronologicalProjection, visit_turn_view,
@@ -51,26 +65,25 @@ pub use lash_sansio::llm::types::{
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
     BaseRenderCache, CheckpointDelivery, CheckpointKind, CompactToolContract, EffectId,
-    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LashSchema, LashlangToolBinding,
-    LlmCallError, MediaType, Message, MessageOrigin, MessageRole, MessageSequence, ModelToolReturn,
-    ModelToolReturnPart, Part, PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt,
-    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
+    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LashSchema, LlmCallError, MediaType,
+    Message, MessageOrigin, MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart,
+    Part, PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt, PromptBuildInput,
+    PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
     PromptContributionSet, PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer,
     PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt,
-    ResolvedLashlangToolBinding, ResolvedPromptLayer, Response, SchemaProjectionOverride,
-    SessionEvent, TextProjectionMetadata, TokenUsage, ToolActivation, ToolArgumentProjectionPolicy,
-    ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome, ToolCallOutput, ToolCallRecord,
-    ToolCallStatus, ToolCancellation, ToolCatalog, ToolCatalogBuildInput, ToolCatalogEntry,
-    ToolCatalogOverride, ToolContract, ToolControl, ToolDefinition, ToolFailure, ToolFailureClass,
-    ToolFailureSource, ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition,
-    ToolRetryPolicy, ToolScheduling, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
-    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_catalog,
-    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
+    ResolvedPromptLayer, Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata,
+    TokenUsage, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
+    ToolAvailabilityConfig, ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus,
+    ToolCancellation, ToolCatalog, ToolCatalogBuildInput, ToolCatalogEntry, ToolCatalogOverride,
+    ToolContract, ToolControl, ToolDefinition, ToolFailure, ToolFailureClass, ToolFailureSource,
+    ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition, ToolRetryPolicy,
+    ToolScheduling, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
+    append_assistant_text_part, build_prompt, build_tool_catalog, build_turn,
+    default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
     normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
     prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
     resolve_prompt_layers, shared_parts, validate_tool_input,
 };
-pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolRestoreReport, ToolSourceHandle, ToolState, ToolStateEntry,
@@ -78,12 +91,12 @@ pub use tool_registry::{
 pub use tool_result::{CancelHint, PendingCompletion, TimeoutBehavior, ToolResult};
 pub use triggers::{
     InMemoryTriggerStore, TriggerDeliveryReservation, TriggerEmitReport, TriggerEvent,
-    TriggerEventCatalog, TriggerEventKey, TriggerEventType, TriggerOccurrenceRecord,
-    TriggerOccurrenceRequest, TriggerRegistration, TriggerRouter, TriggerStore,
-    TriggerSubscriptionDraft, TriggerSubscriptionFilter, TriggerSubscriptionRecord,
+    TriggerEventCatalog, TriggerEventKey, TriggerEventType, TriggerInputBinding,
+    TriggerOccurrenceRecord, TriggerOccurrenceRequest, TriggerRegistration, TriggerRouter,
+    TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter, TriggerSubscriptionRecord,
     TriggerTargetSummary, default_trigger_source_key, deterministic_delivery_process_id,
     deterministic_occurrence_id, empty_trigger_source_key, trigger_event_type,
-    trigger_occurrence_request_hash, validate_payload, validate_trigger_occurrence_request,
+    trigger_occurrence_request_hash, validate_trigger_occurrence_request,
 };
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProtocolTurnOptions {
@@ -183,14 +196,10 @@ pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostTurnProtocol>;
 pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
     JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceContext,
-    TraceError, TraceEvent, TraceLabelMetadata, TraceLashlangChildExecution,
-    TraceLashlangEdgeSelection, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity,
-    TraceLashlangGraph, TraceLashlangGraphChildLink, TraceLashlangGraphEdge,
-    TraceLashlangGraphNode, TraceLashlangGraphStore, TraceLashlangMap, TraceLashlangMapEdge,
-    TraceLashlangMapNode, TraceLashlangNodeStatus, TraceLashlangStatus, TraceLevel,
-    TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent,
-    TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope, TraceRuntimeStreamEvent,
-    TraceRuntimeSubject, TraceSink, TraceSinkError, TraceTokenUsage, TraceToolSpec,
+    TraceError, TraceEvent, TraceLabelMetadata, TraceLevel, TraceLlmMessage, TraceLlmRequest,
+    TraceLlmResponse, TracePromptComponent, TraceProviderStreamEvent, TraceRecord,
+    TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSink, TraceSinkError,
+    TraceTokenUsage, TraceToolSpec,
 };
 pub use llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 pub use model::{ModelLimits, ModelSpec};
@@ -202,14 +211,14 @@ pub use plugin::{
     ContextRegistrations, DirectCompletion, DirectLlmCompletion, OpenAgentFrameRequest,
     OpenAgentFrameResult, PersistentRuntimeServices, PluginAction, PluginActionContext,
     PluginActionDef, PluginActionFailure, PluginActionInvokeError, PluginActionKind,
-    PluginDirective, PluginError, PluginFactory, PluginHost, PluginLifecycleEvent,
-    PluginLifecycleEventHook, PluginOptions, PluginOwned, PluginRegistrar, PluginSession,
-    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
-    ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices, SessionAppendNode,
-    SessionConfigChangedContext, SessionContextOverlay, SessionCreateRequest, SessionGraphService,
-    SessionHandle, SessionLifecycleService, SessionParam, SessionPlugin, SessionPluginSource,
-    SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
+    PluginDirective, PluginError, PluginExtensionContribution, PluginExtensions, PluginFactory,
+    PluginHost, PluginLifecycleEvent, PluginLifecycleEventHook, PluginOptions, PluginOwned,
+    PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
+    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
+    PromptHookContext, ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices,
+    SessionAppendNode, SessionConfigChangedContext, SessionContextOverlay, SessionCreateRequest,
+    SessionGraphService, SessionHandle, SessionLifecycleService, SessionParam, SessionPlugin,
+    SessionPluginSource, SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
     SessionStateChangedContext, SessionStateService, SessionToolAccess, SessionTurnInput,
     SessionTurnRequest, SnapshotReader, SnapshotWriter, SubagentSessionContext,
     ToolCatalogContribution, ToolDiscoveryContext, ToolDiscoveryContribution,
@@ -232,23 +241,26 @@ pub use runtime::{
     DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig, DurableStoreFacet,
     EffectHost, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionScope,
     ExecutionSummary, ExternalCompletionError, InMemoryLiveReplayStore,
-    InMemoryLiveReplayStoreConfig, InMemorySessionStore, InMemorySessionStoreFactory,
-    InlineEffectHost, InlineProcessRunHandle, InlineRuntimeEffectController, InputItem,
-    LashRuntime, LiveReplayGap, LiveReplayGapReason, LiveReplayResult, LiveReplayStore,
-    LiveReplayStoreError, LiveReplaySubscribeResult, LiveReplaySubscription, MergeKey,
-    NoopEventSink, NoopTurnActivitySink, ObservedProcess, ObservedProcessEvent, ObservedWorkItem,
-    OutputState, PROCESS_LEASE_SCHEMA_VERSION, ParkedSession, ProcessAwaitOutput,
-    ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
-    ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
-    ProcessId, ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus,
-    ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost,
-    ProcessService, ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant,
-    ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
+    InMemoryLiveReplayStoreConfig, InMemoryProcessExecutionEnvStore, InMemorySessionStore,
+    InMemorySessionStoreFactory, InlineEffectHost, InlineProcessRunHandle,
+    InlineRuntimeEffectController, InputItem, LashRuntime, LiveReplayGap, LiveReplayGapReason,
+    LiveReplayResult, LiveReplayStore, LiveReplayStoreError, LiveReplaySubscribeResult,
+    LiveReplaySubscription, MergeKey, NoopEventSink, NoopTurnActivitySink, ObservedProcess,
+    ObservedProcessEvent, ObservedWorkItem, OutputState, PROCESS_LEASE_SCHEMA_VERSION,
+    ParkedSession, ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest,
+    ProcessCancelRequest, ProcessCancelSource, ProcessCancelSummary, ProcessEngine,
+    ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
+    ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventType, ProcessExecutionContext,
+    ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary, ProcessId, ProcessIdentity,
+    ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
+    ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
+    ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
+    ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
+    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
     ProcessWorkObserver, ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, PromptUsage,
     ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
     ProtocolTurnExtensionHandle, QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome,
@@ -263,9 +275,8 @@ pub use runtime::{
     TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
     UnavailableProcessService, UsageReportRow, UsageTotals, WaitKind, WaitState, current_epoch_ms,
     diff_token_ledger, diff_usage_reports, ensure_durable_effect_input, epoch_ms_from_system_time,
-    lashlang_process_event_types, lashlang_process_signal_event_types, process_signal_event_type,
-    process_signal_name_from_event_type, process_signal_wait_key, system_time_from_epoch_ms,
-    validate_process_signal_name,
+    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
+    system_time_from_epoch_ms, validate_process_signal_name,
 };
 #[allow(unused_imports)]
 pub(crate) use runtime::{
@@ -315,9 +326,9 @@ pub use store::{
     refresh_persisted_session_state,
 };
 pub use tool_provider::{
-    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolDurableEffects,
-    ToolLashlangExecutionCallSite, ToolPrepareCall, ToolPrepareContext, ToolProvider,
-    ToolSessionAdmin, ToolSessionModel, ToolTriggerClient,
+    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolChildExecutionTraceHook,
+    ToolChildProcessStarted, ToolContext, ToolDurableEffects, ToolPrepareCall, ToolPrepareContext,
+    ToolProvider, ToolSessionAdmin, ToolSessionModel, ToolTriggerClient,
 };
 
 #[cfg(test)]

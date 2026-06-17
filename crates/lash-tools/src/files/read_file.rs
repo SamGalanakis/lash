@@ -5,8 +5,8 @@ use std::path::Path;
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
 use lash_tool_support::{
-    StaticToolExecute, StaticToolProvider, object_schema, parse_optional_usize_arg, require_str,
-    run_blocking_value,
+    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, object_schema,
+    parse_optional_usize_arg, require_str, run_blocking_value,
 };
 
 /// Read files with line-number-prefixed output. Supports images natively.

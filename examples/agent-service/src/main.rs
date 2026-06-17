@@ -9,7 +9,7 @@ use axum::routing::get;
 #[cfg(feature = "restate")]
 use lash::PluginBinding;
 use lash::{
-    LashCore, ModeId, ModePreset,
+    RlmCore,
     durability::InlineEffectHost,
     provider::{ProviderHandle, ProviderOptions},
     tracing::{JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceLevel, TraceSink},
@@ -125,9 +125,7 @@ async fn async_main() -> anyhow_like::Result<()> {
         None,
     )
     .map_err(|err| format!("invalid OPENROUTER_MODEL metadata: {err}"))?;
-    let core_builder = LashCore::builder()
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    let core_builder = RlmCore::builder()
         .provider(provider)
         .model(model_spec)
         .store_factory(store_factory)

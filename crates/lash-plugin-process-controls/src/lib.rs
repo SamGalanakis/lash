@@ -13,10 +13,11 @@ use lash_core::plugin::{
     StaticPluginFactory,
 };
 use lash_core::{
-    LashlangToolBinding, ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolProvider,
-    ToolResult, ToolScheduling,
+    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolScheduling,
 };
-use lash_tool_support::{StaticToolExecute, StaticToolProvider};
+use lash_tool_support::{
+    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
+};
 
 /// Plugin factory for process-control tools.
 ///
@@ -297,12 +298,25 @@ mod tests {
 
     #[test]
     fn tool_definitions_expose_processes_tools() {
-        let names = processes_tool_definitions(true)
-            .into_iter()
+        let definitions = processes_tool_definitions(true);
+        let names = definitions
+            .iter()
             .map(|tool| tool.name().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["list_process_handles", "cancel_process"]);
+        #[cfg(not(feature = "lashlang"))]
+        assert!(
+            definitions
+                .iter()
+                .all(|tool| tool.manifest.bindings.is_empty())
+        );
+        #[cfg(feature = "lashlang")]
+        assert!(definitions.iter().all(|tool| {
+            tool.manifest
+                .bindings
+                .contains_key(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
+        }));
     }
 
     #[test]
@@ -360,7 +374,7 @@ mod tests {
                 Arc::new(SessionProcessAdminPluginFactory::without_cancel_process())
                     as Arc<dyn PluginFactory>,
             )
-            .chain(lash_core::testing::test_rlm_protocol_factories())
+            .chain(lash_core::testing::test_code_protocol_factories())
             .collect(),
         )
         .build_session("rlm", None)

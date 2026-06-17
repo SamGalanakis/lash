@@ -48,7 +48,7 @@ sequenceDiagram
   Host->>Runtime: session.turn(TurnInput).stream_to(&sink)
   Runtime->>Runtime: normalize InputItem text/image refs
   Runtime->>Plugins: prepare_turn + context transforms
-  Runtime->>Plugins: build TurnDriverPreamble from ProtocolBuildInput(ToolCatalog + LashlangHostEnvironment)
+  Runtime->>Plugins: build TurnDriverPreamble from ProtocolBuildInput(ToolCatalog + protocol context)
   Runtime->>Machine: build_turn(TurnDriverPreamble, ToolCatalog, PromptTemplate)
   loop poll effect
     Machine-->>Runtime: Effect

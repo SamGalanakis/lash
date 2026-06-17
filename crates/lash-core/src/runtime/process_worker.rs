@@ -283,6 +283,7 @@ impl DurableProcessWorker {
         let registration = ProcessRegistration {
             id: record.id,
             input: record.input,
+            identity: record.identity,
             event_types: record.event_types,
             provenance: record.provenance.clone(),
             env_ref: record.env_ref.clone(),
@@ -466,7 +467,7 @@ impl DurableProcessWorker {
                 self.runtime_for_session_turn(registration, create_request.as_ref())
                     .await
             }
-            ProcessInput::ToolCall { .. } | ProcessInput::LashlangProcess { .. } => {
+            ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. } => {
                 self.runtime_for_process_env(registration).await
             }
             ProcessInput::External { .. } => unreachable!("external processes short-circuit"),
@@ -508,7 +509,7 @@ impl DurableProcessWorker {
             self.config
                 .runtime_host
                 .durability
-                .lashlang_artifact_store
+                .process_env_store
                 .as_ref(),
             env_ref,
         )
@@ -587,11 +588,11 @@ impl DurableProcessWorker {
             .config
             .runtime_host
             .durability
-            .lashlang_artifact_store
+            .process_env_store
             .durability_tier()
             != crate::DurabilityTier::Durable
         {
-            return Err(require(crate::DurableStoreFacet::ArtifactStore));
+            return Err(require(crate::DurableStoreFacet::ProcessEnvStore));
         }
         if self.config.session_store_factory.durability_tier() != crate::DurabilityTier::Durable {
             return Err(require(crate::DurableStoreFacet::SessionStore));
@@ -644,8 +645,9 @@ mod boundary_tests {
     use super::*;
     use crate::{
         AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
-        DurableStoreFacet, InMemoryAttachmentStore, LashlangArtifactStore, ProcessInput,
-        ProcessRegistration, RuntimeEffectController, RuntimeError, StoredAttachment, TriggerStore,
+        DurableStoreFacet, InMemoryAttachmentStore, ProcessExecutionEnvRef,
+        ProcessExecutionEnvStore, ProcessInput, ProcessRegistration, RuntimeEffectController,
+        RuntimeError, StoredAttachment, TriggerStore,
     };
     use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentRef};
 
@@ -694,48 +696,31 @@ mod boundary_tests {
         }
     }
 
-    /// Lashlang artifact store reporting a durable tier over in-memory storage.
+    /// Process env store reporting a durable tier over in-memory storage.
     #[derive(Default)]
-    struct DurableArtifactStore {
-        inner: lashlang::InMemoryLashlangArtifactStore,
+    struct DurableProcessEnvStore {
+        inner: crate::InMemoryProcessExecutionEnvStore,
     }
 
     #[async_trait::async_trait]
-    impl LashlangArtifactStore for DurableArtifactStore {
+    impl ProcessExecutionEnvStore for DurableProcessEnvStore {
         fn durability_tier(&self) -> DurabilityTier {
             DurabilityTier::Durable
         }
 
-        async fn put_module_artifact(
+        async fn put_process_execution_env(
             &self,
-            artifact: &lashlang::ModuleArtifact,
-        ) -> Result<(), lashlang::ArtifactStoreError> {
-            self.inner.put_module_artifact(artifact).await
-        }
-
-        async fn get_module_artifact(
-            &self,
-            module_ref: &lashlang::ModuleRef,
-        ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
-            self.inner.get_module_artifact(module_ref).await
-        }
-
-        async fn put_artifact_bytes(
-            &self,
-            artifact_ref: &str,
-            descriptor: &str,
+            env_ref: &ProcessExecutionEnvRef,
             bytes: &[u8],
-        ) -> Result<(), lashlang::ArtifactStoreError> {
-            self.inner
-                .put_artifact_bytes(artifact_ref, descriptor, bytes)
-                .await
+        ) -> Result<(), PluginError> {
+            self.inner.put_process_execution_env(env_ref, bytes).await
         }
 
-        async fn get_artifact_bytes(
+        async fn get_process_execution_env(
             &self,
-            artifact_ref: &str,
-        ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
-            self.inner.get_artifact_bytes(artifact_ref).await
+            env_ref: &ProcessExecutionEnvRef,
+        ) -> Result<Option<Vec<u8>>, PluginError> {
+            self.inner.get_process_execution_env(env_ref).await
         }
     }
 
@@ -832,12 +817,12 @@ mod boundary_tests {
     /// exercised independently.
     fn worker(
         attachment: Arc<dyn AttachmentStore>,
-        artifact: Arc<dyn LashlangArtifactStore>,
+        process_env_store: Arc<dyn ProcessExecutionEnvStore>,
         session_store_tier: DurabilityTier,
     ) -> DurableProcessWorker {
         worker_with_store_tiers(
             attachment,
-            artifact,
+            process_env_store,
             session_store_tier,
             DurabilityTier::Durable,
             DurabilityTier::Durable,
@@ -846,7 +831,7 @@ mod boundary_tests {
 
     fn worker_with_store_tiers(
         attachment: Arc<dyn AttachmentStore>,
-        artifact: Arc<dyn LashlangArtifactStore>,
+        process_env_store: Arc<dyn ProcessExecutionEnvStore>,
         session_store_tier: DurabilityTier,
         process_registry_tier: DurabilityTier,
         trigger_store_tier: DurabilityTier,
@@ -855,7 +840,7 @@ mod boundary_tests {
         runtime_host.control.effect_host =
             Arc::new(crate::InlineEffectHost::new(Arc::new(DurableController)));
         runtime_host.durability.attachment_store = attachment;
-        runtime_host.durability.lashlang_artifact_store = artifact;
+        runtime_host.durability.process_env_store = process_env_store;
         let plugin_host = Arc::new(crate::PluginHost::new(Vec::new()));
         let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {
             tier: session_store_tier,
@@ -903,7 +888,7 @@ mod boundary_tests {
     async fn durable_worker_rejects_ephemeral_attachment_store() {
         let worker = worker(
             Arc::new(InMemoryAttachmentStore::new()),
-            Arc::new(DurableArtifactStore::default()),
+            Arc::new(DurableProcessEnvStore::default()),
             DurabilityTier::Durable,
         );
         let err = run(&worker)
@@ -913,23 +898,23 @@ mod boundary_tests {
     }
 
     #[tokio::test]
-    async fn durable_worker_rejects_ephemeral_artifact_store() {
+    async fn durable_worker_rejects_ephemeral_process_env_store() {
         let worker = worker(
             Arc::new(DurableAttachmentStore::default()),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             DurabilityTier::Durable,
         );
         let err = run(&worker)
             .await
-            .expect_err("ephemeral artifact store must be rejected at the worker boundary");
-        assert_facet(err, DurableStoreFacet::ArtifactStore);
+            .expect_err("ephemeral process env store must be rejected at the worker boundary");
+        assert_facet(err, DurableStoreFacet::ProcessEnvStore);
     }
 
     #[tokio::test]
     async fn durable_worker_rejects_ephemeral_session_store_factory() {
         let worker = worker(
             Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableArtifactStore::default()),
+            Arc::new(DurableProcessEnvStore::default()),
             DurabilityTier::Inline,
         );
         let err = run(&worker)
@@ -942,7 +927,7 @@ mod boundary_tests {
     async fn durable_worker_rejects_ephemeral_process_registry() {
         let worker = worker_with_store_tiers(
             Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableArtifactStore::default()),
+            Arc::new(DurableProcessEnvStore::default()),
             DurabilityTier::Durable,
             DurabilityTier::Inline,
             DurabilityTier::Durable,
@@ -957,7 +942,7 @@ mod boundary_tests {
     async fn durable_worker_rejects_ephemeral_trigger_store() {
         let worker = worker_with_store_tiers(
             Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableArtifactStore::default()),
+            Arc::new(DurableProcessEnvStore::default()),
             DurabilityTier::Durable,
             DurabilityTier::Durable,
             DurabilityTier::Inline,
@@ -975,7 +960,7 @@ mod boundary_tests {
         // process.
         let worker = worker(
             Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableArtifactStore::default()),
+            Arc::new(DurableProcessEnvStore::default()),
             DurabilityTier::Durable,
         );
         let output = run(&worker)

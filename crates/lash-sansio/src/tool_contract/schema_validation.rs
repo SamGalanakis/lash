@@ -424,8 +424,8 @@ mod tests {
     #[test]
     fn validation_preserves_internal_session_id_argument() {
         let tool = ToolDefinition::raw(
-            "tool:lashlang_tool",
-            "lashlang_tool",
+            "tool:session_scoped_tool",
+            "session_scoped_tool",
             "",
             serde_json::json!({
                 "type": "object",

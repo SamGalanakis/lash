@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use croner::parser::{CronParser, Seconds};
 use lash::TurnInput;
-use lash::modes::RlmTurnBuilderExt as _;
+use lash::rlm::RlmTurnBuilderExt as _;
 use lash_restate::LashProcessWorkflow;
 use restate_sdk::context::{
     ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, InvocationHandle,
@@ -509,7 +509,6 @@ pub(crate) async fn cancel_cron_jobs_for_session(
     let session = state
         .core
         .session(session_id.to_string())
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -558,7 +557,6 @@ async fn run_user_turn(
     let session = state
         .core
         .session(request.session_id.clone())
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -598,7 +596,6 @@ async fn run_button_trigger(
     let session = state
         .core
         .session(request.session_id.clone())
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -649,7 +646,6 @@ async fn run_mail_received(
     let session = state
         .core
         .session(request.session_id.clone())
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -717,7 +713,6 @@ async fn run_queued_turn(
     let session = state
         .core
         .session(request.session_id.clone())
-        .rlm()
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -811,7 +806,6 @@ async fn sync_cron_jobs_with_context(
     let session = state
         .core
         .session(state.current_session_id())
-        .rlm()
         .open()
         .await
         .map_err(|err| TerminalError::new(err.to_string()))?;

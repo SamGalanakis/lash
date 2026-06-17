@@ -1,10 +1,62 @@
-use lash_core::ToolResult;
+use lash_core::{ToolDefinition, ToolResult};
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod static_provider;
+#[cfg(feature = "lashlang")]
+pub use lash_lashlang_runtime::LashlangToolBinding;
 pub use static_provider::{StaticToolExecute, StaticToolProvider};
+
+#[cfg(not(feature = "lashlang"))]
+#[derive(Clone, Debug, Default)]
+pub struct LashlangToolBinding;
+
+#[cfg(not(feature = "lashlang"))]
+impl LashlangToolBinding {
+    pub fn new(
+        module_path: impl IntoIterator<Item = impl Into<String>>,
+        operation: impl Into<String>,
+    ) -> Self {
+        let _ = module_path
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<String>>();
+        let _ = operation.into();
+        Self
+    }
+
+    pub fn with_authority_type(self, authority_type: impl Into<String>) -> Self {
+        let _ = authority_type.into();
+        self
+    }
+
+    pub fn with_aliases(self, aliases: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let _ = aliases.into_iter().map(Into::into).collect::<Vec<String>>();
+        self
+    }
+}
+
+pub trait ToolDefinitionLashlangExt {
+    fn with_lashlang_binding(self, lashlang_binding: LashlangToolBinding) -> Self;
+}
+
+#[cfg(feature = "lashlang")]
+impl ToolDefinitionLashlangExt for ToolDefinition {
+    fn with_lashlang_binding(self, lashlang_binding: LashlangToolBinding) -> Self {
+        lash_lashlang_runtime::ToolDefinitionLashlangExt::with_lashlang_binding(
+            self,
+            lashlang_binding,
+        )
+    }
+}
+
+#[cfg(not(feature = "lashlang"))]
+impl ToolDefinitionLashlangExt for ToolDefinition {
+    fn with_lashlang_binding(self, _lashlang_binding: LashlangToolBinding) -> Self {
+        self
+    }
+}
 
 /// Resolve a possibly-relative `path` against `base`, returning a lexically
 /// normalized [`PathBuf`].
@@ -253,9 +305,8 @@ pub fn lashlang_binding(
     module_path: impl IntoIterator<Item = impl Into<String>>,
     operation: impl Into<String>,
     aliases: &[&str],
-) -> lash_core::LashlangToolBinding {
-    lash_core::LashlangToolBinding::new(module_path, operation)
-        .with_aliases(aliases.iter().copied())
+) -> LashlangToolBinding {
+    LashlangToolBinding::new(module_path, operation).with_aliases(aliases.iter().copied())
 }
 
 /// Run blocking filesystem work off the async runtime.

@@ -5,31 +5,20 @@ pub struct SessionBuilder {
     pub(crate) core: LashCore,
     pub(crate) session_id: String,
     pub(crate) spec: SessionSpec,
-    pub(crate) mode: Option<ModeId>,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) plugin_factories: Vec<Arc<dyn PluginFactory>>,
+}
+
+#[cfg(feature = "rlm")]
+pub struct RlmSessionBuilder {
+    pub(crate) builder: SessionBuilder,
     pub(crate) rlm_final_answer_format: Option<lash_rlm_types::RlmFinalAnswerFormat>,
 }
 
 impl SessionBuilder {
-    pub fn standard(mut self) -> Self {
-        self.mode = Some(ModeId::standard());
-        self
-    }
-
-    pub fn rlm(mut self) -> Self {
-        self.mode = Some(ModeId::rlm());
-        self
-    }
-
-    pub fn mode(mut self, mode: ModeId) -> Self {
-        self.mode = Some(mode);
-        self
-    }
-
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
         self.spec = self.spec.provider_id(provider.kind());
         self.provider = Some(provider);
@@ -67,13 +56,12 @@ impl SessionBuilder {
     }
 
     pub async fn open(self) -> Result<LashSession> {
-        let (policy, mode) = self.session_policy()?;
+        let policy = self.session_policy();
         let store = self.create_store(&policy).await?;
-        let mut state = self
+        let state = self
             .load_or_default_state(&policy, store.as_deref())
             .await?;
-        self.apply_rlm_session_options(&mode, &mut state)?;
-        self.open_resolved(policy, mode, state, store).await
+        self.open_resolved(policy, state, store).await
     }
 
     /// Open this session with a fresh resident graph, ignoring any persisted
@@ -86,16 +74,15 @@ impl SessionBuilder {
     /// Use [`Self::open`] for resume and [`Self::open_with_state`] only when
     /// restoring explicit host-owned state.
     pub async fn open_fresh(self) -> Result<LashSession> {
-        let (policy, mode) = self.session_policy()?;
+        let policy = self.session_policy();
         let store = self.create_store(&policy).await?;
-        let mut state = RuntimeSessionState {
+        let state = RuntimeSessionState {
             session_id: self.session_id.clone(),
             policy: policy.clone(),
             graph_replace_required: true,
             ..RuntimeSessionState::default()
         };
-        self.apply_rlm_session_options(&mode, &mut state)?;
-        self.open_resolved(policy, mode, state, store).await
+        self.open_resolved(policy, state, store).await
     }
 
     /// Open with an explicitly supplied runtime state.
@@ -105,7 +92,7 @@ impl SessionBuilder {
     /// residency policy or [`Self::open_fresh`] to start over and replace prior
     /// persisted state on the next commit.
     pub async fn open_with_state(self, mut state: RuntimeSessionState) -> Result<LashSession> {
-        let (policy, mode) = self.session_policy()?;
+        let policy = self.session_policy();
         let store = self.create_store(&policy).await?;
         if state.session_id != self.session_id {
             return Err(EmbedError::StoreSessionMismatch {
@@ -116,21 +103,13 @@ impl SessionBuilder {
         let recorded_provider_id = state.policy.recorded_provider_id().to_string();
         state.policy = policy.clone();
         state.policy.provider_id = recorded_provider_id;
-        self.apply_rlm_session_options(&mode, &mut state)?;
-        self.open_resolved(policy, mode, state, store).await
+        self.open_resolved(policy, state, store).await
     }
 
-    fn session_policy(&self) -> Result<(SessionPolicy, ModeId)> {
-        let mode = self
-            .mode
-            .clone()
-            .unwrap_or_else(|| self.core.default_mode.clone());
-        if !self.core.modes.contains_key(&mode) {
-            return Err(EmbedError::ModeNotInstalled { mode });
-        }
+    fn session_policy(&self) -> SessionPolicy {
         let mut policy = self.spec.resolve_against(&self.core.policy);
         policy.session_id = Some(self.session_id.clone());
-        Ok((policy, mode))
+        policy
     }
 
     async fn load_or_default_state(
@@ -209,48 +188,9 @@ impl SessionBuilder {
         }
     }
 
-    fn apply_rlm_session_options(
-        &self,
-        mode: &ModeId,
-        state: &mut RuntimeSessionState,
-    ) -> Result<()> {
-        let Some(final_answer_format) = self.rlm_session_final_answer_format(mode) else {
-            return Ok(());
-        };
-        let mut extras = if state.protocol_turn_options.is_empty() {
-            lash_rlm_types::RlmCreateExtras::default()
-        } else {
-            state.protocol_turn_options.decode()?
-        };
-        extras.final_answer_format = Some(final_answer_format);
-        let options = ProtocolTurnOptions::typed(extras)?;
-        state.protocol_turn_options = options.clone();
-        for frame in &mut state.agent_frames {
-            frame.protocol_turn_options = options.clone();
-        }
-        Ok(())
-    }
-
-    fn rlm_session_final_answer_format(
-        &self,
-        mode: &ModeId,
-    ) -> Option<lash_rlm_types::RlmFinalAnswerFormat> {
-        if mode != &ModeId::rlm() {
-            return None;
-        }
-        self.rlm_final_answer_format.clone().or_else(|| {
-            if self.parent_session_id.is_none() {
-                Some(lash_rlm_types::RlmFinalAnswerFormat::Markdown)
-            } else {
-                Some(lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue)
-            }
-        })
-    }
-
     async fn open_resolved(
         self,
         policy: SessionPolicy,
-        mode: ModeId,
         state: RuntimeSessionState,
         store: Option<Arc<dyn RuntimePersistence>>,
     ) -> Result<LashSession> {
@@ -259,13 +199,14 @@ impl SessionBuilder {
             env.core.providers.provider_resolver =
                 Arc::new(lash_core::SingleProviderResolver::new(provider));
         }
-        let plugin_host = build_plugin_host_for_mode(
-            &self.core.modes,
-            &mode,
+        let plugin_host = build_plugin_host(
+            self.core.protocol_factory.as_ref(),
             self.core.plugin_factories.as_ref(),
             self.plugin_factories,
-            env.process_registry.is_some(),
         )?;
+        env.core = self
+            .core
+            .runtime_host_for_plugin_host(env.core.clone(), &plugin_host)?;
         env.plugin_host = Some(Arc::new(plugin_host));
         let effect_host = Arc::clone(&env.core.control.effect_host);
         // Lazily spawn the default process work runner (Decision 3: deferred to
@@ -281,7 +222,6 @@ impl SessionBuilder {
         Ok(LashSession {
             runtime: handle,
             effect_host,
-            mode,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
             process_phase_probe_slot: self.core.process_work_runner.phase_probe_slot(),
@@ -328,11 +268,131 @@ impl PromptLayerSink for SessionBuilder {
     }
 }
 
+#[cfg(feature = "rlm")]
+impl RlmSessionBuilder {
+    pub fn provider(mut self, provider: ProviderHandle) -> Self {
+        self.builder = self.builder.provider(provider);
+        self
+    }
+
+    pub fn session_spec(mut self, spec: SessionSpec) -> Self {
+        self.builder = self.builder.session_spec(spec);
+        self
+    }
+
+    pub fn parent(mut self, parent_session_id: impl Into<String>) -> Self {
+        self.builder = self.builder.parent(parent_session_id);
+        self
+    }
+
+    pub fn store(mut self, store: Arc<dyn RuntimePersistence>) -> Self {
+        self.builder = self.builder.store(store);
+        self
+    }
+
+    pub fn plugin<P: PluginBinding>(mut self, config: P::SessionConfig) -> Self {
+        self.builder = self.builder.plugin::<P>(config);
+        self
+    }
+
+    pub async fn open(self) -> Result<LashSession> {
+        self.open_resolved(RlmOpenState::Resume).await
+    }
+
+    pub async fn open_fresh(self) -> Result<LashSession> {
+        self.open_resolved(RlmOpenState::Fresh).await
+    }
+
+    pub async fn open_with_state(self, state: RuntimeSessionState) -> Result<LashSession> {
+        self.open_resolved(RlmOpenState::Explicit(state)).await
+    }
+
+    async fn open_resolved(self, open_state: RlmOpenState) -> Result<LashSession> {
+        let Self {
+            builder,
+            rlm_final_answer_format,
+        } = self;
+        let policy = builder.session_policy();
+        let store = builder.create_store(&policy).await?;
+        let mut state = match open_state {
+            RlmOpenState::Resume => {
+                builder
+                    .load_or_default_state(&policy, store.as_deref())
+                    .await?
+            }
+            RlmOpenState::Fresh => RuntimeSessionState {
+                session_id: builder.session_id.clone(),
+                policy: policy.clone(),
+                graph_replace_required: true,
+                ..RuntimeSessionState::default()
+            },
+            RlmOpenState::Explicit(mut state) => {
+                if state.session_id != builder.session_id {
+                    return Err(EmbedError::StoreSessionMismatch {
+                        loaded: state.session_id,
+                        requested: builder.session_id.clone(),
+                    });
+                }
+                let recorded_provider_id = state.policy.recorded_provider_id().to_string();
+                state.policy = policy.clone();
+                state.policy.provider_id = recorded_provider_id;
+                state
+            }
+        };
+        apply_rlm_session_options(
+            builder.parent_session_id.is_none(),
+            rlm_final_answer_format,
+            &mut state,
+        )?;
+        builder.open_resolved(policy, state, store).await
+    }
+}
+
+#[cfg(feature = "rlm")]
+impl PromptLayerSink for RlmSessionBuilder {
+    fn prompt_layer_mut(&mut self) -> &mut PromptLayer {
+        self.builder.prompt_layer_mut()
+    }
+}
+
+#[cfg(feature = "rlm")]
+enum RlmOpenState {
+    Resume,
+    Fresh,
+    Explicit(RuntimeSessionState),
+}
+
+#[cfg(feature = "rlm")]
+fn apply_rlm_session_options(
+    is_root_session: bool,
+    explicit_format: Option<lash_rlm_types::RlmFinalAnswerFormat>,
+    state: &mut RuntimeSessionState,
+) -> Result<()> {
+    let final_answer_format = explicit_format.unwrap_or_else(|| {
+        if is_root_session {
+            lash_rlm_types::RlmFinalAnswerFormat::Markdown
+        } else {
+            lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue
+        }
+    });
+    let mut extras = if state.protocol_turn_options.is_empty() {
+        lash_rlm_types::RlmCreateExtras::default()
+    } else {
+        state.protocol_turn_options.decode()?
+    };
+    extras.final_answer_format = Some(final_answer_format);
+    let options = ProtocolTurnOptions::typed(extras)?;
+    state.protocol_turn_options = options.clone();
+    for frame in &mut state.agent_frames {
+        frame.protocol_turn_options = options.clone();
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct LashSession {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) effect_host: Arc<dyn EffectHost>,
-    pub(crate) mode: ModeId,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) process_phase_probe_slot: Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot>,
@@ -366,10 +426,6 @@ impl LashSession {
         ObservableSession {
             runtime: self.runtime.clone(),
         }
-    }
-
-    pub fn mode(&self) -> &ModeId {
-        &self.mode
     }
 
     pub fn parent_session_id(&self) -> Option<&str> {

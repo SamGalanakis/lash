@@ -16,12 +16,16 @@ pub mod conformance {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::core::LashCoreBuilder;
+    use crate::core::RlmCoreBuilder;
     use crate::plugins::{
-        PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+        PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
+        PluginSessionContext, SessionPlugin,
+    };
+    use crate::rlm::{
+        LASHLANG_SURFACE_EXTENSION_ID, LashlangLanguageFeatures, LashlangSurfaceContribution,
     };
     use crate::testing::TestProvider;
-    use crate::{LashCore, ModeId, ModePreset};
+    use crate::{LashCore, RlmCore};
 
     /// Stores + registry for one run of the
     /// [`runtime_rebuild_and_worker_recovery`] suite.
@@ -35,7 +39,7 @@ pub mod conformance {
     /// (fresh stores) on each call.
     pub struct RuntimeRebuildBackend {
         pub process_registry: Arc<dyn lash_core::ProcessRegistry>,
-        pub build_core: Box<dyn Fn(LashCoreBuilder) -> LashCore + Send + Sync>,
+        pub build_core: Box<dyn Fn(RlmCoreBuilder) -> RlmCore + Send + Sync>,
     }
 
     /// Run the full cold-rebuild + worker-recovery conformance suite against
@@ -94,18 +98,18 @@ submit "registered"
 
     const SESSION_ID: &str = "rebuild-conformance";
 
-    fn clock_tick_event_type() -> crate::modes::NamedDataType {
-        crate::modes::NamedDataType::object(
+    fn clock_tick_event_type() -> crate::rlm::NamedDataType {
+        crate::rlm::NamedDataType::object(
             "clock.Tick",
             vec![
-                crate::modes::TypeField {
+                crate::rlm::TypeField {
                     name: "id".into(),
-                    ty: crate::modes::TypeExpr::Str,
+                    ty: crate::rlm::TypeExpr::Str,
                     optional: false,
                 },
-                crate::modes::TypeField {
+                crate::rlm::TypeField {
                     name: "scheduled_at".into(),
-                    ty: crate::modes::TypeExpr::Str,
+                    ty: crate::rlm::TypeExpr::Str,
                     optional: false,
                 },
             ],
@@ -113,23 +117,23 @@ submit "registered"
         .expect("valid clock tick type")
     }
 
-    fn button_pressed_event_type() -> crate::modes::NamedDataType {
-        crate::modes::NamedDataType::object(
+    fn button_pressed_event_type() -> crate::rlm::NamedDataType {
+        crate::rlm::NamedDataType::object(
             "ui.button.Pressed",
             vec![
-                crate::modes::TypeField {
+                crate::rlm::TypeField {
                     name: "button".into(),
-                    ty: crate::modes::TypeExpr::Str,
+                    ty: crate::rlm::TypeExpr::Str,
                     optional: false,
                 },
-                crate::modes::TypeField {
+                crate::rlm::TypeField {
                     name: "message".into(),
-                    ty: crate::modes::TypeExpr::Str,
+                    ty: crate::rlm::TypeExpr::Str,
                     optional: false,
                 },
-                crate::modes::TypeField {
+                crate::rlm::TypeField {
                     name: "pressed_at".into(),
-                    ty: crate::modes::TypeExpr::Str,
+                    ty: crate::rlm::TypeExpr::Str,
                     optional: false,
                 },
             ],
@@ -137,8 +141,8 @@ submit "registered"
         .expect("valid button event type")
     }
 
-    fn rebuild_abilities() -> crate::modes::LashlangAbilities {
-        crate::modes::LashlangAbilities::default()
+    fn rebuild_abilities() -> crate::rlm::LashlangAbilities {
+        crate::rlm::LashlangAbilities::default()
             .with_processes()
             .with_sleep()
             .with_process_signals()
@@ -153,18 +157,14 @@ submit "registered"
             "rebuild-conformance-trigger"
         }
 
-        fn lashlang_abilities(&self) -> crate::modes::LashlangAbilities {
-            rebuild_abilities()
-        }
-
-        fn lashlang_resources(&self) -> crate::modes::LashlangHostCatalog {
-            let mut resources = crate::modes::LashlangHostCatalog::new();
+        fn extension_contributions(&self) -> Vec<PluginExtensionContribution> {
+            let mut resources = crate::rlm::LashlangHostCatalog::new();
             resources
                 .add_trigger_source_constructor(
                     ["clock", "Alarm"],
-                    crate::modes::TypeExpr::Object(vec![crate::modes::TypeField {
+                    crate::rlm::TypeExpr::Object(vec![crate::rlm::TypeField {
                         name: "at".into(),
-                        ty: crate::modes::TypeExpr::Str,
+                        ty: crate::rlm::TypeExpr::Str,
                         optional: false,
                     }]),
                     clock_tick_event_type(),
@@ -173,11 +173,19 @@ submit "registered"
             resources
                 .add_trigger_source_constructor(
                     ["ui", "button", "pressed"],
-                    crate::modes::TypeExpr::Object(Vec::new()),
+                    crate::rlm::TypeExpr::Object(Vec::new()),
                     button_pressed_event_type(),
                 )
                 .expect("valid button trigger source");
-            resources
+            let contribution = LashlangSurfaceContribution::new(
+                rebuild_abilities(),
+                LashlangLanguageFeatures::default(),
+                resources,
+            );
+            vec![
+                PluginExtensionContribution::new(LASHLANG_SURFACE_EXTENSION_ID, contribution)
+                    .expect("lashlang surface contribution serializes"),
+            ]
         }
 
         fn build(
@@ -200,7 +208,7 @@ submit "registered"
                 "Button",
                 "ui.button",
                 "pressed",
-                button_pressed_event_type(),
+                lash_core::LashSchema::any(),
             ))?;
             Ok(())
         }
@@ -272,13 +280,12 @@ submit "registered"
             .into_handle()
     }
 
-    fn base_builder(registry: Arc<dyn lash_core::ProcessRegistry>) -> LashCoreBuilder {
-        LashCore::builder()
-            .install_mode(ModePreset::rlm_with_config(
-                crate::modes::RlmProtocolPluginConfig::default()
+    fn base_builder(registry: Arc<dyn lash_core::ProcessRegistry>) -> RlmCoreBuilder {
+        RlmCore::builder()
+            .rlm_protocol_config(
+                crate::rlm::RlmProtocolPluginConfig::default()
                     .with_lashlang_abilities(rebuild_abilities()),
-            ))
-            .default_mode(ModeId::rlm())
+            )
             .provider(rebuild_provider())
             .model(rebuild_model())
             .plugin(Arc::new(TriggerResourcePluginFactory))
@@ -302,7 +309,7 @@ submit "registered"
         registration: lash_core::ProcessRegistration,
     ) -> lash_core::ProcessRegistration {
         let env_ref = lash_core::runtime::persist_process_execution_env(
-            core.env.core.durability.lashlang_artifact_store.as_ref(),
+            core.env.core.durability.process_env_store.as_ref(),
             &lash_core::ProcessExecutionEnvSpec::new(
                 lash_core::PluginOptions::default(),
                 lash_core::SessionPolicy {
@@ -334,12 +341,7 @@ submit "registered"
         register: Option<lash_core::ProcessRegistration>,
         registry: &Arc<dyn lash_core::ProcessRegistry>,
     ) {
-        let session = core
-            .session(SESSION_ID)
-            .rlm()
-            .open()
-            .await
-            .expect("open session");
+        let session = core.session(SESSION_ID).open().await.expect("open session");
         let output = session
             .turn(lash_core::TurnInput::text(prompt))
             .run()
@@ -359,7 +361,6 @@ submit "registered"
         // Reopen from cold storage — spawns the default work runner and forces the
         // worker to reconstruct the trigger-mutated surface purely from persistence.
         core.session(SESSION_ID)
-            .rlm()
             .open()
             .await
             .expect("reopen session");
@@ -433,7 +434,6 @@ submit "registered"
 
         let reopened = core
             .session(SESSION_ID)
-            .rlm()
             .open()
             .await
             .expect("reopen session");
@@ -458,7 +458,6 @@ submit "registered"
 
         let session = core
             .session(SESSION_ID)
-            .rlm()
             .open()
             .await
             .expect("reopen session");
@@ -533,7 +532,6 @@ submit "registered"
         await_success(&registry, &process_id).await;
         let session = core
             .session(SESSION_ID)
-            .rlm()
             .open()
             .await
             .expect("reopen session");

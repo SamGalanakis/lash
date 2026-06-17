@@ -52,7 +52,7 @@ pub(super) async fn run_turn_case_without_success_assertions(
         case.scripted_provider_responses.clone(),
         Arc::clone(&prompt_captures),
     );
-    let mut builder = explicit_ephemeral_facets(LashCore::rlm())
+    let mut builder = explicit_ephemeral_facets(RlmCore::builder())
         .provider(provider)
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -158,23 +158,7 @@ fn observed_process_summary(
         lash_core::ProcessHandleDescriptor::new(Some(process.kind), Some(process.label)),
         process.lifecycle,
     )
-    .with_definition(match &process.input {
-        lash_core::ProcessInput::LashlangProcess {
-            module_ref,
-            process_ref,
-            host_requirements_ref,
-            process_name,
-            ..
-        } => Some(lashlang::ProcessDefinitionIdentity::new(
-            module_ref.clone(),
-            host_requirements_ref.clone(),
-            process_ref.clone(),
-            process_name.clone(),
-        )),
-        lash_core::ProcessInput::ToolCall { .. }
-        | lash_core::ProcessInput::SessionTurn { .. }
-        | lash_core::ProcessInput::External { .. } => None,
-    })
+    .with_definition(process.identity.definition)
 }
 
 async fn assert_remote_process_dto_surface(
@@ -291,7 +275,7 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
         vec!["```lashlang\nsubmit { child: \"done\", scoped: true }\n```"],
         Arc::clone(&prompt_captures),
     );
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(provider)
         .model(mock_model_spec())
         .plugin(subagents_plugin())
@@ -400,7 +384,7 @@ submit result.answer
     );
     let (key_tx, key_rx) = oneshot::channel();
     let tools = Arc::new(DurableInputTools::new(key_tx));
-    let core = explicit_ephemeral_facets(LashCore::rlm())
+    let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(provider)
         .model(mock_model_spec())
         .tools(Arc::clone(&tools) as Arc<dyn ToolProvider>)

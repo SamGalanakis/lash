@@ -47,12 +47,15 @@ fn process_selection_tracks_visible_process_snapshot() {
         lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
         lash_core::ProcessLifecycleStatus::Running,
     )
-    .with_definition(Some(lashlang::ProcessDefinitionIdentity::new(
-        lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
-        lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host")),
-        lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
-        "responder",
-    )));
+    .with_definition(Some(
+        serde_json::to_value(lashlang::ProcessDefinitionIdentity::new(
+            lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
+            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host")),
+            lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
+            "responder",
+        ))
+        .expect("process definition serializes"),
+    ));
 
     app.update_processes(vec![running.clone()]);
     assert!(app.select_next_process());
@@ -92,12 +95,15 @@ fn selected_process_row_is_focusable_and_renders_definition() {
             lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
             lash_core::ProcessLifecycleStatus::Running,
         )
-        .with_definition(Some(lashlang::ProcessDefinitionIdentity::new(
-            lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
-            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host")),
-            lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
-            "responder",
-        ))),
+        .with_definition(Some(
+            serde_json::to_value(lashlang::ProcessDefinitionIdentity::new(
+                lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
+                lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host")),
+                lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
+                "responder",
+            ))
+            .expect("process definition serializes"),
+        )),
     ]);
     app.select_next_process();
 

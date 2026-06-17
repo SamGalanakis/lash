@@ -78,7 +78,7 @@ impl AppState {
         })
     }
 
-    fn build_core(&self) -> Result<lash::LashCore> {
+    fn build_core(&self) -> Result<lash::RlmCore> {
         build_e2e_core(lash_restate_postgres_workers_e2e::E2eCoreConfig {
             worker_id: self.worker_id.clone(),
             storage: self.storage.clone(),
@@ -116,7 +116,6 @@ impl AppState {
         }
         let session = core
             .session(DEFAULT_SESSION_ID)
-            .rlm()
             .open()
             .await
             .map_err(terminal_error)?;
@@ -275,7 +274,7 @@ impl AppState {
     async fn signal_process(
         &self,
         controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
-        core: &lash::LashCore,
+        core: &lash::RlmCore,
         request: &TurnRequest,
     ) -> HandlerResult<TurnResponse> {
         let signal = request

@@ -93,14 +93,15 @@ async fn async_main() -> AnyhowResult<()> {
             .await
             .context("open trigger store")?,
     );
-    // Deployment-level Lashlang artifact store (compiled trigger/process
-    // modules), shared across the session tree. SQLite keeps installed triggers
-    // durable across restarts.
+    // Deployment-level Lashlang artifact/process-env store (compiled
+    // trigger/process modules plus durable process environment specs), shared
+    // across the session tree. SQLite keeps installed triggers and process
+    // rebuild metadata durable across restarts.
     let artifact_store = Arc::new(
         lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
             .await
             .context("open lashlang artifact store")?,
-    ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
+    );
     let subagent_registry = Arc::new(lash_subagents::default_registry(&BTreeMap::new()));
     let mail_world = mail::MailWorld::new();
     let session_ids = WorkbenchSessionIds::fresh();
@@ -117,19 +118,27 @@ async fn async_main() -> AnyhowResult<()> {
         }));
     let queued_work_poke = queued_work_runner.poke_handle();
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm_with_config(
-            lash::modes::RlmProtocolPluginConfig::default()
+    let runtime_host_config = lash::durability::RuntimeHostConfig::new(
+        Arc::new(lash_restate::RestateEffectHost::with_ingress_url(
+            restate_ingress_url.clone(),
+        )),
+        Arc::new(lash::persistence::FileAttachmentStore::new(
+            data_dir.join("attachments"),
+        )),
+        artifact_store.clone(),
+    );
+
+    let core = RlmCore::builder()
+        .rlm_protocol_config(
+            lash::rlm::RlmProtocolPluginConfig::default()
                 .with_lashlang_abilities(workbench_lashlang_abilities()),
-        ))
-        .default_mode(ModeId::rlm())
+        )
         .provider(provider)
         .model(model_spec)
         .store_factory(Arc::clone(&core_store_factory))
-        .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
-            data_dir.join("attachments"),
-        )))
-        .lashlang_artifact_store(artifact_store)
+        .lashlang_artifact_store(
+            Arc::clone(&artifact_store) as Arc<dyn lash::persistence::LashlangArtifactStore>
+        )
         .trigger_store(trigger_store)
         .trace_sink(Arc::clone(&trace_sink))
         .lashlang_execution_sink(Arc::clone(&lashlang_execution_sink))
@@ -147,11 +156,9 @@ async fn async_main() -> AnyhowResult<()> {
                     .with_session_spec(SessionSpec::inherit()),
             ));
         })
-        .effect_host(Arc::new(lash_restate::RestateEffectHost::with_ingress_url(
-            restate_ingress_url.clone(),
-        )))
         .process_work_driver(process_deployment.process_work_driver())
         .queued_work_poke(queued_work_poke.clone())
+        .runtime_host_config(runtime_host_config)
         .build()
         .context("build Lash core")?;
     let process_worker = lash::durability::DurableProcessWorker::new(

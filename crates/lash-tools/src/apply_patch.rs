@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
 
 use lash_tool_support::{
-    StaticToolExecute, StaticToolProvider, compact_diff, display_relative, normalize_lexical,
-    object_schema, require_str, resolve_under, run_blocking,
+    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, compact_diff,
+    display_relative, normalize_lexical, object_schema, require_str, resolve_under, run_blocking,
 };
 
 const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";

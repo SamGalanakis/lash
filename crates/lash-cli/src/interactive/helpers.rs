@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use lash::{ModeId, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput};
+use lash::{TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput};
 use lash_core::{SessionPolicy, SessionSnapshot};
 use lash_tui_extensions::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, PreparedTurn};
 use crate::event::{AppEvent, AppEventTx};
+use crate::execution_settings::ExecutionMode;
 use crate::keybindings::{copy_binding, queued_turn_edit_binding};
 use crate::ui_effects::collect_ui_snapshot;
 use crate::ui_trace::{UiTraceRecorder, drain_aux_ops_into};
@@ -16,7 +17,7 @@ use crate::ui_trace::{UiTraceRecorder, drain_aux_ops_into};
 pub(super) struct TurnReplayPayload {
     pub(super) prepared_turn: PreparedTurn,
     pub(super) turn_input: TurnInput,
-    pub(super) execution_mode: ModeId,
+    pub(super) execution_mode: ExecutionMode,
 }
 
 pub(super) struct TurnActivityAppSink {

@@ -2,12 +2,10 @@ use crate::support::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
-    #[error("no mode presets installed; call install_mode(ModePreset::...) first")]
-    NoModesInstalled,
-    #[error("default mode `{mode}` is not installed on this LashCore")]
-    DefaultModeNotInstalled { mode: ModeId },
-    #[error("mode `{mode}` is not installed on this LashCore")]
-    ModeNotInstalled { mode: ModeId },
+    #[error(
+        "protocol plugin is required; call .protocol_plugin(...) or use StandardCore::builder()/RlmCore::builder()"
+    )]
+    MissingProtocolPlugin,
     #[error("model spec is required; hosts must supply explicit model metadata")]
     MissingModelSpec,
     #[error("effect host is required; provide an explicit effect host with .effect_host(...)")]
@@ -20,6 +18,10 @@ pub enum EmbedError {
         "attachment store is required; provide an explicit attachment store with .attachment_store(...)"
     )]
     MissingAttachmentStore,
+    #[error(
+        "process execution environment store is required; provide an explicit process env store with .process_env_store(...)"
+    )]
+    MissingProcessEnvStore,
     #[error("failed to create store for session `{session_id}`: {message}")]
     StoreFactory { session_id: String, message: String },
     #[error("store is bound to session `{loaded}` but builder requested `{requested}`")]

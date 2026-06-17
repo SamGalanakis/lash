@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use lash_core::LashlangToolBinding;
+use lash_tool_support::LashlangToolBinding;
 
 /// Normalise a server name or raw MCP tool name to lowercase ASCII
 /// alphanumeric and underscore. Collapses runs of non-alphanumeric characters
@@ -92,6 +92,7 @@ mod tests {
         assert_eq!(unique_prefixed_name("tool", &mut used), "tool_3");
     }
 
+    #[cfg(feature = "lashlang")]
     #[test]
     fn build_prefixed_name_keeps_module_path_and_original_alias() {
         let mut used = BTreeSet::new();

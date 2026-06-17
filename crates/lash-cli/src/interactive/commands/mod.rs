@@ -42,7 +42,7 @@ pub(super) struct SlashCommandCtx<'a> {
     pub(super) active_stream_id: &'a mut u64,
     pub(super) provider: &'a mut ProviderHandle,
     pub(super) current_model_variant: &'a mut Option<String>,
-    pub(super) current_execution_mode: &'a mut ModeId,
+    pub(super) current_execution_mode: &'a mut ExecutionMode,
     pub(super) active_tool_state: &'a mut ToolState,
     pub(super) model_catalog: &'a CachedModelCatalog,
     pub(super) toolset_hash: &'a mut String,
@@ -194,7 +194,7 @@ pub(super) async fn dispatch_queued_turn(
     active_stream_id: &mut u64,
     _provider: &mut ProviderHandle,
     _current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ModeId,
+    current_execution_mode: &mut ExecutionMode,
     app_tx: &crate::event::AppEventTx,
     _pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
@@ -318,7 +318,7 @@ async fn handle_slash_command(
             let context_window = app.usage.context_window;
             let cwd = app.cwd.clone();
             let session_name = app.session_name.clone();
-            let standard_context_approach = (current_execution_mode == &ModeId::standard())
+            let standard_context_approach = (current_execution_mode == &ExecutionMode::Standard)
                 .then(lash_standard_plugins::StandardContextApproach::default);
             let session_db_path = logger.db_path().to_string_lossy().to_string();
             app.show_document(info_document(

@@ -7,7 +7,7 @@ use lash::{
     prompt::PromptContribution,
     tools::{
         LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
-        ToolResult,
+        ToolDefinitionLashlangExt, ToolResult,
     },
 };
 use serde_json::json;

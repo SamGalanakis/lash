@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use lash::plugins::{PluginError, PluginFactory, PluginSessionContext, SessionPlugin};
 use lash::provider::ProviderHandle;
-use lash::{LashCore, ModeId, ModePreset};
 
 struct AppPlugin;
 
@@ -34,9 +33,9 @@ async fn plugin_core(provider: ProviderHandle, model_id: &str) -> anyhow::Result
     // docs:start:plugin-core
     use std::sync::Arc;
 
-    use lash::{LashCore, plugins::PluginFactory};
+    use lash::plugins::PluginFactory;
 
-    let core = LashCore::rlm()
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(model_id, None, 200_000, None)

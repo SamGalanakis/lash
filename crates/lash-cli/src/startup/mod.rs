@@ -22,7 +22,6 @@ pub(crate) mod session;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash::ModeId;
 use lash::ModelSpec;
 use lash::persistence::FileAttachmentStore;
 use lash::tracing::TraceLevel;
@@ -34,7 +33,7 @@ use serde_json::Value as JsonValue;
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::config::LashConfig;
 use crate::execution_settings::{
-    OmOverrides, ensure_supported_execution_mode, parse_execution_mode,
+    ExecutionMode, OmOverrides, ensure_supported_execution_mode, parse_execution_mode,
     parse_standard_context_approach,
 };
 use crate::info::{info_text, info_text_unconfigured};
@@ -222,7 +221,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         let execution_mode =
             ensure_supported_execution_mode(match args.execution_mode.as_deref() {
                 Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
-                None => ModeId::standard(),
+                None => ExecutionMode::Standard,
             })
             .map_err(anyhow::Error::msg)?;
         let cwd = std::env::current_dir()
@@ -340,17 +339,17 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             .as_ref()
             .map(|config| config.execution_mode.clone())
             .and_then(|mode| ensure_supported_execution_mode(mode).ok())
-            .unwrap_or(ModeId::standard()),
+            .unwrap_or(ExecutionMode::Standard),
     };
     let om_overrides = OmOverrides::from_args(&args);
-    if execution_mode != ModeId::standard()
+    if !execution_mode.is_standard()
         && (args.standard_context_approach.is_some() || !om_overrides.is_empty())
     {
         return Err(anyhow::anyhow!(
             "`--context-approach` and OM tuning flags only apply to `--execution-mode standard`."
         ));
     }
-    let configured_standard_context_approach = if execution_mode == ModeId::standard() {
+    let configured_standard_context_approach = if execution_mode.is_standard() {
         let approach = match args.standard_context_approach.as_deref() {
             Some(raw) => parse_standard_context_approach(raw).map_err(anyhow::Error::msg)?,
             None => persisted_host_config
@@ -364,7 +363,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     };
     let rlm_projected_bindings =
         resolve_rlm_projected_bindings(&args).map_err(anyhow::Error::msg)?;
-    if rlm_projected_bindings.is_some() && execution_mode != ModeId::rlm() {
+    if rlm_projected_bindings.is_some() && !execution_mode.is_rlm() {
         return Err(anyhow::anyhow!(
             "`--rlm-var` and `--rlm-vars-file` require `--execution-mode rlm`."
         ));

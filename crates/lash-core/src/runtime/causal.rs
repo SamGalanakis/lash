@@ -94,13 +94,13 @@ pub(crate) fn tool_retry_sleep_invocation(
     )
 }
 
-pub(crate) fn lashlang_sleep_invocation(
+pub(crate) fn process_sleep_invocation(
     session_id: &str,
     parent: Option<&RuntimeInvocation>,
     scope: &str,
     sequence: u64,
 ) -> RuntimeInvocation {
-    let suffix = format!("lashlang:{scope}:sleep:{sequence}");
+    let suffix = format!("process:{scope}:sleep:{sequence}");
     if let Some(parent) = parent {
         let parent_effect_id = parent.effect_id().unwrap_or("effect");
         return child_effect_invocation(
@@ -118,14 +118,14 @@ pub(crate) fn lashlang_sleep_invocation(
     )
 }
 
-pub(crate) fn lashlang_await_event_invocation(
+pub(crate) fn process_await_event_invocation(
     session_id: &str,
     parent: Option<&RuntimeInvocation>,
     process_id: &str,
     signal_name: &str,
     ordinal: u64,
 ) -> RuntimeInvocation {
-    let suffix = format!("lashlang:process:{process_id}:signal.{signal_name}:await:{ordinal}");
+    let suffix = format!("process:{process_id}:signal.{signal_name}:await:{ordinal}");
     if let Some(parent) = parent {
         let parent_effect_id = parent.effect_id().unwrap_or("effect");
         return child_effect_invocation(

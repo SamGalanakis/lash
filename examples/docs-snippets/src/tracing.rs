@@ -17,16 +17,13 @@ async fn jsonl_trace_core(provider: ProviderHandle, model: String) -> anyhow::Re
 
     let trace_sink: Arc<dyn TraceSink> = Arc::new(JsonlTraceSink::new("./.lash-data/trace.jsonl"));
 
-    let core = LashCore::standard()
+    let core = lash::StandardCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
                 .expect("valid model metadata"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .trace_sink(trace_sink)
         .trace_level(TraceLevel::Extended)
@@ -40,7 +37,7 @@ async fn lashlang_execution_jsonl(
     model: ModelSpec,
 ) -> anyhow::Result<()> {
     // docs:start:lashlang-execution-jsonl
-    let core = LashCore::rlm()
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(model)
         .effect_host(std::sync::Arc::new(
@@ -71,7 +68,7 @@ async fn lashlang_graph_store(provider: ProviderHandle, model: ModelSpec) -> any
             as Arc<dyn TraceSink>,
     ]));
 
-    let core = LashCore::rlm()
+    let core = lash::RlmCore::builder()
         .provider(provider)
         .model(model)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
@@ -116,11 +113,8 @@ async fn otel_trace_core() -> anyhow::Result<()> {
     // Exporter/provider setup stays with the host; this reads the
     // process-global OpenTelemetry tracer provider.
     let sink: Arc<dyn TraceSink> = Arc::new(OtelTraceSink::from_global_provider());
-    let core = LashCore::standard()
+    let core = lash::StandardCore::builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .trace_sink(sink)
         .trace_level(TraceLevel::Extended)

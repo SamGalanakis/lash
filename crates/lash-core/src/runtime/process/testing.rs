@@ -304,7 +304,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             });
             removed
         };
-        let managed = self.managed.lock().await;
+        let mut managed = self.managed.lock().await;
         let grants = self.grants.lock().await;
         let mut orphaned_process_ids = Vec::new();
         let mut preserved_process_ids = Vec::new();
@@ -322,6 +322,11 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                 preserved_process_ids.push(grant.process_id.clone());
             } else {
                 orphaned_process_ids.push(grant.process_id.clone());
+            }
+        }
+        for record in managed.values_mut() {
+            if record.record.clear_wake_target_for_session(session_id) {
+                record.notify.notify_waiters();
             }
         }
         orphaned_process_ids.sort();

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
 use lash_tool_support::{
-    FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, build_path_entry,
-    filesystem_entries_output_schema, filesystem_entries_result, object_schema,
+    FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
+    build_path_entry, filesystem_entries_output_schema, filesystem_entries_result, object_schema,
     parse_optional_bool, parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
 };
 

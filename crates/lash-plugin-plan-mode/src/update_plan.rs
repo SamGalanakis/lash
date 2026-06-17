@@ -392,8 +392,7 @@ mod tests {
             session_id: "root".into(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            lashlang_abilities: Default::default(),
-            lashlang_language_features: Default::default(),
+            extensions: Default::default(),
             plugin_options: Default::default(),
             parent_session_id: None,
         };
@@ -401,8 +400,7 @@ mod tests {
             session_id: "child".into(),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            lashlang_abilities: Default::default(),
-            lashlang_language_features: Default::default(),
+            extensions: Default::default(),
             plugin_options: Default::default(),
             parent_session_id: Some("root".into()),
         };

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use super::*;
 
+const EXAMPLE_BINDING_KEY: &str = "example.call_path";
+
 #[test]
 fn turn_input_round_trips_remote_safe_fields() {
     let mut prompt = lash_core::PromptLayer::new();
@@ -201,7 +203,7 @@ fn trigger_dtos_round_trip_core_values() {
     assert_eq!(core, filter);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+    inputs.insert("event".to_string(), lash_core::TriggerInputBinding::Event);
     let registration = lash_core::TriggerRegistration {
         handle: "trigger:1".to_string(),
         source_key: "source-key".to_string(),
@@ -209,14 +211,19 @@ fn trigger_dtos_round_trip_core_values() {
         source_type: lash_core::TriggerEventType::new("ui.button.pressed"),
         source: serde_json::json!({}),
         target: lash_core::TriggerTargetSummary {
-            process_name: "on_button".to_string(),
-            inputs: lashlang::TriggerInputTemplate::new(inputs),
+            label: Some("on_button".to_string()),
+            identity: engine_process_identity("on_button"),
+            input: engine_process_input("on_button", serde_json::json!({})),
+            inputs,
         },
         enabled: true,
     };
     let remote = RemoteTriggerRegistration::from(registration.clone());
     let core = lash_core::TriggerRegistration::try_from(remote).expect("core registration");
-    assert_eq!(core, registration);
+    assert_eq!(
+        serde_json::to_value(&core).expect("core registration json"),
+        serde_json::to_value(&registration).expect("registration json")
+    );
 
     let cause = lash_core::CausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
@@ -279,7 +286,11 @@ fn trigger_subscription_dtos_round_trip_core_values() {
     let response = RemoteTriggerListSubscriptionsResponse::from(vec![record.clone()]);
     let core_records =
         Vec::<lash_core::TriggerSubscriptionRecord>::try_from(response).expect("list response");
-    assert_eq!(core_records, vec![record]);
+    assert_eq!(core_records.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&core_records[0]).expect("core record json"),
+        serde_json::to_value(&record).expect("record json")
+    );
 
     let cancel = RemoteTriggerCancelSubscriptionRequest {
         protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -313,13 +324,7 @@ fn process_start_requests_round_trip_core_values() {
 
     let lashlang = lash_core::ProcessStartRequest::new(
         "process:lashlang",
-        lash_core::ProcessInput::LashlangProcess {
-            module_ref: module_ref(),
-            process_ref: process_ref(),
-            host_requirements_ref: host_requirements_ref(),
-            process_name: "main".to_string(),
-            args: serde_json::Map::from_iter([("event".to_string(), serde_json::json!(true))]),
-        },
+        engine_process_input("main", serde_json::json!({ "event": true })),
         lash_core::ProcessOriginator::session(lash_core::SessionScope::new("session-a")),
     )
     .with_env_spec(lash_core::ProcessExecutionEnvSpec::new(
@@ -386,12 +391,7 @@ fn process_records_events_snapshots_and_results_round_trip_core_values() {
         lash_core::ProcessHandleDescriptor::new(Some("external"), Some("External")),
         lash_core::ProcessLifecycleStatus::Completed,
     )
-    .with_definition(Some(lashlang::ProcessDefinitionIdentity::new(
-        module_ref(),
-        host_requirements_ref(),
-        process_ref(),
-        "main",
-    )));
+    .with_definition(Some(process_definition_identity("main")));
     let remote = RemoteProcessSummary::from(summary.clone());
     remote
         .validate("RemoteProcessSummary")
@@ -482,12 +482,7 @@ fn process_records_events_snapshots_and_results_round_trip_core_values() {
 #[test]
 fn process_list_cancel_signal_and_await_requests_convert_to_core_commands() {
     let filter = lash_core::ProcessListFilter {
-        definition: Some(lashlang::ProcessDefinitionIdentity::new(
-            module_ref(),
-            host_requirements_ref(),
-            process_ref(),
-            "main",
-        )),
+        definition: Some(process_definition_identity("main")),
         status: lash_core::ProcessStatusFilter::Any,
         waiting: Some(true),
     };
@@ -590,13 +585,16 @@ fn remote_turn_result_maps_core_semantics() {
 fn remote_tool_grants_validate_explicit_bindings_and_duplicates() {
     let grant = demo_grant("one", "tools", "search");
     grant.validate().expect("valid grant");
-    assert_eq!(grant.call_path().unwrap(), "tools.search");
+    assert_eq!(
+        grant.binding_call_path(EXAMPLE_BINDING_KEY).unwrap(),
+        "tools.search"
+    );
 
     let mut missing_binding = grant.clone();
-    missing_binding.lashlang_binding = None;
+    missing_binding.bindings.remove(EXAMPLE_BINDING_KEY);
     assert!(matches!(
-        missing_binding.validate(),
-        Err(RemoteProtocolError::MissingLashlangToolBinding { .. })
+        missing_binding.binding_call_path(EXAMPLE_BINDING_KEY),
+        Err(RemoteProtocolError::MissingToolBinding { .. })
     ));
 
     let duplicate = demo_grant("two", "tools", "search");
@@ -604,6 +602,42 @@ fn remote_tool_grants_validate_explicit_bindings_and_duplicates() {
         RemoteToolGrant::validate_all(&[grant, duplicate]),
         Err(RemoteProtocolError::DuplicateRemoteCallPath { .. })
     ));
+}
+
+#[test]
+fn remote_tool_grants_convert_to_core_ids_without_binding_call_path() {
+    let grant = demo_grant("one", "tools", "search");
+    let definition = lash_core::ToolDefinition::try_from(&grant).expect("tool definition");
+    assert_eq!(definition.manifest().id.as_str(), "remote-tool:one");
+    assert_eq!(
+        definition.manifest().bindings[EXAMPLE_BINDING_KEY],
+        grant.bindings[EXAMPLE_BINDING_KEY],
+        "remote bindings remain opaque metadata on the manifest"
+    );
+
+    let changed_binding = demo_grant("one", "other_module", "other_operation");
+    assert_eq!(
+        changed_binding
+            .binding_call_path(EXAMPLE_BINDING_KEY)
+            .expect("changed binding call path"),
+        "other_module.other_operation"
+    );
+    let definition =
+        lash_core::ToolDefinition::try_from(&changed_binding).expect("tool definition");
+    assert_eq!(
+        definition.manifest().id.as_str(),
+        "remote-tool:one",
+        "derived core IDs are based on remote grant names, not binding call paths"
+    );
+    assert_ne!(
+        definition.manifest().id.as_str(),
+        "remote-tool:other_module.other_operation"
+    );
+
+    let mut explicit = grant;
+    explicit.id = Some("remote-tool:explicit".to_string());
+    let definition = lash_core::ToolDefinition::try_from(&explicit).expect("tool definition");
+    assert_eq!(definition.manifest().id.as_str(), "remote-tool:explicit");
 }
 
 #[test]
@@ -739,41 +773,58 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         argument_projection: None,
         scheduling: None,
         retry_policy: None,
-        lashlang_binding: Some(RemoteLashlangToolBinding::new([module], operation)),
+        bindings: BTreeMap::from([(
+            EXAMPLE_BINDING_KEY.to_string(),
+            serde_json::json!({
+                "module_path": [module],
+                "operation": operation
+            }),
+        )]),
     }
 }
 
-fn module_ref() -> lashlang::ModuleRef {
-    lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"))
+fn process_definition_identity(process_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "module_ref": "lashlang:v1:sha256:module",
+        "host_requirements_ref": "lashlang-host-requirements:v1:sha256:host",
+        "process_ref": {
+            "component": "process-component",
+            "pos": 1
+        },
+        "process_name": process_name
+    })
 }
 
-fn host_requirements_ref() -> lashlang::HostRequirementsRef {
-    lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("host"))
+fn engine_process_input(process_name: &str, args: serde_json::Value) -> lash_core::ProcessInput {
+    let _ = process_name;
+    lash_core::ProcessInput::Engine {
+        kind: "lashlang".to_string(),
+        payload: serde_json::json!({
+            "args": args
+        }),
+    }
 }
 
-fn process_ref() -> lashlang::ProcessRef {
-    lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1)
+fn engine_process_identity(process_name: &str) -> lash_core::ProcessIdentity {
+    lash_core::ProcessIdentity::new("lashlang")
+        .with_label(Some(process_name.to_string()))
+        .with_definition(Some(process_definition_identity(process_name)))
 }
 
-fn trigger_target_identity() -> lashlang::ProcessDefinitionIdentity {
-    lashlang::ProcessDefinitionIdentity::new(
-        module_ref(),
-        host_requirements_ref(),
-        process_ref(),
-        "on_button",
-    )
+fn trigger_target_identity() -> serde_json::Value {
+    process_definition_identity("on_button")
 }
 
-fn trigger_input_template() -> lashlang::TriggerInputTemplate {
-    lashlang::TriggerInputTemplate::new(BTreeMap::from([
-        ("event".to_string(), lashlang::TriggerInputBinding::Event),
+fn trigger_input_template() -> BTreeMap<String, lash_core::TriggerInputBinding> {
+    BTreeMap::from([
+        ("event".to_string(), lash_core::TriggerInputBinding::Event),
         (
             "fixed".to_string(),
-            lashlang::TriggerInputBinding::Fixed {
+            lash_core::TriggerInputBinding::Fixed {
                 value: serde_json::json!("blue"),
             },
         ),
-    ]))
+    ])
 }
 
 fn trigger_subscription_draft() -> lash_core::TriggerSubscriptionDraft {
@@ -787,12 +838,12 @@ fn trigger_subscription_draft() -> lash_core::TriggerSubscriptionDraft {
         source_type: "ui.button.pressed".to_string(),
         source_key: "source-key".to_string(),
         source: serde_json::json!({ "button": "blue" }),
-        event_ty: lashlang::TypeExpr::Any,
-        module_ref: module_ref(),
-        host_requirements_ref: host_requirements_ref(),
-        process_ref: process_ref(),
-        process_name: "on_button".to_string(),
+        payload_schema: lash_core::LashSchema::any(),
+        target: engine_process_input("on_button", serde_json::json!({})),
+        target_identity: engine_process_identity("on_button"),
+        event_types: vec![process_event_type()],
         input_template: trigger_input_template(),
+        target_label: Some("on_button".to_string()),
     }
 }
 
@@ -808,12 +859,12 @@ fn trigger_subscription_record() -> lash_core::TriggerSubscriptionRecord {
         source_type: draft.source_type,
         source_key: draft.source_key,
         source: draft.source,
-        event_ty: draft.event_ty,
-        module_ref: draft.module_ref,
-        host_requirements_ref: draft.host_requirements_ref,
-        process_ref: draft.process_ref,
-        process_name: draft.process_name,
+        payload_schema: draft.payload_schema,
+        target: draft.target,
+        target_identity: draft.target_identity,
+        event_types: draft.event_types,
         input_template: draft.input_template,
+        target_label: draft.target_label,
         enabled: true,
         created_at_ms: 1,
         updated_at_ms: 2,
@@ -917,6 +968,8 @@ fn observed_process() -> lash_core::ObservedProcess {
         process_id: "process:observed".to_string(),
         graph_key: "process:process:observed".to_string(),
         kind: "external".to_string(),
+        identity: lash_core::ProcessIdentity::new("external")
+            .with_label(Some("External".to_string())),
         lifecycle: lash_core::ProcessLifecycleStatus::Running,
         status_label: "running".to_string(),
         terminal: false,

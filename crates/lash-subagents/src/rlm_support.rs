@@ -6,6 +6,7 @@ use lash_core::{
     SessionToolAccess, SubagentSessionContext, ToolCatalogContribution, ToolDefinition, ToolResult,
     ToolScheduling, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
+use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 use serde_json::{Value, json};
 
 use crate::capability::{CapabilityRegistry, SubagentSpawnContext};
@@ -228,7 +229,10 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
         }),
         submit_error_output_schema(),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "submit_error"))
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "submit_error",
+    ))
     .with_scheduling(ToolScheduling::Serial)
 }
 

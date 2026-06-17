@@ -11,12 +11,6 @@ impl PluginFactory for TriggerResourcePluginFactory {
         TRIGGER_RESOURCE_PLUGIN_ID
     }
 
-    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
-        let mut resources = lashlang::LashlangHostCatalog::new();
-        lashlang::add_trigger_resource_operations(&mut resources);
-        resources
-    }
-
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(TriggerResourcePlugin))
     }
@@ -32,37 +26,4 @@ impl SessionPlugin for TriggerResourcePlugin {
     fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         Ok(())
     }
-}
-
-pub(crate) fn trigger_handle_json(handle: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "trigger_handle",
-        "id": handle,
-    })
-}
-
-pub(crate) async fn validate_target_process(
-    target: &lashlang::ProcessDefinitionIdentity,
-    source_type: &str,
-    inputs: &lashlang::TriggerInputTemplate,
-    artifact_store: &dyn lashlang::LashlangArtifactStore,
-) -> Result<lashlang::TriggerCompatibility, PluginError> {
-    let artifact = artifact_store
-        .get_module_artifact(&target.module_ref)
-        .await
-        .map_err(|err| PluginError::Session(format!("load trigger target artifact: {err}")))?
-        .ok_or_else(|| {
-            PluginError::Session(format!(
-                "missing trigger target artifact `{}`",
-                target.module_ref
-            ))
-        })?;
-    let validation = lashlang::check_trigger_compatibility(lashlang::TriggerCompatibilityRequest {
-        artifact: &artifact,
-        definition: target,
-        source_type,
-        inputs,
-    })
-    .map_err(|err| PluginError::Session(err.to_string()))?;
-    Ok(validation)
 }

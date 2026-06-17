@@ -72,7 +72,7 @@ pub trait AttachmentStore: Send + Sync {
     ///
     /// Plain stores return an empty set. [`SessionScopedAttachmentStore`]
     /// overrides this so attachments created through downstream tools,
-    /// Lashlang execution, and other runtime services are committed by the
+    /// process execution, and other runtime services are committed by the
     /// same final turn transaction that makes them reachable from session
     /// state.
     fn pending_manifest_commit_ids(&self) -> Vec<AttachmentId> {

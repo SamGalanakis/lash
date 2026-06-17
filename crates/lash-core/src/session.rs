@@ -11,7 +11,6 @@ pub(crate) mod process_handles;
 mod tool_execution;
 
 pub use execution_context::RuntimeExecutionContext;
-pub(crate) use execution_context::lashlang_host_environment_from_tool_catalog;
 pub use tool_execution::{ToolInvocation, ToolInvocationReply};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,7 +19,6 @@ struct ToolCatalogCacheKey {
     context_overlay_revision: u64,
     tool_generation: u64,
     plugin_revision: u64,
-    lashlang_language_features: lashlang::LashlangLanguageFeatures,
 }
 
 #[derive(Debug, Default)]
@@ -92,6 +90,7 @@ pub enum SessionError {
 
 #[derive(Clone, Debug)]
 pub struct ExecRequest {
+    pub language: String,
     pub code: String,
     pub accept_finish: bool,
 }
@@ -216,7 +215,6 @@ impl Session {
             context_overlay_revision: self.context_overlay_revision,
             tool_generation: self.tool_registry.generation(),
             plugin_revision: self.plugins().snapshot_revision_fingerprint(),
-            lashlang_language_features: self.plugins().lashlang_language_features(),
         }
     }
 
@@ -236,18 +234,13 @@ impl Session {
                 resolve_contract: Some(Arc::clone(&resolve_contract)),
                 tool_access: self.plugins().tool_access().clone(),
                 subagent: self.plugins().subagent_context().cloned(),
-                lashlang_abilities: self.plugins().lashlang_abilities(),
+                extensions: self.plugins().extensions().clone(),
             },
         )?);
         let input = crate::ProtocolBuildInput {
             tool_catalog: Arc::clone(&tool_catalog),
-            lashlang_host_environment:
-                execution_context::lashlang_host_environment_from_tool_catalog(
-                    &tool_catalog,
-                    self.plugins().lashlang_abilities(),
-                    self.plugins().lashlang_language_features(),
-                    self.plugins().lashlang_resources(),
-                ),
+            plugin_extensions: self.plugins().extensions().clone(),
+            trigger_events: self.plugins().triggers().clone(),
             extra_prompt_contributions: self.protocol_extra_prompt_contributions(),
         };
         let driver = self.plugins().protocol_driver();
@@ -352,9 +345,7 @@ impl Session {
         Ok(RuntimeExecutionContext::new(
             session_id.to_string(),
             dispatch,
-            self.plugins().lashlang_abilities(),
-            self.plugins().lashlang_language_features(),
-            Arc::clone(&self.services.lashlang_artifact_store),
+            Arc::clone(&self.services.process_env_store),
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
             protocol_extension,

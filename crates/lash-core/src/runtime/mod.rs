@@ -105,14 +105,17 @@ pub use observation::{
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    DefaultProcessCancelAbility, ObservedProcess, ObservedProcessEvent, ObservedWorkItem,
-    PROCESS_LEASE_SCHEMA_VERSION, PreparedProcessEventAppend, ProcessAwaitOutput,
-    ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
-    ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
-    ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput,
-    ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
+    DefaultProcessCancelAbility, InMemoryProcessExecutionEnvStore, ObservedProcess,
+    ObservedProcessEvent, ObservedWorkItem, PROCESS_LEASE_SCHEMA_VERSION,
+    PreparedProcessEventAppend, ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest,
+    ProcessCancelRequest, ProcessCancelSource, ProcessCancelSummary, ProcessEngine,
+    ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
+    ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef,
+    ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessIdentity,
+    ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
     ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord,
     ProcessRegistration, ProcessRegistry, ProcessService, ProcessSessionDeleteReport,
     ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
@@ -120,13 +123,12 @@ pub use process::{
     ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
     ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver, ProcessWorkSnapshot, SessionScope,
     SessionScopeId, UnavailableProcessService, WaitKind, WaitState, current_epoch_ms,
-    epoch_ms_from_system_time, lashlang_process_event_types, lashlang_process_signal_event_types,
-    load_process_execution_env, materialize_process_event_semantics, persist_process_execution_env,
-    prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
-    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
-    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
-    process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
-    validate_process_signal_name,
+    epoch_ms_from_system_time, load_process_execution_env, materialize_process_event_semantics,
+    persist_process_execution_env, prepare_process_event_append, prepare_process_registration,
+    process_event_payload_hash, process_signal_event_type, process_signal_name_from_event_type,
+    process_signal_wait_key, process_wake_delivery, process_wake_input_from_event_payload,
+    process_wake_turn_cause, process_wake_turn_text, require_event_replay,
+    system_time_from_epoch_ms, validate_process_signal_name,
 };
 pub use process_work_runner::{
     InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner,
@@ -569,7 +571,7 @@ pub enum OutputState {
     RecoveredFromError,
 }
 
-/// RLM code execution output observed during a turn.
+/// Code execution output observed during a turn.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CodeOutputRecord {
     pub output: String,

@@ -15,6 +15,6 @@ fn main() {
         .with_contribution(contribution)
         .with_cleared_slot(lash::prompt::PromptSlot::Environment);
 
-    let _ = lash::LashCore::standard().prompt_layer(layer);
+    let _ = lash::StandardCore::builder().prompt_layer(layer);
     let _ = lash::prompt::default_prompt_template();
 }

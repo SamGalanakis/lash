@@ -12,7 +12,14 @@ const PROCESS_HANDLE_KIND: &str = "process";
 impl RuntimeExecutionContext<'_> {
     pub(super) fn process_handle_value(id: &str, tool_name: &str) -> serde_json::Value {
         let _ = tool_name;
-        crate::lashlang_bridge::process_handle_json(id)
+        Self::process_handle_json(id)
+    }
+
+    pub fn process_handle_json(id: &str) -> serde_json::Value {
+        json!({
+            "__handle__": "process",
+            "id": id,
+        })
     }
 
     pub(super) fn process_status_value(status: &crate::ProcessRecord) -> serde_json::Value {
@@ -201,7 +208,7 @@ impl RuntimeExecutionContext<'_> {
                 return Self::recorded_process_error(call_id, "signal_process", args, err, started);
             }
         };
-        let signal_id = format!("lashlang-{call_id}");
+        let signal_id = format!("process-{call_id}");
         let output = match self
             .dispatch
             .processes
@@ -258,10 +265,10 @@ impl RuntimeExecutionContext<'_> {
                         &self.session_id,
                         &handle_id,
                         self.process_scope(self.parent_invocation.clone()),
-                        crate::ProcessCancelSource::Lashlang,
+                        crate::ProcessCancelSource::Process,
                     )
                     .with_handle(handle)
-                    .with_reason("requested by lashlang"),
+                    .with_reason("requested by process handle"),
                 )
                 .await
         };
@@ -413,9 +420,7 @@ mod tests {
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
             dispatch,
-            Default::default(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -491,15 +496,11 @@ mod tests {
                     },
                     crate::ProcessProvenance::host(),
                 )
-                .with_extra_event_types(
-                    crate::lashlang_process_event_types().into_iter().chain([
-                        crate::ProcessEventType {
-                            name: "signal.ready".to_string(),
-                            payload_schema: crate::LashSchema::any(),
-                            semantics: crate::ProcessEventSemanticsSpec::default(),
-                        },
-                    ]),
-                ),
+                .with_extra_event_types([crate::ProcessEventType {
+                    name: "signal.ready".to_string(),
+                    payload_schema: crate::LashSchema::any(),
+                    semantics: crate::ProcessEventSemanticsSpec::default(),
+                }]),
             )
             .await
             .expect("register target process");
@@ -536,9 +537,7 @@ mod tests {
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
             dispatch,
-            Default::default(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -631,9 +630,7 @@ mod tests {
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
             dispatch,
-            Default::default(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -716,9 +713,7 @@ mod tests {
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
             dispatch,
-            Default::default(),
-            Default::default(),
-            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -742,10 +737,7 @@ mod tests {
         );
         assert_eq!(
             ability.calls(),
-            vec![(
-                crate::ProcessCancelSource::Lashlang,
-                "process-1".to_string()
-            )]
+            vec![(crate::ProcessCancelSource::Process, "process-1".to_string())]
         );
     }
 }

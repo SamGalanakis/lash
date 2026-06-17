@@ -152,7 +152,10 @@ pub struct RemoteTriggerRegistration {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTriggerTargetSummary {
-    pub process_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub identity: RemoteProcessIdentity,
+    pub input: RemoteProcessInput,
     #[serde(default)]
     pub inputs: RemoteTriggerInputTemplate,
 }
@@ -201,10 +204,15 @@ pub struct RemoteTriggerSubscriptionDraft {
     #[serde(default)]
     pub source: serde_json::Value,
     #[serde(default)]
-    pub event_ty: serde_json::Value,
-    pub target: RemoteProcessDefinitionIdentity,
+    pub payload_schema: serde_json::Value,
+    pub target: RemoteProcessInput,
+    pub target_identity: RemoteProcessIdentity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_types: Vec<RemoteProcessEventType>,
     #[serde(default)]
     pub input_template: RemoteTriggerInputTemplate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_label: Option<String>,
 }
 
 impl RemoteTriggerSubscriptionDraft {
@@ -226,6 +234,11 @@ impl RemoteTriggerSubscriptionDraft {
             &self.source_key,
         )?;
         self.target.validate("RemoteTriggerSubscriptionDraft")?;
+        self.target_identity
+            .validate("RemoteTriggerSubscriptionDraft")?;
+        for event_type in &self.event_types {
+            event_type.validate("RemoteTriggerSubscriptionDraft")?;
+        }
         self.input_template
             .validate("RemoteTriggerSubscriptionDraft")
     }
@@ -246,10 +259,15 @@ pub struct RemoteTriggerSubscriptionRecord {
     #[serde(default)]
     pub source: serde_json::Value,
     #[serde(default)]
-    pub event_ty: serde_json::Value,
-    pub target: RemoteProcessDefinitionIdentity,
+    pub payload_schema: serde_json::Value,
+    pub target: RemoteProcessInput,
+    pub target_identity: RemoteProcessIdentity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_types: Vec<RemoteProcessEventType>,
     #[serde(default)]
     pub input_template: RemoteTriggerInputTemplate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_label: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub created_at_ms: u64,
@@ -268,6 +286,10 @@ impl RemoteTriggerSubscriptionRecord {
         require_non_empty(type_name, "source_type", &self.source_type)?;
         require_non_empty(type_name, "source_key", &self.source_key)?;
         self.target.validate(type_name)?;
+        self.target_identity.validate(type_name)?;
+        for event_type in &self.event_types {
+            event_type.validate(type_name)?;
+        }
         self.input_template.validate(type_name)
     }
 }

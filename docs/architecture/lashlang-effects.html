@@ -67,7 +67,7 @@
         <div class="section" id="host-provided-modules">
           <div class="section-header">
             <h2>Host-Provided Modules</h2>
-            <p>Lashlang does not ship a global tool namespace. The current turn's <code>RuntimeExecutionContext::lashlang_host_environment()</code> builds the effective language surface by translating callable <code>ToolCatalog</code> entries into module operations and then extending that catalog with plugin-provided Lashlang resources. Linking and prompt rendering both use this surface, so examples in the prompt are executable against the same host contract.</p>
+            <p>Lashlang does not ship a global tool namespace. The Lashlang runtime builds the effective language surface from the current turn's <code>RuntimeExecutionContext</code>: it translates callable <code>ToolCatalog</code> entries into module operations and extends that catalog with plugin-provided Lashlang resources. Linking and prompt rendering both use this surface, so examples in the prompt are executable against the same host contract.</p>
           </div>
           <dl class="def-list">
             <dt><code>LashlangToolBinding</code></dt>
@@ -77,7 +77,7 @@
             <dt><code>PluginFactory::lashlang_resources</code></dt>
             <dd>Plugins use this hook for language resources that are not ordinary tools: configured trigger-source constructors such as <code>cron.Schedule(...)</code>, typed resource constructors, and other host descriptor constructors. Zero-config trigger sources such as <code>ui.button.pressed({})</code> are added to the session catalog from <code>reg.triggers().declare(...)</code>. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
             <dt><code>LashlangAbilities</code></dt>
-            <dd>The host enables process starts, sleep, process signals, and trigger registry operations explicitly. A configured process registry derives process/lifecycle availability for sessions; plugins such as the built-in session-trigger plugin contribute trigger operations and resources.</dd>
+            <dd>The host enables process starts, sleep, process signals, and trigger registry operations explicitly. A configured process registry supplies the generic process plane; the Lashlang runtime derives process/lifecycle availability from that plane for RLM sessions. Plugins such as the built-in session-trigger plugin contribute trigger operations and resources.</dd>
             <dt><code>LashlangLanguageFeatures</code></dt>
             <dd>The host enables optional static language features separately from executable abilities. <code>label_annotations</code> allows <code>@label(...)</code> process-map metadata; it is not an execution effect and does not grant any resource, process, trigger, or provider capability.</dd>
           </dl>

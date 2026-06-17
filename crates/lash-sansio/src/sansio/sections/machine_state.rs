@@ -17,6 +17,7 @@ enum MachineState<M: TurnProtocol = UnitTurnProtocol> {
     },
     WaitingExec {
         effect_id: EffectId,
+        language: String,
         code: String,
         driver_state: M::DriverState,
     },
@@ -75,10 +76,12 @@ impl<M: TurnProtocol> Clone for MachineState<M> {
             },
             Self::WaitingExec {
                 effect_id,
+                language,
                 code,
                 driver_state,
             } => Self::WaitingExec {
                 effect_id: *effect_id,
+                language: language.clone(),
                 code: code.clone(),
                 driver_state: driver_state.clone(),
             },
@@ -128,9 +131,13 @@ impl<M: TurnProtocol> MachineState<M> {
                 calls: calls.clone(),
             }),
             Self::WaitingExec {
-                effect_id, code, ..
+                effect_id,
+                language,
+                code,
+                ..
             } => Some(Effect::ExecCode {
                 id: *effect_id,
+                language: language.clone(),
                 code: code.clone(),
             }),
             Self::WaitingCheckpoint {

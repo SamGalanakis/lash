@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,19 +49,23 @@ impl From<&str> for SessionScopeId {
 }
 
 /// Durable executable input for a process.
+///
+/// `ToolCall`, `SessionTurn`, and `External` are kernel process primitives:
+/// core owns their durable representation and execution semantics because they
+/// are how the runtime coordinates tools, child sessions, and externally
+/// completed work. `Engine` is the extension point for deployment-specific
+/// process runtimes; those rows require a matching [`crate::ProcessEngine`] in
+/// the host's process engine registry.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProcessInput {
     ToolCall {
         call: crate::PreparedToolCall,
     },
-    LashlangProcess {
-        module_ref: lashlang::ModuleRef,
-        process_ref: lashlang::ProcessRef,
-        host_requirements_ref: lashlang::HostRequirementsRef,
-        process_name: String,
+    Engine {
+        kind: String,
         #[serde(default)]
-        args: serde_json::Map<String, serde_json::Value>,
+        payload: serde_json::Value,
     },
     SessionTurn {
         create_request: Box<crate::SessionCreateRequest>,
@@ -76,18 +82,9 @@ impl Clone for ProcessInput {
     fn clone(&self) -> Self {
         match self {
             Self::ToolCall { call } => Self::ToolCall { call: call.clone() },
-            Self::LashlangProcess {
-                module_ref,
-                process_ref,
-                host_requirements_ref,
-                process_name,
-                args,
-            } => Self::LashlangProcess {
-                module_ref: module_ref.clone(),
-                process_ref: process_ref.clone(),
-                host_requirements_ref: host_requirements_ref.clone(),
-                process_name: process_name.clone(),
-                args: args.clone(),
+            Self::Engine { kind, payload } => Self::Engine {
+                kind: kind.clone(),
+                payload: payload.clone(),
             },
             Self::SessionTurn {
                 create_request,
@@ -101,6 +98,30 @@ impl Clone for ProcessInput {
             Self::External { metadata } => Self::External {
                 metadata: metadata.clone(),
             },
+        }
+    }
+}
+
+impl PartialEq for ProcessInput {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
+}
+
+impl ProcessInput {
+    pub fn engine_kind(&self) -> &'static str {
+        match self {
+            Self::ToolCall { .. } => "tool",
+            Self::Engine { .. } => "engine",
+            Self::SessionTurn { .. } => "session_turn",
+            Self::External { .. } => "external",
+        }
+    }
+
+    pub fn engine_specific_kind(&self) -> Option<&str> {
+        match self {
+            Self::Engine { kind, .. } => Some(kind.as_str()),
+            _ => None,
         }
     }
 }
@@ -156,8 +177,68 @@ impl ProcessExecutionEnvSpec {
     }
 }
 
+#[async_trait::async_trait]
+pub trait ProcessExecutionEnvStore: Send + Sync {
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
+
+    async fn put_process_execution_env(
+        &self,
+        env_ref: &ProcessExecutionEnvRef,
+        bytes: &[u8],
+    ) -> Result<(), crate::PluginError>;
+
+    async fn get_process_execution_env(
+        &self,
+        env_ref: &ProcessExecutionEnvRef,
+    ) -> Result<Option<Vec<u8>>, crate::PluginError>;
+}
+
+#[derive(Default)]
+pub struct InMemoryProcessExecutionEnvStore {
+    envs: Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+impl InMemoryProcessExecutionEnvStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl ProcessExecutionEnvStore for InMemoryProcessExecutionEnvStore {
+    async fn put_process_execution_env(
+        &self,
+        env_ref: &ProcessExecutionEnvRef,
+        bytes: &[u8],
+    ) -> Result<(), crate::PluginError> {
+        self.envs
+            .lock()
+            .map_err(|_| {
+                crate::PluginError::Session("process execution env store lock poisoned".to_string())
+            })?
+            .insert(env_ref.as_str().to_string(), bytes.to_vec());
+        Ok(())
+    }
+
+    async fn get_process_execution_env(
+        &self,
+        env_ref: &ProcessExecutionEnvRef,
+    ) -> Result<Option<Vec<u8>>, crate::PluginError> {
+        Ok(self
+            .envs
+            .lock()
+            .map_err(|_| {
+                crate::PluginError::Session("process execution env store lock poisoned".to_string())
+            })?
+            .get(env_ref.as_str())
+            .cloned())
+    }
+}
+
 pub async fn persist_process_execution_env(
-    artifact_store: &dyn lashlang::LashlangArtifactStore,
+    env_store: &dyn ProcessExecutionEnvStore,
     spec: &ProcessExecutionEnvSpec,
 ) -> Result<ProcessExecutionEnvRef, crate::PluginError> {
     let env_ref = spec.stable_ref().map_err(|err| {
@@ -166,29 +247,19 @@ pub async fn persist_process_execution_env(
     let bytes = spec.to_store_bytes().map_err(|err| {
         crate::PluginError::Session(format!("failed to encode process execution env: {err}"))
     })?;
-    artifact_store
-        .put_artifact_bytes(env_ref.as_str(), "process_execution_env", &bytes)
-        .await
-        .map_err(|err| {
-            crate::PluginError::Session(format!(
-                "failed to persist process execution env `{env_ref}`: {err}"
-            ))
-        })?;
+    env_store
+        .put_process_execution_env(&env_ref, &bytes)
+        .await?;
     Ok(env_ref)
 }
 
 pub async fn load_process_execution_env(
-    artifact_store: &dyn lashlang::LashlangArtifactStore,
+    env_store: &dyn ProcessExecutionEnvStore,
     env_ref: &ProcessExecutionEnvRef,
 ) -> Result<ProcessExecutionEnvSpec, crate::PluginError> {
-    let bytes = artifact_store
-        .get_artifact_bytes(env_ref.as_str())
-        .await
-        .map_err(|err| {
-            crate::PluginError::Session(format!(
-                "failed to load process execution env `{env_ref}`: {err}"
-            ))
-        })?
+    let bytes = env_store
+        .get_process_execution_env(env_ref)
+        .await?
         .ok_or_else(|| {
             crate::PluginError::Session(format!("missing process execution env `{env_ref}`"))
         })?;
@@ -499,6 +570,7 @@ impl SessionScope {
 pub struct ProcessRegistration {
     pub id: ProcessId,
     pub input: Arc<ProcessInput>,
+    pub identity: ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
     pub provenance: ProcessProvenance,
@@ -513,6 +585,7 @@ impl Clone for ProcessRegistration {
         Self {
             id: self.id.clone(),
             input: Arc::clone(&self.input),
+            identity: self.identity.clone(),
             event_types: self.event_types.clone(),
             provenance: self.provenance.clone(),
             env_ref: self.env_ref.clone(),
@@ -527,9 +600,11 @@ impl ProcessRegistration {
         input: ProcessInput,
         provenance: ProcessProvenance,
     ) -> Self {
+        let identity = ProcessIdentity::from_process_input(&input);
         Self {
             id: id.into(),
             input: Arc::new(input),
+            identity,
             event_types: default_process_event_types(),
             provenance,
             env_ref: None,
@@ -553,6 +628,11 @@ impl ProcessRegistration {
 
     pub fn with_wake_target(mut self, wake_target: Option<SessionScope>) -> Self {
         self.wake_target = wake_target;
+        self
+    }
+
+    pub fn with_identity(mut self, identity: ProcessIdentity) -> Self {
+        self.identity = identity;
         self
     }
 
@@ -650,6 +730,7 @@ pub struct ProcessRecord {
     pub id: ProcessId,
     pub registration_hash: String,
     pub input: Arc<ProcessInput>,
+    pub identity: ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
     pub provenance: ProcessProvenance,
@@ -705,6 +786,7 @@ impl ProcessRecord {
             id: registration.id,
             registration_hash,
             input: registration.input,
+            identity: registration.identity,
             event_types: registration.event_types,
             provenance: registration.provenance,
             env_ref: registration.env_ref,
@@ -721,8 +803,82 @@ impl ProcessRecord {
         self.status.is_terminal()
     }
 
+    pub fn clear_wake_target_for_session(&mut self, session_id: &str) -> bool {
+        let should_clear = self
+            .wake_target
+            .as_ref()
+            .is_some_and(|scope| scope.session_id == session_id);
+        if should_clear {
+            self.wake_target = None;
+            self.updated_at_ms = current_epoch_ms();
+        }
+        should_clear
+    }
+
     pub fn originator_scope_id(&self) -> String {
         self.provenance.originator.scope_id()
+    }
+}
+
+/// Canonical process identity stored alongside every durable process row.
+///
+/// `ProcessInput::Engine` keeps its payload opaque to core. Engines therefore
+/// publish their visible kind, display label, and definition identity at the
+/// registration boundary; list, summary, trigger, and observation paths read
+/// this durable field instead of decoding engine payload conventions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessIdentity {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<serde_json::Value>,
+}
+
+impl ProcessIdentity {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            label: None,
+            definition: None,
+        }
+    }
+
+    pub fn with_label(mut self, label: Option<impl Into<String>>) -> Self {
+        self.label = label.map(Into::into);
+        self
+    }
+
+    pub fn with_definition(mut self, definition: Option<serde_json::Value>) -> Self {
+        self.definition = definition;
+        self
+    }
+
+    pub fn from_process_input(input: &ProcessInput) -> Self {
+        match input {
+            ProcessInput::ToolCall { call } => {
+                Self::new("tool").with_label(Some(call.tool_name.clone()))
+            }
+            ProcessInput::Engine { kind, .. } => Self::new(kind.clone()),
+            ProcessInput::SessionTurn { create_request, .. } => {
+                let label = create_request
+                    .subagent
+                    .as_ref()
+                    .map(|subagent| subagent.capability.clone())
+                    .or_else(|| create_request.usage_source.clone())
+                    .or_else(|| create_request.session_id.clone());
+                Self::new("session_turn").with_label(label)
+            }
+            ProcessInput::External { metadata } => {
+                let label = metadata
+                    .get("label")
+                    .or_else(|| metadata.get("name"))
+                    .or_else(|| metadata.get("title"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                Self::new("external").with_label(label)
+            }
+        }
     }
 }
 
@@ -865,7 +1021,7 @@ pub struct ProcessHandleSummary {
     pub process_id: ProcessId,
     pub descriptor: ProcessHandleDescriptor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition: Option<lashlang::ProcessDefinitionIdentity>,
+    pub definition: Option<serde_json::Value>,
     pub status: ProcessLifecycleStatus,
 }
 
@@ -886,16 +1042,13 @@ impl ProcessHandleSummary {
         }
     }
 
-    pub fn with_definition(
-        mut self,
-        definition: Option<lashlang::ProcessDefinitionIdentity>,
-    ) -> Self {
+    pub fn with_definition(mut self, definition: Option<serde_json::Value>) -> Self {
         self.definition = definition;
         self
     }
 
     pub fn from_grant_record(grant: ProcessHandleGrant, record: ProcessRecord) -> Self {
-        let definition = process_definition_identity_from_input(record.input.as_ref());
+        let definition = record.identity.definition.clone();
         Self::new(
             record.id,
             grant.descriptor,
@@ -923,28 +1076,6 @@ impl ProcessCancelSummary {
             process_id: record.id,
             status: ProcessLifecycleStatus::from(record.status),
         }
-    }
-}
-
-fn process_definition_identity_from_input(
-    input: &ProcessInput,
-) -> Option<lashlang::ProcessDefinitionIdentity> {
-    match input {
-        ProcessInput::LashlangProcess {
-            module_ref,
-            process_ref,
-            host_requirements_ref,
-            process_name,
-            ..
-        } => Some(lashlang::ProcessDefinitionIdentity::new(
-            module_ref.clone(),
-            host_requirements_ref.clone(),
-            process_ref.clone(),
-            process_name.clone(),
-        )),
-        ProcessInput::ToolCall { .. }
-        | ProcessInput::SessionTurn { .. }
-        | ProcessInput::External { .. } => None,
     }
 }
 
@@ -990,9 +1121,9 @@ impl ProcessStatusFilter {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProcessListFilter {
-    pub definition: Option<lashlang::ProcessDefinitionIdentity>,
+    pub definition: Option<serde_json::Value>,
     pub status: ProcessStatusFilter,
     pub waiting: Option<bool>,
 }
@@ -1008,11 +1139,7 @@ impl ProcessListFilter {
                 _ => return Err(format!("processes.list unknown filter `{key}`")),
             }
         }
-        let definition = args
-            .get("definition")
-            .map(lashlang::ProcessDefinitionIdentity::from_process_value)
-            .transpose()
-            .map_err(|err| err.to_string())?;
+        let definition = args.get("definition").cloned();
         let status =
             ProcessStatusFilter::decode(args.get("status").and_then(serde_json::Value::as_str))?;
         let waiting = args
@@ -1045,23 +1172,7 @@ impl ProcessListFilter {
             && self
                 .definition
                 .as_ref()
-                .is_none_or(|definition| match record.input.as_ref() {
-                    ProcessInput::LashlangProcess {
-                        module_ref,
-                        process_ref,
-                        host_requirements_ref,
-                        process_name,
-                        ..
-                    } => definition.matches_input_refs(
-                        module_ref,
-                        host_requirements_ref,
-                        process_ref,
-                        process_name,
-                    ),
-                    ProcessInput::ToolCall { .. }
-                    | ProcessInput::SessionTurn { .. }
-                    | ProcessInput::External { .. } => false,
-                })
+                .is_none_or(|definition| record.identity.definition.as_ref() == Some(definition))
             && self
                 .waiting
                 .is_none_or(|waiting| record.wait.is_some() == waiting)
@@ -1106,51 +1217,29 @@ mod tests {
 
     use super::*;
 
-    fn process_ref(component: &str, pos: usize) -> lashlang::ProcessRef {
-        lashlang::ProcessRef {
-            component: lashlang::ContentHash::new(component),
-            pos: pos as u32,
-        }
+    fn process_value(component: &str, pos: usize, name: &str) -> serde_json::Value {
+        json!({
+            "component": component,
+            "pos": pos,
+            "name": name,
+        })
     }
 
-    fn process_value(
-        module_ref: &lashlang::ModuleRef,
-        host_requirements_ref: &lashlang::HostRequirementsRef,
-        process_ref: &lashlang::ProcessRef,
-        name: &str,
-    ) -> serde_json::Value {
-        let mut value = serde_json::Map::new();
-        value.insert(lashlang::LASH_PROCESS_VALUE_KEY.to_string(), json!(true));
-        value.insert(lashlang::LASH_MODULE_REF_KEY.to_string(), json!(module_ref));
-        value.insert(
-            lashlang::LASH_HOST_REQUIREMENTS_REF_KEY.to_string(),
-            json!(host_requirements_ref),
-        );
-        value.insert(
-            lashlang::LASH_PROCESS_REF_KEY.to_string(),
-            json!(process_ref),
-        );
-        value.insert(lashlang::LASH_PROCESS_NAME_KEY.to_string(), json!(name));
-        serde_json::Value::Object(value)
-    }
-
-    fn lashlang_entry(
+    fn engine_entry(
         process_id: &str,
-        module_ref: lashlang::ModuleRef,
-        host_requirements_ref: lashlang::HostRequirementsRef,
-        process_ref: lashlang::ProcessRef,
+        definition: serde_json::Value,
         process_name: &str,
         status: ProcessStatus,
     ) -> ProcessHandleGrantEntry {
         let mut record = ProcessRecord::from_registration(
             ProcessRegistration::new(
                 process_id,
-                ProcessInput::LashlangProcess {
-                    module_ref,
-                    process_ref,
-                    host_requirements_ref: host_requirements_ref,
-                    process_name: process_name.to_string(),
-                    args: serde_json::Map::new(),
+                ProcessInput::Engine {
+                    kind: "test-engine".to_string(),
+                    payload: json!({
+                        "definition": definition,
+                        "label": process_name,
+                    }),
                 },
                 ProcessProvenance::host(),
             )
@@ -1163,7 +1252,7 @@ mod tests {
             ProcessHandleGrant {
                 session_id: "session".to_string(),
                 process_id: process_id.to_string(),
-                descriptor: ProcessHandleDescriptor::new(Some("lashlang"), Some(process_name)),
+                descriptor: ProcessHandleDescriptor::new(Some("test-engine"), Some(process_name)),
             },
             record,
         )
@@ -1171,21 +1260,16 @@ mod tests {
 
     #[test]
     fn process_list_filter_matches_definition_and_status() {
-        let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
-        let host_requirements_ref =
-            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("surface"));
-        let target_ref = process_ref("target", 0);
-        let other_ref = process_ref("other", 1);
+        let target_ref = process_value("target", 0, "target");
+        let other_ref = process_value("other", 1, "other");
         let filter = ProcessListFilter::decode(&json!({
-            "definition": process_value(&module_ref, &host_requirements_ref, &target_ref, "target"),
+            "definition": target_ref,
             "status": "completed"
         }))
         .expect("decode filter");
 
-        let matching = lashlang_entry(
+        let matching = engine_entry(
             "matching",
-            module_ref.clone(),
-            host_requirements_ref.clone(),
             target_ref,
             "target",
             ProcessStatus::Completed {
@@ -1194,10 +1278,8 @@ mod tests {
                 )),
             },
         );
-        let wrong_definition = lashlang_entry(
+        let wrong_definition = engine_entry(
             "wrong-definition",
-            module_ref,
-            host_requirements_ref,
             other_ref,
             "other",
             ProcessStatus::Completed {
@@ -1214,14 +1296,9 @@ mod tests {
 
     #[test]
     fn process_list_filter_matches_waiting_facet() {
-        let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
-        let host_requirements_ref =
-            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("surface"));
-        let process_ref = process_ref("target", 0);
-        let mut waiting_entry = lashlang_entry(
+        let process_ref = process_value("target", 0, "target");
+        let mut waiting_entry = engine_entry(
             "waiting",
-            module_ref.clone(),
-            host_requirements_ref.clone(),
             process_ref.clone(),
             "target",
             ProcessStatus::Running,
@@ -1235,14 +1312,7 @@ mod tests {
                 ordinal: 1,
             },
         });
-        let idle_entry = lashlang_entry(
-            "idle",
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            "target",
-            ProcessStatus::Running,
-        );
+        let idle_entry = engine_entry("idle", process_ref, "target", ProcessStatus::Running);
         let waiting_filter =
             ProcessListFilter::decode(&json!({ "waiting": true })).expect("decode waiting filter");
         let idle_filter =

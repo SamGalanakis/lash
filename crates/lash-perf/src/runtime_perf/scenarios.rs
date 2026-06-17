@@ -1,7 +1,22 @@
-use lash::ModeId;
 use lash_standard_plugins::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ExecutionMode {
+    Standard,
+    Rlm,
+}
+
+impl ExecutionMode {
+    pub(crate) fn is_standard(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+
+    pub(crate) fn is_rlm(self) -> bool {
+        matches!(self, Self::Rlm)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimePerfScenario {
@@ -169,7 +184,7 @@ impl RuntimePerfScenario {
         }
     }
 
-    pub(crate) fn execution_mode(self) -> ModeId {
+    pub(crate) fn execution_mode(self) -> ExecutionMode {
         match self {
             Self::Standard
             | Self::StandardToolCalls
@@ -188,7 +203,7 @@ impl RuntimePerfScenario {
             | Self::SqliteStoreReopen
             | Self::TurnCheckpoint
             | Self::LiveReplayPressure
-            | Self::TraceJsonlStandard => ModeId::standard(),
+            | Self::TraceJsonlStandard => ExecutionMode::Standard,
             Self::Rlm
             | Self::RlmToolCalls
             | Self::RlmAsyncToolCompletion
@@ -199,13 +214,13 @@ impl RuntimePerfScenario {
             | Self::RlmGlobals
             | Self::RlmLargeToolCatalog
             | Self::EmbedRlm
-            | Self::TraceJsonlExtended => ModeId::rlm(),
+            | Self::TraceJsonlExtended => ExecutionMode::Rlm,
         }
     }
 
     pub(crate) fn standard_context_approach(self) -> Option<StandardContextApproach> {
         match self.execution_mode() {
-            mode if mode != ModeId::standard() => None,
+            mode if !mode.is_standard() => None,
             _ => Some(match self {
                 Self::ObservationalMemory => StandardContextApproach::ObservationalMemory(
                     ObservationalMemoryConfig::default(),

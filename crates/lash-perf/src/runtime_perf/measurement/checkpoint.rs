@@ -226,6 +226,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for CheckpointDriver {
                 calls: checkpoint_tool_calls(ctx.protocol_iteration()),
             }],
             Self::Exec => vec![DriverAction::StartExec {
+                language: "code".to_string(),
                 code: checkpoint_exec_code(ctx.protocol_iteration()),
                 driver_state: lash_core::ProtocolDriverState::new(
                     "runtime_perf_checkpoint",
@@ -453,7 +454,7 @@ fn checkpoint_pending_exec(
     let mut machine = checkpoint_machine(config, seed_messages, turn_index);
     let effect = next_checkpoint_effect(&mut machine)
         .ok_or_else(|| anyhow::anyhow!("checkpoint exec scenario produced no effect"))?;
-    let Effect::ExecCode { id, code } = effect else {
+    let Effect::ExecCode { id, code, .. } = effect else {
         anyhow::bail!("checkpoint exec scenario expected ExecCode effect");
     };
     let checkpoint = machine.checkpoint();
@@ -602,7 +603,7 @@ fn assert_restored_exec(
     expected_code: &str,
 ) -> anyhow::Result<()> {
     match next_checkpoint_effect(machine) {
-        Some(Effect::ExecCode { id, code }) if id == expected_id && code == expected_code => Ok(()),
+        Some(Effect::ExecCode { id, code, .. }) if id == expected_id && code == expected_code => Ok(()),
         Some(_) => anyhow::bail!("restored checkpoint did not replay matching ExecCode"),
         None => anyhow::bail!("restored checkpoint had no ExecCode"),
     }
@@ -637,9 +638,7 @@ pub(crate) async fn run_once_embed(
     let store = Arc::new(RuntimePerfStore::default());
     let core = build_embed_core(scenario, Arc::clone(&store))?;
     let session = core
-        .session(format!("runtime-perf-{}", scenario.name()))
-        .mode(scenario.execution_mode())
-        .open()
+        .open_session(format!("runtime-perf-{}", scenario.name()))
         .await
         .with_context(|| format!("open embed session for {}", scenario.name()))?;
     let build_runtime_ms = elapsed_ms(build_started);

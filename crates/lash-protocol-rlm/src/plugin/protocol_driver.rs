@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use lash_core::plugin::ProtocolDriverPlugin;
 use lash_core::{ProtocolBuildInput, TurnDriverPreamble};
+use lash_lashlang_runtime::LashlangSurface;
 
 use super::RlmProtocolPluginConfig;
 use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
 
 pub(super) struct RlmProtocolDriver {
     pub(super) config: RlmProtocolPluginConfig,
+    pub(super) lashlang_surface: LashlangSurface,
     pub(super) last_prompt_usage: SharedPromptUsage,
 }
 
@@ -20,6 +22,7 @@ impl ProtocolDriverPlugin for RlmProtocolDriver {
                 max_budget_tokens: self.config.continue_as_soft_warn_tokens,
                 last_prompt_usage: Arc::clone(&self.last_prompt_usage),
                 prompt_features: self.config.prompt_features,
+                lashlang_surface: self.lashlang_surface.clone(),
             },
         )
     }

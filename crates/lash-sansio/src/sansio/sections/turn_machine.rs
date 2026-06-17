@@ -311,15 +311,17 @@ impl<M: TurnProtocol> TurnMachine<M> {
         });
     }
 
-    fn start_exec(&mut self, code: String, driver_state: M::DriverState) {
+    fn start_exec(&mut self, language: String, code: String, driver_state: M::DriverState) {
         let effect_id = self.next_id();
         self.state = MachineState::WaitingExec {
             effect_id,
+            language: language.clone(),
             code: code.clone(),
             driver_state,
         };
         self.pending_effects.push_back(Effect::ExecCode {
             id: effect_id,
+            language,
             code,
         });
     }
@@ -383,9 +385,11 @@ impl<M: TurnProtocol> TurnMachine<M> {
                     driver_state,
                 } => self.start_llm_request(request, driver_state),
                 DriverAction::StartTools { calls } => self.start_tool_calls(calls),
-                DriverAction::StartExec { code, driver_state } => {
-                    self.start_exec(code, driver_state)
-                }
+                DriverAction::StartExec {
+                    language,
+                    code,
+                    driver_state,
+                } => self.start_exec(language, code, driver_state),
                 DriverAction::StartCheckpoint {
                     checkpoint,
                     on_empty,
@@ -836,6 +840,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
                 effect_id,
                 code: _,
                 driver_state,
+                ..
             } if effect_id == id => Some(WaitingExecState { driver_state }),
             other => {
                 self.state = other;

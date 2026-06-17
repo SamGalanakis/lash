@@ -159,15 +159,6 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
         self.env.process_registry = Some(process_registry);
-        if let Some(host) = self.env.plugin_host.take() {
-            let abilities = super::builder::lashlang_abilities_for_process_registry(
-                host.lashlang_abilities(),
-                true,
-            );
-            self.env.plugin_host = Some(Arc::new(
-                host.as_ref().clone().with_lashlang_abilities(abilities),
-            ));
-        }
         self
     }
 
@@ -242,17 +233,6 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
         self.env.core.tracing.trace_sink = sink;
-        self
-    }
-
-    pub fn with_lashlang_execution_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
-        self.env.core.tracing.lashlang_execution_sink = sink;
-        self
-    }
-
-    pub fn with_lashlang_execution_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.env.core.tracing.lashlang_execution_sink =
-            path.map(|path| Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn TraceSink>);
         self
     }
 

@@ -13,8 +13,13 @@ description = "Process-control plugin for the lash agent runtime."
 keywords = ["lash", "agent", "plugin", "process", "runtime"]
 categories = ["asynchronous", "api-bindings"]
 
+[features]
+default = []
+lashlang = ["dep:lash-lashlang-runtime", "lash-tool-support/lashlang"]
+
 [dependencies]
 lash-core = { workspace = true }
+lash-lashlang-runtime = { workspace = true, optional = true }
 lash-tool-support = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

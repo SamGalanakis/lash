@@ -227,7 +227,7 @@ impl LashRuntime {
         Ok(())
     }
 
-    pub async fn list_lashlang_trigger_registrations(
+    pub async fn list_trigger_registrations(
         &self,
     ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {
         let store = self.host.trigger_store.as_ref().ok_or_else(|| {
@@ -245,7 +245,7 @@ impl LashRuntime {
             .collect())
     }
 
-    pub async fn lashlang_trigger_registrations_by_source_type(
+    pub async fn trigger_registrations_by_source_type(
         &self,
         source_type: impl Into<crate::TriggerEventType>,
     ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {

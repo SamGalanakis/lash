@@ -7,7 +7,7 @@ use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
-use lash::{EmbedError, LashCore, ModePreset, PluginBinding};
+use lash::{EmbedError, PluginBinding, StandardCore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -184,7 +184,7 @@ fn response_tool_call() -> LlmResponse {
     }
 }
 
-fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
+fn core_with_responses(responses: Vec<LlmResponse>) -> StandardCore {
     let responses = Arc::new(Mutex::new(responses.into_iter()));
     let provider = lash_core::testing::TestProvider::builder()
         .complete(move |_request| {
@@ -202,18 +202,17 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
     // These plugin/typed-input tests never start a process, so they wire no
     // process registry (and thus no store factory) and run non-persistent turns
     // — which the live `TurnContext` plugin input path requires.
-    LashCore::builder()
-        .install_mode(ModePreset::standard())
+    StandardCore::builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("mock-model", None, 16_000, None)
                 .expect("valid model spec"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
         .build()
         .expect("core")
 }

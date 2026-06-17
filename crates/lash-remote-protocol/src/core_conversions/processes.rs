@@ -72,42 +72,45 @@ impl From<RemoteProcessProvenance> for lash_core::ProcessProvenance {
     }
 }
 
-impl From<lashlang::ProcessDefinitionIdentity> for RemoteProcessDefinitionIdentity {
-    fn from(value: lashlang::ProcessDefinitionIdentity) -> Self {
+impl From<serde_json::Value> for RemoteProcessDefinitionIdentity {
+    fn from(value: serde_json::Value) -> Self {
+        Self { value }
+    }
+}
+
+impl From<RemoteProcessDefinitionIdentity> for serde_json::Value {
+    fn from(value: RemoteProcessDefinitionIdentity) -> Self {
+        value.value
+    }
+}
+
+impl From<lash_core::ProcessIdentity> for RemoteProcessIdentity {
+    fn from(value: lash_core::ProcessIdentity) -> Self {
+        let lash_core::ProcessIdentity {
+            kind,
+            label,
+            definition,
+        } = value;
         Self {
-            module_ref: value.module_ref.as_str().to_string(),
-            host_requirements_ref: value.host_requirements_ref.as_str().to_string(),
-            process_ref: value.process_ref.into(),
-            process_name: value.process_name,
+            kind,
+            label,
+            definition: definition.map(Into::into),
         }
     }
 }
 
-impl TryFrom<RemoteProcessDefinitionIdentity> for lashlang::ProcessDefinitionIdentity {
-    type Error = RemoteProtocolError;
-
-    fn try_from(value: RemoteProcessDefinitionIdentity) -> Result<Self, Self::Error> {
-        value.validate("RemoteProcessDefinitionIdentity")?;
-        let RemoteProcessDefinitionIdentity {
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            process_name,
+impl From<RemoteProcessIdentity> for lash_core::ProcessIdentity {
+    fn from(value: RemoteProcessIdentity) -> Self {
+        let RemoteProcessIdentity {
+            kind,
+            label,
+            definition,
         } = value;
-        Ok(lashlang::ProcessDefinitionIdentity::new(
-            decode_remote_lashlang_ref(
-                module_ref,
-                "RemoteProcessDefinitionIdentity",
-                "module_ref",
-            )?,
-            decode_remote_lashlang_ref(
-                host_requirements_ref,
-                "RemoteProcessDefinitionIdentity",
-                "host_requirements_ref",
-            )?,
-            process_ref.into(),
-            process_name,
-        ))
+        Self {
+            kind,
+            label,
+            definition: definition.map(Into::into),
+        }
     }
 }
 
@@ -422,19 +425,9 @@ impl TryFrom<lash_core::ProcessInput> for RemoteProcessInput {
                     }
                 })?,
             }),
-            lash_core::ProcessInput::LashlangProcess {
-                module_ref,
-                process_ref,
-                host_requirements_ref,
-                process_name,
-                args,
-            } => Ok(Self::LashlangProcess {
-                module_ref: module_ref.as_str().to_string(),
-                process_ref: process_ref.into(),
-                host_requirements_ref: host_requirements_ref.as_str().to_string(),
-                process_name,
-                args,
-            }),
+            lash_core::ProcessInput::Engine { kind, payload } => {
+                Ok(Self::Engine { kind, payload })
+            }
             lash_core::ProcessInput::SessionTurn {
                 create_request,
                 turn_input,
@@ -467,27 +460,7 @@ impl TryFrom<RemoteProcessInput> for lash_core::ProcessInput {
                     "prepared_tool_call",
                 )?,
             }),
-            RemoteProcessInput::LashlangProcess {
-                module_ref,
-                process_ref,
-                host_requirements_ref,
-                process_name,
-                args,
-            } => Ok(Self::LashlangProcess {
-                module_ref: decode_remote_lashlang_ref(
-                    module_ref,
-                    "RemoteProcessInput",
-                    "module_ref",
-                )?,
-                process_ref: process_ref.into(),
-                host_requirements_ref: decode_remote_lashlang_ref(
-                    host_requirements_ref,
-                    "RemoteProcessInput",
-                    "host_requirements_ref",
-                )?,
-                process_name,
-                args,
-            }),
+            RemoteProcessInput::Engine { kind, payload } => Ok(Self::Engine { kind, payload }),
             RemoteProcessInput::SessionTurn {
                 create_request,
                 turn_input,
@@ -1176,7 +1149,7 @@ impl TryFrom<RemoteProcessSummary> for lash_core::ProcessHandleSummary {
             id,
             process_id,
             descriptor: descriptor.into(),
-            definition: definition.map(TryInto::try_into).transpose()?,
+            definition: definition.map(Into::into),
             status: status.into(),
         })
     }
@@ -1190,6 +1163,7 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
             id,
             registration_hash: _,
             input,
+            identity,
             event_types,
             provenance,
             env_ref,
@@ -1203,6 +1177,7 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
         Ok(Self {
             process_id: id,
             input: input.as_ref().clone().try_into()?,
+            identity: identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             provenance: provenance.into(),
             env_ref: env_ref.map(|env_ref| env_ref.as_str().to_string()),
@@ -1224,6 +1199,7 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
         let RemoteProcessRecord {
             process_id,
             input,
+            identity,
             event_types,
             provenance,
             env_ref,
@@ -1239,6 +1215,7 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
             input.try_into()?,
             provenance.into(),
         )
+        .with_identity(identity.into())
         .with_event_types(event_types.into_iter().map(Into::into))
         .with_execution_env_ref(env_ref.map(lash_core::ProcessExecutionEnvRef::new))
         .with_wake_target(wake_target.map(Into::into));
@@ -1260,6 +1237,7 @@ impl TryFrom<lash_core::ObservedProcess> for RemoteObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity,
             lifecycle,
             status_label,
             terminal,
@@ -1280,6 +1258,7 @@ impl TryFrom<lash_core::ObservedProcess> for RemoteObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity: identity.into(),
             lifecycle: lifecycle.into(),
             status_label,
             terminal,
@@ -1308,6 +1287,7 @@ impl TryFrom<RemoteObservedProcess> for lash_core::ObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity,
             lifecycle,
             status_label,
             terminal,
@@ -1328,6 +1308,7 @@ impl TryFrom<RemoteObservedProcess> for lash_core::ObservedProcess {
             process_id,
             graph_key,
             kind,
+            identity: identity.into(),
             lifecycle: lifecycle.into(),
             status_label,
             terminal,
@@ -1546,7 +1527,7 @@ impl TryFrom<RemoteProcessListFilter> for lash_core::ProcessListFilter {
             waiting,
         } = value;
         Ok(Self {
-            definition: definition.map(TryInto::try_into).transpose()?,
+            definition: definition.map(Into::into),
             status: status.into(),
             waiting,
         })

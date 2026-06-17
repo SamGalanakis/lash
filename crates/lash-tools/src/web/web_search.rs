@@ -2,7 +2,9 @@ use serde_json::{Value, json};
 
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
 
-use lash_tool_support::{StaticToolExecute, StaticToolProvider, object_schema};
+use lash_tool_support::{
+    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, object_schema,
+};
 
 /// Web search via Tavily API.
 pub struct WebSearch {

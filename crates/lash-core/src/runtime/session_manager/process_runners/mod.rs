@@ -1,7 +1,6 @@
 use super::*;
 
 mod control;
-mod lashlang;
 mod runner;
 mod session;
 mod tool;
@@ -140,5 +139,3 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
         })
     }
 }
-
-include!("tests.rs");

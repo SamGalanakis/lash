@@ -25,13 +25,6 @@ pub struct ReopenableAttachmentStore {
     pub reopen: Arc<dyn crate::AttachmentStore>,
 }
 
-/// A pair of [`LashlangArtifactStore`] handles opened against the same durable
-/// backing store.
-pub struct ReopenableLashlangArtifactStore {
-    pub open: Arc<dyn crate::LashlangArtifactStore>,
-    pub reopen: Arc<dyn crate::LashlangArtifactStore>,
-}
-
 /// A pair of [`TriggerStore`](crate::TriggerStore) handles opened against
 /// the same durable backing store.
 pub struct ReopenableTriggerStore {

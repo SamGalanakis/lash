@@ -94,8 +94,7 @@ attaches a trace sink to `LashCore`, and writes JSONL trace records to stderr
 and `AGENT_SERVICE_TRACE` so provider payloads, RLM response, extracted
 lashlang, terminal output, and tool calls are visible while you run it.
 
-The app installs RLM explicitly with `ModePreset::rlm()`, activates
-`DemoPlugin` per chat session with
+The app builds an `RlmCore`, activates `DemoPlugin` per chat session with
 `SessionBuilder::plugin::<DemoPlugin>(...)`, and lets the plugin provide
 its fixed app tools through the normal `ToolProvider` hook.
 

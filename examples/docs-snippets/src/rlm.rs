@@ -6,11 +6,9 @@ async fn rlm_core(provider: ProviderHandle, model_id: &str) -> anyhow::Result<()
     // docs:start:rlm-core
     use std::sync::Arc;
 
-    use lash::{LashCore, ModeId, ModePreset, TurnInput};
+    use lash::TurnInput;
 
-    let core = LashCore::builder()
-        .install_mode(ModePreset::rlm())
-        .default_mode(ModeId::rlm())
+    let core = lash::RlmCore::builder()
         .plugins(lash::plugins::runtime_plugin_stack())
         .provider(provider)
         .model(
@@ -24,7 +22,7 @@ async fn rlm_core(provider: ProviderHandle, model_id: &str) -> anyhow::Result<()
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
-    let session = core.session("task-42").rlm().open().await?;
+    let session = core.session("task-42").open().await?;
     let output = session
         .turn(TurnInput::text(
             "Inspect the task and submit a concise result.",

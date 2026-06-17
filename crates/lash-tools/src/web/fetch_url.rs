@@ -2,7 +2,9 @@ use serde_json::json;
 
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
 
-use lash_tool_support::{StaticToolExecute, StaticToolProvider, object_schema, require_str};
+use lash_tool_support::{
+    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, object_schema, require_str,
+};
 
 /// Fetch a URL and return its content as text.
 pub struct FetchUrl {

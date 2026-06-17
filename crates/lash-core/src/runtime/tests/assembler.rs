@@ -535,7 +535,7 @@ fn output_state_empty_output() {
 
 #[test]
 fn output_state_traceback_only() {
-    let raw = "Runtime error: Traceback (most recent call last):\nFile \"rlm_1.py\", line 2, in <module>\nNameError: name 'now' is not defined";
+    let raw = "Runtime error: Traceback (most recent call last):\nFile \"frame_1.py\", line 2, in <module>\nNameError: name 'now' is not defined";
     assert_eq!(
         classify_output_state(raw, "", &[]),
         OutputState::TracebackOnly
