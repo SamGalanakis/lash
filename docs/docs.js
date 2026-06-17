@@ -28,6 +28,7 @@
   const DOCS = [
     {
       label: "Start here",
+      tier: "guide",
       summary: "Install the runtime, run a turn, and choose the next task path.",
       href: "quickstart.html",
       items: [
@@ -43,16 +44,31 @@
           summary: "Pick a common job: stream a turn, persist a session, add a tool, expose state, spawn subagents, run background work, or inspect traces.",
           kind: "guide",
         },
+      ],
+    },
+    {
+      label: "Execution modes",
+      tier: "guide",
+      summary: "Choose how the model acts each turn: native provider tool-calls (standard) or model-authored Lashlang programs (RLM). One commit unit either way.",
+      href: "execution-modes.html",
+      items: [
         {
-          title: "Using the CLI",
-          href: "cli.html",
-          summary: "Run Lash from the terminal, configure providers, resume sessions, export traces, and use slash commands.",
-          kind: "reference",
+          title: "Standard vs RLM",
+          href: "execution-modes.html",
+          summary: "The per-turn choice: standard native tool-calling vs model-authored Lashlang programs, how to select each, and when to reach for one over the other.",
+          kind: "guide",
+        },
+        {
+          title: "RLM protocol",
+          href: "rlm.html",
+          summary: "Prompt construction, history projection, variables, the execution loop, finish semantics, and failure modes for the RLM mode.",
+          kind: "guide",
         },
       ],
     },
     {
       label: "Build an app",
+      tier: "guide",
       summary: "Wire Lash into a product backend with sessions, turns, prompts, persistence, and traces.",
       href: "embedding.html",
       items: [
@@ -89,26 +105,8 @@
       ],
     },
     {
-      label: "RLM and lashlang",
-      summary: "Let the model write Lashlang programs while all effects stay behind host boundaries.",
-      href: "rlm.html",
-      items: [
-        {
-          title: "RLM protocol",
-          href: "rlm.html",
-          summary: "Prompt construction, history projection, variables, execution loop, finish semantics, and failure modes.",
-          kind: "guide",
-        },
-        {
-          title: "Lashlang language",
-          href: "architecture/lashlang.html",
-          summary: "Syntax, module shape, foreground blocks, processes, labels, and language-level diagnostics.",
-          kind: "reference",
-        },
-      ],
-    },
-    {
       label: "Tools",
+      tier: "guide",
       summary: "Expose callable host operations to model turns and Lashlang modules.",
       href: "tools.html",
       items: [
@@ -128,6 +126,7 @@
     },
     {
       label: "Plugins",
+      tier: "guide",
       summary: "Add behavior that participates in runtime/session lifecycle, prompt construction, policy, or resumable state.",
       href: "plugins.html",
       items: [
@@ -147,6 +146,7 @@
     },
     {
       label: "Operations",
+      tier: "guide",
       summary: "Run Lash with durable stores, traces, workflow replay, scaling, and service boundaries.",
       href: "persistence.html",
       items: [
@@ -184,6 +184,7 @@
     },
     {
       label: "Examples",
+      tier: "guide",
       summary: "See complete hosts that combine runtime, product state, tools, UI, persistence, and workflow edges.",
       href: "examples.html",
       items: [
@@ -208,7 +209,52 @@
       ],
     },
     {
-      label: "Architecture",
+      label: "Reference",
+      tier: "reference",
+      summary: "Jump to API indices, the Lashlang language spec, and low-level supporting references.",
+      href: "architecture/reference.html",
+      items: [
+        {
+          title: "API reference",
+          href: "architecture/reference.html",
+          summary: "Rustdoc index for facade, core, provider, protocol, store, trace, export, and example crates.",
+          kind: "reference",
+        },
+        {
+          title: "Lashlang language",
+          href: "architecture/lashlang.html",
+          summary: "The CodeAct language behind RLM: syntax, module shape, foreground blocks, processes, labels, and language-level diagnostics.",
+          kind: "reference",
+        },
+        {
+          title: "Providers",
+          href: "architecture/providers.html",
+          summary: "Provider request/response normalization, cache policy, usage mapping, and adding a provider crate.",
+          kind: "reference",
+        },
+        {
+          title: "Dependency map",
+          href: "architecture/deps.html",
+          summary: "Workspace dependency boundaries and crate-layer constraints.",
+          kind: "reference",
+        },
+        {
+          title: "HTML exporter",
+          href: "architecture/html-exporter.html",
+          summary: "Exporter internals for session trace HTML and static assets.",
+          kind: "reference",
+        },
+        {
+          title: "Trace export",
+          href: "trace-export-edges.html",
+          summary: "Trace edge cases and export behaviors that matter for downstream viewers.",
+          kind: "reference",
+        },
+      ],
+    },
+    {
+      label: "Internals",
+      tier: "internals",
       summary: "Understand why the runtime is split into facade, core, protocol, language, provider, store, and export crates.",
       href: "architecture/index.html",
       items: [
@@ -275,38 +321,15 @@
       ],
     },
     {
-      label: "Reference",
-      summary: "Jump to API indices and low-level supporting references.",
-      href: "architecture/reference.html",
+      label: "lash CLI",
+      tier: "cli",
+      summary: "The reference terminal application built on the runtime. Use it to try lash without writing code and as a worked embedding example — it is not required to build on lash.",
+      href: "cli.html",
       items: [
         {
-          title: "API reference",
-          href: "architecture/reference.html",
-          summary: "Rustdoc index for facade, core, provider, protocol, store, trace, export, and example crates.",
-          kind: "reference",
-        },
-        {
-          title: "Providers",
-          href: "architecture/providers.html",
-          summary: "Provider request/response normalization, cache policy, usage mapping, and adding a provider crate.",
-          kind: "reference",
-        },
-        {
-          title: "Dependency map",
-          href: "architecture/deps.html",
-          summary: "Workspace dependency boundaries and crate-layer constraints.",
-          kind: "reference",
-        },
-        {
-          title: "HTML exporter",
-          href: "architecture/html-exporter.html",
-          summary: "Exporter internals for session trace HTML and static assets.",
-          kind: "reference",
-        },
-        {
-          title: "Trace export",
-          href: "trace-export-edges.html",
-          summary: "Trace edge cases and export behaviors that matter for downstream viewers.",
+          title: "lash CLI",
+          href: "cli.html",
+          summary: "Run the reference binary from the terminal: setup wizard, providers, sessions, slash commands, key bindings, flags, config, and trace export.",
           kind: "reference",
         },
       ],
@@ -356,6 +379,7 @@
   // consume TOC so the nav code stays small.
   const TOC = DOCS.map((group) => ({
     label: group.label,
+    tier: group.tier || "guide",
     summary: group.summary,
     href: normalizeDocHref(group.href),
     items: (group.items || [])
@@ -474,6 +498,69 @@
     catch (e) { /* ignore quota / private mode */ }
   }
 
+  // ── sections (top-bar tabs) ─────────────────────────────
+  // The top band carries one tab per section; the left sidebar shows
+  // only the active section's groups. Guide is the long primary spine;
+  // Reference, Architecture, and CLI are their own short sections reached
+  // from the band. This keeps the guide spine continuous and drops the
+  // in-rail tier dividers entirely.
+  const TIER_ORDER = ["guide", "reference", "internals", "cli"];
+  const TIER_LABELS = {
+    guide: "Guide",
+    reference: "Reference",
+    internals: "Internals",
+    cli: "CLI",
+  };
+  // True if `href` is any leaf under this nav node.
+  function nodeHasHref(node, href) {
+    if (node.items) return node.items.some((c) => nodeHasHref(c, href));
+    return node.href === href;
+  }
+  // The section that owns a page (defaults to guide for the landing /
+  // anything not in the registry).
+  function tierForHref(href) {
+    for (const g of TOC) if (nodeHasHref(g, href)) return g.tier || "guide";
+    return "guide";
+  }
+  // Where a section tab points: the first group's href in that section,
+  // falling back to its first item.
+  function tierLandingHref(tier) {
+    for (const g of TOC) {
+      if ((g.tier || "guide") !== tier) continue;
+      if (g.href) return g.href;
+      if (g.items && g.items[0] && g.items[0].href) return g.items[0].href;
+    }
+    return "index.html";
+  }
+  function bandSectionsHTML(base, activeTier) {
+    const at = activeTier || tierForHref(currentPath());
+    return (
+      '<nav class="band__sections" aria-label="documentation sections">' +
+      TIER_ORDER.map((t) => {
+        const cls = "band__section" + (t === at ? " is-active" : "");
+        const aria = t === at ? ' aria-current="page"' : "";
+        return (
+          `<a class="${cls}" data-tier="${t}"${aria} ` +
+          `href="${escapeHtml(base + tierLandingHref(t))}">` +
+          `${escapeHtml(TIER_LABELS[t])}</a>`
+        );
+      }).join("") +
+      "</nav>"
+    );
+  }
+  // Keep the band's active tab in sync after an SPA nav without rebuilding it.
+  function syncBandSections(activeTier) {
+    const nav = document.querySelector(".band__sections");
+    if (!nav) return;
+    const at = activeTier || tierForHref(currentPath());
+    nav.querySelectorAll(".band__section").forEach((a) => {
+      const on = a.getAttribute("data-tier") === at;
+      a.classList.toggle("is-active", on);
+      if (on) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
+    });
+  }
+
   function buildTOC() {
     const host = document.querySelector(".toc");
     if (!host) return;
@@ -526,7 +613,13 @@
       '</summary>'
     );
     out.push('<div class="toc-disclosure__panel">');
+    // The sidebar shows only the active section's groups; the top band
+    // switches sections. No in-rail dividers — each section is its own
+    // self-contained rail, and the guide spine stays continuous.
+    const activeTier = tierForHref(cur);
+    window.__LASH_ACTIVE_TIER = activeTier;
     for (const group of TOC) {
+      if ((group.tier || "guide") !== activeTier) continue;
       const containsActive = containsHref(group, cur);
       const groupActive = containsActive;
       const hasItems = group.items && group.items.length > 0;
@@ -567,6 +660,7 @@
     out.push('</div>'); // .toc-disclosure__panel
     out.push('</details>');
     host.innerHTML = out.join("\n");
+    syncBandSections(activeTier);
 
     // ── reconcile the disclosure's open state with the viewport ──
     //    Desktop: always open (CSS also hides the summary + forces the
@@ -1093,8 +1187,13 @@
       if (scene) window.__LASH_SCENE = scene;
 
       // post-swap re-init — TOC active state, per-page outline, spine,
-      // mermaid, scene
-      refreshTOCActive();
+      // mermaid, scene. If the section changed, the sidebar holds the
+      // wrong section's groups, so rebuild it; otherwise just refresh
+      // active state (cheaper, preserves expanded groups).
+      const swapTier = tierForHref(currentPath());
+      if (swapTier !== window.__LASH_ACTIVE_TIER) buildTOC();
+      else refreshTOCActive();
+      syncBandSections(swapTier);
       buildPager();
       mountRelatedLinks();
       injectPageOutline();
@@ -1527,6 +1626,7 @@
     band.className = "band";
     band.innerHTML =
       `<span class="band__brand"><a href="${base}index.html">lash</a></span>` +
+      bandSectionsHTML(base) +
       '<div class="band__right">' +
         `<button class="band__btn band__btn--search" type="button" data-cmdk-open ` +
           `aria-label="search docs (${kbAria})" title="search docs (${kbAria})">` +

@@ -60,7 +60,7 @@ let core = LashCore::standard()
         <div class="section" id="lashlang-execution">
           <div class="section-header">
             <h2>Lashlang Execution Graphs</h2>
-            <p>Host-level Lashlang execution graphs are a separate opt-in sink. They are observability only: they are not written to <code>process_events</code>, do not create process-registry storage, and the normal <code>trace_sink</code> does not receive them unless the host explicitly tees the sink itself. Commands remain on the process admin surfaces — the session-scoped <code>SessionProcessAdmin</code> and the runtime-level <code>LashCore::processes()</code> handle; observation is optional trace projection.</p>
+            <p>Host-level Lashlang execution graphs are a separate opt-in sink. They are observability only: they are not written to <code>process_events</code>, do not create process-registry storage, and the normal <code>trace_sink</code> does not receive them unless the host explicitly tees the sink itself. Commands remain on the process admin surfaces: the session-scoped <code>SessionProcessAdmin</code> and the runtime-level <code>LashCore::processes()</code> handle; observation is optional trace projection.</p>
           </div>
           <pre data-lang="rust" data-snippet="tracing#lashlang-execution-jsonl"><code>let core = LashCore::rlm()
     .provider(provider)
@@ -237,7 +237,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Prompt</h3>
-              <p><code>PromptBuilt</code> — combined <code>prompt_hash</code>, <code>prompt_chars</code>, per-component fingerprints. The runtime caches rendered prompts by fingerprint; an unexpected hash change flags a drifting plugin contribution, tool list, or template entry.</p>
+              <p><code>PromptBuilt</code>: combined <code>prompt_hash</code>, <code>prompt_chars</code>, per-component fingerprints. The runtime caches rendered prompts by fingerprint; an unexpected hash change flags a drifting plugin contribution, tool list, or template entry.</p>
             </article>
             <article class="panel">
               <h3>LLM interaction</h3>
@@ -253,15 +253,15 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Usage</h3>
-              <p><code>TokenUsage</code> — per-turn input/output/cached/reasoning deltas. Mirrors the session usage ledger.</p>
+              <p><code>TokenUsage</code>: per-turn input/output/cached/reasoning deltas. Mirrors the session usage ledger.</p>
             </article>
             <article class="panel">
               <h3>Protocol steps</h3>
-              <p><code>ProtocolStep</code> — agentic-loop iterations (RLM execute / observe / submit).</p>
+              <p><code>ProtocolStep</code>: agentic-loop iterations (RLM execute / observe / submit).</p>
             </article>
             <article class="panel">
               <h3>Custom</h3>
-              <p><code>Custom { name, payload }</code> — escape hatch for host-specific events.</p>
+              <p><code>Custom { name, payload }</code>: escape hatch for host-specific events.</p>
             </article>
           </div>
         </div>

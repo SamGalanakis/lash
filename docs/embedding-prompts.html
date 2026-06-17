@@ -28,7 +28,7 @@
 <div class="section" id="context-window">
           <div class="section-header">
             <h2>Context Window And History</h2>
-            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. It is the model's <strong>prompt (input) budget</strong>, not the total input+output context — the value the rolling-history / prompt-view layer prunes against. The CLI resolves it from a built-in limits table first and falls back to models.dev, applying a provider-level clamp where the route's real ceiling is lower than the catalog (e.g. the Codex OAuth route is clamped to ~256k). Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> rewrite committed history. Compact into a new Agent Frame, switch model, or switch frames.</p>
+            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. It is the model's <strong>prompt (input) budget</strong>, not the total input+output context: the value the rolling-history / prompt-view layer prunes against. The CLI resolves it from a built-in limits table first and falls back to models.dev, applying a provider-level clamp where the route's real ceiling is lower than the catalog (e.g. the Codex OAuth route is clamped to ~256k). Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> rewrite committed history. Compact into a new Agent Frame, switch model, or switch frames.</p>
           </div>
           <p>Two context strategies, picked via the mode's context-approach setting:</p>
           <div class="two-col">
@@ -68,17 +68,17 @@ let core = LashCore::standard()
         <div class="section" id="projected-bindings">
           <div class="section-header">
             <h2>Projected Bindings</h2>
-            <p>Named, typed, read-only values placed directly in lashlang scope. RLM-only. Use for environment data the program should read without a tool call — current request, board state, tenant id, task spec, parent-session digest.</p>
+            <p>Named, typed, read-only values placed directly in lashlang scope. RLM-only. Use for environment data the program should read without a tool call: current request, board state, tenant id, task spec, parent-session digest.</p>
           </div>
           <p>Two scopes:</p>
           <div class="two-col">
             <article class="panel">
               <h3>Per turn</h3>
-              <p><code>TurnInput::rlm_project(...)</code> — values that change every turn.</p>
+              <p><code>TurnInput::rlm_project(...)</code>: values that change every turn.</p>
             </article>
             <article class="panel">
               <h3>Per session</h3>
-              <p>Mode extension at session open — values that persist across turns.</p>
+              <p>Mode extension at session open: values that persist across turns.</p>
             </article>
           </div>
           <pre data-lang="rust" data-snippet="embedding_prompts#projected-bindings"><code>use lash::TurnInput;
@@ -110,9 +110,9 @@ submit({ "move": move_idx, "tenant": tenant_id })
 ```</code></pre>
           <p>Three bind methods, in order of growing power:</p>
           <ul class="bullets">
-            <li><code>.bind_json(name, value)</code> — common case. Any <code>serde_json::Value</code>; re-typed on entry.</li>
-            <li><code>.bind_value(name, FlowValue)</code> — pass a native lashlang value, skipping the JSON round-trip.</li>
-            <li><code>.bind_lazy(name, ProjectionRef)</code> — for large host structures. Register the host object with a <code>ProjectionResolver</code>, bind the stable ref, and let RLM resolve it immediately before Lashlang execution.</li>
+            <li><code>.bind_json(name, value)</code>: common case. Any <code>serde_json::Value</code>; re-typed on entry.</li>
+            <li><code>.bind_value(name, FlowValue)</code>: pass a native lashlang value, skipping the JSON round-trip.</li>
+            <li><code>.bind_lazy(name, ProjectionRef)</code>: for large host structures. Register the host object with a <code>ProjectionResolver</code>, bind the stable ref, and let RLM resolve it immediately before Lashlang execution.</li>
           </ul>
           <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostDescriptor&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, AgentFrame switches, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
           <pre data-lang="rust" data-snippet="embedding_prompts#lazy-projection"><code>use std::sync::Arc;
@@ -138,7 +138,7 @@ let input = TurnInput::text("Answer using docs only when needed.")
     .rlm_project(RlmProjectedBindings::new().bind_lazy("docs", docs_ref)?)?;</code></pre>
           <p><code>ProjectionRegistry::register_memory(...)</code> returns refs that remain valid while that registry lives. After process loss, or if the RLM factory was built with a different resolver, execution fails with an unavailable-projection error rather than replacing the binding with <code>null</code>.</p>
           <h3>Reserved names and the read-only guard</h3>
-          <p>Projected names are read-only — assignment inside lashlang raises a protocol error. The runtime reserves <code>history</code>; override by narrowing through your own projected handle, not by rebinding.</p>
+          <p>Projected names are read-only; assignment inside lashlang raises a protocol error. The runtime reserves <code>history</code>; override by narrowing through your own projected handle, not by rebinding.</p>
           <p>Duplicate names between session and turn scopes are rejected at <code>run()</code> time. Pick one scope; merge at the source.</p>
           <h3>Seeds for AgentFrame switches and subagents</h3>
           <p><code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries re-project in the AgentFrame or child session. Ref-backed projected values keep their <code>ProjectionRef</code>; value-backed projected values serialize as JSON. See <a href="./embedding-advanced.html#subagents">Subagents</a> and <a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected Host Bindings</a>.</p>
@@ -319,7 +319,7 @@ impl lash::tools::ToolProvider for ToneTools {
     }
 }</code></pre>
           </div>
-          <p>Each surface reads typed input where it is available — the prompt hook from its <code>TurnContext</code>, the tool in <code>prepare_tool_call</code> through <code>ToolPrepareContext::plugin_input</code>, then carried into <code>execute</code> as the prepared payload. The execute-time <code>ToolContext</code> has no <code>plugin_input</code> accessor by design.</p>
+          <p>Each surface reads typed input where it is available: the prompt hook from its <code>TurnContext</code>, the tool in <code>prepare_tool_call</code> through <code>ToolPrepareContext::plugin_input</code>, then carried into <code>execute</code> as the prepared payload. The execute-time <code>ToolContext</code> has no <code>plugin_input</code> accessor by design.</p>
           <p>Human input follows the same rule: a host-supplied tool that waits inside its implementation and returns a normal tool result. No separate runtime prompt event.</p>
           <p>Per-turn plugin input is live host state. It is useful for local, synchronous turns, but durable workflow integrations that may resume a turn later should keep canonical app state in a store and have prompt hooks or tools reload it by session id. The <a href="./example-agent-service.html">agent-service example</a> uses that store-backed pattern for its board state.</p>
           <p>Plugin crates should export a domain extension trait wrapping the generic input primitive:</p>

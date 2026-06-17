@@ -44,7 +44,7 @@ pub enum TurnFinish {
     ToolValue { tool_name: String, value: serde_json::Value },
 }</code></pre>
           </div>
-          <p><code>Finished</code>: clean terminal value. <code>AssistantMessage</code> is the prose default for both modes; the runtime commit materializes the transcript message exactly once — there is no second "final message" stream event after <code>AssistantProseDelta</code>. <code>SubmittedValue</code> / <code>ToolValue</code> come from RLM <code>submit</code> or a tool-authored terminal; both arrive on the stream too.</p>
+          <p><code>Finished</code>: clean terminal value. <code>AssistantMessage</code> is the prose default for both modes; the runtime commit materializes the transcript message exactly once; there is no second "final message" stream event after <code>AssistantProseDelta</code>. <code>SubmittedValue</code> / <code>ToolValue</code> come from RLM <code>submit</code> or a tool-authored terminal; both arrive on the stream too.</p>
           <p><code>AgentFrameSwitch</code>: a protocol plugin or tool switched to a fresh AgentFrame inside the same session. Runtime callers normally use the facade, which keeps driving the same session until a terminal outcome is reached.</p>
           <p><code>Stopped</code>: turn aborted before a terminal value. Ten <code>TurnStop</code> variants:</p>
           <div class="table">
@@ -65,7 +65,7 @@ pub enum TurnFinish {
             </table>
           </div>
           <p>Host-driven stops are recoverable next request. Provider stops usually want a different model or shorter context. Runtime stops indicate a configuration or authoring problem. <code>RuntimeError</code> is the only category where identical-input retry is unlikely to help.</p>
-          <p>CAS commit conflicts are <em>not</em> a <code>Stopped</code> variant — they surface as <code>Err</code> from <code>run()</code>/<code>stream()</code>, no partial commit. See <a href="./persistence.html#cas-conflicts">Persistence → Concurrent Writes And CAS</a>.</p>
+          <p>CAS commit conflicts are <em>not</em> a <code>Stopped</code> variant; they surface as <code>Err</code> from <code>run()</code>/<code>stream()</code>, no partial commit. See <a href="./persistence.html#cas-conflicts">Persistence → Concurrent Writes And CAS</a>.</p>
           <pre data-lang="rust" data-snippet="embedding_turns#outcome-match"><code>match result.outcome {
     TurnOutcome::Finished(finish) =&gt; persist_terminal(finish)?,
     TurnOutcome::AgentFrameSwitch { frame_id, .. } =&gt; record_frame_boundary(frame_id)?,
@@ -95,7 +95,7 @@ pub enum TurnFinish {
             <p>Identity-bearing stream. Prose and reasoning arrive as deltas. Tool and code activity carries a <code>correlation_id</code>. <code>submit</code> or tool-authored terminals arrive as <code>SubmittedValue</code> / <code>ToolValue</code>. Normal prose completion emits no terminal stream item.</p>
           </div>
           <div class="callout">
-            <strong>Three event types — only one is for your app.</strong>
+            <strong>Three event types, only one is for your app.</strong>
             <p>Apps consume <code>TurnActivity</code>: <code>id</code>, <code>correlation_id</code>, and a <code>TurnEvent</code> payload. Hosts do not subscribe to lower-level runtime/debug graph events. There is no app-facing final-message event enum contract. Sinks match only on <code>TurnEvent</code>.</p>
           </div>
           <div class="callout">
@@ -207,7 +207,7 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
             <h2>Sink Semantics</h2>
             <p><code>TurnActivitySink::emit()</code> is awaited by the runtime. A slow sink slows the turn. No buffering, no spawn-and-drop. Sinks own their own concurrency.</p>
           </div>
-          <p>Conventional pattern: push onto an <code>mpsc</code> channel and return immediately; drain into UI state from a separate task. <code>Sender::send</code> only awaits when full — the channel bound is the backpressure dial:</p>
+          <p>Conventional pattern: push onto an <code>mpsc</code> channel and return immediately; drain into UI state from a separate task. <code>Sender::send</code> only awaits when full; the channel bound is the backpressure dial:</p>
           <pre data-lang="rust" data-snippet="embedding_turns#channel-sink"><code>use tokio::sync::mpsc;
 
 struct ChannelSink {
@@ -222,7 +222,7 @@ impl TurnActivitySink for ChannelSink {
         let _ = self.tx.send(activity).await;
     }
 }</code></pre>
-          <p>Sink panics or <code>Err</code>-shaped activities do not abort the turn. Persistence and <code>TurnOutput.activities</code> are independent of the sink — a dropped sink loses no activity.</p>
+          <p>Sink panics or <code>Err</code>-shaped activities do not abort the turn. Persistence and <code>TurnOutput.activities</code> are independent of the sink; a dropped sink loses no activity.</p>
         </div>
 
         <div class="section" id="cancellation">
@@ -230,7 +230,7 @@ impl TurnActivitySink for ChannelSink {
             <h2>Cancellation</h2>
             <p>Cancellation is cooperative and first-class: a cancelled turn finishes with <code>TurnOutcome::Stopped(TurnStop::Cancelled)</code>, commits like any other turn, and leaves the session ready for the next turn. In-flight provider streaming is aborted, not awaited.</p>
           </div>
-          <p>Two tiers. <code>TurnBuilder::cancel(token)</code> attaches a caller-owned <code>CancellationToken</code> (re-exported at the crate root — no <code>tokio-util</code> dependency needed) to one turn. <code>LashSession::cancel_running_turns()</code> cancels everything currently executing through that opened session and its clones — the affordance behind a UI stop button, with no token threading. It returns how many turns were signalled; a handle opened separately for the same session id is not reached.</p>
+          <p>Two tiers. <code>TurnBuilder::cancel(token)</code> attaches a caller-owned <code>CancellationToken</code> (re-exported at the crate root, no <code>tokio-util</code> dependency needed) to one turn. <code>LashSession::cancel_running_turns()</code> cancels everything currently executing through that opened session and its clones: the affordance behind a UI stop button, with no token threading. It returns how many turns were signalled; a handle opened separately for the same session id is not reached.</p>
           <pre data-lang="rust" data-snippet="embedding_turns#cancel-turn"><code>use lash::CancellationToken;
 use lash::runtime::{TurnOutcome, TurnStop};
 

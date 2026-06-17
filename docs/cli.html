@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">using<span class="slash">/</span>cli</h1>
-    <p class="opener__lede">The <code>lash</code> binary is shipped by the <code>lash-cli</code> crate. It runs an interactive terminal UI by default, an autonomous single-shot mode under <code>--print</code>, and a handful of administrative flows like <code>--export</code> and <code>--reset</code>. This page enumerates the user-visible surface: flags, slash commands, key bindings, the setup wizard, the config file, and the environment variables it reads.</p>
+    <p class="opener__lede">The <code>lash</code> binary, shipped by the <code>lash-cli</code> crate, runs an interactive terminal UI by default, an autonomous single-shot mode under <code>--print</code>, and administrative flows like <code>--export</code> and <code>--reset</code>. It is the runtime's reference application and a worked embedding example: a testing bed for the library, not a separate product, and not required to build on lash. The runtime is the crate you embed. This page enumerates the user-visible surface: flags, slash commands, key bindings, the setup wizard, the config file, and the environment variables it reads.</p>
   </section>
 
   <main class="body" id="content">
@@ -212,7 +212,7 @@ $ lash --print "Investigate the latest test failure." \
         <div class="section" id="config-file">
           <div class="section-header">
             <h2>Config File</h2>
-            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is defined by <code>LashConfig</code> in <code>lash-cli</code> and uses <code>serde(deny_unknown_fields)</code> — unknown top-level fields are rejected to catch typos.</p>
+            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is defined by <code>LashConfig</code> in <code>lash-cli</code> and uses <code>serde(deny_unknown_fields)</code>, so unknown top-level fields are rejected to catch typos.</p>
           </div>
           <pre data-lang="json"><code>{
   "active_provider": "openai",
@@ -260,7 +260,7 @@ $ lash --print "Investigate the latest test failure." \
         <div class="section" id="environment-variables">
           <div class="section-header">
             <h2>Environment Variables</h2>
-            <p>The CLI reads a small set of environment variables — most are overrides for paths or behavior the config file doesn't cover.</p>
+            <p>The CLI reads a small set of environment variables; most are overrides for paths or behavior the config file doesn't cover.</p>
           </div>
           <div class="table">
             <table>

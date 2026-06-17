@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
   <section class="opener">
     <h1 class="opener__title">agent<span class="slash">/</span>workbench</h1>
-    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes trigger button presses, and registers Restate-backed cron triggers. Restate is required — the bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
+    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes trigger button presses, and registers Restate-backed cron triggers. Restate is required. The bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
   </section>
 
   <main class="body" id="content">
@@ -34,7 +34,7 @@
 # then open http://127.0.0.1:3030</code></pre>
       <dl class="def-list">
         <dt><code>TAVILY_API_KEY</code></dt>
-        <dd>Key for the <code>web.search(...)</code> and <code>web.fetch(...)</code> tools, matching the CLI web tools. Optional — the rest of the workbench runs without it.</dd>
+        <dd>Key for the <code>web.search(...)</code> and <code>web.fetch(...)</code> tools, matching the CLI web tools. Optional; the rest of the workbench runs without it.</dd>
         <dt><code>OPENROUTER_MODEL</code></dt>
         <dd>Default model id for new chats. Defaults to <code>anthropic/claude-sonnet-4.6</code>.</dd>
         <dt><code>OPENROUTER_MODEL_VARIANT</code></dt>
@@ -44,7 +44,7 @@
         <dt><code>AGENT_WORKBENCH_DATA_DIR</code></dt>
         <dd>Persistence, plus the JSONL turn and Lashlang-execution traces. Defaults to <code>.agent-workbench</code>.</dd>
       </dl>
-      <p>The entrypoint also manages the workbench's Restate endpoint bind (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, default <code>127.0.0.1:9081</code>), the Restate container ports (ingress <code>8080</code>, admin <code>19070</code>, node <code>19071</code>), and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 2&nbsp;MiB — override only when diagnosing stack regressions). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
+      <p>The entrypoint also manages the workbench's Restate endpoint bind (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, default <code>127.0.0.1:9081</code>), the Restate container ports (ingress <code>8080</code>, admin <code>19070</code>, node <code>19071</code>), and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 2&nbsp;MiB; override only when diagnosing stack regressions). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
     </div>
 
     <div class="section" id="demonstrates">
@@ -66,7 +66,7 @@
     <div class="section" id="triggers">
       <div class="section-header">
         <h2>Button Trigger Occurrences</h2>
-        <p>The buttons emit a zero-config trigger source — the source config is <code>{}</code>, and red/blue selection arrives in the event payload. The model registers a trigger that wakes a process when a button is pressed.</p>
+        <p>The buttons emit a zero-config trigger source: the source config is <code>{}</code>, and red/blue selection arrives in the event payload. The model registers a trigger that wakes a process when a button is pressed.</p>
       </div>
       <pre data-lang="lashlang"><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
@@ -101,7 +101,7 @@ handle = await triggers.register({
   name: "daily_digest"
 })?
 submit { handle: handle, registrations: await triggers.list({ target: daily_digest })? }</code></pre>
-      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that source key to <code>WorkbenchCronJob/{session_id}:{source_key}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler first schedules the next <code>run</code> with a delayed Restate send (so a tick that fails cannot kill the schedule), then emits a validated <code>cron.Tick</code> trigger occurrence whose idempotency key includes the journaled fire time — unique per tick, stable across retries of the same tick. A job whose session is no longer the live workbench session terminates itself on its next fire instead of ticking into a deleted session. Resetting the workbench cancels the old session's cron jobs derived from its durable trigger registrations (plus anything armed in-process), and an equal-request re-sync revives a chain whose stored next execution is already in the past. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code>, <code>agent_workbench.cron.restate.run</code>, and <code>agent_workbench.cron.restate.zombie_cancelled</code> events.</p>
+      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that source key to <code>WorkbenchCronJob/{session_id}:{source_key}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler first schedules the next <code>run</code> with a delayed Restate send (so a tick that fails cannot kill the schedule), then emits a validated <code>cron.Tick</code> trigger occurrence whose idempotency key includes the journaled fire time: unique per tick, stable across retries of the same tick. A job whose session is no longer the live workbench session terminates itself on its next fire instead of ticking into a deleted session. Resetting the workbench cancels the old session's cron jobs derived from its durable trigger registrations (plus anything armed in-process), and an equal-request re-sync revives a chain whose stored next execution is already in the past. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code>, <code>agent_workbench.cron.restate.run</code>, and <code>agent_workbench.cron.restate.zombie_cancelled</code> events.</p>
     </div>
 
     <div class="section" id="host-wiring">

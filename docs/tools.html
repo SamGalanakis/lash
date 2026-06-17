@@ -125,7 +125,7 @@ async fn lookup_weather(args: WeatherArgs) -&gt; WeatherReport {
 <div class="section" id="toolcall-shape">
           <div class="section-header">
             <h2>The <code>ToolCall&lt;'_&gt;</code> Shape</h2>
-            <p>Every <code>execute()</code> call receives a borrowed view of the invocation. Don't store the reference — copy what you need into owned types.</p>
+            <p>Every <code>execute()</code> call receives a borrowed view of the invocation. Don't store the reference; copy what you need into owned types.</p>
           </div>
           <pre data-lang="rust"><code>pub struct ToolCall&lt;'a&gt; {
     pub name: &amp;'a str,                           // Advertised tool name the model called

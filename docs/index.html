@@ -303,7 +303,7 @@ finding = await agents.spawn({ task: "audit auth.rs", output: Finding })?
 // identity is the path the model names: gmail.work, never gmail.personal
 process notify(mail: Gmail, finding: Finding) { await mail.send({ body: finding })? finish true }
 start notify(mail: gmail.work, finding: finding)</code></pre>
-        <p><code>agents.spawn</code> runs a typed subagent on the side. Identity is the resource path the model names, and the host decides which paths exist. <code>start</code> launches a durable background process the turn can <code>await</code>, <code>signal</code>, or <code>cancel</code>. The process captures its execution environment at start and runs as a self-contained runtime entity — arguments are the only state handover, and it outlives the session that started it.</p>
+        <p><code>agents.spawn</code> runs a typed subagent on the side. Identity is the resource path the model names, and the host decides which paths exist. <code>start</code> launches a durable background process the turn can <code>await</code>, <code>signal</code>, or <code>cancel</code>. The process captures its execution environment at start and runs as a self-contained runtime entity; arguments are the only state handover, and it outlives the session that started it.</p>
       </div>
     </section>
 

@@ -278,7 +278,7 @@ core.triggers()
         <div class="section" id="terminator-effects">
           <div class="section-header">
             <h2>Terminator Effects</h2>
-            <p><code>submit</code>, <code>finish</code>, and <code>fail</code> are ability operations too, not VM-local short-circuits. The VM hands the terminal value to <code>ExecutionHost::perform</code> as <code>AbilityOp::Submit</code>, <code>Finish</code>, or <code>Fail</code> before unwinding. Default handlers pass the value through unchanged; custom handlers can transform it, observe it, or record it for replay. The VM still enforces divergence — the handler may change the value but cannot prevent termination.</p>
+            <p><code>submit</code>, <code>finish</code>, and <code>fail</code> are ability operations too, not VM-local short-circuits. The VM hands the terminal value to <code>ExecutionHost::perform</code> as <code>AbilityOp::Submit</code>, <code>Finish</code>, or <code>Fail</code> before unwinding. Default handlers pass the value through unchanged; custom handlers can transform it, observe it, or record it for replay. The VM still enforces divergence: the handler may change the value but cannot prevent termination.</p>
           </div>
           <dl class="def-list">
             <dt><code>AbilityOp::Submit(value)</code></dt>
