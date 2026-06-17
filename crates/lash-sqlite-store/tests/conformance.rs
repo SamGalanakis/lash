@@ -12,10 +12,11 @@ use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, EffectHost, ExecutionScope, ProcessExecutionEnvRef, ProcessOriginator,
-    ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    DurabilityTier, EffectHost, ExecutionScope, PluginOptions, ProcessExecutionEnvRef,
+    ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessOriginator, ProcessRegistry,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimePersistence, SessionScope, SessionStoreFactory,
+    RuntimeInvocation, RuntimePersistence, SessionPolicy, SessionScope, SessionStoreFactory,
     TriggerOccurrenceRequest, TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
 };
 use lash_sqlite_store::{
@@ -63,6 +64,13 @@ fn open_store(path: &Path) -> Arc<dyn RuntimePersistence> {
     })) as Arc<dyn RuntimePersistence>
 }
 
+fn open_process_env_store(path: &Path) -> Arc<dyn ProcessExecutionEnvStore> {
+    let path = path.to_path_buf();
+    Arc::new(sync_await(async move {
+        Store::open(&path).await.expect("file process env store")
+    })) as Arc<dyn ProcessExecutionEnvStore>
+}
+
 fn open_trigger_store(path: &Path) -> Arc<dyn TriggerStore> {
     let path = path.to_path_buf();
     Arc::new(sync_await(async move {
@@ -70,6 +78,53 @@ fn open_trigger_store(path: &Path) -> Arc<dyn TriggerStore> {
             .await
             .expect("file trigger store")
     })) as Arc<dyn TriggerStore>
+}
+
+#[test]
+fn sqlite_process_execution_env_store_round_trips_and_survives_reopen() {
+    let dirs = Arc::new(Mutex::new(Vec::new()));
+    let path = fresh_db_path(&dirs, "process-env.db");
+    let spec = ProcessExecutionEnvSpec::new(PluginOptions::default(), SessionPolicy::default());
+    let env_ref = spec.stable_ref().expect("stable env ref");
+    let bytes = spec.to_store_bytes().expect("encode env spec");
+
+    let store = open_process_env_store(&path);
+    assert_eq!(store.durability_tier(), DurabilityTier::Durable);
+    sync_await({
+        let store = Arc::clone(&store);
+        let env_ref = env_ref.clone();
+        let bytes = bytes.clone();
+        async move {
+            store
+                .put_process_execution_env(&env_ref, &bytes)
+                .await
+                .expect("put env");
+            assert_eq!(
+                store
+                    .get_process_execution_env(&env_ref)
+                    .await
+                    .expect("get env"),
+                Some(bytes)
+            );
+        }
+    });
+    drop(store);
+
+    let reopened = open_process_env_store(&path);
+    sync_await({
+        let reopened = Arc::clone(&reopened);
+        let env_ref = env_ref.clone();
+        let bytes = bytes.clone();
+        async move {
+            assert_eq!(
+                reopened
+                    .get_process_execution_env(&env_ref)
+                    .await
+                    .expect("get reopened env"),
+                Some(bytes)
+            );
+        }
+    });
 }
 
 fn trigger_subscription_draft(

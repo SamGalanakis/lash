@@ -145,10 +145,7 @@ impl ProcessWorkObserver {
             .map(ObservedProcessEvent::from)
             .collect();
         let process = ObservedProcess::from_record(record);
-        let kind = descriptor
-            .kind
-            .clone()
-            .unwrap_or_else(|| stable_kind(&process.input).to_string());
+        let kind = descriptor_kind(&descriptor, &process.input);
         let label = typed_label(&process.input)
             .or_else(|| descriptor.label.clone())
             .unwrap_or_else(|| kind.clone());
@@ -200,7 +197,7 @@ impl ObservedProcess {
     fn from_record(record: ProcessRecord) -> Self {
         let lifecycle = ProcessLifecycleStatus::from(&record.status);
         let input = record.input.as_ref().clone();
-        let kind = stable_kind(&input).to_string();
+        let kind = visible_kind(&input);
         let label = typed_label(&input).unwrap_or_else(|| kind.clone());
         let process_id = record.id;
         Self {
@@ -262,20 +259,26 @@ fn process_visible_to_session(record: &ProcessRecord, session_id: &str) -> bool 
 }
 
 fn descriptor_from_process_input(input: &ProcessInput) -> ProcessHandleDescriptor {
-    let kind = stable_kind(input).to_string();
+    let kind = visible_kind(input);
     let label = typed_label(input).unwrap_or_else(|| kind.clone());
     ProcessHandleDescriptor::new(Some(kind), Some(label))
+}
+
+fn descriptor_kind(descriptor: &ProcessHandleDescriptor, input: &ProcessInput) -> String {
+    let generic_kind = stable_kind(input);
+    let visible_kind = visible_kind(input);
+    descriptor
+        .kind
+        .as_deref()
+        .filter(|kind| input.engine_specific_kind().is_none() || *kind != generic_kind)
+        .map(str::to_string)
+        .unwrap_or(visible_kind)
 }
 
 fn typed_label(input: &ProcessInput) -> Option<String> {
     match input {
         ProcessInput::ToolCall { call } => Some(call.tool_name.clone()),
-        ProcessInput::Engine { payload, .. } => payload
-            .get("label")
-            .or_else(|| payload.get("name"))
-            .or_else(|| payload.get("title"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+        ProcessInput::Engine { payload, .. } => engine_payload_label(payload),
         ProcessInput::SessionTurn { create_request, .. } => create_request
             .subagent
             .as_ref()
@@ -298,6 +301,28 @@ fn stable_kind(input: &ProcessInput) -> &'static str {
         ProcessInput::SessionTurn { .. } => "session_turn",
         ProcessInput::External { .. } => "external",
     }
+}
+
+fn visible_kind(input: &ProcessInput) -> String {
+    input
+        .engine_specific_kind()
+        .unwrap_or_else(|| stable_kind(input))
+        .to_string()
+}
+
+fn engine_payload_label(payload: &serde_json::Value) -> Option<String> {
+    string_field(payload, &["label", "name", "title", "process_name"]).or_else(|| {
+        payload.get("definition").and_then(|definition| {
+            string_field(definition, &["label", "name", "title", "process_name"])
+        })
+    })
+}
+
+fn string_field(value: &serde_json::Value, fields: &[&str]) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -435,6 +460,49 @@ mod tests {
             std::collections::BTreeSet::from(["frame-wake-targeted".to_string()])
         );
         assert_eq!(snapshot.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_for_session_labels_engine_wake_targets_from_payload_without_handle_grants() {
+        let registry =
+            Arc::new(super::super::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let scope = SessionScope::new("visible");
+        registry
+            .register_process(
+                ProcessRegistration::new(
+                    "engine-wake-targeted",
+                    ProcessInput::Engine {
+                        kind: "test-engine".to_string(),
+                        payload: json!({
+                            "definition": { "process_name": "remember" },
+                        }),
+                    },
+                    ProcessProvenance::host(),
+                )
+                .with_execution_env_ref(Some(ProcessExecutionEnvRef::new("process-env:test")))
+                .with_wake_target(Some(scope)),
+            )
+            .await
+            .expect("register engine wake-targeted process");
+
+        let snapshot = observer(Arc::clone(&registry))
+            .snapshot_for_session("visible")
+            .await
+            .expect("snapshot");
+
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].kind, "test-engine");
+        assert_eq!(snapshot.items[0].label, "remember");
+        assert_eq!(
+            snapshot.items[0].descriptor.kind.as_deref(),
+            Some("test-engine")
+        );
+        assert_eq!(
+            snapshot.items[0].descriptor.label.as_deref(),
+            Some("remember")
+        );
+        assert_eq!(snapshot.items[0].process.kind, "test-engine");
+        assert_eq!(snapshot.items[0].process.label, "remember");
     }
 
     #[tokio::test]
@@ -666,6 +734,7 @@ mod tests {
 
         assert_eq!(by_id["tool"].label, "shell.run");
         assert_eq!(by_id["engine"].label, "remember");
+        assert_eq!(by_id["engine"].process.kind, "test-engine");
         assert_eq!(by_id["session"].label, "researcher");
         assert_eq!(
             by_id["session"].process.child_session_id.as_deref(),

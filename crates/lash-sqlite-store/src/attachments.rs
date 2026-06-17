@@ -175,6 +175,73 @@ impl lashlang::LashlangArtifactStore for Store {
     }
 }
 
+#[async_trait::async_trait]
+impl lash_core::ProcessExecutionEnvStore for Store {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    async fn put_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+        bytes: &[u8],
+    ) -> Result<(), lash_core::PluginError> {
+        let blob_profile = self.options.blob_profile;
+        let artifact_ref = env_ref.as_str().to_string();
+        let bytes = bytes.to_vec();
+        self.conn
+            .write(move |tx| {
+                let blob_ref = Self::insert_artifact_blob_conn(
+                    tx,
+                    BlobArtifactDescriptor::process_execution_env(),
+                    &bytes,
+                    blob_profile,
+                )?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
+                    params![artifact_ref, blob_ref.as_str()],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(process_sqlite_error)
+    }
+
+    async fn get_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+    ) -> Result<Option<Vec<u8>>, lash_core::PluginError> {
+        let artifact_ref = env_ref.as_str().to_string();
+        let diagnostic_ref = artifact_ref.clone();
+        let resolved = self
+            .conn
+            .call(move |conn| {
+                let blob_ref: Option<String> = conn
+                    .query_row(
+                        "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
+                        params![artifact_ref],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let Some(blob_ref) = blob_ref else {
+                    return Ok(None);
+                };
+                Ok(Some(Self::get_blob_conn(conn, &BlobRef(blob_ref))))
+            })
+            .await
+            .map_err(process_sqlite_error)?;
+        let Some(blob) = resolved else {
+            return Ok(None);
+        };
+        blob.ok_or_else(|| {
+            lash_core::PluginError::Session(format!(
+                "process execution env `{diagnostic_ref}` points at a missing blob"
+            ))
+        })
+        .map(Some)
+    }
+}
+
 impl AttachmentManifest for Store {
     fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError> {
         block_on_store(async {
