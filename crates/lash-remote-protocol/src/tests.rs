@@ -506,7 +506,10 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         registrant: RemoteProcessOriginator::Session {
             scope: RemoteSessionScope::new("session"),
         },
-        env_ref: "process-env:sha256:abc".to_string(),
+        env_ref:
+            "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse()
+                .expect("canonical env ref"),
         wake_target: Some(RemoteSessionScope::new("session")),
         name: Some("button watcher".to_string()),
         source_type: "ui.button.pressed".to_string(),
@@ -680,6 +683,86 @@ fn nested_protocol_versions_must_match_envelope() {
 }
 
 #[test]
+fn remote_process_env_ref_is_validated_but_serializes_as_string() {
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 5);
+    let env_ref: RemoteProcessExecutionEnvRef =
+        canonical_env_ref().parse().expect("canonical env ref");
+    assert_eq!(env_ref.as_str(), canonical_env_ref());
+    assert_eq!(
+        serde_json::to_value(&env_ref).expect("serialize env ref"),
+        serde_json::json!(canonical_env_ref())
+    );
+    let decoded: RemoteProcessExecutionEnvRef =
+        serde_json::from_value(serde_json::json!(canonical_env_ref()))
+            .expect("deserialize env ref");
+    assert_eq!(decoded, env_ref);
+
+    for invalid in [
+        "",
+        "process-env:sha256:abc",
+        "process-env:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "tool-authority:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert!(
+            serde_json::from_value::<RemoteProcessExecutionEnvRef>(serde_json::json!(invalid))
+                .is_err(),
+            "`{invalid}` should be rejected"
+        );
+    }
+}
+
+#[test]
+fn remote_process_env_persistence_dtos_validate() {
+    let request = RemotePersistProcessEnvRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        env_spec: RemoteProcessExecutionEnvSpec::default(),
+    };
+    request.validate().expect("valid persist env request");
+
+    let result = RemotePersistProcessEnvResult {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        env_ref: canonical_env_ref().parse().expect("canonical env ref"),
+    };
+    result.validate().expect("valid persist env result");
+    assert_eq!(
+        serde_json::to_value(&result).expect("serialize result")["env_ref"],
+        serde_json::json!(canonical_env_ref())
+    );
+
+    let mut invalid = request;
+    invalid.env_spec.policy.model.limits.context_window_tokens = 0;
+    assert!(matches!(
+        invalid.validate(),
+        Err(RemoteProtocolError::InvalidEnvelope { .. })
+    ));
+}
+
+#[test]
+fn trigger_target_label_must_match_identity_label() {
+    let mut draft = RemoteTriggerSubscriptionDraft::for_process(
+        RemoteProcessOriginator::Host,
+        canonical_env_ref().parse().expect("canonical env ref"),
+        "ui.button.pressed",
+        "source-key",
+        RemoteProcessInput::External {
+            metadata: serde_json::json!({}),
+        },
+        RemoteProcessIdentity {
+            kind: "external".to_string(),
+            label: Some("identity-label".to_string()),
+            definition: None,
+        },
+    )
+    .with_target_label("other-label");
+    assert!(matches!(
+        draft.validate(),
+        Err(RemoteProtocolError::InvalidEnvelope { .. })
+    ));
+    draft.target_label = Some("identity-label".to_string());
+    draft.validate().expect("matching labels validate");
+}
+
+#[test]
 fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteLlmRequest>();
     assert_schema_has_protocol_version::<RemoteLlmResponse>();
@@ -713,6 +796,8 @@ fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteProcessAwaitResult>();
     assert_schema_has_protocol_version::<RemoteProcessEventsRequest>();
     assert_schema_has_protocol_version::<RemoteProcessEventsResponse>();
+    assert_schema_has_protocol_version::<RemotePersistProcessEnvRequest>();
+    assert_schema_has_protocol_version::<RemotePersistProcessEnvResult>();
 }
 
 #[test]
@@ -763,6 +848,10 @@ fn assert_schema_has_protocol_version<T: JsonSchema>() {
         schema_text.contains("protocol_version"),
         "schema did not include protocol_version: {schema_text}"
     );
+}
+
+fn canonical_env_ref() -> &'static str {
+    "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 
 fn remote_trigger_input_template() -> RemoteTriggerInputTemplate {
@@ -827,7 +916,11 @@ fn remote_process_record() -> RemoteProcessRecord {
             originator: RemoteProcessOriginator::Host,
             caused_by: None,
         },
-        env_ref: Some("process-env:sha256:abc".to_string()),
+        env_ref: Some(
+            "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse()
+                .expect("canonical env ref"),
+        ),
         wake_target: Some(RemoteSessionScope::new("session")),
         created_at_ms: 1,
         updated_at_ms: 2,

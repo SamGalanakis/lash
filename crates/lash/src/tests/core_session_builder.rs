@@ -1,5 +1,6 @@
 use super::*;
 use crate::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
+use lash_lashlang_runtime::LashlangArtifactStore as _;
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct CompileSurfaceToolConfig {
@@ -442,9 +443,16 @@ async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result
     Ok(())
 }
 
-#[test]
-fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options() -> Result<()> {
-    let core = explicit_ephemeral_facets(RlmCore::builder())
+#[tokio::test]
+async fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options() -> Result<()> {
+    let artifact_store = Arc::new(crate::persistence::InMemoryLashlangArtifactStore::new());
+    let core = RlmCore::builder()
+        .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(artifact_store.clone())
+        .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            crate::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
         .provider(mock_provider())
         .model(mock_model_spec())
         .plugin(Arc::new(CompileSurfaceToolFactory::new(
@@ -454,23 +462,25 @@ fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options() -> 
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .build()?;
-    let plugin_options = lash_core::PluginOptions::typed(
-        "compile-extra-tool",
-        CompileSurfaceToolConfig {
-            tool_name: "compile_option_tool".to_string(),
-        },
-    )
-    .expect("compile plugin options serialize");
+    let plugin_options = || {
+        lash_core::PluginOptions::typed(
+            "compile-extra-tool",
+            CompileSurfaceToolConfig {
+                tool_name: "lookup".to_string(),
+            },
+        )
+        .expect("compile plugin options serialize")
+    };
     let request = crate::rlm::LashlangCompileSurfaceRequest::new(
         "compile-surface",
         lash_core::ProcessExecutionEnvSpec::new(
-            plugin_options,
+            plugin_options(),
             lash_core::SessionPolicy::default(),
         ),
     )
     .plugin(Arc::new(CompileSurfaceToolFactory::new(
         "compile-extra-tool",
-        "compile_extra_default",
+        "fallback",
     )));
 
     let surface = core.lashlang_compile_surface(request)?;
@@ -479,16 +489,8 @@ fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options() -> 
     assert!(surface.host_environment.abilities.sleep);
     assert!(surface.host_environment.abilities.process_signals);
     assert!(surface.tool_catalog.has_callable_tool("compile_core_tool"));
-    assert!(
-        surface
-            .tool_catalog
-            .has_callable_tool("compile_option_tool")
-    );
-    assert!(
-        !surface
-            .tool_catalog
-            .has_callable_tool("compile_extra_default")
-    );
+    assert!(surface.tool_catalog.has_callable_tool("lookup"));
+    assert!(!surface.tool_catalog.has_callable_tool("fallback"));
     assert!(
         surface
             .host_environment
@@ -500,8 +502,37 @@ fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options() -> 
         surface
             .host_environment
             .resources
-            .resolve_module_operation("Tools", "tools", "compile.option.tool")
+            .resolve_module_operation("Tools", "tools", "lookup")
             .is_some()
+    );
+
+    let compiled = core
+        .compile_lashlang_module(
+            crate::rlm::LashlangModuleCompileRequest::new(
+                "compile-module",
+                r#"
+value = tools.lookup({})
+submit value
+"#,
+                lash_core::ProcessExecutionEnvSpec::new(
+                    plugin_options(),
+                    lash_core::SessionPolicy::default(),
+                ),
+            )
+            .plugin(Arc::new(CompileSurfaceToolFactory::new(
+                "compile-extra-tool",
+                "fallback",
+            ))),
+        )
+        .await
+        .expect("compile module through RlmCore facade");
+    assert!(
+        artifact_store
+            .get_module_artifact(&compiled.module_ref)
+            .await
+            .expect("load persisted module artifact")
+            .is_some(),
+        "compile_lashlang_module should persist through the configured artifact store"
     );
     Ok(())
 }

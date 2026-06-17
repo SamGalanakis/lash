@@ -289,6 +289,84 @@ pub struct TriggerSubscriptionDraft {
     pub target_label: Option<String>,
 }
 
+impl TriggerSubscriptionDraft {
+    pub fn for_process(
+        registrant: crate::ProcessOriginator,
+        env_ref: crate::ProcessExecutionEnvRef,
+        source_type: impl Into<String>,
+        source_key: impl Into<String>,
+        target: crate::ProcessInput,
+        target_identity: crate::ProcessIdentity,
+    ) -> Self {
+        let target_label = target_identity.label.clone();
+        Self {
+            registrant,
+            env_ref,
+            wake_target: None,
+            name: None,
+            source_type: source_type.into(),
+            source_key: source_key.into(),
+            source: serde_json::Value::Object(serde_json::Map::new()),
+            payload_schema: crate::LashSchema::new(serde_json::Value::Object(
+                serde_json::Map::new(),
+            )),
+            target,
+            target_identity,
+            event_types: Vec::new(),
+            input_template: BTreeMap::new(),
+            target_label,
+        }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn with_source(mut self, source: serde_json::Value) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_payload_schema(mut self, payload_schema: crate::LashSchema) -> Self {
+        self.payload_schema = payload_schema;
+        self
+    }
+
+    pub fn with_wake_target(mut self, wake_target: crate::SessionScope) -> Self {
+        self.wake_target = Some(wake_target);
+        self
+    }
+
+    pub fn with_event_types(
+        mut self,
+        event_types: impl IntoIterator<Item = crate::ProcessEventType>,
+    ) -> Self {
+        self.event_types = event_types.into_iter().collect();
+        self
+    }
+
+    pub fn with_input_template(
+        mut self,
+        input_template: BTreeMap<String, TriggerInputBinding>,
+    ) -> Self {
+        self.input_template = input_template;
+        self
+    }
+
+    pub fn with_target_label(mut self, target_label: impl Into<String>) -> Self {
+        self.target_label = Some(target_label.into());
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), PluginError> {
+        validate_trigger_subscription_target_label(
+            self.target_label.as_deref(),
+            self.target_identity.label.as_deref(),
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSubscriptionRecord {
     pub subscription_id: String,
@@ -327,6 +405,21 @@ impl TriggerSubscriptionRecord {
             crate::ProcessOriginator::Session { scope } => Some(scope.session_id.as_str()),
             crate::ProcessOriginator::Host => None,
         }
+    }
+}
+
+fn validate_trigger_subscription_target_label(
+    target_label: Option<&str>,
+    identity_label: Option<&str>,
+) -> Result<(), PluginError> {
+    match (target_label, identity_label) {
+        (Some(target_label), Some(identity_label)) if target_label != identity_label => {
+            Err(PluginError::Session(
+                "trigger target_label must match target_identity.label when both are present"
+                    .to_string(),
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -481,6 +574,7 @@ impl TriggerStore for InMemoryTriggerStore {
         &self,
         draft: TriggerSubscriptionDraft,
     ) -> Result<TriggerSubscriptionRecord, PluginError> {
+        draft.validate()?;
         let mut state = self
             .state
             .lock()
@@ -983,5 +1077,27 @@ mod tests {
             .expect_err("duplicate public source identity should be rejected");
 
         assert!(err.contains("duplicate trigger source `ui.button.pressed`"));
+    }
+
+    #[tokio::test]
+    async fn trigger_store_rejects_mismatched_target_label() {
+        let store = InMemoryTriggerStore::default();
+        let draft = TriggerSubscriptionDraft::for_process(
+            crate::ProcessOriginator::host(),
+            crate::ProcessExecutionEnvRef::new("process-env:test"),
+            "ui.button.pressed",
+            "source-key",
+            crate::ProcessInput::External {
+                metadata: serde_json::json!({}),
+            },
+            crate::ProcessIdentity::new("external").with_label(Some("expected")),
+        )
+        .with_target_label("other");
+
+        let err = store
+            .register_subscription(draft)
+            .await
+            .expect_err("mismatched target labels should be rejected");
+        assert!(err.to_string().contains("target_label must match"));
     }
 }

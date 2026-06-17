@@ -2612,6 +2612,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "lash-core",
+ "lash-remote-protocol",
  "lash-trace",
  "lashlang",
  "serde",

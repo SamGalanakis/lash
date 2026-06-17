@@ -1012,6 +1012,7 @@ impl TryFrom<RemoteProcessExecutionEnvSpec> for lash_core::ProcessExecutionEnvSp
     type Error = RemoteProtocolError;
 
     fn try_from(value: RemoteProcessExecutionEnvSpec) -> Result<Self, Self::Error> {
+        value.validate("RemoteProcessExecutionEnvSpec")?;
         let RemoteProcessExecutionEnvSpec {
             plugin_options,
             policy,
@@ -1180,7 +1181,9 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
             identity: identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             provenance: provenance.into(),
-            env_ref: env_ref.map(|env_ref| env_ref.as_str().to_string()),
+            env_ref: env_ref
+                .map(|env_ref| env_ref.as_str().parse())
+                .transpose()?,
             wake_target: wake_target.map(Into::into),
             created_at_ms,
             updated_at_ms,
@@ -1217,7 +1220,9 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
         )
         .with_identity(identity.into())
         .with_event_types(event_types.into_iter().map(Into::into))
-        .with_execution_env_ref(env_ref.map(lash_core::ProcessExecutionEnvRef::new))
+        .with_execution_env_ref(env_ref.map(|env_ref| {
+            lash_core::ProcessExecutionEnvRef::new(env_ref.as_str().to_string())
+        }))
         .with_wake_target(wake_target.map(Into::into));
         let mut record = lash_core::ProcessRecord::from_registration(registration);
         record.created_at_ms = created_at_ms;
@@ -1267,7 +1272,9 @@ impl TryFrom<lash_core::ObservedProcess> for RemoteObservedProcess {
             updated_at_ms,
             input: input.try_into()?,
             originator: originator.into(),
-            env_ref: env_ref.map(|env_ref| env_ref.as_str().to_string()),
+            env_ref: env_ref
+                .map(|env_ref| env_ref.as_str().parse())
+                .transpose()?,
             wake_target: wake_target.map(Into::into),
             caused_by: caused_by.map(Into::into),
             external_ref: external_ref.map(Into::into),
@@ -1317,7 +1324,9 @@ impl TryFrom<RemoteObservedProcess> for lash_core::ObservedProcess {
             updated_at_ms,
             input: input.try_into()?,
             originator: originator.into(),
-            env_ref: env_ref.map(lash_core::ProcessExecutionEnvRef::new),
+            env_ref: env_ref.map(|env_ref| {
+                lash_core::ProcessExecutionEnvRef::new(env_ref.as_str().to_string())
+            }),
             wake_target: wake_target.map(Into::into),
             caused_by: caused_by.map(Into::into),
             external_ref: external_ref.map(Into::into),
