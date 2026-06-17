@@ -204,6 +204,10 @@ impl SessionBootstrap {
         self.sidecar_db_path("processes.db")
     }
 
+    pub(crate) fn process_env_db_file(&self) -> PathBuf {
+        self.sidecar_db_path("process-env.db")
+    }
+
     pub(crate) fn triggers_db_file(&self) -> PathBuf {
         self.sidecar_db_path("triggers.db")
     }
@@ -333,6 +337,8 @@ impl CliSessionOpener {
         let trigger_store = Arc::new(
             lash_sqlite_store::SqliteTriggerStore::open(&bootstrap.triggers_db_file()).await?,
         );
+        let process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore> =
+            Arc::new(Store::open(&bootstrap.process_env_db_file()).await?);
         let child_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             bootstrap.sessions_dir().to_path_buf(),
         ));
@@ -346,6 +352,7 @@ impl CliSessionOpener {
                     .prompt_layer(self.prompt_layer.clone())
                     .effect_host(effect_host)
                     .attachment_store(Arc::clone(&self.attachment_store))
+                    .process_env_store(Arc::clone(&process_env_store))
                     .trace_level(self.trace_level)
                     .process_registry(process_registry)
                     .trigger_store(trigger_store);
@@ -371,6 +378,7 @@ impl CliSessionOpener {
                     .effect_host(effect_host)
                     .lashlang_artifact_store(artifact_store)
                     .attachment_store(Arc::clone(&self.attachment_store))
+                    .process_env_store(Arc::clone(&process_env_store))
                     .trace_level(self.trace_level)
                     .process_registry(process_registry)
                     .trigger_store(trigger_store);
@@ -472,6 +480,7 @@ mod tests {
         assert!(opened.bootstrap.artifacts_db_file().is_file());
         assert!(opened.bootstrap.effects_db_file().is_file());
         assert!(opened.bootstrap.processes_db_file().is_file());
+        assert!(opened.bootstrap.process_env_db_file().is_file());
         assert!(opened.bootstrap.triggers_db_file().is_file());
         Ok(())
     }
