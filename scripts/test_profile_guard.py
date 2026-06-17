@@ -53,6 +53,19 @@ class ProfileGuardCoverageTests(unittest.TestCase):
             profile_runtime_stack.DEFAULT_SCENARIOS,
         )
 
+    def test_typed_facade_scenarios_are_in_default_perf_coverage(self) -> None:
+        required = {
+            "standard",
+            "rlm",
+            "embed_standard",
+            "embed_rlm",
+            "trace_jsonl_standard",
+            "trace_jsonl_extended",
+        }
+
+        self.assertTrue(required.issubset(profile_guard.DEFAULT_STACK_SCENARIOS))
+        self.assertTrue(required.issubset(profile_runtime_stack.DEFAULT_SCENARIOS))
+
     def test_runtime_stack_defaults_cover_every_known_runtime_scenario(self) -> None:
         self.assertEqual(
             profile_runtime_stack.DEFAULT_SCENARIOS,

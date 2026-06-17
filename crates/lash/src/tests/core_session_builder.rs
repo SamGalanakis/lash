@@ -1,6 +1,103 @@
 use super::*;
 use crate::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct CompileSurfaceToolConfig {
+    tool_name: String,
+}
+
+struct CompileSurfaceToolFactory {
+    id: &'static str,
+    default_tool_name: &'static str,
+}
+
+impl CompileSurfaceToolFactory {
+    fn new(id: &'static str, default_tool_name: &'static str) -> Self {
+        Self {
+            id,
+            default_tool_name,
+        }
+    }
+}
+
+impl lash_core::PluginFactory for CompileSurfaceToolFactory {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn build(
+        &self,
+        ctx: &lash_core::PluginSessionContext,
+    ) -> std::result::Result<Arc<dyn lash_core::SessionPlugin>, lash_core::PluginError> {
+        let config = ctx
+            .plugin_options
+            .decode::<CompileSurfaceToolConfig>(self.id)
+            .map_err(|err| lash_core::PluginError::Registration(err.to_string()))?;
+        let tool_name = config
+            .map(|config| config.tool_name)
+            .unwrap_or_else(|| self.default_tool_name.to_string());
+        Ok(Arc::new(CompileSurfaceToolPlugin {
+            plugin_id: self.id,
+            tool_name,
+        }))
+    }
+}
+
+struct CompileSurfaceToolPlugin {
+    plugin_id: &'static str,
+    tool_name: String,
+}
+
+impl lash_core::SessionPlugin for CompileSurfaceToolPlugin {
+    fn id(&self) -> &'static str {
+        self.plugin_id
+    }
+
+    fn register(
+        &self,
+        reg: &mut lash_core::PluginRegistrar,
+    ) -> std::result::Result<(), lash_core::PluginError> {
+        reg.tools().provider(Arc::new(CompileSurfaceToolProvider {
+            tool_name: self.tool_name.clone(),
+        }))?;
+        Ok(())
+    }
+}
+
+struct CompileSurfaceToolProvider {
+    tool_name: String,
+}
+
+#[async_trait]
+impl lash_core::ToolProvider for CompileSurfaceToolProvider {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![compile_surface_tool_definition(&self.tool_name).manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == self.tool_name)
+            .then(|| Arc::new(compile_surface_tool_definition(&self.tool_name).contract()))
+    }
+
+    async fn execute(&self, _call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        lash_core::ToolResult::ok(serde_json::json!({ "ok": true }))
+    }
+}
+
+fn compile_surface_tool_definition(name: &str) -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        format!("tool:{name}"),
+        name.to_string(),
+        "Compile-surface test tool.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object" }),
+    )
+}
+
 #[tokio::test]
 async fn standard_core_runs_mock_turn() -> Result<()> {
     let core = standard_core();
@@ -75,6 +172,20 @@ fn typed_core_builders_require_explicit_store_choice() {
         Err(err) => err,
     };
     assert!(matches!(err, EmbedError::MissingEffectHost));
+}
+
+#[test]
+fn generic_lash_core_builder_requires_protocol_plugin() {
+    let err = match explicit_ephemeral_facets(LashCore::builder())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .build()
+    {
+        Ok(_) => panic!("generic LashCore must require an explicit protocol plugin"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(err, EmbedError::MissingProtocolPlugin));
 }
 
 #[tokio::test]
@@ -328,6 +439,70 @@ async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result
     assert!(prompts[0].contains("process definition"));
     assert!(prompts[0].contains("triggers.list({})"));
     assert!(!prompts[0].contains("TRIGGER."));
+    Ok(())
+}
+
+#[test]
+fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options() -> Result<()> {
+    let core = explicit_ephemeral_facets(RlmCore::builder())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .plugin(Arc::new(CompileSurfaceToolFactory::new(
+            "compile-core-tool",
+            "compile_core_tool",
+        )))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+    let plugin_options = lash_core::PluginOptions::typed(
+        "compile-extra-tool",
+        CompileSurfaceToolConfig {
+            tool_name: "compile_option_tool".to_string(),
+        },
+    )
+    .expect("compile plugin options serialize");
+    let request = crate::rlm::LashlangCompileSurfaceRequest::new(
+        "compile-surface",
+        lash_core::ProcessExecutionEnvSpec::new(
+            plugin_options,
+            lash_core::SessionPolicy::default(),
+        ),
+    )
+    .plugin(Arc::new(CompileSurfaceToolFactory::new(
+        "compile-extra-tool",
+        "compile_extra_default",
+    )));
+
+    let surface = core.lashlang_compile_surface(request)?;
+
+    assert!(surface.host_environment.abilities.processes);
+    assert!(surface.host_environment.abilities.sleep);
+    assert!(surface.host_environment.abilities.process_signals);
+    assert!(surface.tool_catalog.has_callable_tool("compile_core_tool"));
+    assert!(
+        surface
+            .tool_catalog
+            .has_callable_tool("compile_option_tool")
+    );
+    assert!(
+        !surface
+            .tool_catalog
+            .has_callable_tool("compile_extra_default")
+    );
+    assert!(
+        surface
+            .host_environment
+            .resources
+            .resolve_module_operation("Tools", "tools", "compile.core.tool")
+            .is_some()
+    );
+    assert!(
+        surface
+            .host_environment
+            .resources
+            .resolve_module_operation("Tools", "tools", "compile.option.tool")
+            .is_some()
+    );
     Ok(())
 }
 
