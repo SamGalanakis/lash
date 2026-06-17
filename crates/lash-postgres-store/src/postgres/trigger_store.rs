@@ -8,6 +8,7 @@ impl TriggerStore for PostgresTriggerStore {
         &self,
         draft: TriggerSubscriptionDraft,
     ) -> Result<TriggerSubscriptionRecord, PluginError> {
+        draft.validate()?;
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         let seq: i64 = sqlx::query_scalar("SELECT nextval('lash_trigger_subscription_seq')")
             .fetch_one(&mut *tx)

@@ -1796,7 +1796,8 @@ mod tests {
             .await
             .expect("list persisted trigger subscriptions for remote DTO round trip");
         let remote_list =
-            lash_remote_protocol::RemoteTriggerListSubscriptionsResponse::from(records.clone());
+            lash_remote_protocol::RemoteTriggerListSubscriptionsResponse::try_from(records.clone())
+                .expect("remote trigger subscription list");
         remote_list
             .validate()
             .expect("remote trigger subscription list should validate");
@@ -1807,7 +1808,8 @@ mod tests {
 
         for record in &records {
             let remote_record =
-                lash_remote_protocol::RemoteTriggerSubscriptionRecord::from(record.clone());
+                lash_remote_protocol::RemoteTriggerSubscriptionRecord::try_from(record.clone())
+                    .expect("remote trigger subscription record");
             remote_record
                 .validate("WorkbenchTriggerSubscription")
                 .expect("remote trigger subscription record should validate");
@@ -1817,9 +1819,10 @@ mod tests {
             assert_eq!(&round_trip_record, record);
 
             let remote_result =
-                lash_remote_protocol::RemoteTriggerRegisterSubscriptionResult::from(
+                lash_remote_protocol::RemoteTriggerRegisterSubscriptionResult::try_from(
                     record.clone(),
-                );
+                )
+                .expect("remote trigger register result");
             remote_result
                 .validate()
                 .expect("remote trigger register result should validate");

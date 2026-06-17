@@ -87,8 +87,8 @@ pub mod observe {
 pub mod triggers {
     pub use lash_core::{
         LashSchema, TriggerEmitReport, TriggerEvent, TriggerEventType, TriggerOccurrenceRequest,
-        TriggerRegistration, TriggerSubscriptionFilter, TriggerTargetSummary,
-        empty_trigger_source_key,
+        TriggerRegistration, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
+        TriggerTargetSummary, empty_trigger_source_key,
     };
 }
 
@@ -102,7 +102,10 @@ pub mod tools {
     };
     pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
     #[cfg(feature = "rlm")]
-    pub use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
+    pub use lash_lashlang_runtime::{
+        LASHLANG_TOOL_BINDING_KEY, LashlangToolBinding, RemoteToolGrantLashlangExt,
+        ToolDefinitionLashlangExt, ToolManifestLashlangExt,
+    };
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
     /// `resolve_contract`: supply the [`ToolDefinition`]s once and an
     /// [`StaticToolExecute`] for behavior.
@@ -184,10 +187,11 @@ pub mod remote {
         RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestMetadata, RemoteLlmResponse,
         RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec,
         RemoteModelIntent, RemoteObservedProcess, RemoteObservedProcessEvent,
-        RemoteProcessAwaitOutput, RemoteProcessAwaitRequest, RemoteProcessAwaitResult,
-        RemoteProcessCancelRequest, RemoteProcessCancelResult, RemoteProcessDefinitionIdentity,
-        RemoteProcessEvent, RemoteProcessEventSemantics, RemoteProcessEventSemanticsSpec,
-        RemoteProcessEventType, RemoteProcessEventsRequest, RemoteProcessEventsResponse,
+        RemotePersistProcessEnvRequest, RemotePersistProcessEnvResult, RemoteProcessAwaitOutput,
+        RemoteProcessAwaitRequest, RemoteProcessAwaitResult, RemoteProcessCancelRequest,
+        RemoteProcessCancelResult, RemoteProcessDefinitionIdentity, RemoteProcessEvent,
+        RemoteProcessEventSemantics, RemoteProcessEventSemanticsSpec, RemoteProcessEventType,
+        RemoteProcessEventsRequest, RemoteProcessEventsResponse, RemoteProcessExecutionEnvRef,
         RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy, RemoteProcessExternalRef,
         RemoteProcessHandleDescriptor, RemoteProcessInput, RemoteProcessLifecycleStatus,
         RemoteProcessListFilter, RemoteProcessListResponse, RemoteProcessModelLimits,
@@ -231,19 +235,20 @@ pub mod process {
         ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessAwaitOutput,
         ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
         ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-        ProcessEventType, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
-        ProcessHandleGrant, ProcessHandleSummary, ProcessInput, ProcessLease,
-        ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
-        ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-        ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
-        ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
-        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
-        ProcessWorkObserver, ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, SessionScope,
-        SessionScopeId,
+        ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
+        ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
+        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
+        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessRecord,
+        ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
+        ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+        ProcessStatusFilter, ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey,
+        ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver,
+        ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, SessionScope, SessionScopeId,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
-        LashlangProcessInput, lashlang_process_event_types, lashlang_process_signal_event_types,
+        LASHLANG_ENGINE_KIND, LASHLANG_TOOL_BINDING_KEY, LashlangProcessInput,
+        lashlang_process_event_types, lashlang_process_signal_event_types,
     };
 }
 

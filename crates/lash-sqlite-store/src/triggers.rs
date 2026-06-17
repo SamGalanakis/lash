@@ -71,6 +71,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
         &self,
         draft: lash_core::TriggerSubscriptionDraft,
     ) -> Result<lash_core::TriggerSubscriptionRecord, lash_core::PluginError> {
+        draft.validate()?;
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {

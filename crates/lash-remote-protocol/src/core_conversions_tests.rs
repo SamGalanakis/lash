@@ -236,7 +236,7 @@ fn trigger_dtos_round_trip_core_values() {
 #[test]
 fn trigger_subscription_dtos_round_trip_core_values() {
     let draft = trigger_subscription_draft();
-    let remote = RemoteTriggerSubscriptionDraft::from(draft.clone());
+    let remote = RemoteTriggerSubscriptionDraft::try_from(draft.clone()).expect("remote draft");
     remote.validate().expect("valid remote trigger draft");
     let core = lash_core::TriggerSubscriptionDraft::try_from(remote).expect("core draft");
     assert_eq!(
@@ -245,7 +245,7 @@ fn trigger_subscription_dtos_round_trip_core_values() {
     );
 
     let record = trigger_subscription_record();
-    let remote = RemoteTriggerSubscriptionRecord::from(record.clone());
+    let remote = RemoteTriggerSubscriptionRecord::try_from(record.clone()).expect("remote record");
     remote
         .validate("RemoteTriggerSubscriptionRecord")
         .expect("valid remote trigger record");
@@ -274,16 +274,18 @@ fn trigger_subscription_dtos_round_trip_core_values() {
 
     let request = RemoteTriggerRegisterSubscriptionRequest {
         protocol_version: REMOTE_PROTOCOL_VERSION,
-        draft: RemoteTriggerSubscriptionDraft::from(draft),
+        draft: RemoteTriggerSubscriptionDraft::try_from(draft).expect("remote request draft"),
     };
     let core = lash_core::TriggerSubscriptionDraft::try_from(request).expect("register request");
     assert_eq!(core.source_key, "source-key");
 
-    let result = RemoteTriggerRegisterSubscriptionResult::from(record.clone());
+    let result =
+        RemoteTriggerRegisterSubscriptionResult::try_from(record.clone()).expect("remote result");
     let core = lash_core::TriggerSubscriptionRecord::try_from(result).expect("register result");
     assert_eq!(core.subscription_id, record.subscription_id);
 
-    let response = RemoteTriggerListSubscriptionsResponse::from(vec![record.clone()]);
+    let response =
+        RemoteTriggerListSubscriptionsResponse::try_from(vec![record.clone()]).expect("response");
     let core_records =
         Vec::<lash_core::TriggerSubscriptionRecord>::try_from(response).expect("list response");
     assert_eq!(core_records.len(), 1);
@@ -832,7 +834,9 @@ fn trigger_subscription_draft() -> lash_core::TriggerSubscriptionDraft {
         registrant: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(
             "session-a",
         )),
-        env_ref: lash_core::ProcessExecutionEnvRef::new("process-env:sha256:abc"),
+        env_ref: lash_core::ProcessExecutionEnvRef::new(
+            "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
         wake_target: Some(lash_core::SessionScope::new("session-a")),
         name: Some("button watcher".to_string()),
         source_type: "ui.button.pressed".to_string(),

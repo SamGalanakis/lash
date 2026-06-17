@@ -350,6 +350,7 @@ pub struct RlmCore {
     core: LashCore,
     surface_config: lash_protocol_rlm::RlmProtocolPluginConfig,
     process_lifecycle_available: bool,
+    lashlang_artifact_store: Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>,
 }
 
 #[cfg(feature = "rlm")]
@@ -408,6 +409,36 @@ impl RlmCore {
             tool_catalog,
             surface,
         })
+    }
+
+    pub async fn compile_lashlang_module(
+        &self,
+        request: crate::rlm::LashlangModuleCompileRequest,
+    ) -> std::result::Result<crate::rlm::ModuleCompileOutput, crate::rlm::LashlangModuleCompileError>
+    {
+        let surface = self
+            .lashlang_compile_surface(crate::rlm::LashlangCompileSurfaceRequest {
+                session_id: request.session_id,
+                execution_env_spec: request.execution_env_spec,
+                extra_plugin_factories: request.extra_plugin_factories,
+            })
+            .map_err(|err| {
+                lashlang::ModuleCompileError::Link(lashlang::ModuleCompileDiagnostic {
+                    stage: lashlang::ModuleCompileStage::Link,
+                    message: err.to_string(),
+                    offset: None,
+                    span: None,
+                    line: None,
+                    column: None,
+                    diagnostic: Some(err.to_string()),
+                })
+            })?;
+        lashlang::compile_module(lashlang::ModuleCompileRequest {
+            source: &request.source,
+            environment: &surface.host_environment,
+            artifact_store: Some(self.lashlang_artifact_store.as_ref()),
+        })
+        .await
     }
 }
 
@@ -516,6 +547,7 @@ impl RlmCoreBuilder {
             core,
             surface_config: config,
             process_lifecycle_available,
+            lashlang_artifact_store: artifact_store,
         })
     }
 }

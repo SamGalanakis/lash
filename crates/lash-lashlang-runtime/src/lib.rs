@@ -184,6 +184,20 @@ pub fn tool_lashlang_binding(manifest: &lash_core::ToolManifest) -> LashlangTool
         .unwrap_or_default()
 }
 
+pub trait ToolManifestLashlangExt {
+    fn lashlang_binding(&self) -> Result<Option<LashlangToolBinding>, serde_json::Error>;
+}
+
+impl ToolManifestLashlangExt for lash_core::ToolManifest {
+    fn lashlang_binding(&self) -> Result<Option<LashlangToolBinding>, serde_json::Error> {
+        self.bindings
+            .get(LASHLANG_TOOL_BINDING_KEY)
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+    }
+}
+
 pub trait ToolDefinitionLashlangExt {
     fn with_lashlang_binding(self, lashlang_binding: LashlangToolBinding) -> Self;
 }
@@ -196,6 +210,29 @@ impl ToolDefinitionLashlangExt for lash_core::ToolDefinition {
             .bindings
             .insert(LASHLANG_TOOL_BINDING_KEY.to_string(), value);
         self
+    }
+}
+
+pub trait RemoteToolGrantLashlangExt {
+    fn with_lashlang_binding(self, lashlang_binding: LashlangToolBinding) -> Self;
+    fn lashlang_binding(&self) -> Result<Option<LashlangToolBinding>, serde_json::Error>;
+}
+
+impl RemoteToolGrantLashlangExt for lash_remote_protocol::RemoteToolGrant {
+    fn with_lashlang_binding(mut self, lashlang_binding: LashlangToolBinding) -> Self {
+        let value = serde_json::to_value(lashlang_binding)
+            .expect("lashlang tool binding must serialize to JSON");
+        self.bindings
+            .insert(LASHLANG_TOOL_BINDING_KEY.to_string(), value);
+        self
+    }
+
+    fn lashlang_binding(&self) -> Result<Option<LashlangToolBinding>, serde_json::Error> {
+        self.bindings
+            .get(LASHLANG_TOOL_BINDING_KEY)
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
     }
 }
 
@@ -443,11 +480,48 @@ pub struct LashlangProcessInput {
 }
 
 impl LashlangProcessInput {
-    pub fn into_process_input(self) -> Result<lash_core::ProcessInput, serde_json::Error> {
+    pub fn process_identity(&self) -> lash_core::ProcessIdentity {
+        lashlang_process_identity(self)
+    }
+
+    pub fn remote_identity(&self) -> lash_remote_protocol::RemoteProcessIdentity {
+        lash_remote_protocol::RemoteProcessIdentity {
+            kind: LASHLANG_ENGINE_KIND.to_string(),
+            label: Some(self.process_name.clone()),
+            definition: Some(lash_remote_protocol::RemoteProcessDefinitionIdentity {
+                value: self.definition(),
+            }),
+        }
+    }
+
+    pub fn to_process_input(&self) -> Result<lash_core::ProcessInput, serde_json::Error> {
         Ok(lash_core::ProcessInput::Engine {
             kind: LASHLANG_ENGINE_KIND.to_string(),
             payload: serde_json::to_value(self)?,
         })
+    }
+
+    pub fn into_process_input(self) -> Result<lash_core::ProcessInput, serde_json::Error> {
+        self.to_process_input()
+    }
+
+    pub fn remote_trigger_subscription_draft(
+        &self,
+        registrant: lash_remote_protocol::RemoteProcessOriginator,
+        env_ref: lash_remote_protocol::RemoteProcessExecutionEnvRef,
+        source_type: impl Into<String>,
+        source_key: impl Into<String>,
+    ) -> Result<lash_remote_protocol::RemoteTriggerSubscriptionDraft, serde_json::Error> {
+        Ok(
+            lash_remote_protocol::RemoteTriggerSubscriptionDraft::for_process(
+                registrant,
+                env_ref,
+                source_type,
+                source_key,
+                self.clone().try_into()?,
+                self.remote_identity(),
+            ),
+        )
     }
 
     pub fn from_payload(payload: serde_json::Value) -> Result<Self, serde_json::Error> {
@@ -460,6 +534,17 @@ impl LashlangProcessInput {
             "process_ref": self.process_ref,
             "host_requirements_ref": self.host_requirements_ref,
             "process_name": self.process_name,
+        })
+    }
+}
+
+impl TryFrom<LashlangProcessInput> for lash_remote_protocol::RemoteProcessInput {
+    type Error = serde_json::Error;
+
+    fn try_from(value: LashlangProcessInput) -> Result<Self, Self::Error> {
+        Ok(Self::Engine {
+            kind: LASHLANG_ENGINE_KIND.to_string(),
+            payload: serde_json::to_value(value)?,
         })
     }
 }
@@ -718,6 +803,53 @@ mod tests {
     }
 
     #[test]
+    fn process_input_remote_helpers_use_generic_engine_and_identity() {
+        let hash = lashlang::ContentHash::new("abc123");
+        let input = LashlangProcessInput {
+            module_ref: lashlang::ModuleRef::new(&hash),
+            process_ref: lashlang::ProcessRef::new(hash.clone(), 7),
+            host_requirements_ref: lashlang::HostRequirementsRef::new(&hash),
+            process_name: "main".to_string(),
+            args: serde_json::Map::from_iter([("prompt".to_string(), serde_json::json!("go"))]),
+        };
+
+        let remote_input: lash_remote_protocol::RemoteProcessInput = input
+            .clone()
+            .try_into()
+            .expect("lashlang process input serializes remotely");
+        let lash_remote_protocol::RemoteProcessInput::Engine { kind, payload } = remote_input
+        else {
+            panic!("lashlang runtime must use the generic remote engine process input");
+        };
+        assert_eq!(kind, LASHLANG_ENGINE_KIND);
+        assert_eq!(
+            LashlangProcessInput::from_payload(payload)
+                .expect("remote payload decodes")
+                .process_name,
+            "main"
+        );
+
+        let identity = input.process_identity();
+        assert_eq!(identity.kind, LASHLANG_ENGINE_KIND);
+        assert_eq!(identity.label.as_deref(), Some("main"));
+        assert_eq!(input.remote_identity().label.as_deref(), Some("main"));
+
+        let draft = input
+            .remote_trigger_subscription_draft(
+                lash_remote_protocol::RemoteProcessOriginator::Host,
+                "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .parse()
+                    .expect("canonical env ref"),
+                "ui.button.pressed",
+                "source-key",
+            )
+            .expect("remote trigger draft");
+        draft.validate().expect("draft validates");
+        assert_eq!(draft.target_label.as_deref(), Some("main"));
+        assert_eq!(draft.target_identity.label.as_deref(), Some("main"));
+    }
+
+    #[test]
     fn tool_binding_defaults_remain_lashlang_local_policy() {
         let tool = lash_core::ToolDefinition::raw_named(
             "read_file",
@@ -757,6 +889,59 @@ mod tests {
     }
 
     #[test]
+    fn manifest_lashlang_binding_accessor_reports_absent_valid_and_malformed() {
+        let mut manifest = lash_core::ToolDefinition::raw_named(
+            "read_file",
+            "read a file",
+            lash_core::ToolDefinition::default_input_schema(),
+            serde_json::Value::Null,
+        )
+        .manifest;
+        assert_eq!(manifest.lashlang_binding().expect("absent binding"), None);
+
+        manifest.bindings.insert(
+            LASHLANG_TOOL_BINDING_KEY.to_string(),
+            serde_json::json!({
+                "module_path": ["fs"],
+                "operation": "read"
+            }),
+        );
+        let binding = manifest
+            .lashlang_binding()
+            .expect("valid binding")
+            .expect("present binding");
+        assert_eq!(binding.module_path, vec!["fs"]);
+        assert_eq!(binding.operation.as_deref(), Some("read"));
+
+        manifest.bindings.insert(
+            LASHLANG_TOOL_BINDING_KEY.to_string(),
+            serde_json::json!({ "module_path": "fs" }),
+        );
+        assert!(manifest.lashlang_binding().is_err());
+    }
+
+    #[test]
+    fn remote_grant_lashlang_binding_accessor_reports_absent_valid_and_malformed() {
+        let grant = remote_tool_grant("read_file");
+        assert_eq!(grant.lashlang_binding().expect("absent binding"), None);
+
+        let grant = grant.with_lashlang_binding(LashlangToolBinding::new(["fs"], "read"));
+        let binding = grant
+            .lashlang_binding()
+            .expect("valid binding")
+            .expect("present binding");
+        assert_eq!(binding.module_path, vec!["fs"]);
+        assert_eq!(binding.operation.as_deref(), Some("read"));
+
+        let mut malformed = grant;
+        malformed.bindings.insert(
+            LASHLANG_TOOL_BINDING_KEY.to_string(),
+            serde_json::json!({ "module_path": "fs" }),
+        );
+        assert!(malformed.lashlang_binding().is_err());
+    }
+
+    #[test]
     fn surface_merges_plugin_extensions() {
         let contribution = LashlangSurfaceContribution::new(
             LashlangAbilities::default().with_processes(),
@@ -785,5 +970,26 @@ mod tests {
                 .resolve_module_operation("Tools", "tools", "lookup")
                 .is_some()
         );
+    }
+
+    fn remote_tool_grant(name: &str) -> lash_remote_protocol::RemoteToolGrant {
+        lash_remote_protocol::RemoteToolGrant {
+            protocol_version: lash_remote_protocol::REMOTE_PROTOCOL_VERSION,
+            id: None,
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: lash_core::ToolDefinition::default_input_schema(),
+            output_schema: serde_json::Value::Null,
+            input_schema_projections: Vec::new(),
+            output_schema_projections: Vec::new(),
+            output_contract: lash_remote_protocol::RemoteToolOutputContract::Static,
+            examples: Vec::new(),
+            availability: None,
+            activation: None,
+            argument_projection: None,
+            scheduling: None,
+            retry_policy: None,
+            bindings: Default::default(),
+        }
     }
 }

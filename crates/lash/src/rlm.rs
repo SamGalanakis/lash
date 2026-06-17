@@ -44,10 +44,11 @@ impl RlmSessionBuilderExt for RlmSessionBuilder {
 }
 
 pub use lash_lashlang_runtime::{
-    LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment,
-    LashlangLanguageFeatures, LashlangProcessEngine, LashlangProcessInput, LashlangSurface,
-    LashlangSurfaceContribution, LashlangToolBinding, ToolDefinitionLashlangExt,
-    lashlang_process_event_types, lashlang_process_signal_event_types,
+    LASHLANG_ENGINE_KIND, LASHLANG_SURFACE_EXTENSION_ID, LASHLANG_TOOL_BINDING_KEY,
+    LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment, LashlangLanguageFeatures,
+    LashlangProcessEngine, LashlangProcessInput, LashlangSurface, LashlangSurfaceContribution,
+    LashlangToolBinding, RemoteToolGrantLashlangExt, ToolDefinitionLashlangExt,
+    ToolManifestLashlangExt, lashlang_process_event_types, lashlang_process_signal_event_types,
 };
 pub use lash_protocol_rlm::{
     NamedDataType, RlmProtocolPluginConfig, TypeExpr, TypeField, format_type_expr,
@@ -81,6 +82,46 @@ impl LashlangCompileSurfaceRequest {
         self
     }
 }
+
+#[cfg(feature = "rlm")]
+pub struct LashlangModuleCompileRequest {
+    pub session_id: String,
+    pub source: String,
+    pub execution_env_spec: ProcessExecutionEnvSpec,
+    pub extra_plugin_factories: Vec<Arc<dyn PluginFactory>>,
+}
+
+#[cfg(feature = "rlm")]
+impl LashlangModuleCompileRequest {
+    pub fn new(
+        session_id: impl Into<String>,
+        source: impl Into<String>,
+        execution_env_spec: ProcessExecutionEnvSpec,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            source: source.into(),
+            execution_env_spec,
+            extra_plugin_factories: Vec::new(),
+        }
+    }
+
+    pub fn plugin(mut self, plugin: Arc<dyn PluginFactory>) -> Self {
+        self.extra_plugin_factories.push(plugin);
+        self
+    }
+
+    pub fn plugins(mut self, plugins: impl IntoIterator<Item = Arc<dyn PluginFactory>>) -> Self {
+        self.extra_plugin_factories.extend(plugins);
+        self
+    }
+}
+
+#[cfg(feature = "rlm")]
+pub type LashlangModuleCompileError = lashlang::ModuleCompileError;
+
+#[cfg(feature = "rlm")]
+pub type ModuleCompileOutput = lashlang::ModuleCompileOutput;
 
 #[cfg(feature = "rlm")]
 pub struct LashlangCompileSurface {

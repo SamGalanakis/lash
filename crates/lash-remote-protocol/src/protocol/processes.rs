@@ -22,6 +22,77 @@ impl RemoteSessionScope {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct RemoteProcessExecutionEnvRef(String);
+
+impl RemoteProcessExecutionEnvRef {
+    pub const PREFIX: &'static str = "process-env:sha256:";
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, RemoteProtocolError> {
+        let value = value.into();
+        if is_canonical_process_execution_env_ref(&value) {
+            Ok(Self(value))
+        } else {
+            Err(RemoteProtocolError::InvalidEnvelope {
+                type_name: "RemoteProcessExecutionEnvRef",
+                message:
+                    "env_ref must match `process-env:sha256:<64 lowercase hex>`".to_string(),
+            })
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
+        if is_canonical_process_execution_env_ref(&self.0) {
+            Ok(())
+        } else {
+            Err(RemoteProtocolError::InvalidEnvelope {
+                type_name,
+                message:
+                    "env_ref must match `process-env:sha256:<64 lowercase hex>`".to_string(),
+            })
+        }
+    }
+}
+
+impl std::fmt::Display for RemoteProcessExecutionEnvRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for RemoteProcessExecutionEnvRef {
+    type Err = RemoteProtocolError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RemoteProcessExecutionEnvRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+fn is_canonical_process_execution_env_ref(value: &str) -> bool {
+    let Some(digest) = value.strip_prefix(RemoteProcessExecutionEnvRef::PREFIX) else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RemoteProcessOriginator {
@@ -347,7 +418,7 @@ pub struct RemoteProcessRecord {
     pub event_types: Vec<RemoteProcessEventType>,
     pub provenance: RemoteProcessProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_ref: Option<String>,
+    pub env_ref: Option<RemoteProcessExecutionEnvRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<RemoteSessionScope>,
     pub created_at_ms: u64,
@@ -370,7 +441,7 @@ impl RemoteProcessRecord {
         }
         self.provenance.validate(type_name)?;
         if let Some(env_ref) = &self.env_ref {
-            require_non_empty(type_name, "env_ref", env_ref)?;
+            env_ref.validate(type_name)?;
         }
         if let Some(wake_target) = &self.wake_target {
             wake_target.validate(type_name)?;
@@ -452,7 +523,7 @@ pub struct RemoteObservedProcess {
     pub input: RemoteProcessInput,
     pub originator: RemoteProcessOriginator,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_ref: Option<String>,
+    pub env_ref: Option<RemoteProcessExecutionEnvRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<RemoteSessionScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,7 +547,7 @@ impl RemoteObservedProcess {
         self.input.validate(type_name)?;
         self.originator.validate(type_name)?;
         if let Some(env_ref) = &self.env_ref {
-            require_non_empty(type_name, "env_ref", env_ref)?;
+            env_ref.validate(type_name)?;
         }
         if let Some(wake_target) = &self.wake_target {
             wake_target.validate(type_name)?;
@@ -897,6 +968,57 @@ impl RemoteProcessExecutionEnvSpec {
     pub fn is_empty(&self) -> bool {
         self.plugin_options.is_empty() && self.policy.is_empty()
     }
+
+    pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
+        if self.policy.model.limits.context_window_tokens == 0 {
+            return Err(RemoteProtocolError::InvalidEnvelope {
+                type_name,
+                message: "env_spec.policy.model.limits.context_window_tokens must be greater than zero"
+                    .to_string(),
+            });
+        }
+        if self
+            .policy
+            .model
+            .limits
+            .output_token_capacity
+            .is_some_and(|value| value == 0)
+        {
+            return Err(RemoteProtocolError::InvalidEnvelope {
+                type_name,
+                message:
+                    "env_spec.policy.model.limits.output_token_capacity must be greater than zero"
+                        .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemotePersistProcessEnvRequest {
+    pub protocol_version: u32,
+    pub env_spec: RemoteProcessExecutionEnvSpec,
+}
+
+impl RemotePersistProcessEnvRequest {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        self.env_spec.validate("RemotePersistProcessEnvRequest")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemotePersistProcessEnvResult {
+    pub protocol_version: u32,
+    pub env_ref: RemoteProcessExecutionEnvRef,
+}
+
+impl RemotePersistProcessEnvResult {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        self.env_ref.validate("RemotePersistProcessEnvResult")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -921,27 +1043,7 @@ impl RemoteProcessStartRequest {
         require_non_empty("RemoteProcessStartRequest", "id", &self.id)?;
         self.input.validate("RemoteProcessStartRequest")?;
         if let Some(env_spec) = &self.env_spec {
-            if env_spec.policy.model.limits.context_window_tokens == 0 {
-                return Err(RemoteProtocolError::InvalidEnvelope {
-                    type_name: "RemoteProcessStartRequest",
-                    message: "env_spec.policy.model.limits.context_window_tokens must be greater than zero"
-                        .to_string(),
-                });
-            }
-            if env_spec
-                .policy
-                .model
-                .limits
-                .output_token_capacity
-                .is_some_and(|value| value == 0)
-            {
-                return Err(RemoteProtocolError::InvalidEnvelope {
-                    type_name: "RemoteProcessStartRequest",
-                    message:
-                        "env_spec.policy.model.limits.output_token_capacity must be greater than zero"
-                            .to_string(),
-                });
-            }
+            env_spec.validate("RemoteProcessStartRequest")?;
         }
         if let RemoteProcessInput::SessionTurn { turn_input, .. } = &self.input
             && turn_input.protocol_version != self.protocol_version

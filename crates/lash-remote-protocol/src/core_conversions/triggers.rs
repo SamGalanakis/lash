@@ -321,7 +321,7 @@ impl TryFrom<RemoteTriggerSubscriptionDraft> for lash_core::TriggerSubscriptionD
         } = value;
         Ok(Self {
             registrant: registrant.into(),
-            env_ref: lash_core::ProcessExecutionEnvRef::new(env_ref),
+            env_ref: lash_core::ProcessExecutionEnvRef::new(env_ref.as_str().to_string()),
             wake_target: wake_target.map(Into::into),
             name,
             source_type,
@@ -337,8 +337,10 @@ impl TryFrom<RemoteTriggerSubscriptionDraft> for lash_core::TriggerSubscriptionD
     }
 }
 
-impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraft {
-    fn from(value: lash_core::TriggerSubscriptionDraft) -> Self {
+impl TryFrom<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraft {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: lash_core::TriggerSubscriptionDraft) -> Result<Self, Self::Error> {
         let lash_core::TriggerSubscriptionDraft {
             registrant,
             env_ref,
@@ -354,10 +356,10 @@ impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraf
             input_template,
             target_label,
         } = value;
-        Self {
+        Ok(Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             registrant: registrant.into(),
-            env_ref: env_ref.as_str().to_string(),
+            env_ref: env_ref.as_str().parse()?,
             wake_target: wake_target.map(Into::into),
             name,
             source_type,
@@ -371,12 +373,14 @@ impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraf
             event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
             target_label,
-        }
+        })
     }
 }
 
-impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRecord {
-    fn from(value: lash_core::TriggerSubscriptionRecord) -> Self {
+impl TryFrom<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRecord {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: lash_core::TriggerSubscriptionRecord) -> Result<Self, Self::Error> {
         let lash_core::TriggerSubscriptionRecord {
             subscription_id,
             registrant,
@@ -397,10 +401,10 @@ impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRec
             created_at_ms,
             updated_at_ms,
         } = value;
-        Self {
+        Ok(Self {
             subscription_id,
             registrant: registrant.into(),
-            env_ref: env_ref.as_str().to_string(),
+            env_ref: env_ref.as_str().parse()?,
             wake_target: wake_target.map(Into::into),
             handle,
             name,
@@ -418,7 +422,7 @@ impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRec
             enabled,
             created_at_ms,
             updated_at_ms,
-        }
+        })
     }
 }
 
@@ -450,7 +454,7 @@ impl TryFrom<RemoteTriggerSubscriptionRecord> for lash_core::TriggerSubscription
         Ok(Self {
             subscription_id,
             registrant: registrant.into(),
-            env_ref: lash_core::ProcessExecutionEnvRef::new(env_ref),
+            env_ref: lash_core::ProcessExecutionEnvRef::new(env_ref.as_str().to_string()),
             wake_target: wake_target.map(Into::into),
             handle,
             name,
@@ -483,12 +487,14 @@ impl TryFrom<RemoteTriggerRegisterSubscriptionRequest> for lash_core::TriggerSub
     }
 }
 
-impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerRegisterSubscriptionResult {
-    fn from(value: lash_core::TriggerSubscriptionRecord) -> Self {
-        Self {
+impl TryFrom<lash_core::TriggerSubscriptionRecord> for RemoteTriggerRegisterSubscriptionResult {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: lash_core::TriggerSubscriptionRecord) -> Result<Self, Self::Error> {
+        Ok(Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            record: value.into(),
-        }
+            record: value.try_into()?,
+        })
     }
 }
 
@@ -505,12 +511,17 @@ impl TryFrom<RemoteTriggerRegisterSubscriptionResult> for lash_core::TriggerSubs
     }
 }
 
-impl From<Vec<lash_core::TriggerSubscriptionRecord>> for RemoteTriggerListSubscriptionsResponse {
-    fn from(value: Vec<lash_core::TriggerSubscriptionRecord>) -> Self {
-        Self {
+impl TryFrom<Vec<lash_core::TriggerSubscriptionRecord>> for RemoteTriggerListSubscriptionsResponse {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: Vec<lash_core::TriggerSubscriptionRecord>) -> Result<Self, Self::Error> {
+        Ok(Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            subscriptions: value.into_iter().map(Into::into).collect(),
-        }
+            subscriptions: value
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 }
 

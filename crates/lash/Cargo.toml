@@ -30,6 +30,7 @@ lash-protocol-standard = { workspace = true }
 lash-plugin-tool-output-budget = { workspace = true }
 lash-rlm-types = { workspace = true, optional = true }
 lash-trace = { workspace = true }
+lashlang = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -38,14 +39,13 @@ tokio-util = { workspace = true }
 
 [features]
 default = []
-rlm = ["dep:lash-lashlang-runtime", "dep:lash-protocol-rlm", "dep:lash-rlm-types"]
+rlm = ["dep:lash-lashlang-runtime", "dep:lash-protocol-rlm", "dep:lash-rlm-types", "dep:lashlang"]
 # Exposes `lash::testing` (e.g. `TestProvider`) for embedder integration tests.
 testing = ["lash-core/testing"]
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
-lashlang = { workspace = true }
 lash-subagents = { workspace = true }
 lash-sqlite-store = { workspace = true }
 tempfile = { workspace = true }
