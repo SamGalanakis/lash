@@ -36,6 +36,7 @@ use lash_core::{
     ToolFailureClass, ToolFailureSource, ToolResult, ToolRetryDisposition, ToolScheduling,
     ToolValue,
 };
+use lash_tool_support::ToolDefinitionLashlangExt;
 
 use crate::config::McpServerConfig;
 use crate::error::McpError;

@@ -500,33 +500,6 @@ pub(crate) async fn enqueue_mail_received_trigger_command(
         .context("emit mail received trigger occurrence")
 }
 
-fn button_trigger_event_type() -> lashlang::NamedDataType {
-    lashlang::NamedDataType::object(
-        "ui.button.Pressed",
-        vec![
-            lashlang::TypeField {
-                name: "button".into(),
-                ty: lashlang::TypeExpr::Union(vec![
-                    lashlang::TypeExpr::Enum(vec!["Red".into()]),
-                    lashlang::TypeExpr::Enum(vec!["Blue".into()]),
-                ]),
-                optional: false,
-            },
-            lashlang::TypeField {
-                name: "message".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            },
-            lashlang::TypeField {
-                name: "pressed_at".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            },
-        ],
-    )
-    .expect("valid button trigger event type")
-}
-
 fn workbench_lashlang_abilities() -> lashlang::LashlangAbilities {
     lashlang::LashlangAbilities::default()
         .with_processes()

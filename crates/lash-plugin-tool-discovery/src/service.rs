@@ -140,9 +140,9 @@ mod tests {
     };
     use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot};
     use lash_core::{
-        DirectCompletion, LashlangToolBinding, TokenUsage, ToolCall, ToolContract, ToolDefinition,
-        ToolProvider,
+        DirectCompletion, TokenUsage, ToolCall, ToolContract, ToolDefinition, ToolProvider,
     };
+    use lash_tool_support::{LashlangToolBinding, ToolDefinitionLashlangExt};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -257,23 +257,43 @@ mod tests {
             .with_aliases(aliases),
         );
         let manifest = tool.manifest();
-        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
-        let call = lashlang_binding.call_path();
-        json!({
+        let projected = json!({
             "id": manifest.id,
             "name": manifest.name,
-            "module_path": lashlang_binding.module_path.clone(),
-            "operation": lashlang_binding.operation.clone(),
-            "call": call,
             "description": manifest.description,
-            "aliases": lashlang_binding.aliases.clone(),
             "availability": "searchable",
             "callable": false,
             "showcased": false,
             "searchable": true,
             "activation": manifest.activation,
-            "contract": manifest.compact_contract.expect("compact contract"),
-        })
+            "contract": manifest.compact_contract.clone().expect("compact contract"),
+        });
+        #[cfg(feature = "lashlang")]
+        {
+            let mut projected = projected;
+            let lashlang_binding = lash_lashlang_runtime::tool_lashlang_binding(&manifest)
+                .executable_for(&manifest.name);
+            let call = lashlang_binding.call_path();
+            let projected_object = projected.as_object_mut().expect("catalog object");
+            projected_object.insert(
+                "module_path".to_string(),
+                json!(lashlang_binding.module_path.clone()),
+            );
+            projected_object.insert(
+                "operation".to_string(),
+                json!(lashlang_binding.operation.clone()),
+            );
+            projected_object.insert("call".to_string(), json!(call));
+            projected_object.insert(
+                "aliases".to_string(),
+                json!(lashlang_binding.aliases.clone()),
+            );
+            projected
+        }
+        #[cfg(not(feature = "lashlang"))]
+        {
+            projected
+        }
     }
 
     fn ranked_names(results: &[Value]) -> Vec<String> {
@@ -291,13 +311,21 @@ mod tests {
 
     #[test]
     fn provider_exposes_search_tools_only() {
-        let names = tool_discovery_provider()
-            .tool_manifests()
-            .into_iter()
-            .map(|definition| definition.name)
+        let manifests = tool_discovery_provider().tool_manifests();
+        let names = manifests
+            .iter()
+            .map(|definition| definition.name.as_str())
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["search_tools"]);
+        #[cfg(not(feature = "lashlang"))]
+        assert!(manifests[0].bindings.is_empty());
+        #[cfg(feature = "lashlang")]
+        assert!(
+            manifests[0]
+                .bindings
+                .contains_key(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
+        );
     }
 
     #[tokio::test]
@@ -322,9 +350,15 @@ mod tests {
         let provider = tool_discovery_provider();
         let context = discovery_context(host);
 
+        #[cfg(feature = "lashlang")]
         let args = json!({
             "query": "cat",
             "module": "filesystem",
+            "limit": 1,
+        });
+        #[cfg(not(feature = "lashlang"))]
+        let args = json!({
+            "query": "read file",
             "limit": 1,
         });
         let result = provider
@@ -340,16 +374,23 @@ mod tests {
         let value = result.value_for_projection();
         let results = value.as_array().expect("search result list");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["name"], json!("filesystem.read"));
+        assert_eq!(results[0]["id"], json!("tool:read_file"));
+        assert_eq!(results[0]["name"], json!("read_file"));
+        #[cfg(feature = "lashlang")]
         assert_eq!(results[0]["call"], json!("filesystem.read"));
+        #[cfg(not(feature = "lashlang"))]
+        assert!(results[0].get("call").is_none());
         assert!(
             results[0]["signature"]
                 .as_str()
                 .expect("signature")
-                .starts_with("await filesystem.read({})? -> ")
+                .starts_with("read_file({})")
         );
         assert_eq!(results[0]["description"], json!("Read file contents"));
+        #[cfg(feature = "lashlang")]
         assert_eq!(results[0]["module_path"], json!(["filesystem"]));
+        #[cfg(not(feature = "lashlang"))]
+        assert!(results[0].get("module_path").is_none());
         assert!(results[0].get("score").is_none());
     }
 
@@ -386,7 +427,7 @@ mod tests {
         assert!(result.is_success(), "{result:?}");
         let value = result.value_for_projection();
         let results = value.as_array().expect("search result list");
-        assert_eq!(ranked_names(results), vec!["web.search"]);
+        assert_eq!(ranked_names(results), vec!["search_web"]);
         let requests = host
             .direct_requests
             .lock()

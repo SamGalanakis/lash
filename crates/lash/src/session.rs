@@ -11,6 +11,7 @@ pub struct SessionBuilder {
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) plugin_factories: Vec<Arc<dyn PluginFactory>>,
+    #[cfg(feature = "rlm")]
     pub(crate) rlm_final_answer_format: Option<lash_rlm_types::RlmFinalAnswerFormat>,
 }
 
@@ -20,6 +21,7 @@ impl SessionBuilder {
         self
     }
 
+    #[cfg(feature = "rlm")]
     pub fn rlm(mut self) -> Self {
         self.mode = Some(ModeId::rlm());
         self
@@ -69,9 +71,11 @@ impl SessionBuilder {
     pub async fn open(self) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
         let store = self.create_store(&policy).await?;
+        #[cfg_attr(not(feature = "rlm"), allow(unused_mut))]
         let mut state = self
             .load_or_default_state(&policy, store.as_deref())
             .await?;
+        #[cfg(feature = "rlm")]
         self.apply_rlm_session_options(&mode, &mut state)?;
         self.open_resolved(policy, mode, state, store).await
     }
@@ -88,12 +92,14 @@ impl SessionBuilder {
     pub async fn open_fresh(self) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
         let store = self.create_store(&policy).await?;
+        #[cfg_attr(not(feature = "rlm"), allow(unused_mut))]
         let mut state = RuntimeSessionState {
             session_id: self.session_id.clone(),
             policy: policy.clone(),
             graph_replace_required: true,
             ..RuntimeSessionState::default()
         };
+        #[cfg(feature = "rlm")]
         self.apply_rlm_session_options(&mode, &mut state)?;
         self.open_resolved(policy, mode, state, store).await
     }
@@ -116,6 +122,7 @@ impl SessionBuilder {
         let recorded_provider_id = state.policy.recorded_provider_id().to_string();
         state.policy = policy.clone();
         state.policy.provider_id = recorded_provider_id;
+        #[cfg(feature = "rlm")]
         self.apply_rlm_session_options(&mode, &mut state)?;
         self.open_resolved(policy, mode, state, store).await
     }
@@ -209,6 +216,7 @@ impl SessionBuilder {
         }
     }
 
+    #[cfg(feature = "rlm")]
     fn apply_rlm_session_options(
         &self,
         mode: &ModeId,
@@ -231,6 +239,7 @@ impl SessionBuilder {
         Ok(())
     }
 
+    #[cfg(feature = "rlm")]
     fn rlm_session_final_answer_format(
         &self,
         mode: &ModeId,
@@ -265,6 +274,12 @@ impl SessionBuilder {
             self.core.plugin_factories.as_ref(),
             self.plugin_factories,
             env.process_registry.is_some(),
+            #[cfg(feature = "rlm")]
+            self.core.lashlang_artifact_store.as_ref(),
+            #[cfg(feature = "rlm")]
+            self.core.lashlang_execution_sink.clone(),
+            #[cfg(feature = "rlm")]
+            env.core.tracing.trace_context.clone(),
         )?;
         env.plugin_host = Some(Arc::new(plugin_host));
         let effect_host = Arc::clone(&env.core.control.effect_host);

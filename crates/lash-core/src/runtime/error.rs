@@ -6,7 +6,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DurableStoreFacet {
     AttachmentStore,
-    ArtifactStore,
+    ProcessEnvStore,
     SessionStore,
     ProcessRegistry,
     TriggerStore,
@@ -18,7 +18,7 @@ impl DurableStoreFacet {
     fn as_code(self) -> &'static str {
         match self {
             Self::AttachmentStore => "durable_store_required:attachment_store",
-            Self::ArtifactStore => "durable_store_required:artifact_store",
+            Self::ProcessEnvStore => "durable_store_required:process_env_store",
             Self::SessionStore => "durable_store_required:session_store",
             Self::ProcessRegistry => "durable_store_required:process_registry",
             Self::TriggerStore => "durable_store_required:trigger_store",
@@ -97,8 +97,8 @@ impl From<&str> for RuntimeErrorCode {
             "durable_store_required:attachment_store" => Self::DurableStoreRequired {
                 facet: DurableStoreFacet::AttachmentStore,
             },
-            "durable_store_required:artifact_store" => Self::DurableStoreRequired {
-                facet: DurableStoreFacet::ArtifactStore,
+            "durable_store_required:process_env_store" => Self::DurableStoreRequired {
+                facet: DurableStoreFacet::ProcessEnvStore,
             },
             "durable_store_required:session_store" => Self::DurableStoreRequired {
                 facet: DurableStoreFacet::SessionStore,
@@ -175,7 +175,7 @@ impl RuntimeError {
     pub fn durable_store_required(facet: DurableStoreFacet) -> Self {
         let facet_label = match facet {
             DurableStoreFacet::AttachmentStore => "attachment store",
-            DurableStoreFacet::ArtifactStore => "lashlang artifact store",
+            DurableStoreFacet::ProcessEnvStore => "process env store",
             DurableStoreFacet::SessionStore => "session store",
             DurableStoreFacet::ProcessRegistry => "process registry",
             DurableStoreFacet::TriggerStore => "trigger store",
@@ -216,7 +216,7 @@ mod tests {
     fn durable_store_required_round_trips_per_facet() {
         for facet in [
             DurableStoreFacet::AttachmentStore,
-            DurableStoreFacet::ArtifactStore,
+            DurableStoreFacet::ProcessEnvStore,
             DurableStoreFacet::SessionStore,
             DurableStoreFacet::ProcessRegistry,
             DurableStoreFacet::TriggerStore,

@@ -113,13 +113,14 @@ grant to the registry. The rows survive restart. Turn starts carry turn
 causality; trigger deliveries carry `CausalRef::TriggerOccurrence { occurrence_id }`.
 Neither path carries a borrowed execution scope or a live session binding.
 The captured process environment is typed and closed: it contains Process
-Plugin Options plus policy, not product metadata. Before a
-`ProcessInput::LashlangProcess` row is registered, Lash rebuilds the candidate
-plugin session, Tool Catalog, and Lashlang Host Environment from those captured
-options and validates that environment against the target module artifact's Host
-Requirements. Trigger-started and turn-started processes both capture the same
-environment shape, and worker recovery repeats the Host Requirements guard
-before compiling or running the process.
+Plugin Options plus policy, not product metadata. Before a Lashlang
+`ProcessInput::Engine { kind: "lashlang", payload }` row is registered, the
+Lashlang runtime rebuilds the candidate plugin session, Tool Catalog, and
+Lashlang Host Environment from those captured options and validates that
+environment against the target module artifact's Host Requirements.
+Trigger-started and turn-started processes both capture the same environment
+shape, and worker recovery repeats the Host Requirements guard before compiling
+or running the process.
 
 **2. Execution = a lash-owned durable worker with a per-process lease +
 recovery.** Turns use effect-host replay plus final commit stamps; processes use

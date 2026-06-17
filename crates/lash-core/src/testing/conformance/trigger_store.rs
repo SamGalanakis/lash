@@ -36,7 +36,7 @@ fn sample_trigger_subscription_draft(
     process_name: &str,
 ) -> crate::TriggerSubscriptionDraft {
     let mut inputs = BTreeMap::new();
-    inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+    inputs.insert("event".to_string(), crate::TriggerInputBinding::Event);
     let registrant_scope = crate::SessionScope::new(session_id);
     crate::TriggerSubscriptionDraft {
         registrant: crate::ProcessOriginator::session(registrant_scope.clone()),
@@ -46,18 +46,21 @@ fn sample_trigger_subscription_draft(
         source_type: "ui.button.pressed".to_string(),
         source_key: source_key.to_string(),
         source: serde_json::json!({}),
-        event_ty: lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-            name: "button".into(),
-            ty: lashlang::TypeExpr::Str,
-            optional: false,
-        }]),
-        module_ref: lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
-        host_requirements_ref: lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new(
-            "surface",
-        )),
-        process_ref: lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
-        process_name: process_name.to_string(),
-        input_template: lashlang::TriggerInputTemplate::new(inputs),
+        payload_schema: crate::LashSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "button": { "type": "string" }
+            },
+            "required": ["button"],
+            "additionalProperties": false
+        })),
+        target: crate::ProcessInput::Engine {
+            kind: "test".to_string(),
+            payload: serde_json::json!({ "process": process_name }),
+        },
+        event_types: Vec::new(),
+        input_template: inputs,
+        target_label: Some(process_name.to_string()),
     }
 }
 

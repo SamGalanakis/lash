@@ -169,7 +169,11 @@ pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
         calls: Vec<PendingToolCall>,
     },
     /// Execute a protocol-owned code block.
-    ExecCode { id: EffectId, code: String },
+    ExecCode {
+        id: EffectId,
+        language: String,
+        code: String,
+    },
     /// Run a host/plugin checkpoint before the machine continues or completes.
     Checkpoint {
         id: EffectId,
@@ -216,8 +220,9 @@ impl<M: TurnProtocol> Clone for Effect<M> {
                 id: *id,
                 calls: calls.clone(),
             },
-            Self::ExecCode { id, code } => Self::ExecCode {
+            Self::ExecCode { id, language, code } => Self::ExecCode {
                 id: *id,
+                language: language.clone(),
                 code: code.clone(),
             },
             Self::Checkpoint { id, checkpoint } => Self::Checkpoint {
@@ -352,6 +357,7 @@ pub enum DriverAction<M: TurnProtocol = UnitTurnProtocol> {
         calls: Vec<PendingToolCall>,
     },
     StartExec {
+        language: String,
         code: String,
         driver_state: M::DriverState,
     },

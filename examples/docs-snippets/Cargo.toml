@@ -12,16 +12,16 @@ default = []
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-lash = { workspace = true }
+lash = { workspace = true, features = ["rlm"] }
 lash-core = { workspace = true, features = ["otel-trace"] }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
-lash-plugin-mcp = { workspace = true }
+lash-plugin-mcp = { workspace = true, features = ["lashlang"] }
 lash-postgres-store = { workspace = true }
 lash-protocol-rlm = { workspace = true }
 lash-provider-openai = { workspace = true }
 lash-s3-store = { workspace = true }
 lash-sqlite-store = { workspace = true }
-lash-standard-plugins = { workspace = true }
+lash-standard-plugins = { workspace = true, features = ["lashlang"] }
 lash-subagents = { workspace = true }
 lashlang = { workspace = true }
 schemars = { workspace = true, features = ["derive"] }

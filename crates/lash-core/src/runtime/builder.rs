@@ -12,20 +12,6 @@ enum PluginSource {
     Session(Arc<PluginSession>),
 }
 
-pub(super) fn lashlang_abilities_for_process_registry(
-    mut abilities: lashlang::LashlangAbilities,
-    process_registry_available: bool,
-) -> lashlang::LashlangAbilities {
-    abilities = abilities.with_sleep();
-    if process_registry_available {
-        abilities.with_processes().with_process_signals()
-    } else {
-        abilities.processes = false;
-        abilities.process_signals = false;
-        abilities
-    }
-}
-
 pub struct EmbeddedRuntimeBuilder {
     session_id: Option<String>,
     policy: Option<SessionPolicy>,
@@ -161,21 +147,6 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_lashlang_execution_sink(
-        mut self,
-        sink: Option<Arc<dyn lash_trace::TraceSink>>,
-    ) -> Self {
-        self.core.tracing.lashlang_execution_sink = sink;
-        self
-    }
-
-    pub fn with_lashlang_execution_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.core.tracing.lashlang_execution_sink = path.map(|path| {
-            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
-        });
-        self
-    }
-
     pub fn with_trace_level(mut self, level: lash_trace::TraceLevel) -> Self {
         self.core.tracing.trace_level = level;
         self
@@ -224,11 +195,6 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
         self.process_registry = Some(process_registry);
-        if let PluginSource::Host(host) = &mut self.plugin_source {
-            let abilities =
-                lashlang_abilities_for_process_registry(host.lashlang_abilities(), true);
-            *host = host.clone().with_lashlang_abilities(abilities);
-        }
         self
     }
 
@@ -312,10 +278,6 @@ impl EmbeddedRuntimeBuilder {
             PluginSource::Session(session) => Ok(Arc::clone(session)),
             PluginSource::Host(host) => host
                 .clone()
-                .with_lashlang_abilities(lashlang_abilities_for_process_registry(
-                    host.lashlang_abilities(),
-                    self.process_registry.is_some(),
-                ))
                 .isolated_registry()
                 .build_session_with_parent(
                     state.session_id.clone(),

@@ -12,9 +12,11 @@ use std::sync::Arc;
 
 use lash_core::{
     ExecRequest, ExecResponse, RuntimeEffectKind, RuntimeExecutionContext, SessionError,
-    TraceLabelMetadata, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity,
-    TraceLashlangMap, TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangStatus,
-    TraceRuntimeScope, TraceRuntimeSubject,
+    TraceContext, TraceLabelMetadata, TraceRuntimeScope, TraceRuntimeSubject, TraceSink,
+};
+use lash_lashlang_runtime::{
+    LashlangSurface, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangMap,
+    TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangStatus,
 };
 #[cfg(test)]
 use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
@@ -27,12 +29,21 @@ use crate::projection::{
     rehydrate_projected_globals,
 };
 
+#[derive(Clone, Default)]
+pub(crate) struct RlmLashlangExecutionTraceConfig {
+    pub(crate) sink: Option<Arc<dyn TraceSink>>,
+    pub(crate) trace_context: TraceContext,
+}
+
 pub async fn execute_code(
     mut state: RlmExecutionState,
     ctx: RuntimeExecutionContext<'_>,
     request: ExecRequest,
+    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    lashlang_surface: LashlangSurface,
     session_projected_bindings: RlmProjectedBindings,
     projection_resolver: Arc<dyn ProjectionResolver>,
+    lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
 ) -> Result<(RlmExecutionState, ExecResponse), SessionError> {
     let start = std::time::Instant::now();
     let clean_code = clean_model_code(&request.code);
@@ -41,8 +52,11 @@ pub async fn execute_code(
         ctx,
         &clean_code,
         start,
+        artifact_store,
+        lashlang_surface,
         session_projected_bindings,
         projection_resolver,
+        lashlang_execution_trace_config,
     ))
     .await;
     Ok((state, response))
@@ -67,15 +81,19 @@ async fn execute_code_inner(
     ctx: RuntimeExecutionContext<'_>,
     code: &str,
     start: std::time::Instant,
+    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    lashlang_surface: LashlangSurface,
     session_projected_bindings: RlmProjectedBindings,
     projection_resolver: Arc<dyn ProjectionResolver>,
+    lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
 ) -> ExecResponse {
     state.dirty = true;
+    let host_environment = lashlang_surface.host_environment(ctx.tool_catalog().as_ref());
     let compile_result = {
         let _phase = ctx.named_phase("rlm_lashlang.compile_link");
         state
             .linked_programs
-            .get_or_compile(code, ctx.lashlang_host_environment())
+            .get_or_compile(code, &host_environment)
     };
     let cached_program = match compile_result {
         Ok(program) => program,
@@ -112,7 +130,8 @@ async fn execute_code_inner(
     {
         let stored = {
             let _phase = ctx.named_phase("rlm_lashlang.store_module_artifact");
-            ctx.put_lashlang_module_artifact(&linked_module.artifact)
+            artifact_store
+                .put_module_artifact(&linked_module.artifact)
                 .await
         };
         if let Err(err) = stored {
@@ -171,8 +190,11 @@ async fn execute_code_inner(
     let projected_names = projected.names().collect::<Vec<_>>();
     prune_projected_binding_names(&mut state.rlm, projected_names.iter().map(String::as_str));
     let tool_result_projectors = tool_result_projectors(&ctx);
-    let lashlang_execution_trace =
-        foreground_lashlang_execution_trace(&ctx, &linked_module.artifact);
+    let lashlang_execution_trace = foreground_lashlang_execution_trace(
+        &ctx,
+        &linked_module.artifact,
+        &lashlang_execution_trace_config,
+    );
     if let Some(trace) = &lashlang_execution_trace {
         emit_foreground_execution_started(trace, &linked_module.artifact);
     }
@@ -181,6 +203,8 @@ async fn execute_code_inner(
         state.observe_projection.clone(),
         tool_result_projectors,
         lashlang_execution_trace.clone(),
+        host_environment,
+        Arc::clone(&artifact_store),
     );
     let env = lashlang::ExecutionEnvironment::new(&host)
         .traced()
@@ -254,8 +278,9 @@ fn tool_result_projectors(ctx: &RuntimeExecutionContext<'_>) -> Vec<crate::RlmTo
 fn foreground_lashlang_execution_trace(
     ctx: &RuntimeExecutionContext<'_>,
     artifact: &lashlang::ModuleArtifact,
+    config: &RlmLashlangExecutionTraceConfig,
 ) -> Option<LashlangExecutionTrace> {
-    let sink = ctx.lashlang_execution_sink()?;
+    let sink = config.sink.as_ref()?.clone();
     let invocation = ctx.parent_invocation()?;
     if invocation.effect_kind() != Some(RuntimeEffectKind::ExecCode) {
         return None;
@@ -264,7 +289,7 @@ fn foreground_lashlang_execution_trace(
     let kind = invocation.effect_kind()?;
     Some(LashlangExecutionTrace::new(
         sink,
-        ctx.lashlang_execution_context().clone(),
+        config.trace_context.clone(),
         TraceLashlangExecutionIdentity {
             scope: TraceRuntimeScope {
                 session_id: invocation.scope.session_id.clone(),
@@ -536,18 +561,31 @@ mod tests {
         resources: lashlang::LashlangHostCatalog,
     ) -> ExecResponse {
         let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-        let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
-            abilities, resources,
+        let ctx = if abilities.triggers {
+            lash_core::testing::code_execution_context_with_trigger_store(Arc::new(
+                lash_core::InMemoryTriggerStore::default(),
+            ))
+        } else {
+            lash_core::testing::code_execution_context()
+        };
+        let surface = LashlangSurface::new(
+            abilities,
+            lashlang::LashlangLanguageFeatures::default(),
+            resources,
         );
         let (_, response) = execute_code(
             state,
             ctx,
             ExecRequest {
+                language: "lashlang".to_string(),
                 code: code.to_string(),
                 accept_finish: true,
             },
+            lashlang::global_in_memory_lashlang_artifact_store(),
+            surface,
             RlmProjectedBindings::default(),
             Arc::new(ProjectionRegistry::new()),
+            RlmLashlangExecutionTraceConfig::default(),
         )
         .await
         .expect("execute code");
@@ -559,20 +597,28 @@ mod tests {
         block_on(async {
             let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
             let request = || ExecRequest {
+                language: "lashlang".to_string(),
                 code: "submit 1".to_string(),
                 accept_finish: true,
             };
             let resolver = || Arc::new(ProjectionRegistry::new());
+            let surface = || {
+                LashlangSurface::new(
+                    lashlang::LashlangAbilities::default(),
+                    lashlang::LashlangLanguageFeatures::default(),
+                    lashlang::LashlangHostCatalog::new(),
+                )
+            };
 
             let (state, first) = execute_code(
                 state,
-                lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
-                    lashlang::LashlangAbilities::default(),
-                    lashlang::LashlangHostCatalog::new(),
-                ),
+                lash_core::testing::code_execution_context(),
                 request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                surface(),
                 RlmProjectedBindings::default(),
                 resolver(),
+                RlmLashlangExecutionTraceConfig::default(),
             )
             .await
             .expect("first execution should succeed");
@@ -584,13 +630,13 @@ mod tests {
 
             let (state, second) = execute_code(
                 state,
-                lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
-                    lashlang::LashlangAbilities::default(),
-                    lashlang::LashlangHostCatalog::new(),
-                ),
+                lash_core::testing::code_execution_context(),
                 request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                surface(),
                 RlmProjectedBindings::default(),
                 resolver(),
+                RlmLashlangExecutionTraceConfig::default(),
             )
             .await
             .expect("second execution should succeed");
@@ -609,13 +655,16 @@ mod tests {
         block_on(async {
             let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
             let request = || ExecRequest {
+                language: "lashlang".to_string(),
                 code: "process later() { finish 1 }\nsubmit 1".to_string(),
                 accept_finish: true,
             };
             let resolver = || Arc::new(ProjectionRegistry::new());
-            let context = || {
-                lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+            let context = || lash_core::testing::code_execution_context();
+            let surface = || {
+                LashlangSurface::new(
                     lashlang::LashlangAbilities::default().with_processes(),
+                    lashlang::LashlangLanguageFeatures::default(),
                     lashlang::LashlangHostCatalog::new(),
                 )
             };
@@ -624,8 +673,11 @@ mod tests {
                 state,
                 context(),
                 request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                surface(),
                 RlmProjectedBindings::default(),
                 resolver(),
+                RlmLashlangExecutionTraceConfig::default(),
             )
             .await
             .expect("first process module execution should succeed");
@@ -636,8 +688,11 @@ mod tests {
                 state,
                 context(),
                 request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                surface(),
                 RlmProjectedBindings::default(),
                 resolver(),
+                RlmLashlangExecutionTraceConfig::default(),
             )
             .await
             .expect("second process module execution should succeed");
@@ -651,6 +706,7 @@ mod tests {
 
     fn timer_trigger_resources() -> lashlang::LashlangHostCatalog {
         let mut resources = lashlang::LashlangHostCatalog::new();
+        lashlang::add_trigger_resource_operations(&mut resources);
         resources
             .add_trigger_source_constructor(
                 ["timer", "Schedule"],
@@ -1125,18 +1181,24 @@ mod tests {
     fn bound_variables_prompt_renders_live_globals_after_execution() {
         block_on(async {
             let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-            let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities(
-                lashlang::LashlangAbilities::default(),
-            );
+            let ctx = lash_core::testing::code_execution_context();
             let (state, response) = execute_code(
                 state,
                 ctx,
                 ExecRequest {
+                    language: "lashlang".to_string(),
                     code: "scratch_note = \"after execution\"".to_string(),
                     accept_finish: true,
                 },
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                LashlangSurface::new(
+                    lashlang::LashlangAbilities::default(),
+                    lashlang::LashlangLanguageFeatures::default(),
+                    lashlang::LashlangHostCatalog::new(),
+                ),
                 RlmProjectedBindings::default(),
                 Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
             )
             .await
             .expect("execute");
@@ -1162,9 +1224,7 @@ mod tests {
     fn bench_bound_variables_render_cost() {
         block_on(async {
             let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-            let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities(
-                lashlang::LashlangAbilities::default(),
-            );
+            let ctx = lash_core::testing::code_execution_context();
             // Realistic mid-game RLM state: a ~25-room map, a 67-entry notes
             // log, and a small inventory.
             let code = "map = {}\n\
@@ -1181,11 +1241,19 @@ mod tests {
                 state,
                 ctx,
                 ExecRequest {
+                    language: "lashlang".to_string(),
                     code,
                     accept_finish: true,
                 },
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                LashlangSurface::new(
+                    lashlang::LashlangAbilities::default(),
+                    lashlang::LashlangLanguageFeatures::default(),
+                    lashlang::LashlangHostCatalog::new(),
+                ),
                 RlmProjectedBindings::default(),
                 Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
             )
             .await
             .expect("execute");
@@ -1244,9 +1312,7 @@ mod tests {
     fn bound_variables_prompt_degrades_large_live_globals() {
         block_on(async {
             let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-            let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities(
-                lashlang::LashlangAbilities::default(),
-            );
+            let ctx = lash_core::testing::code_execution_context();
             // Same constructs the runtime-perf `rlm_globals` scenario seeds:
             // a large record and a large list that exceed the inline budget.
             let code = "big_map = {}\n\
@@ -1262,11 +1328,19 @@ mod tests {
                 state,
                 ctx,
                 ExecRequest {
+                    language: "lashlang".to_string(),
                     code,
                     accept_finish: true,
                 },
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                LashlangSurface::new(
+                    lashlang::LashlangAbilities::default(),
+                    lashlang::LashlangLanguageFeatures::default(),
+                    lashlang::LashlangHostCatalog::new(),
+                ),
                 RlmProjectedBindings::default(),
                 Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
             )
             .await
             .expect("execute");

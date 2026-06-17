@@ -15,6 +15,11 @@ pub struct LashCore {
     pub(crate) plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) live_replay_store: Arc<dyn LiveReplayStore>,
+    #[cfg(feature = "rlm")]
+    pub(crate) lashlang_artifact_store:
+        Option<Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>>,
+    #[cfg(feature = "rlm")]
+    pub(crate) lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     /// Shared resolution of the process work runner. The poke it yields is
     /// threaded onto every session's host so the process admin seam can wake
     /// the runner after a successful start. Shared across `LashCore` clones so
@@ -129,8 +134,8 @@ impl LashCore {
     /// Preset for `standard` mode.
     ///
     /// Storage and effect durability are still host-owned choices. Provide the
-    /// effect host, Lashlang artifact store, and attachment store facets with
-    /// the builder setters before calling [`LashCoreBuilder::build`].
+    /// effect host and attachment store facets with the builder setters before
+    /// calling [`LashCoreBuilder::build`].
     pub fn standard() -> LashCoreBuilder {
         Self::builder()
             .install_mode(ModePreset::standard())
@@ -139,10 +144,7 @@ impl LashCore {
     }
 
     /// Preset for `rlm` mode.
-    ///
-    /// Storage and effect durability are still host-owned choices. Provide the
-    /// effect host, Lashlang artifact store, and attachment store facets with
-    /// the builder setters before calling [`LashCoreBuilder::build`].
+    #[cfg(feature = "rlm")]
     pub fn rlm() -> LashCoreBuilder {
         Self::builder()
             .install_mode(ModePreset::rlm())
@@ -161,6 +163,7 @@ impl LashCore {
             provider: None,
             active_plugins: Vec::new(),
             plugin_factories: Vec::new(),
+            #[cfg(feature = "rlm")]
             rlm_final_answer_format: None,
         }
     }
@@ -290,6 +293,12 @@ impl LashCore {
             self.plugin_factories.as_ref(),
             extra_plugin_factories.into_iter().collect(),
             true,
+            #[cfg(feature = "rlm")]
+            self.lashlang_artifact_store.as_ref(),
+            #[cfg(feature = "rlm")]
+            self.lashlang_execution_sink.clone(),
+            #[cfg(feature = "rlm")]
+            self.env.core.tracing.trace_context.clone(),
         )?;
         let mut config = DurableProcessWorkerConfig::new(
             Arc::new(plugin_host),
@@ -318,16 +327,18 @@ pub struct LashCoreBuilder {
     provider: Option<ProviderHandle>,
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     child_store_factory: Option<Arc<dyn SessionStoreFactory>>,
-    // `RuntimeHostConfig` has no `Default`: the three host-owned durability
+    // `RuntimeHostConfig` has no `Default`: the generic host-owned durability
     // dependencies must be named. They are collected here and resolved in
     // `build()`, which errors if any is unset.
     effect_host: Option<Arc<dyn EffectHost>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
-    lashlang_artifact_store: Option<Arc<dyn lash_core::LashlangArtifactStore>>,
+    #[cfg(feature = "rlm")]
+    lashlang_artifact_store: Option<Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>>,
     trigger_store: Option<Arc<dyn lash_core::TriggerStore>>,
     // Benign core overrides applied on top of the resolved core.
     prompt: Option<PromptLayer>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    #[cfg(feature = "rlm")]
     lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     trace_level: Option<lash_trace::TraceLevel>,
     trace_context: Option<lash_trace::TraceContext>,
@@ -410,12 +421,11 @@ impl LashCoreBuilder {
         self
     }
 
-    /// Set the deployment-level Lashlang artifact store (compiled module
-    /// cache, shared across the session tree). A durable store such as
-    /// `lash_sqlite_store::Store` implements it.
+    /// Set the deployment-level Lashlang artifact store.
+    #[cfg(feature = "rlm")]
     pub fn lashlang_artifact_store(
         mut self,
-        artifact_store: Arc<dyn lash_core::LashlangArtifactStore>,
+        artifact_store: Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>,
     ) -> Self {
         self.lashlang_artifact_store = Some(artifact_store);
         self
@@ -460,6 +470,7 @@ impl LashCoreBuilder {
         self
     }
 
+    #[cfg(feature = "rlm")]
     pub fn lashlang_execution_sink(
         mut self,
         lashlang_execution_sink: Arc<dyn lash_trace::TraceSink>,
@@ -468,6 +479,7 @@ impl LashCoreBuilder {
         self
     }
 
+    #[cfg(feature = "rlm")]
     pub fn lashlang_execution_jsonl_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.lashlang_execution_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(path.into())));
         self
@@ -501,7 +513,7 @@ impl LashCoreBuilder {
         self
     }
 
-    /// Resolve the runtime host config, requiring the three host-owned
+    /// Resolve the runtime host config, requiring the generic host-owned
     /// durability dependencies to have been named.
     fn resolve_runtime_host_config(&mut self) -> Result<RuntimeHostConfig> {
         if let Some(base) = self.runtime_host_config.take() {
@@ -511,15 +523,11 @@ impl LashCoreBuilder {
             .effect_host
             .take()
             .ok_or(EmbedError::MissingEffectHost)?;
-        let lashlang_artifact_store = self
-            .lashlang_artifact_store
-            .take()
-            .ok_or(EmbedError::MissingLashlangArtifactStore)?;
         let attachment_store = self
             .attachment_store
             .take()
             .ok_or(EmbedError::MissingAttachmentStore)?;
-        let core = RuntimeHostConfig::new(effect_host, lashlang_artifact_store, attachment_store);
+        let core = RuntimeHostConfig::new(effect_host, attachment_store);
         Ok(self.apply_core_overrides(core))
     }
 
@@ -531,17 +539,11 @@ impl LashCoreBuilder {
         if let Some(attachment_store) = self.attachment_store.take() {
             core.durability.attachment_store = attachment_store;
         }
-        if let Some(artifact_store) = self.lashlang_artifact_store.take() {
-            core.durability.lashlang_artifact_store = artifact_store;
-        }
         if let Some(prompt) = self.prompt.take() {
             core.prompt.prompt = prompt;
         }
         if let Some(trace_sink) = self.trace_sink.take() {
             core.tracing.trace_sink = Some(trace_sink);
-        }
-        if let Some(lashlang_execution_sink) = self.lashlang_execution_sink.take() {
-            core.tracing.lashlang_execution_sink = Some(lashlang_execution_sink);
         }
         if let Some(trace_level) = self.trace_level.take() {
             core.tracing.trace_level = trace_level;
@@ -582,6 +584,7 @@ impl LashCoreBuilder {
             .attachment_store
             .as_ref()
             .map(|store| store.persistence().durability_tier());
+        #[cfg(feature = "rlm")]
         let artifact_tier = self
             .lashlang_artifact_store
             .as_ref()
@@ -597,7 +600,8 @@ impl LashCoreBuilder {
                     facet: "attachment store",
                 });
             }
-            if artifact_tier == Some(DurabilityTier::Inline) {
+            #[cfg(feature = "rlm")]
+            if artifact_tier == Some(lash_lashlang_runtime::LashlangDurabilityTier::Inline) {
                 return Err(EmbedError::DurableStorePeerRequired {
                     facet: "artifact store",
                 });
@@ -639,6 +643,13 @@ impl LashCoreBuilder {
         if self.modes.is_empty() {
             return Err(EmbedError::NoModesInstalled);
         }
+        let process_lifecycle_available = self.process_work_source.has_registry();
+        #[cfg(feature = "rlm")]
+        let rlm_requires_lashlang = self.modes.values().any(ModePreset::needs_lashlang_runtime);
+        #[cfg(feature = "rlm")]
+        if rlm_requires_lashlang && self.lashlang_artifact_store.is_none() {
+            return Err(EmbedError::MissingLashlangArtifactStore);
+        }
         self.ensure_store_peer_coherence()?;
         let default_mode = self
             .default_mode
@@ -676,7 +687,6 @@ impl LashCoreBuilder {
             core.providers.provider_resolver =
                 Arc::new(lash_core::SingleProviderResolver::new(provider));
         }
-
         let plugin_factories = if let Some(plugin_host) = self.plugin_host {
             plugin_host.factories().to_vec()
         } else {
@@ -697,8 +707,36 @@ impl LashCoreBuilder {
             &default_mode,
             &plugin_factories,
             Vec::new(),
-            self.process_work_source.has_registry(),
+            process_lifecycle_available,
+            #[cfg(feature = "rlm")]
+            self.lashlang_artifact_store.as_ref(),
+            #[cfg(feature = "rlm")]
+            self.lashlang_execution_sink.clone(),
+            #[cfg(feature = "rlm")]
+            core.tracing.trace_context.clone(),
         )?;
+
+        #[cfg(feature = "rlm")]
+        if rlm_requires_lashlang {
+            let artifact_store = self
+                .lashlang_artifact_store
+                .as_ref()
+                .cloned()
+                .ok_or(EmbedError::MissingLashlangArtifactStore)?;
+            let surface = self
+                .modes
+                .values()
+                .find_map(|preset| preset.lashlang_surface(process_lifecycle_available))
+                .unwrap_or_default()
+                .with_plugin_extensions(default_plugin_host.extensions())
+                .map_err(lash_core::PluginError::Registration)?;
+            let engine = lash_lashlang_runtime::LashlangProcessEngine::new(artifact_store, surface)
+                .with_execution_trace(
+                    self.lashlang_execution_sink.clone(),
+                    core.tracing.trace_context.clone(),
+                );
+            core = core.with_process_engine(Arc::new(engine));
+        }
 
         let process_registry = self.process_work_source.process_registry();
 
@@ -760,6 +798,10 @@ impl LashCoreBuilder {
             plugin_factories: Arc::new(plugin_factories),
             provider: self.provider,
             live_replay_store,
+            #[cfg(feature = "rlm")]
+            lashlang_artifact_store: self.lashlang_artifact_store,
+            #[cfg(feature = "rlm")]
+            lashlang_execution_sink: self.lashlang_execution_sink,
             process_work_runner: Arc::new(ProcessWorkRunnerSlot::new(process_work_runner)),
         })
     }
@@ -863,24 +905,28 @@ pub(crate) fn build_plugin_host_for_mode(
     common_factories: &[Arc<dyn PluginFactory>],
     extra_factories: Vec<Arc<dyn PluginFactory>>,
     process_lifecycle: bool,
+    #[cfg(feature = "rlm")] lashlang_artifact_store: Option<
+        &Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>,
+    >,
+    #[cfg(feature = "rlm")] lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    #[cfg(feature = "rlm")] trace_context: lash_trace::TraceContext,
 ) -> Result<PluginHost> {
     let preset = modes
         .get(mode)
         .ok_or_else(|| EmbedError::ModeNotInstalled { mode: mode.clone() })?;
     let mut factories = Vec::with_capacity(1 + common_factories.len() + extra_factories.len());
-    factories.push(Arc::clone(&preset.factory));
+    #[cfg(feature = "rlm")]
+    factories.push(preset.factory(
+        lashlang_artifact_store.cloned(),
+        lashlang_execution_sink,
+        trace_context,
+        process_lifecycle,
+    )?);
+    #[cfg(not(feature = "rlm"))]
+    factories.push(preset.factory(None, None, (), process_lifecycle)?);
     factories.extend(common_factories.iter().cloned());
     factories.extend(extra_factories);
-    let mut plugin_host = PluginHost::new(factories);
-    if process_lifecycle {
-        let abilities = plugin_host
-            .lashlang_abilities()
-            .with_processes()
-            .with_sleep()
-            .with_process_signals();
-        plugin_host = plugin_host.with_lashlang_abilities(abilities);
-    }
-    Ok(plugin_host)
+    Ok(PluginHost::new(factories))
 }
 
 impl PromptLayerSink for LashCoreBuilder {

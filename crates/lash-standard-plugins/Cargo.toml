@@ -16,6 +16,11 @@ categories = ["asynchronous", "api-bindings"]
 [features]
 default = []
 semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
+lashlang = [
+    "lash-plugin-process-controls/lashlang",
+    "lash-plugin-tool-discovery/lashlang",
+    "lash-tools/lashlang",
+]
 
 [dependencies]
 lash-core = { workspace = true }

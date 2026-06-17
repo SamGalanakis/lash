@@ -565,12 +565,12 @@ impl LashRuntime {
             .host
             .core
             .durability
-            .lashlang_artifact_store
+            .process_env_store
             .durability_tier()
             != crate::DurabilityTier::Durable
         {
             return Err(RuntimeError::durable_store_required(
-                crate::DurableStoreFacet::ArtifactStore,
+                crate::DurableStoreFacet::ProcessEnvStore,
             ));
         }
         if let Some(store) = self
@@ -637,10 +637,11 @@ impl LashRuntime {
     /// Stream one logical host turn, following foreground AgentFrame switches
     /// until a terminal outcome is reached.
     ///
-    /// RLM `continue_as` creates a new frame in the same session. Hosts that
-    /// only care about the benchmark/app answer should not need to special-case
-    /// that intermediate outcome; this helper keeps driving the same session
-    /// through each frame's task with the normal runtime turn guards.
+    /// A protocol continuation creates a new frame in the same session. Hosts
+    /// that only care about the benchmark/app answer should not need to
+    /// special-case that intermediate outcome; this helper keeps driving the
+    /// same session through each frame's task with the normal runtime turn
+    /// guards.
     pub async fn stream_turn_with_agent_frames(
         &mut self,
         input: TurnInput,

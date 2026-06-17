@@ -85,6 +85,33 @@ impl lash_core::RuntimeEffectController for RecordingInlineEffectController {
 }
 
 #[derive(Default)]
+struct DurableInMemoryProcessEnvStore {
+    inner: lash_core::InMemoryProcessExecutionEnvStore,
+}
+
+#[async_trait]
+impl lash_core::ProcessExecutionEnvStore for DurableInMemoryProcessEnvStore {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    async fn put_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+        bytes: &[u8],
+    ) -> std::result::Result<(), lash_core::PluginError> {
+        self.inner.put_process_execution_env(env_ref, bytes).await
+    }
+
+    async fn get_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+    ) -> std::result::Result<Option<Vec<u8>>, lash_core::PluginError> {
+        self.inner.get_process_execution_env(env_ref).await
+    }
+}
+
+#[derive(Default)]
 struct DurableNoopEffectHost;
 
 impl lash_core::EffectHost for DurableNoopEffectHost {
@@ -1549,6 +1576,13 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
         .lashlang_artifact_store(artifact_store)
         .trigger_store(trigger_store)
         .process_registry(process_registry)
+        .advanced()
+        .runtime_host_config({
+            let mut config = lash_core::RuntimeHostConfig::in_memory();
+            config.durability.process_env_store =
+                Arc::new(DurableInMemoryProcessEnvStore::default());
+            config
+        })
         .build()?;
     let session = core.session(session_id).open().await?;
     let mut input = TurnInput::text("switch frames");
@@ -1731,7 +1765,10 @@ submit value
     assert_eq!(graph.graph_key, format!("process:{}", running.process_id));
     assert_eq!(graph.entry_kind, "process");
     assert_eq!(graph.entry_name, "lookup");
-    assert_eq!(graph.status, lash_core::TraceLashlangStatus::Running);
+    assert_eq!(
+        graph.status,
+        lash_lashlang_runtime::TraceLashlangStatus::Running
+    );
     assert!(!graph.nodes.is_empty());
     assert!(
         graph_store

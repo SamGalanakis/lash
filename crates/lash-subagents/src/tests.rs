@@ -9,9 +9,14 @@ use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmRespo
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
     LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeHostConfig, RuntimeServices,
-    SessionPolicy, TestLocalProcessRegistry, TraceLashlangGraphStore, TraceRuntimeSubject,
+    SessionPolicy, TestLocalProcessRegistry, TraceRuntimeSubject,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
+use lash_lashlang_runtime::{
+    LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog,
+    LashlangLanguageFeatures, LashlangProcessEngine, LashlangSurface, LashlangSurfaceContribution,
+    TraceLashlangGraphStore,
+};
 use lash_protocol_rlm::RlmTurnInputExt;
 use serde_json::json;
 
@@ -748,13 +753,21 @@ async fn run_seed_probe_inner(
         captured_child_prompt: Arc::clone(&captured_child_prompt),
     });
     let provider = seed_probe_provider(Arc::clone(&state)).into_handle();
+    let execution_sink: Option<Arc<dyn lash_core::TraceSink>> = graph_store
+        .as_ref()
+        .map(|store| Arc::clone(store) as Arc<dyn lash_core::TraceSink>);
+    let trace_context = lash_core::TraceContext::default();
+    let language_features = LashlangLanguageFeatures::default().with_label_annotations();
+    let process_env_store = Arc::new(lash_core::InMemoryProcessExecutionEnvStore::new());
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
-        Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::new(
-            lash_protocol_rlm::RlmProtocolPluginConfig::default().with_lashlang_language_features(
-                lash_protocol_rlm::LashlangLanguageFeatures::default().with_label_annotations(),
-            ),
-        )),
+        Arc::new(
+            lash_protocol_rlm::RlmProtocolPluginFactory::new(
+                lash_protocol_rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_language_features(language_features),
+            )
+            .with_lashlang_execution_trace(execution_sink.clone(), trace_context.clone()),
+        ),
         Arc::new(SubagentsPluginFactory::new(Arc::new(
             CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
                 "default",
@@ -764,13 +777,35 @@ async fn run_seed_probe_inner(
     ];
     let registry = Arc::new(TestLocalProcessRegistry::default());
     let host_plugins = PluginHost::new(factories.clone());
-    let process_abilities = host_plugins
-        .lashlang_abilities()
+    let process_abilities = LashlangAbilities::default()
         .with_processes()
         .with_sleep()
         .with_process_signals();
+    let mut extensions = host_plugins.extensions().clone();
+    extensions.insert(
+        lash_core::PluginExtensionContribution::new(
+            LASHLANG_SURFACE_EXTENSION_ID,
+            LashlangSurfaceContribution::new(
+                process_abilities,
+                language_features,
+                LashlangHostCatalog::new(),
+            ),
+        )
+        .expect("lashlang surface contribution serializes"),
+    );
+    let process_surface = LashlangSurface::new(
+        process_abilities,
+        language_features,
+        LashlangHostCatalog::new(),
+    )
+    .with_plugin_extensions(&extensions)
+    .expect("process lashlang surface should merge plugin extensions");
+    let process_engine = Arc::new(
+        LashlangProcessEngine::in_memory(process_surface)
+            .with_execution_trace(execution_sink, trace_context),
+    );
     let plugins = host_plugins
-        .with_lashlang_abilities(process_abilities)
+        .with_extensions(extensions)
         .build_session("root", None)
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
@@ -778,10 +813,9 @@ async fn run_seed_probe_inner(
             let mut config = RuntimeHostConfig::in_memory();
             config.providers.provider_resolver =
                 Arc::new(lash_core::SingleProviderResolver::new(provider.clone()));
-            if let Some(graph_store) = &graph_store {
-                config.tracing.lashlang_execution_sink =
-                    Some(Arc::clone(graph_store) as Arc<dyn lash_core::TraceSink>);
-            }
+            config = config
+                .with_process_env_store(process_env_store.clone())
+                .with_process_engine(process_engine.clone());
             config
         }),
         Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
@@ -806,10 +840,9 @@ async fn run_seed_probe_inner(
                 let mut config = RuntimeHostConfig::in_memory();
                 config.providers.provider_resolver =
                     Arc::new(lash_core::SingleProviderResolver::new(provider.clone()));
-                if let Some(graph_store) = &graph_store {
-                    config.tracing.lashlang_execution_sink =
-                        Some(Arc::clone(graph_store) as Arc<dyn lash_core::TraceSink>);
-                }
+                config = config
+                    .with_process_env_store(process_env_store)
+                    .with_process_engine(process_engine);
                 config
             },
             Arc::new(lash_core::InMemorySessionStoreFactory::new()),
@@ -883,8 +916,7 @@ async fn subagents_plugin_builds_without_mode_context() {
         session_id: "parent".to_string(),
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
-        lashlang_abilities: Default::default(),
-        lashlang_language_features: Default::default(),
+        extensions: Default::default(),
         plugin_options: Default::default(),
         parent_session_id: None,
     };
@@ -914,8 +946,7 @@ async fn rlm_provider_does_not_require_process_support() {
         session_id: "parent".to_string(),
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
-        lashlang_abilities: Default::default(),
-        lashlang_language_features: Default::default(),
+        extensions: Default::default(),
         plugin_options: Default::default(),
         parent_session_id: None,
     };
@@ -969,7 +1000,7 @@ fn sublashlang_binding_reports_authority_notes() {
             depth: 1,
             max_depth: 5,
         }),
-        lashlang_abilities: Default::default(),
+        extensions: Default::default(),
     };
 
     let contribution =

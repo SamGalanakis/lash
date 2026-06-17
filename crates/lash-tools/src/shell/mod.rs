@@ -27,8 +27,8 @@ use lash_core::{
 };
 
 use lash_tool_support::{
-    StaticToolExecute, StaticToolProvider, object_schema, parse_optional_bool,
-    parse_optional_usize_arg, require_str,
+    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, object_schema,
+    parse_optional_bool, parse_optional_usize_arg, require_str,
 };
 
 use crate::shell::output::{PollOutcome, shell_io_result, timed_out_shell_io_result};
@@ -261,7 +261,7 @@ impl StandardShell {
         match context.processes().start(request).await {
             Ok(summary) => {
                 let mut handle = serde_json::to_value(summary).unwrap_or_else(|_| {
-                    lash_core::lashlang_bridge::process_handle_json(&process_id)
+                    lash_core::RuntimeExecutionContext::process_handle_json(&process_id)
                 });
                 if let Some(object) = handle.as_object_mut() {
                     object.insert("status".to_string(), json!("running"));

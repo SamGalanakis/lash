@@ -234,7 +234,7 @@ mod tests {
             true,
         );
         let rlm_names = tool_names_for_stack(
-            lash_core::testing::test_rlm_protocol_factories(),
+            lash_core::testing::test_code_protocol_factories(),
             None,
             false,
         );

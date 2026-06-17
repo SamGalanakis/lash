@@ -7,6 +7,7 @@ use lash_core::llm::transport::LlmTransportError;
 use lash_core::llm::types::{
     LlmContentBlock, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, ResponseTextMeta,
 };
+use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 
 #[derive(Default)]
@@ -674,7 +675,7 @@ fn durable_input_tool_definition() -> lash_core::ToolDefinition {
             "additionalProperties": true
         }),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
         ["tools"],
         "mock_input_request",
     ))
@@ -739,7 +740,10 @@ fn app_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "object" }),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "app_lookup",
+    ))
 }
 
 struct LongTextTools;
@@ -771,7 +775,10 @@ fn long_text_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "string" }),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["tools"], "app_lookup"))
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "app_lookup",
+    ))
 }
 
 struct SurfacePluginFactory;

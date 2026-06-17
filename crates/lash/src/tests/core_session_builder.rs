@@ -48,21 +48,7 @@ fn mode_presets_require_explicit_store_choice() {
         .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
         .build()
     {
-        Ok(_) => panic!("artifact store must be explicit after effect host is wired"),
-        Err(err) => err,
-    };
-    assert!(matches!(err, EmbedError::MissingLashlangArtifactStore));
-
-    let err = match LashCore::standard()
-        .provider(mock_provider())
-        .model(mock_model_spec())
-        .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            crate::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
-        .build()
-    {
-        Ok(_) => panic!("attachment store must be explicit after artifact store is wired"),
+        Ok(_) => panic!("attachment store must be explicit after effect host is wired"),
         Err(err) => err,
     };
     assert!(matches!(err, EmbedError::MissingAttachmentStore));
@@ -72,7 +58,20 @@ fn mode_presets_require_explicit_store_choice() {
         .model(mock_model_spec())
         .build()
     {
-        Ok(_) => panic!("rlm preset must not install implicit in-memory stores"),
+        Ok(_) => panic!("rlm preset must not install implicit Lashlang artifact stores"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, EmbedError::MissingLashlangArtifactStore));
+
+    let err = match LashCore::rlm()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .lashlang_artifact_store(Arc::new(
+            crate::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .build()
+    {
+        Ok(_) => panic!("rlm preset must not install implicit generic stores"),
         Err(err) => err,
     };
     assert!(matches!(err, EmbedError::MissingEffectHost));
@@ -1285,7 +1284,7 @@ fn expect_build_error(
 
 async fn durable_artifact_store(
     dir: &std::path::Path,
-) -> Arc<dyn lash_core::LashlangArtifactStore> {
+) -> Arc<dyn lash_lashlang_runtime::LashlangArtifactStore> {
     Arc::new(
         lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
             .await
@@ -1332,7 +1331,9 @@ async fn durable_session_store_rejects_ephemeral_artifact_store_at_build() {
         .attachment_store(durable_attachment_store(dir.path()))
         // Explicit ephemeral artifact store; durable attachment clears the first
         // facet so the artifact facet is the one that must fail.
-        .lashlang_artifact_store(Arc::new(lash_core::InMemoryLashlangArtifactStore::new()))
+        .lashlang_artifact_store(Arc::new(
+            lash_lashlang_runtime::InMemoryLashlangArtifactStore::new(),
+        ))
         .build();
     let err = expect_build_error(
         result,

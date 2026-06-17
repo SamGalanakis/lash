@@ -56,6 +56,7 @@ impl RuntimeTurnDriver<'_> {
         &mut self,
         machine: &mut TurnMachine,
         invocation: crate::RuntimeInvocation,
+        language: String,
         code: String,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
@@ -64,7 +65,10 @@ impl RuntimeTurnDriver<'_> {
             machine,
             event_tx,
             cancel,
-            RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::ExecCode { code }),
+            RuntimeEffectEnvelope::new(
+                invocation,
+                RuntimeEffectCommand::ExecCode { language, code },
+            ),
             RuntimeEffectOutcome::into_exec_code,
         )
         .await
@@ -191,6 +195,7 @@ impl RuntimeTurnDriver<'_> {
 
     pub(in crate::runtime) async fn run_exec_code(
         &mut self,
+        language: String,
         code: &str,
         messages: crate::MessageSequence,
         protocol_iteration: usize,
@@ -214,7 +219,7 @@ impl RuntimeTurnDriver<'_> {
                             sandbox_closed = true;
                             continue;
                         };
-                        if sandbox_msg.kind != "lashlang_code" && !relay_tx.is_closed() {
+                        if sandbox_msg.kind != "code" && !relay_tx.is_closed() {
                             let _ = relay_tx
                                 .send(RuntimeStreamEvent::Session(SessionEvent::Message {
                                     text: sandbox_msg.text,
@@ -246,17 +251,14 @@ impl RuntimeTurnDriver<'_> {
         let context = self
             .execution_context(session_event_tx.clone(), chronological_projection)
             .map_err(|err| err.to_string())?
-            .with_turn_event_sender(turn_event_tx.clone())
-            .with_lashlang_execution_trace(
-                self.host.core.tracing.lashlang_execution_sink.clone(),
-                self.host.core.tracing.trace_context.clone(),
-            );
+            .with_turn_event_sender(turn_event_tx.clone());
         let context = context.with_parent_invocation(invocation);
         let result = match code_executor {
             Some(code_executor) => code_executor
                 .execute_code(
                     context,
                     crate::ExecRequest {
+                        language,
                         code: code.to_string(),
                         accept_finish: true,
                     },

@@ -20,14 +20,14 @@ chrono = { workspace = true, features = ["clock"] }
 chrono-tz = { workspace = true }
 croner = { workspace = true }
 dotenvy = "0.15"
-lash = { workspace = true }
+lash = { workspace = true, features = ["rlm"] }
 lashlang = { workspace = true }
-lash-plugin-process-controls = { workspace = true }
+lash-plugin-process-controls = { workspace = true, features = ["lashlang"] }
 lash-provider-openai = { workspace = true }
 lash-restate = { workspace = true }
 lash-sqlite-store = { workspace = true }
 lash-subagents = { workspace = true }
-lash-tools = { path = "../../crates/lash-tools", default-features = false }
+lash-tools = { path = "../../crates/lash-tools", default-features = false, features = ["lashlang"] }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"] }
 restate-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -38,8 +38,9 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
+lash-lashlang-runtime = { workspace = true }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
-lash = { workspace = true, features = ["testing"] }
+lash = { workspace = true, features = ["rlm", "testing"] }
 
 [features]
 default = []

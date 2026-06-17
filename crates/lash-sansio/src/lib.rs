@@ -52,10 +52,10 @@ pub use tool_catalog::{
     ToolCatalogOverride, ToolContractResolver, build_tool_catalog,
 };
 pub use tool_contract::{
-    CompactToolContract, LashSchema, LashlangToolBinding, ModelTool, ResolvedLashlangToolBinding,
-    SchemaProjectionOverride, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
-    ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolId, ToolManifest, ToolOutputContract,
-    ToolRetryPolicy, ToolScheduling, schema_for, validate_tool_input,
+    CompactToolContract, LashSchema, ModelTool, SchemaProjectionOverride, ToolActivation,
+    ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolContract,
+    ToolDefinition, ToolId, ToolManifest, ToolOutputContract, ToolRetryPolicy, ToolScheduling,
+    schema_for, validate_tool_input,
 };
 pub use tool_output::{
     ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolCallOutput, ToolCallRecord,

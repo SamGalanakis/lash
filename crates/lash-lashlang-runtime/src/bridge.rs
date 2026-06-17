@@ -1,12 +1,5 @@
 use lashlang::{ExecutionHostError, Value as LashlangValue};
 
-pub fn process_handle_json(id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "__handle__": "process",
-        "id": id,
-    })
-}
-
 pub fn lashlang_value_to_json(
     value: &LashlangValue,
 ) -> Result<serde_json::Value, ExecutionHostError> {
@@ -15,13 +8,13 @@ pub fn lashlang_value_to_json(
 }
 
 pub fn protocol_tool_reply_to_lashlang_value(
-    reply: crate::ToolInvocationReply,
+    reply: lash_core::ToolInvocationReply,
 ) -> Result<LashlangValue, ExecutionHostError> {
     protocol_tool_output_to_lashlang_value(&reply.output)
 }
 
 pub fn protocol_tool_output_to_lashlang_value(
-    output: &crate::ToolCallOutput,
+    output: &lash_core::ToolCallOutput,
 ) -> Result<LashlangValue, ExecutionHostError> {
     let value = output.value_for_projection();
     if output.is_success() {

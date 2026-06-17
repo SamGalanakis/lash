@@ -193,10 +193,14 @@ pub trait AssistantProseProjectorPlugin: Send + Sync {
     fn project_assistant_prose(&self, text: &str) -> String;
 }
 
-/// Singleton plugin slot that owns the `ProtocolDriverHandle` and
-/// associated preamble (prompt text, tool catalog, sync/async flag)
-/// for this session. Plugin stack construction must install exactly one
-/// implementation.
+/// Singleton kernel extension slot that owns the `ProtocolDriverHandle` and
+/// associated preamble (prompt text, tool catalog, sync/async flag) for this
+/// session.
+///
+/// Core owns the slot and the `HostTurnProtocol` state shape so the turn loop
+/// can persist and resume protocol driver state generically. External protocol
+/// crates own the concrete prompt policy and output parser. Plugin stack
+/// construction must install exactly one implementation.
 pub trait ProtocolDriverPlugin: Send + Sync {
     /// Build the `TurnDriverPreamble` (driver handle + prompt text + tool
     /// surface metadata) for a turn.

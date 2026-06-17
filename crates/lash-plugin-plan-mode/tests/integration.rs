@@ -548,7 +548,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            lashlang_abilities: Default::default(),
+            extensions: Default::default(),
         })
         .expect("tool catalog");
     assert!(

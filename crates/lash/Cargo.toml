@@ -22,12 +22,13 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = { workspace = true }
 lash-core = { workspace = true }
+lash-lashlang-runtime = { workspace = true, optional = true }
 lash-remote-protocol = { workspace = true }
 lash-tool-support = { workspace = true }
-lash-protocol-rlm = { workspace = true }
+lash-protocol-rlm = { workspace = true, optional = true }
 lash-protocol-standard = { workspace = true }
 lash-plugin-tool-output-budget = { workspace = true }
-lash-rlm-types = { workspace = true }
+lash-rlm-types = { workspace = true, optional = true }
 lash-trace = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -36,6 +37,8 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 
 [features]
+default = []
+rlm = ["dep:lash-lashlang-runtime", "dep:lash-protocol-rlm", "dep:lash-rlm-types"]
 # Exposes `lash::testing` (e.g. `TestProvider`) for embedder integration tests.
 testing = ["lash-core/testing"]
 

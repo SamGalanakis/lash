@@ -143,7 +143,7 @@ let core = LashCore::rlm()
     .build()?;</code></pre>
           <aside class="gotcha">
             <strong>Gotcha</strong>
-            <p>A process registry enables Lashlang process/lifecycle abilities for sessions built from the core. It does not make in-flight effects durable by itself; durable replay still comes from the active <code>EffectHost</code> and scoped controller.</p>
+            <p>A process registry enables the generic process admin plane. In RLM, the Lashlang runtime maps that plane into process/lifecycle abilities when the matching artifact store and process engine are configured. The registry does not make in-flight effects durable by itself; durable replay still comes from the active <code>EffectHost</code> and scoped controller.</p>
           </aside>
         </div>
 
@@ -326,7 +326,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p><code>.advanced()</code> is reserved for low-level overrides: a custom <code>PluginHost</code> or a replaceable <code>RuntimeHostConfig</code>. Durable embedding concerns such as effect hosts, process registries, process work drivers, residency policy, and termination policy live on the normal <code>LashCoreBuilder</code>. The registry trait itself lives under <code>lash::process::ProcessRegistry</code>; installing one derives the explicit Lashlang process/lifecycle abilities for sessions built from the environment.</p>
+            <p><code>.advanced()</code> is reserved for low-level overrides: a custom <code>PluginHost</code> or a replaceable <code>RuntimeHostConfig</code>. Durable embedding concerns such as effect hosts, process registries, process work drivers, residency policy, and termination policy live on the normal <code>LashCoreBuilder</code>. The registry trait itself lives under <code>lash::process::ProcessRegistry</code>; RLM/Lashlang turns that generic process plane into authored process/lifecycle abilities when the Lashlang runtime pieces are installed.</p>
           </div>
           <pre data-lang="rust" data-snippet="embedding_advanced#durable-stores-core"><code>let core = LashCore::rlm()
     .provider(provider)

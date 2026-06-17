@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 
 use lash_core::plugin::{PluginError, ToolCatalogContext};
 use lash_core::{ToolAvailability, ToolCatalogContribution, ToolCatalogOverride};
+use lash_lashlang_runtime::tool_lashlang_binding;
 
 pub(crate) fn rlm_tool_catalog(
     ctx: ToolCatalogContext,
@@ -63,7 +64,7 @@ fn catalogue_notes(ctx: &ToolCatalogContext, has_catalogued_tools: bool) -> Vec<
             continue;
         }
         omitted_tool_count += 1;
-        let lashlang_binding = tool.lashlang_binding.executable_for(&tool.name);
+        let lashlang_binding = tool_lashlang_binding(tool).executable_for(&tool.name);
         let module = lashlang_binding.module_path.join(".");
         by_module
             .entry(module)
@@ -110,13 +111,22 @@ fn catalogue_notes(ctx: &ToolCatalogContext, has_catalogued_tools: bool) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::definitions::search_tools_definition;
     use lash_core::{
         ToolAvailabilityConfig, ToolCatalogBuildInput, ToolContract, ToolDefinition,
         ToolScheduling, build_tool_catalog,
     };
     use serde_json::json;
     use std::sync::Arc;
+
+    fn search_tools_definition() -> ToolDefinition {
+        ToolDefinition::raw_named(
+            "search_tools",
+            "Search tools",
+            ToolContract::default_input_schema(),
+            json!({ "type": "array" }),
+        )
+        .with_scheduling(ToolScheduling::Parallel)
+    }
 
     #[test]
     fn rlm_catalog_promotes_searchable_tools() {
@@ -145,7 +155,7 @@ mod tests {
             })),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            lashlang_abilities: Default::default(),
+            extensions: Default::default(),
         })
         .unwrap();
         let surface = build_tool_catalog(ToolCatalogBuildInput {
@@ -171,7 +181,7 @@ mod tests {
             resolve_contract: None,
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
-            lashlang_abilities: Default::default(),
+            extensions: Default::default(),
         })
         .unwrap();
 
@@ -181,5 +191,6 @@ mod tests {
             contribution.overrides[0].availability,
             Some(ToolAvailability::Off)
         );
+        assert!(contribution.tool_list_notes.is_empty());
     }
 }

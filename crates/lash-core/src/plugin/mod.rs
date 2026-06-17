@@ -63,8 +63,8 @@ pub use registrar::{
 };
 pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
-    PluginFactory, PluginSessionContext, PluginSpec, PluginSpecBuilder, PluginSpecFactory,
-    SessionPlugin, SessionReadyContext, StaticPluginFactory,
+    PluginExtensionContribution, PluginExtensions, PluginFactory, PluginSessionContext, PluginSpec,
+    PluginSpecBuilder, PluginSpecFactory, SessionPlugin, SessionReadyContext, StaticPluginFactory,
 };
 pub use runtime_host::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectLlmCompletion,
@@ -92,7 +92,6 @@ pub use tool_catalog::{
     TurnFinalization, TurnPreparation,
 };
 pub(crate) use tool_catalog::{emit_plugin_runtime_events, plugin_runtime_session_events};
-pub(crate) use trigger_registry::{trigger_handle_json, validate_target_process};
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Protocol plugins must be registered by the embedder before calling
     // `PluginHost::build_session`. Unit tests use an in-tree fake to avoid
@@ -199,50 +198,35 @@ mod tests {
         }
     }
 
-    struct TriggerResourcePluginFactory;
+    const TEST_EXTENSION_ID: &str = "test.extension";
 
-    impl PluginFactory for TriggerResourcePluginFactory {
+    struct ExtensionPluginFactory;
+
+    impl PluginFactory for ExtensionPluginFactory {
         fn id(&self) -> &'static str {
-            "trigger_resource"
+            "extension_resource"
         }
 
-        fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
-            let mut resources = lashlang::LashlangHostCatalog::new();
-            resources
-                .add_trigger_source_constructor(
-                    ["clock", "Alarm"],
-                    lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-                        name: "at".into(),
-                        ty: lashlang::TypeExpr::Str,
-                        optional: false,
-                    }]),
-                    lashlang::NamedDataType::object(
-                        "clock.Tick",
-                        vec![lashlang::TypeField {
-                            name: "fired_at".into(),
-                            ty: lashlang::TypeExpr::Str,
-                            optional: false,
-                        }],
-                    )
-                    .expect("valid clock tick type"),
-                )
-                .expect("valid clock trigger source");
-            resources
+        fn extension_contributions(&self) -> Vec<PluginExtensionContribution> {
+            vec![PluginExtensionContribution::from_value(
+                TEST_EXTENSION_ID,
+                json!({ "resource": "clock.alarm" }),
+            )]
         }
 
         fn build(
             &self,
             _ctx: &PluginSessionContext,
         ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-            Ok(Arc::new(TriggerResourcePlugin))
+            Ok(Arc::new(ExtensionPlugin))
         }
     }
 
-    struct TriggerResourcePlugin;
+    struct ExtensionPlugin;
 
-    impl SessionPlugin for TriggerResourcePlugin {
+    impl SessionPlugin for ExtensionPlugin {
         fn id(&self) -> &'static str {
-            "trigger_resource"
+            "extension_resource"
         }
 
         fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
@@ -317,25 +301,22 @@ mod tests {
     }
 
     #[test]
-    fn plugin_host_collects_factory_lashlang_resources() {
-        let host = PluginHost::new(vec![Arc::new(TriggerResourcePluginFactory)]);
+    fn plugin_host_collects_factory_extension_contributions() {
+        let host = PluginHost::new(vec![Arc::new(ExtensionPluginFactory)]);
 
-        assert!(
-            host.lashlang_resources()
-                .resolve_value_constructor(&["clock", "Alarm"])
-                .is_some()
+        assert_eq!(
+            host.extensions().payloads(TEST_EXTENSION_ID),
+            &[json!({ "resource": "clock.alarm" })]
         );
         let session = host.build_session("root", None).expect("session");
-        assert!(
-            session
-                .lashlang_resources()
-                .resolve_value_constructor(&["clock", "Alarm"])
-                .is_some()
+        assert_eq!(
+            session.extensions().payloads(TEST_EXTENSION_ID),
+            &[json!({ "resource": "clock.alarm" })]
         );
     }
 
     #[test]
-    fn declared_triggers_enter_session_lashlang_resources() {
+    fn declared_triggers_enter_session_catalog() {
         struct TriggerEventOnlyFactory;
 
         impl PluginFactory for TriggerEventOnlyFactory {
@@ -363,26 +344,13 @@ mod tests {
                     "Button",
                     "ui.button",
                     "pressed",
-                    lashlang::NamedDataType::object(
-                        "ui.button.Pressed",
-                        vec![lashlang::TypeField {
-                            name: "button".into(),
-                            ty: lashlang::TypeExpr::Str,
-                            optional: false,
-                        }],
-                    )
-                    .expect("valid button payload type"),
+                    crate::LashSchema::any(),
                 ))
             }
         }
 
         let host = PluginHost::new(vec![Arc::new(TriggerEventOnlyFactory)]);
 
-        assert!(
-            host.lashlang_resources()
-                .resolve_trigger_source("ui.button.pressed")
-                .is_none()
-        );
         let session = host.build_session("root", None).expect("session");
         assert!(
             session
@@ -390,18 +358,11 @@ mod tests {
                 .get("Button", "ui.button", "pressed")
                 .is_some()
         );
-        assert!(
-            session
-                .lashlang_resources()
-                .resolve_trigger_source("ui.button.pressed")
-                .is_some()
-        );
-        assert!(
-            session
-                .lashlang_resources()
-                .resolve_value_constructor(&["ui", "button", "pressed"])
-                .is_some()
-        );
+        let event = session
+            .triggers()
+            .get("Button", "ui.button", "pressed")
+            .expect("button event");
+        assert_eq!(event.source_type(), "ui.button.pressed");
     }
 
     #[tokio::test]

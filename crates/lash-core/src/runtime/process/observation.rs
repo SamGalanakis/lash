@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -7,8 +8,8 @@ use crate::plugin::PluginError;
 use super::events::{ProcessAwaitOutput, ProcessEvent};
 use super::model::{
     ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessId, ProcessInput,
-    ProcessLifecycleStatus, ProcessListFilter, ProcessOriginator, ProcessRecord, SessionScope,
-    WaitState,
+    ProcessLifecycleStatus, ProcessListFilter, ProcessOriginator, ProcessRecord,
+    ProcessStatusFilter, SessionScope, WaitState,
 };
 use super::registry::ProcessRegistry;
 use super::time::epoch_ms_from_system_time;
@@ -89,31 +90,28 @@ impl ProcessWorkObserver {
         let session_id = session_id.into();
         let session_scope = SessionScope::new(session_id.clone());
         let entries = self.registry.list_handle_grants(&session_scope).await?;
-        let mut items = Vec::with_capacity(entries.len());
+        let mut items = Vec::new();
+        let mut seen_process_ids = BTreeSet::new();
         for (grant, record) in entries {
-            let events = self
-                .registry
-                .recent_events(&record.id, SNAPSHOT_EVENT_TAIL)
-                .await?
-                .into_iter()
-                .map(ObservedProcessEvent::from)
-                .collect();
-            let descriptor = grant.descriptor;
-            let process = ObservedProcess::from_record(record);
-            let kind = descriptor
-                .kind
-                .clone()
-                .unwrap_or_else(|| stable_kind(&process.input).to_string());
-            let label = typed_label(&process.input)
-                .or_else(|| descriptor.label.clone())
-                .unwrap_or_else(|| kind.clone());
-            items.push(ObservedWorkItem {
-                process,
-                descriptor,
-                events,
-                kind,
-                label,
-            });
+            seen_process_ids.insert(record.id.clone());
+            items.push(self.work_item_from_record(record, grant.descriptor).await?);
+        }
+        let visible_records = self
+            .registry
+            .list_processes(&ProcessListFilter {
+                status: ProcessStatusFilter::Any,
+                ..ProcessListFilter::default()
+            })
+            .await?;
+        for record in visible_records {
+            if seen_process_ids.contains(&record.id)
+                || !process_visible_to_session(&record, &session_id)
+            {
+                continue;
+            }
+            seen_process_ids.insert(record.id.clone());
+            let descriptor = descriptor_from_process_input(record.input.as_ref());
+            items.push(self.work_item_from_record(record, descriptor).await?);
         }
         items.sort_by(|left, right| {
             right
@@ -131,6 +129,35 @@ impl ProcessWorkObserver {
             session_id,
             visible_process_ids,
             items,
+        })
+    }
+
+    async fn work_item_from_record(
+        &self,
+        record: ProcessRecord,
+        descriptor: ProcessHandleDescriptor,
+    ) -> Result<ObservedWorkItem, PluginError> {
+        let events = self
+            .registry
+            .recent_events(&record.id, SNAPSHOT_EVENT_TAIL)
+            .await?
+            .into_iter()
+            .map(ObservedProcessEvent::from)
+            .collect();
+        let process = ObservedProcess::from_record(record);
+        let kind = descriptor
+            .kind
+            .clone()
+            .unwrap_or_else(|| stable_kind(&process.input).to_string());
+        let label = typed_label(&process.input)
+            .or_else(|| descriptor.label.clone())
+            .unwrap_or_else(|| kind.clone());
+        Ok(ObservedWorkItem {
+            process,
+            descriptor,
+            events,
+            kind,
+            label,
         })
     }
 
@@ -222,15 +249,33 @@ fn child_session_id(input: &ProcessInput) -> Option<String> {
     match input {
         ProcessInput::SessionTurn { create_request, .. } => create_request.session_id.clone(),
         ProcessInput::ToolCall { .. }
-        | ProcessInput::LashlangProcess { .. }
+        | ProcessInput::Engine { .. }
         | ProcessInput::External { .. } => None,
     }
+}
+
+fn process_visible_to_session(record: &ProcessRecord, session_id: &str) -> bool {
+    record
+        .wake_target
+        .as_ref()
+        .is_some_and(|scope| scope.session_id == session_id)
+}
+
+fn descriptor_from_process_input(input: &ProcessInput) -> ProcessHandleDescriptor {
+    let kind = stable_kind(input).to_string();
+    let label = typed_label(input).unwrap_or_else(|| kind.clone());
+    ProcessHandleDescriptor::new(Some(kind), Some(label))
 }
 
 fn typed_label(input: &ProcessInput) -> Option<String> {
     match input {
         ProcessInput::ToolCall { call } => Some(call.tool_name.clone()),
-        ProcessInput::LashlangProcess { process_name, .. } => Some(process_name.clone()),
+        ProcessInput::Engine { payload, .. } => payload
+            .get("label")
+            .or_else(|| payload.get("name"))
+            .or_else(|| payload.get("title"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
         ProcessInput::SessionTurn { create_request, .. } => create_request
             .subagent
             .as_ref()
@@ -249,7 +294,7 @@ fn typed_label(input: &ProcessInput) -> Option<String> {
 fn stable_kind(input: &ProcessInput) -> &'static str {
     match input {
         ProcessInput::ToolCall { .. } => "tool",
-        ProcessInput::LashlangProcess { .. } => "lashlang",
+        ProcessInput::Engine { .. } => "engine",
         ProcessInput::SessionTurn { .. } => "session_turn",
         ProcessInput::External { .. } => "external",
     }
@@ -343,6 +388,53 @@ mod tests {
             "process.cancel_requested"
         );
         assert!(snapshot.items[0].events[0].occurred_at_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_for_session_includes_frame_wake_targets_without_handle_grants() {
+        let registry =
+            Arc::new(super::super::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let frame_scope = SessionScope::for_agent_frame("visible", "frame-a");
+        registry
+            .register_process(ProcessRegistration::new(
+                "frame-originated",
+                ProcessInput::External {
+                    metadata: json!({ "label": "Frame originated" }),
+                },
+                ProcessProvenance::session(frame_scope.clone()),
+            ))
+            .await
+            .expect("register frame-originated process");
+        registry
+            .register_process(
+                external_registration("frame-wake-targeted", "Frame wake targeted")
+                    .with_wake_target(Some(frame_scope)),
+            )
+            .await
+            .expect("register frame wake-targeted process");
+        registry
+            .register_process(
+                external_registration("hidden-frame", "Hidden")
+                    .with_wake_target(Some(SessionScope::for_agent_frame("other", "frame-b"))),
+            )
+            .await
+            .expect("register hidden process");
+
+        let snapshot = observer(Arc::clone(&registry))
+            .snapshot_for_session("visible")
+            .await
+            .expect("snapshot");
+        let visible_process_ids = snapshot
+            .visible_process_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            visible_process_ids,
+            std::collections::BTreeSet::from(["frame-wake-targeted".to_string()])
+        );
+        assert_eq!(snapshot.items.len(), 1);
     }
 
     #[tokio::test]
@@ -479,10 +571,6 @@ mod tests {
         let registry =
             Arc::new(super::super::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
         let scope = SessionScope::new("labels");
-        let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
-        let host_requirements_ref =
-            lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new("surface"));
-        let process_ref = lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1);
         let mut child_request = SessionCreateRequest::child_session(
             "labels",
             SessionStartPoint::Empty,
@@ -512,15 +600,15 @@ mod tests {
                 None,
             ),
             (
-                "lashlang",
-                ProcessInput::LashlangProcess {
-                    module_ref,
-                    process_ref,
-                    host_requirements_ref: host_requirements_ref,
-                    process_name: "remember".to_string(),
-                    args: serde_json::Map::new(),
+                "engine",
+                ProcessInput::Engine {
+                    kind: "test-engine".to_string(),
+                    payload: json!({
+                        "label": "remember",
+                        "definition": { "name": "remember" }
+                    }),
                 },
-                "lashlang",
+                "engine",
                 "remember",
                 None,
             ),
@@ -548,7 +636,7 @@ mod tests {
         for (process_id, input, _kind, _label, _child_session_id) in cases {
             let needs_env = matches!(
                 input,
-                ProcessInput::ToolCall { .. } | ProcessInput::LashlangProcess { .. }
+                ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. }
             );
             let mut registration =
                 ProcessRegistration::new(process_id, input, ProcessProvenance::host());
@@ -577,7 +665,7 @@ mod tests {
             .collect::<std::collections::BTreeMap<_, _>>();
 
         assert_eq!(by_id["tool"].label, "shell.run");
-        assert_eq!(by_id["lashlang"].label, "remember");
+        assert_eq!(by_id["engine"].label, "remember");
         assert_eq!(by_id["session"].label, "researcher");
         assert_eq!(
             by_id["session"].process.child_session_id.as_deref(),

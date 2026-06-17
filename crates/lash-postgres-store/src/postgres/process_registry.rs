@@ -278,6 +278,23 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 preserved_process_ids.push(process_id);
             }
         }
+        let rows = sqlx::query(
+            "SELECT process_id, record_json
+             FROM lash_processes
+             ORDER BY process_id ASC
+             FOR UPDATE",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        for row in rows {
+            let record_json: String = row.get(1);
+            let mut record: ProcessRecord =
+                serde_json::from_str(&record_json).map_err(process_decode_error)?;
+            if record.clear_wake_target_for_session(session_id) {
+                save_process_tx(&mut tx, &record).await?;
+            }
+        }
         tx.commit().await.map_err(plugin_sqlx_error)?;
         orphaned_process_ids.sort();
         orphaned_process_ids.dedup();

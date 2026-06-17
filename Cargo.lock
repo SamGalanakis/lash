@@ -64,6 +64,7 @@ dependencies = [
  "croner",
  "dotenvy",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-plugin-process-controls",
  "lash-provider-openai",
  "lash-remote-protocol",
@@ -2541,7 +2542,6 @@ dependencies = [
  "hmac",
  "lash-sansio",
  "lash-trace",
- "lashlang",
  "regex",
  "schemars",
  "serde",
@@ -2606,14 +2606,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-lashlang-runtime"
+version = "0.1.0-alpha.55"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "lash-core",
+ "lash-trace",
+ "lashlang",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "lash-llm-tools"
 version = "0.1.0-alpha.55"
 dependencies = [
  "async-trait",
  "jsonschema",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-tool-support",
- "lashlang",
  "serde_json",
  "tokio",
 ]
@@ -2640,6 +2656,7 @@ dependencies = [
  "clap",
  "dhat",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-llm-tools",
  "lash-plugin-observational-memory",
  "lash-protocol-rlm",
@@ -2665,6 +2682,8 @@ dependencies = [
  "base64 0.22.1",
  "http",
  "lash-core",
+ "lash-lashlang-runtime",
+ "lash-tool-support",
  "rmcp",
  "serde",
  "serde_json",
@@ -2708,6 +2727,7 @@ version = "0.1.0-alpha.55"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-tool-support",
  "serde_json",
  "tokio",
@@ -2719,6 +2739,7 @@ version = "0.1.0-alpha.55"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-tool-support",
  "model2vec-rs",
  "schemars",
@@ -2761,6 +2782,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-plugin-tool-output-budget",
  "lash-protocol-standard",
  "lash-rlm-types",
@@ -2851,7 +2873,6 @@ version = "0.1.0-alpha.55"
 dependencies = [
  "base64 0.22.1",
  "lash-core",
- "lashlang",
  "schemars",
  "serde",
  "serde_json",
@@ -2868,6 +2889,7 @@ dependencies = [
  "http",
  "http-body-util",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-protocol-standard",
  "lash-sqlite-store",
  "lashlang",
@@ -2922,6 +2944,7 @@ version = "0.1.0-alpha.55"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-plugin-tool-output-budget",
  "lash-protocol-rlm",
  "lash-protocol-standard",
@@ -2970,6 +2993,7 @@ dependencies = [
  "async-trait",
  "fff-search",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-tool-support",
  "regex",
  "serde_json",
@@ -3021,6 +3045,7 @@ dependencies = [
  "async-trait",
  "jsonschema",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-llm-tools",
  "lash-protocol-rlm",
  "lash-rlm-types",
@@ -3039,6 +3064,7 @@ dependencies = [
  "chrono",
  "ignore",
  "lash-core",
+ "lash-lashlang-runtime",
  "serde",
  "serde_json",
  "similar",
@@ -3052,8 +3078,8 @@ dependencies = [
  "async-trait",
  "globset",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-tool-support",
- "lashlang",
  "libc",
  "pdf-extract",
  "portable-pty",

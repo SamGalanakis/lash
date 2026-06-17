@@ -148,16 +148,13 @@ impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscription
             target,
             enabled,
         } = value;
-        let target = target
-            .map(lashlang::ProcessDefinitionIdentity::try_from)
-            .transpose()?;
         Ok(Self {
             session_id,
             handle,
             name,
             source_type,
             source_key,
-            target,
+            target: target.map(Into::into),
             enabled,
         })
     }
@@ -181,7 +178,7 @@ impl From<lash_core::TriggerSubscriptionFilter> for RemoteTriggerSubscriptionFil
             name,
             source_type,
             source_key,
-            target: target.map(RemoteProcessDefinitionIdentity::from),
+            target: target.map(Into::into),
             enabled,
         }
     }
@@ -199,7 +196,8 @@ impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
             enabled,
         } = value;
         let lash_core::TriggerTargetSummary {
-            process_name,
+            label,
+            input,
             inputs,
         } = target;
         Self {
@@ -209,7 +207,8 @@ impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
             source_type: source_type.to_string(),
             source,
             target: RemoteTriggerTargetSummary {
-                process_name,
+                label,
+                input: input.try_into().expect("core process input serializes remotely"),
                 inputs: inputs.into(),
             },
             enabled,
@@ -231,7 +230,8 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
             enabled,
         } = value;
         let RemoteTriggerTargetSummary {
-            process_name,
+            label,
+            input,
             inputs,
         } = target;
         Ok(Self {
@@ -241,7 +241,8 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
             source_type: lash_core::TriggerEventType::new(source_type),
             source,
             target: lash_core::TriggerTargetSummary {
-                process_name,
+                label,
+                input: input.try_into()?,
                 inputs: inputs.into(),
             },
             enabled,
@@ -249,60 +250,42 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
     }
 }
 
-impl From<lashlang::ProcessRef> for RemoteLashlangProcessRef {
-    fn from(value: lashlang::ProcessRef) -> Self {
-        let lashlang::ProcessRef { component, pos } = value;
-        Self {
-            component: component.as_str().to_string(),
-            pos,
-        }
-    }
-}
-
-impl From<RemoteLashlangProcessRef> for lashlang::ProcessRef {
-    fn from(value: RemoteLashlangProcessRef) -> Self {
-        let RemoteLashlangProcessRef { component, pos } = value;
-        Self {
-            component: lashlang::ContentHash::new(component),
-            pos,
-        }
-    }
-}
-
-impl From<lashlang::TriggerInputTemplate> for RemoteTriggerInputTemplate {
-    fn from(value: lashlang::TriggerInputTemplate) -> Self {
+impl From<std::collections::BTreeMap<String, lash_core::TriggerInputBinding>>
+    for RemoteTriggerInputTemplate
+{
+    fn from(value: std::collections::BTreeMap<String, lash_core::TriggerInputBinding>) -> Self {
         let entries = value
-            .entries()
+            .iter()
             .map(|(name, binding)| (name.to_string(), RemoteTriggerInputBinding::from(binding)))
             .collect();
         Self { entries }
     }
 }
 
-impl From<RemoteTriggerInputTemplate> for lashlang::TriggerInputTemplate {
+impl From<RemoteTriggerInputTemplate>
+    for std::collections::BTreeMap<String, lash_core::TriggerInputBinding>
+{
     fn from(value: RemoteTriggerInputTemplate) -> Self {
         let RemoteTriggerInputTemplate { entries } = value;
-        lashlang::TriggerInputTemplate::new(
-            entries
-                .into_iter()
-                .map(|(name, binding)| (name, binding.into()))
-                .collect(),
-        )
+        entries
+            .into_iter()
+            .map(|(name, binding)| (name, binding.into()))
+            .collect()
     }
 }
 
-impl From<&lashlang::TriggerInputBinding> for RemoteTriggerInputBinding {
-    fn from(value: &lashlang::TriggerInputBinding) -> Self {
+impl From<&lash_core::TriggerInputBinding> for RemoteTriggerInputBinding {
+    fn from(value: &lash_core::TriggerInputBinding) -> Self {
         match value {
-            lashlang::TriggerInputBinding::Event => Self::Event,
-            lashlang::TriggerInputBinding::Fixed { value } => Self::Fixed {
+            lash_core::TriggerInputBinding::Event => Self::Event,
+            lash_core::TriggerInputBinding::Fixed { value } => Self::Fixed {
                 value: value.clone(),
             },
         }
     }
 }
 
-impl From<RemoteTriggerInputBinding> for lashlang::TriggerInputBinding {
+impl From<RemoteTriggerInputBinding> for lash_core::TriggerInputBinding {
     fn from(value: RemoteTriggerInputBinding) -> Self {
         match value {
             RemoteTriggerInputBinding::Event => Self::Event,
@@ -325,16 +308,12 @@ impl TryFrom<RemoteTriggerSubscriptionDraft> for lash_core::TriggerSubscriptionD
             source_type,
             source_key,
             source,
-            event_ty,
+            payload_schema,
             target,
+            event_types,
             input_template,
+            target_label,
         } = value;
-        let RemoteProcessDefinitionIdentity {
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            process_name,
-        } = target;
         Ok(Self {
             registrant: registrant.into(),
             env_ref: lash_core::ProcessExecutionEnvRef::new(env_ref),
@@ -343,24 +322,11 @@ impl TryFrom<RemoteTriggerSubscriptionDraft> for lash_core::TriggerSubscriptionD
             source_type,
             source_key,
             source,
-            event_ty: decode_remote_json(
-                event_ty,
-                "RemoteTriggerSubscriptionDraft",
-                "event_ty",
-            )?,
-            module_ref: decode_remote_lashlang_ref(
-                module_ref,
-                "RemoteTriggerSubscriptionDraft",
-                "target.module_ref",
-            )?,
-            host_requirements_ref: decode_remote_lashlang_ref(
-                host_requirements_ref,
-                "RemoteTriggerSubscriptionDraft",
-                "target.host_requirements_ref",
-            )?,
-            process_ref: process_ref.into(),
-            process_name,
+            payload_schema: lash_core::LashSchema::new(payload_schema),
+            target: target.try_into()?,
+            event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
+            target_label,
         })
     }
 }
@@ -375,12 +341,11 @@ impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraf
             source_type,
             source_key,
             source,
-            event_ty,
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            process_name,
+            payload_schema,
+            target,
+            event_types,
             input_template,
+            target_label,
         } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -391,14 +356,13 @@ impl From<lash_core::TriggerSubscriptionDraft> for RemoteTriggerSubscriptionDraf
             source_type,
             source_key,
             source,
-            event_ty: serde_json::to_value(event_ty).expect("lashlang type expression serializes"),
-            target: RemoteProcessDefinitionIdentity {
-                module_ref: module_ref.as_str().to_string(),
-                host_requirements_ref: host_requirements_ref.as_str().to_string(),
-                process_ref: process_ref.into(),
-                process_name,
-            },
+            payload_schema: payload_schema.schema,
+            target: target
+                .try_into()
+                .expect("core process input serializes remotely"),
+            event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
+            target_label,
         }
     }
 }
@@ -415,12 +379,11 @@ impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRec
             source_type,
             source_key,
             source,
-            event_ty,
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            process_name,
+            payload_schema,
+            target,
+            event_types,
             input_template,
+            target_label,
             enabled,
             created_at_ms,
             updated_at_ms,
@@ -435,14 +398,13 @@ impl From<lash_core::TriggerSubscriptionRecord> for RemoteTriggerSubscriptionRec
             source_type,
             source_key,
             source,
-            event_ty: serde_json::to_value(event_ty).expect("lashlang type expression serializes"),
-            target: RemoteProcessDefinitionIdentity {
-                module_ref: module_ref.as_str().to_string(),
-                host_requirements_ref: host_requirements_ref.as_str().to_string(),
-                process_ref: process_ref.into(),
-                process_name,
-            },
+            payload_schema: payload_schema.schema,
+            target: target
+                .try_into()
+                .expect("core process input serializes remotely"),
+            event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
+            target_label,
             enabled,
             created_at_ms,
             updated_at_ms,
@@ -465,19 +427,15 @@ impl TryFrom<RemoteTriggerSubscriptionRecord> for lash_core::TriggerSubscription
             source_type,
             source_key,
             source,
-            event_ty,
+            payload_schema,
             target,
+            event_types,
             input_template,
+            target_label,
             enabled,
             created_at_ms,
             updated_at_ms,
         } = value;
-        let RemoteProcessDefinitionIdentity {
-            module_ref,
-            host_requirements_ref,
-            process_ref,
-            process_name,
-        } = target;
         Ok(Self {
             subscription_id,
             registrant: registrant.into(),
@@ -488,24 +446,11 @@ impl TryFrom<RemoteTriggerSubscriptionRecord> for lash_core::TriggerSubscription
             source_type,
             source_key,
             source,
-            event_ty: decode_remote_json(
-                event_ty,
-                "RemoteTriggerSubscriptionRecord",
-                "event_ty",
-            )?,
-            module_ref: decode_remote_lashlang_ref(
-                module_ref,
-                "RemoteTriggerSubscriptionRecord",
-                "target.module_ref",
-            )?,
-            host_requirements_ref: decode_remote_lashlang_ref(
-                host_requirements_ref,
-                "RemoteTriggerSubscriptionRecord",
-                "target.host_requirements_ref",
-            )?,
-            process_ref: process_ref.into(),
-            process_name,
+            payload_schema: lash_core::LashSchema::new(payload_schema),
+            target: target.try_into()?,
+            event_types: event_types.into_iter().map(Into::into).collect(),
             input_template: input_template.into(),
+            target_label,
             enabled,
             created_at_ms,
             updated_at_ms,
@@ -581,12 +526,4 @@ fn decode_remote_json<T: serde::de::DeserializeOwned>(
         type_name,
         message: format!("invalid {field}: {err}"),
     })
-}
-
-fn decode_remote_lashlang_ref<T: serde::de::DeserializeOwned>(
-    value: String,
-    type_name: &'static str,
-    field: &'static str,
-) -> Result<T, RemoteProtocolError> {
-    decode_remote_json(serde_json::Value::String(value), type_name, field)
 }

@@ -66,11 +66,9 @@ impl LashRuntime {
                 ));
             host.core.durability.attachment_store = scoped;
         }
-        let services =
-            services.with_attachment_store(Arc::clone(&host.core.durability.attachment_store));
-        let services = services.with_lashlang_artifact_store(Arc::clone(
-            &host.core.durability.lashlang_artifact_store,
-        ));
+        let services = services
+            .with_attachment_store(Arc::clone(&host.core.durability.attachment_store))
+            .with_process_env_store(Arc::clone(&host.core.durability.process_env_store));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone() {
             // Cold rebuild restores the exact persisted tool catalog, adopting
@@ -256,12 +254,6 @@ impl LashRuntime {
                 "RuntimeEnvironment.plugin_host is required for from_environment".to_string(),
             )
         })?;
-        let plugin_host = plugin_host.as_ref().clone().with_lashlang_abilities(
-            super::builder::lashlang_abilities_for_process_registry(
-                plugin_host.lashlang_abilities(),
-                env.process_registry.is_some(),
-            ),
-        );
         let plugin_session = plugin_host
             .build_session(state.session_id.as_str(), state.plugin_snapshot.as_ref())
             .map_err(|err| SessionError::Protocol(err.to_string()))?;

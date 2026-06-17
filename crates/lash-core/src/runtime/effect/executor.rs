@@ -1056,13 +1056,14 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                     triggers: outcome.triggers,
                 })
             }
-            RuntimeEffectCommand::ExecCode { code } => {
+            RuntimeEffectCommand::ExecCode { language, code } => {
                 let protocol_iteration = runner.machine.protocol_iteration();
                 let messages = runner.machine.message_sequence();
                 Ok(RuntimeEffectOutcome::ExecCode {
                     result: runner
                         .driver
                         .run_exec_code(
+                            language,
                             &code,
                             messages,
                             protocol_iteration,

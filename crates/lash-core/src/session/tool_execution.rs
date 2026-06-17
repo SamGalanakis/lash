@@ -113,7 +113,7 @@ impl RuntimeExecutionContext<'_> {
         index: usize,
         replay: Option<crate::llm::types::ProviderReplayMeta>,
         parent_invocation: Option<crate::RuntimeInvocation>,
-        lashlang_execution_call_site: Option<crate::ToolLashlangExecutionCallSite>,
+        child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
     ) -> CompletedProtocolToolCall {
         let _ = self
             .dispatch
@@ -154,7 +154,7 @@ impl RuntimeExecutionContext<'_> {
                             .cancellation_token(self.cancellation_token.clone())
                             .runtime_process_id(self.runtime_process_id.clone())
                             .parent_invocation(parent_invocation.clone())
-                            .lashlang_execution_call_site(lashlang_execution_call_site.clone());
+                            .child_execution_trace_hook(child_execution_trace_hook.clone());
                     if let Some(process_events) = self.process_event_context.as_ref() {
                         tool_context = tool_context.process_events(
                             process_events.process_id.clone(),
@@ -300,7 +300,7 @@ impl RuntimeExecutionContext<'_> {
         parent_invocation: Option<crate::RuntimeInvocation>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
-        let _phase = self.named_phase("rlm_process.await_handle");
+        let _phase = self.named_phase("process.await_handle");
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 result = self.dispatch.processes.await_process(
@@ -511,16 +511,16 @@ impl RuntimeExecutionContext<'_> {
         reply.with_record(executed.record)
     }
 
-    pub async fn call_tool_with_lashlang_execution_call_site(
+    pub async fn call_tool_with_child_execution_trace_hook(
         &self,
         call_id: String,
         name: String,
         args: serde_json::Value,
         index: usize,
-        call_site: crate::ToolLashlangExecutionCallSite,
+        trace_hook: crate::ToolChildExecutionTraceHook,
     ) -> ToolInvocationReply {
         let executed = self
-            .execute_tool_call(call_id, name, args, index, None, None, Some(call_site))
+            .execute_tool_call(call_id, name, args, index, None, None, Some(trace_hook))
             .await;
         let reply = ToolInvocationReply::from_output(executed.completed.output);
         reply.with_record(executed.record)

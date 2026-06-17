@@ -7,8 +7,8 @@ use super::*;
 /// Result of running stream hooks over a visible chunk. Carries both
 /// the (possibly rewritten) text and an `abort_requested` flag that the
 /// LLM runner uses to break the stream early when a plugin has decided
-/// the response is complete (e.g. the RLM mask detecting a closed
-/// lashlang fence).
+/// the response is complete (for example, a protocol mask detecting a
+/// closed code fence).
 pub(super) struct StreamChunkOutcome {
     pub(super) chunk: String,
     pub(super) reasoning_deltas: Vec<String>,
@@ -263,7 +263,7 @@ impl RuntimeTurnDriver<'_> {
                     }
                     if *stream_state.abort_requested {
                         // A plugin stream hook asked us to end the LLM
-                        // call now (e.g. RLM mask saw a closed fence).
+                        // call now after seeing a complete response block.
                         // Drain events already sitting in the buffer, then
                         // wait briefly for the provider's final completion
                         // event. Some providers attach usage there, and the
@@ -892,7 +892,7 @@ fn stream_correlation_id(
 }
 
 /// Wait up to 2s for a late `Usage` event from the provider after an
-/// RLM stream-mask abort. The usage is returned on the response itself so
+/// a plugin stream-mask abort. The usage is returned on the response itself so
 /// sansio records it synchronously, which makes prompt-budget guidance
 /// available to the next protocol iteration.
 async fn collect_trailing_usage_before_abort<T>(

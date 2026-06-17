@@ -107,7 +107,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
         <div class="section" id="surface-build-and-dispatch">
           <div class="section-header">
             <h2>Surface Build And Dispatch</h2>
-            <p>The runtime owns the concrete bridge between authored Lashlang and host capabilities. A turn builds a <code>RuntimeExecutionContext</code> from the active session, tool dispatch context, plugin session, process services, artifact store, attachment store, and turn metadata. That context produces the <code>LashlangHostEnvironment</code>, links the module, stores the content-addressed artifact, and gives <code>HostBridge</code> the dispatch primitives it needs during VM execution.</p>
+            <p><code>lash-lashlang-runtime</code> owns the concrete bridge between authored Lashlang and host capabilities. A turn builds a <code>RuntimeExecutionContext</code> from the active session, tool dispatch context, plugin session, process services, artifact store, attachment store, and turn metadata. The Lashlang runtime uses that context to produce the <code>LashlangHostEnvironment</code>, link the module, store the content-addressed artifact, and give <code>HostBridge</code> the dispatch primitives it needs during VM execution.</p>
           </div>
           <div class="table">
             <table>
@@ -122,6 +122,25 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             </table>
           </div>
           <p>The linked artifact is the durable identity boundary. Process start validates a captured execution environment before registration: Lash rebuilds a candidate plugin session and Tool Catalog from the process's Process Plugin Options, builds the candidate <code>LashlangHostEnvironment</code>, and checks it satisfies the artifact's Host Requirements. The process worker then reloads <code>ModuleArtifact</code> by <code>module_ref</code>, verifies the recorded <code>host_requirements_ref</code>, rebuilds the environment from the same captured options, checks the requirements again, and compiles the selected <code>process_ref</code> through the process cache. Live callable tool dispatch still uses the rebuilt current tool catalog for that process environment, so the artifact captures the language contract while installed plugins own how snapshot-backed tools and resources are reconstituted. Static <code>@label</code> process-map metadata is part of the artifact hash and recorded surface requirements; changing a title or description changes the module ref but not the compiled execution behavior.</p>
+        </div>
+
+        <div class="section" id="separation-test-coverage">
+          <div class="section-header">
+            <h2>Separation Test Coverage</h2>
+            <p>Lashlang process behavior used to be covered inside core process-runner tests. After separation, the coverage is intentionally split by boundary.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Boundary</th><th>Coverage home</th><th>Representative tests</th></tr></thead>
+              <tbody>
+                <tr><td>Core process primitives and engine dispatch</td><td><code>lash-core</code></td><td><code>crates/lash-core/src/runtime/process/tests.rs</code>, <code>crates/lash-core/tests/integration_boundary.rs</code>; asserts <code>ToolCall</code>, <code>SessionTurn</code>, <code>External</code>, and opaque <code>Engine</code> rows stay kernel-neutral.</td></tr>
+                <tr><td>Lashlang process payloads, artifact refs, host requirements, and engine runtime</td><td><code>lash-lashlang-runtime</code> + facade process tests</td><td><code>crates/lash-lashlang-runtime/src/lib.rs</code> and <code>crates/lash/src/tests/processes_endstate.rs</code>; asserts ref-only <code>Engine { kind: "lashlang" }</code> payloads, process signals, repeated waits, trigger starts, deleted-session recovery, and process outliving origin sessions.</td></tr>
+                <tr><td>RLM foreground execution, prompt/catalog policy, and projected bindings</td><td><code>lash-protocol-rlm</code></td><td><code>executor_reports_disabled_lashlang_abilities_at_link_time</code>, <code>execute_code_stores_process_module_artifact_once</code>, trigger-registry operation tests, stream-mask tests, and RLM catalog-note tests.</td></tr>
+                <tr><td>Workflow/restart serialization</td><td><code>lash-restate</code></td><td><code>restate_controller_schedules_lashlang_process_with_serializable_input</code> and recovery tests assert persisted Lashlang process rows serialize as generic engine payloads and dispatch through the registered engine after restart.</td></tr>
+                <tr><td>Language semantics independent of core</td><td><code>lashlang</code></td><td>Parser, linker, compiler, VM, property, snapshot, and stack-budget tests stay in the language crate and do not import <code>lash-core</code>.</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div class="section" id="images-and-attachments">

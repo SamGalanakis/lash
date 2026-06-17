@@ -11,6 +11,7 @@ use lash_core::{
     ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolDefinition, ToolPrepareContext,
     ToolResult, ToolScheduling, sansio::PendingToolCall,
 };
+use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -77,10 +78,8 @@ impl RlmSubagentToolsProvider {
             .start(request)
             .await
             .map_err(|err| format!("failed to start subagent process: {err}"))?;
-        context.emit_lashlang_child_process_started(
-            prepared.process_id.clone(),
-            Some("subagent".to_string()),
-        );
+        context
+            .emit_child_process_started(prepared.process_id.clone(), Some("subagent".to_string()));
         let output = context
             .processes()
             .await_process(&prepared.process_id)
@@ -297,7 +296,10 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     .with_argument_projection(
         ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
     )
-    .with_lashlang_binding(lash_core::LashlangToolBinding::new(["agents"], "spawn"))
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["agents"],
+        "spawn",
+    ))
     .with_output_from_input_schema("output", None)
 }
 

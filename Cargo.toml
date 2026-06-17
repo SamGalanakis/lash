@@ -5,6 +5,7 @@ members = [
     "crates/lash-trace-viewer",
     "crates/lash-rlm-types",
     "crates/lash-core",
+    "crates/lash-lashlang-runtime",
     "crates/lash-remote-protocol",
     "crates/lash-llm-transport",
     "crates/lash-provider-auth",
@@ -132,6 +133,7 @@ lash-export = { path = "crates/lash-export", version = "=0.1.0-alpha.55" }
 lash-file-index = { path = "crates/lash-file-index", version = "=0.1.0-alpha.55" }
 lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.1.0-alpha.55" }
 lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.1.0-alpha.55" }
+lash-lashlang-runtime = { path = "crates/lash-lashlang-runtime", version = "=0.1.0-alpha.55" }
 lash-postgres-store = { path = "crates/lash-postgres-store", version = "=0.1.0-alpha.55" }
 lash-s3-store = { path = "crates/lash-s3-store", version = "=0.1.0-alpha.55" }
 lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.55" }

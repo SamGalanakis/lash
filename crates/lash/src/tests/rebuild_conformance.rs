@@ -64,12 +64,14 @@ fn fresh_sqlite_session_backend(root: &std::path::Path) -> FreshSqliteSessionBac
 fn fresh_in_memory_backend() -> (
     Arc<dyn lash_core::SessionStoreFactory>,
     Arc<dyn lash_core::ProcessRegistry>,
+    Arc<dyn lash_core::TriggerStore>,
 ) {
     (
         Arc::new(lash_core::InMemorySessionStoreFactory::new())
             as Arc<dyn lash_core::SessionStoreFactory>,
         Arc::new(lash_core::TestLocalProcessRegistry::default())
             as Arc<dyn lash_core::ProcessRegistry>,
+        Arc::new(lash_core::InMemoryTriggerStore::default()) as Arc<dyn lash_core::TriggerStore>,
     )
 }
 
@@ -77,12 +79,13 @@ fn fresh_in_memory_backend() -> (
 fn runtime_rebuild_and_worker_recovery_with_inline_stores() {
     run_async_test_on_stack_budget("runtime-rebuild-inline-stores", || async {
         runtime_rebuild_and_worker_recovery(move || {
-            let (store_factory, registry) = fresh_in_memory_backend();
+            let (store_factory, registry, trigger_store) = fresh_in_memory_backend();
             RuntimeRebuildBackend {
                 process_registry: registry,
                 build_core: Box::new(move |builder| {
                     explicit_ephemeral_facets(builder)
                         .store_factory(Arc::clone(&store_factory))
+                        .trigger_store(Arc::clone(&trigger_store))
                         .build()
                         .expect("build core")
                 }),
@@ -108,7 +111,7 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
                 lash_sqlite_store::Store::open(&artifact_db)
                     .await
                     .expect("open durable artifact store")
-            })) as Arc<dyn lash_core::LashlangArtifactStore>;
+            })) as Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>;
             RuntimeRebuildBackend {
                 process_registry: registry,
                 build_core: Box::new(move |builder| {

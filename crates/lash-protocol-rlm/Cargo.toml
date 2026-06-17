@@ -15,6 +15,7 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 lash-core = { workspace = true }
+lash-lashlang-runtime = { workspace = true }
 lash-plugin-tool-output-budget = { workspace = true }
 lashlang = { workspace = true }
 lash-rlm-types = { workspace = true }

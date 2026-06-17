@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
 use lash_core::testing::conformance::{
-    ReopenableLashlangArtifactStore, ReopenableProcessRegistry, ReopenableRuntimePersistence,
-    ReopenableTriggerStore,
+    ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
     DurabilityTier, ProcessExecutionEnvRef, ProcessOriginator, ProcessRegistry, RuntimePersistence,
@@ -88,7 +87,7 @@ fn trigger_subscription_draft(
     process_name: &str,
 ) -> TriggerSubscriptionDraft {
     let mut inputs = BTreeMap::new();
-    inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+    inputs.insert("event".to_string(), lash_core::TriggerInputBinding::Event);
     let registrant_scope = SessionScope::new(session_id);
     TriggerSubscriptionDraft {
         registrant: ProcessOriginator::session(registrant_scope.clone()),
@@ -98,18 +97,22 @@ fn trigger_subscription_draft(
         source_type: "ui.button.pressed".to_string(),
         source_key: source_key.to_string(),
         source: serde_json::json!({}),
-        event_ty: lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-            name: "button".into(),
-            ty: lashlang::TypeExpr::Str,
-            optional: false,
-        }]),
-        module_ref: lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
-        host_requirements_ref: lashlang::HostRequirementsRef::new(&lashlang::ContentHash::new(
-            "surface",
-        )),
-        process_ref: lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
-        process_name: process_name.to_string(),
-        input_template: lashlang::TriggerInputTemplate::new(inputs),
+        payload_schema: lash_core::LashSchema::new(serde_json::json!({
+            "type": "object",
+            "required": ["button"],
+            "properties": {
+                "button": { "type": "string" }
+            }
+        })),
+        target: lash_core::ProcessInput::Engine {
+            kind: "test-trigger".to_string(),
+            payload: serde_json::json!({
+                "definition": { "process_name": process_name }
+            }),
+        },
+        event_types: Vec::new(),
+        input_template: inputs,
+        target_label: Some(process_name.to_string()),
     }
 }
 
@@ -327,29 +330,4 @@ async fn postgres_trigger_store_skips_legacy_required_surface_ref_when_configure
     .await
     .expect("canonical row count");
     assert_eq!(canonical_rows, 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_lashlang_artifact_store_satisfies_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
-        eprintln!("skipping Postgres artifact conformance: LASH_POSTGRES_DATABASE_URL is not set");
-        return;
-    };
-    let storage = Arc::new(storage);
-    lash_core::testing::conformance::lashlang_artifact_store_reopenable(
-        || {
-            let storage = Arc::clone(&storage);
-            sync_await(async move {
-                reset(&storage).await;
-                let open = Arc::new(storage.lashlang_artifact_store())
-                    as Arc<dyn lashlang::LashlangArtifactStore>;
-                let reopen = Arc::new(storage.lashlang_artifact_store())
-                    as Arc<dyn lashlang::LashlangArtifactStore>;
-                ReopenableLashlangArtifactStore { open, reopen }
-            })
-        },
-        DurabilityTier::Durable,
-    )
-    .await;
 }

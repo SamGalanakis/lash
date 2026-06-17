@@ -9,9 +9,12 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    LashlangToolBinding, Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract,
-    ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract, ToolDefinition,
+    ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
 };
+#[cfg(test)]
+use lash_lashlang_runtime::tool_lashlang_binding;
+use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 
 use super::scenarios::RuntimePerfScenario;
 
@@ -1100,8 +1103,9 @@ mod tests {
         let defs = BenchmarkLargeToolCatalog::build_tool_definitions();
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
+            let binding = tool_lashlang_binding(&def.manifest);
             def.manifest.availability.base == ToolAvailability::Callable
-                && def.manifest.lashlang_binding.module_path == vec!["gmail".to_string()]
+                && binding.module_path == vec!["gmail".to_string()]
                 && !def.contract.input_schema["properties"]
                     .as_object()
                     .expect("object schema")

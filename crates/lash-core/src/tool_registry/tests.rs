@@ -911,22 +911,13 @@ mod tests {
     #[test]
     fn project_tool_catalog_keeps_searchable_tools_with_catalog_metadata() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
-            let tool = crate::ToolDefinition::raw_with_id(
+            crate::ToolDefinition::raw_with_id(
                 format!("tool:{name}"),
                 name,
                 format!("desc for {name}"),
                 crate::ToolDefinition::default_input_schema(),
                 serde_json::json!({}),
-            );
-            match name {
-                "read_file" => {
-                    tool.with_lashlang_binding(crate::LashlangToolBinding::new(["files"], "read"))
-                }
-                "search_tools" => {
-                    tool.with_lashlang_binding(crate::LashlangToolBinding::new(["tools"], "search"))
-                }
-                _ => tool,
-            }
+            )
         }
         let catalog = project_tool_catalog([
             crate::ToolCatalogEntry {
@@ -942,7 +933,7 @@ mod tests {
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
         assert_eq!(
             catalog[0]["contract"]["signature"],
-            serde_json::json!("await files.read({})?")
+            serde_json::json!("read_file({})")
         );
         assert_eq!(catalog[0]["showcased"], serde_json::json!(true));
         assert_eq!(catalog[1]["callable"], serde_json::json!(true));
@@ -958,7 +949,6 @@ mod tests {
                 crate::ToolDefinition::default_input_schema(),
                 serde_json::json!({}),
             )
-            .with_lashlang_binding(crate::LashlangToolBinding::new(["llm"], "query"))
         }
         let catalog = project_tool_catalog([crate::ToolCatalogEntry {
             manifest: dummy_tool("llm_query")
@@ -972,7 +962,7 @@ mod tests {
 
         assert_eq!(
             catalog[0]["contract"]["signature"],
-            serde_json::json!("await llm.query<T = str>({})?")
+            serde_json::json!("llm_query<T = str>({})")
         );
         assert_eq!(catalog[0]["contract"]["returns"], serde_json::json!("T"));
     }
@@ -988,17 +978,11 @@ where
         .map(|entry| {
             let manifest = entry.manifest;
             let availability = entry.availability;
-            let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
-            let call = lashlang_binding.call_path();
             let mut projected = serde_json::json!({
                 "id": manifest.id,
                 "name": manifest.name,
-                "module_path": lashlang_binding.module_path,
-                "operation": lashlang_binding.operation,
-                "authority_type": lashlang_binding.authority_type,
-                "call": call,
                 "description": manifest.description,
-                "aliases": lashlang_binding.aliases,
+                "bindings": manifest.bindings,
                 "availability": availability,
                 "callable": availability.is_callable(),
                 "showcased": availability.is_showcased(),

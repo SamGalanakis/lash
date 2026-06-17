@@ -213,167 +213,6 @@ fn is_default_tool_activation(activation: &ToolActivation) -> bool {
     *activation == ToolActivation::default()
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LashlangToolBinding {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub module_path: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authority_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-}
-
-impl LashlangToolBinding {
-    pub fn new(
-        module_path: impl IntoIterator<Item = impl Into<String>>,
-        operation: impl Into<String>,
-    ) -> Self {
-        Self {
-            module_path: module_path.into_iter().map(Into::into).collect(),
-            operation: Some(operation.into()),
-            authority_type: None,
-            aliases: Vec::new(),
-        }
-    }
-
-    pub fn with_authority_type(mut self, authority_type: impl Into<String>) -> Self {
-        self.authority_type = Some(authority_type.into());
-        self
-    }
-
-    pub fn with_aliases(mut self, aliases: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.aliases = aliases.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn executable_for(&self, tool_name: &str) -> ResolvedLashlangToolBinding {
-        let module_path = if self.module_path.is_empty() {
-            vec!["tools".to_string()]
-        } else {
-            self.module_path.clone()
-        };
-        let operation = self
-            .operation
-            .as_deref()
-            .filter(|operation| !operation.trim().is_empty())
-            .unwrap_or(tool_name)
-            .to_string();
-        let authority_type = self
-            .authority_type
-            .as_deref()
-            .filter(|authority_type| !authority_type.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| default_authority_type(&module_path));
-        ResolvedLashlangToolBinding {
-            module_path,
-            operation,
-            authority_type,
-            aliases: self.aliases.clone(),
-        }
-    }
-
-    /// Resolve a remote-callable surface without applying local prompt fallbacks.
-    ///
-    /// Remote hosts must provide an explicit module path and operation so
-    /// serialized tool grants have one canonical call path. This deliberately
-    /// rejects the prompt-only conveniences used by [`Self::executable_for`],
-    /// where an empty module path falls back to `tools` and an empty operation
-    /// falls back to the flat tool name.
-    pub fn required_for_remote(
-        manifest: &ToolManifest,
-    ) -> Result<ResolvedLashlangToolBinding, String> {
-        manifest
-            .lashlang_binding
-            .required_executable_for_remote(&manifest.name)
-    }
-
-    pub fn required_executable_for_remote(
-        &self,
-        tool_name: &str,
-    ) -> Result<ResolvedLashlangToolBinding, String> {
-        if self.module_path.is_empty() {
-            return Err(format!(
-                "tool `{tool_name}` is missing an explicit remote module path"
-            ));
-        }
-        if let Some(empty) = self.module_path.iter().find(|part| part.trim().is_empty()) {
-            return Err(format!(
-                "tool `{tool_name}` has an empty remote module path segment `{empty}`"
-            ));
-        }
-        let Some(operation) = self
-            .operation
-            .as_deref()
-            .map(str::trim)
-            .filter(|operation| !operation.is_empty())
-        else {
-            return Err(format!(
-                "tool `{tool_name}` is missing an explicit remote operation"
-            ));
-        };
-        let authority_type = self
-            .authority_type
-            .as_deref()
-            .filter(|authority_type| !authority_type.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| default_authority_type(&self.module_path));
-        Ok(ResolvedLashlangToolBinding {
-            module_path: self.module_path.clone(),
-            operation: operation.to_string(),
-            authority_type,
-            aliases: self.aliases.clone(),
-        })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.module_path.is_empty()
-            && self.operation.is_none()
-            && self.authority_type.is_none()
-            && self.aliases.is_empty()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedLashlangToolBinding {
-    pub module_path: Vec<String>,
-    pub operation: String,
-    pub authority_type: String,
-    pub aliases: Vec<String>,
-}
-
-impl ResolvedLashlangToolBinding {
-    pub fn module_path_string(&self) -> String {
-        self.module_path.join(".")
-    }
-
-    pub fn call_path(&self) -> String {
-        format!("{}.{}", self.module_path_string(), self.operation)
-    }
-}
-
-fn default_authority_type(module_path: &[String]) -> String {
-    let base = module_path
-        .first()
-        .map(String::as_str)
-        .unwrap_or("tools")
-        .trim_matches('_');
-    let mut out = String::new();
-    for part in base.split('_').filter(|part| !part.is_empty()) {
-        let mut chars = part.chars();
-        if let Some(first) = chars.next() {
-            out.extend(first.to_uppercase());
-            out.extend(chars);
-        }
-    }
-    if out.is_empty() {
-        "Tools".to_string()
-    } else {
-        out
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolOutputContract {
@@ -540,8 +379,8 @@ pub struct ToolManifest {
     pub activation: ToolActivation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_override: Option<ToolAvailability>,
-    #[serde(default, skip_serializing_if = "LashlangToolBinding::is_empty")]
-    pub lashlang_binding: LashlangToolBinding,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bindings: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(
         default,
         skip_serializing_if = "is_default_tool_argument_projection_policy"
@@ -614,9 +453,8 @@ impl ToolContract {
         manifest: &ToolManifest,
         example_limit: usize,
     ) -> CompactToolContract {
-        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
         CompactToolContract {
-            name: lashlang_binding.call_path(),
+            name: manifest.name.clone(),
             signature: self.input_signature(manifest),
             returns: self.output_summary(),
             parameters: self.parameter_metadata(),
@@ -627,7 +465,6 @@ impl ToolContract {
     }
 
     pub fn input_signature(&self, manifest: &ToolManifest) -> String {
-        let lashlang_binding = manifest.lashlang_binding.executable_for(&manifest.name);
         let params = self
             .parameter_docs()
             .into_iter()
@@ -639,8 +476,8 @@ impl ToolContract {
             format!("{{ {} }}", params.join(", "))
         };
         format!(
-            "await {}{}({})?",
-            lashlang_binding.call_path(),
+            "{}{}({})",
+            manifest.name,
             self.output_contract
                 .type_parameter_suffix()
                 .unwrap_or_default(),
@@ -885,11 +722,6 @@ impl ToolDefinition {
 
     pub fn with_activation(mut self, activation: ToolActivation) -> Self {
         self.manifest.activation = activation;
-        self
-    }
-
-    pub fn with_lashlang_binding(mut self, lashlang_binding: LashlangToolBinding) -> Self {
-        self.manifest.lashlang_binding = lashlang_binding;
         self
     }
 

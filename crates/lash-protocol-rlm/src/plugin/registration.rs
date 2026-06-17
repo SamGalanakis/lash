@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use lash_core::plugin::{PluginError, PluginRegistrar};
+use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface};
 
 use super::RlmProtocolPluginConfig;
 use super::budget_warning::BudgetUsageObserver;
@@ -10,6 +11,7 @@ use super::protocol_session::RlmProtocolSession;
 use super::runtime_state::{RlmCodeExecutor, RlmRuntimeState};
 use super::tool_args::normalize_projected_tool_args;
 use crate::driver::SharedPromptUsage;
+use crate::executor::RlmLashlangExecutionTraceConfig;
 use crate::projection::{
     ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectionExtension, rlm_history_projection,
 };
@@ -19,11 +21,20 @@ pub(super) fn register_rlm_protocol_plugin(
     reg: &mut PluginRegistrar,
     config: RlmProtocolPluginConfig,
     projection_resolver: Arc<dyn ProjectionResolver>,
+    artifact_store: Arc<dyn LashlangArtifactStore>,
+    lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
+    lashlang_surface: LashlangSurface,
     last_prompt_usage: SharedPromptUsage,
 ) -> Result<(), PluginError> {
     let runtime_state = Arc::new(
-        RlmRuntimeState::new(config.clone(), projection_resolver)
-            .map_err(|err| PluginError::Session(err.to_string()))?,
+        RlmRuntimeState::new(
+            config.clone(),
+            projection_resolver,
+            Arc::clone(&artifact_store),
+            lashlang_surface.clone(),
+            lashlang_execution_trace_config,
+        )
+        .map_err(|err| PluginError::Session(err.to_string()))?,
     );
     let code_executor = Arc::new(RlmCodeExecutor::new(Arc::clone(&runtime_state)));
     let protocol_session = Arc::new(RlmProtocolSession::new(
@@ -36,10 +47,13 @@ pub(super) fn register_rlm_protocol_plugin(
         .assistant_prose_projector(Arc::new(RlmAssistantProseProjector))?;
     reg.protocol().protocol_driver(Arc::new(RlmProtocolDriver {
         config,
+        lashlang_surface,
         last_prompt_usage: Arc::clone(&last_prompt_usage),
     }))?;
     reg.tools()
         .provider(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
+    reg.tool_catalog()
+        .contribute(Arc::new(crate::tool_catalog::rlm_tool_catalog));
     reg.tool_calls().before(Arc::new(|ctx| {
         Box::pin(async move { normalize_projected_tool_args(ctx) })
     }));

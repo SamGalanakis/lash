@@ -32,6 +32,7 @@ pub(crate) fn args_with_limit(args: &Value, limit: usize) -> Value {
     Value::Object(args)
 }
 
+#[cfg(feature = "lashlang")]
 pub(crate) fn module_filter(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::String(module)) => module
@@ -74,6 +75,7 @@ pub(crate) fn round_score(score: f64) -> f64 {
     (score * 100.0).round() / 100.0
 }
 
+#[cfg(feature = "lashlang")]
 pub(crate) fn string_vec(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(items)) => items

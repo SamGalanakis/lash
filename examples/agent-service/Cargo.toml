@@ -13,7 +13,7 @@ chrono = { workspace = true }
 dotenvy = "0.15"
 lash-restate = { workspace = true, optional = true }
 lash-sqlite-store = { workspace = true }
-lash = { workspace = true }
+lash = { workspace = true, features = ["rlm"] }
 lash-provider-openai = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"], optional = true }
 restate-sdk = { workspace = true, optional = true }

@@ -642,6 +642,7 @@ fn replay_conformance_exec_envelope(effect_id: &'static str) -> RuntimeEffectEnv
             format!("effect-conformance:effect-conformance-turn:{effect_id}"),
         ),
         RuntimeEffectCommand::ExecCode {
+            language: "code".to_string(),
             code: format!("emit {effect_id}"),
         },
     )

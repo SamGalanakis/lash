@@ -18,7 +18,7 @@ mod plugin_binding;
 mod prompt_layer;
 mod session;
 mod support;
-#[cfg(test)]
+#[cfg(all(test, feature = "rlm"))]
 mod tests;
 pub mod turn;
 pub mod usage;
@@ -81,7 +81,7 @@ pub mod observe {
 /// [`LashCore::triggers`] and [`LashSession::triggers`].
 pub mod triggers {
     pub use lash_core::{
-        TriggerEmitReport, TriggerEvent, TriggerEventType, TriggerOccurrenceRequest,
+        LashSchema, TriggerEmitReport, TriggerEvent, TriggerEventType, TriggerOccurrenceRequest,
         TriggerRegistration, TriggerSubscriptionFilter, TriggerTargetSummary,
         empty_trigger_source_key,
     };
@@ -89,13 +89,15 @@ pub mod triggers {
 
 pub mod tools {
     pub use lash_core::{
-        CancelHint, LashlangToolBinding, PendingCompletion, PreparedToolCall, TimeoutBehavior,
-        ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
-        ToolCall, ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
+        CancelHint, PendingCompletion, PreparedToolCall, TimeoutBehavior, ToolActivation,
+        ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCall,
+        ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
         ToolDurableEffects, ToolManifest, ToolOutputContract, ToolPrepareCall, ToolPrepareContext,
         ToolProvider, ToolResult, ToolScheduling, ToolSourceHandle, ToolTriggerClient,
     };
     pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
+    #[cfg(feature = "rlm")]
+    pub use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
     /// `resolve_contract`: supply the [`ToolDefinition`]s once and an
     /// [`StaticToolExecute`] for behavior.
@@ -134,7 +136,8 @@ pub mod persistence {
         SessionReadScope, SessionReadView, SessionRelation, StoreError, TokenLedgerEntry,
         VacuumReport,
     };
-    pub use lash_core::{InMemoryLashlangArtifactStore, LashlangArtifactStore};
+    #[cfg(feature = "rlm")]
+    pub use lash_lashlang_runtime::{InMemoryLashlangArtifactStore, LashlangArtifactStore};
 }
 
 pub mod plugins {
@@ -145,8 +148,8 @@ pub mod plugins {
         AssistantResponseTransform, AssistantStreamHook, AssistantStreamHookContext,
         AssistantStreamTransform, BeforeToolCallHook, BeforeTurnHook, CheckpointHook,
         CheckpointHookContext, CompactionContext, ContextCompaction, ContextCompactor,
-        ContextError, PluginSpecBuilder, StaticPluginFactory, ToolCallHookContext,
-        ToolResultHookContext,
+        ContextError, PluginExtensionContribution, PluginSpecBuilder, StaticPluginFactory,
+        ToolCallHookContext, ToolResultHookContext,
     };
     pub use lash_core::{
         PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
@@ -161,11 +164,21 @@ pub mod plugins {
 }
 
 pub mod modes {
+    #[cfg(feature = "rlm")]
     pub use crate::mode::{RlmSessionBuilderExt, RlmTurnBuilderExt};
+    #[cfg(feature = "rlm")]
+    pub use lash_lashlang_runtime::{
+        LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog,
+        LashlangHostEnvironment, LashlangLanguageFeatures, LashlangProcessEngine,
+        LashlangProcessInput, LashlangSurface, LashlangSurfaceContribution, LashlangToolBinding,
+        ToolDefinitionLashlangExt, lashlang_process_event_types,
+        lashlang_process_signal_event_types,
+    };
+    #[cfg(feature = "rlm")]
     pub use lash_protocol_rlm::{
-        LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment, LashlangLanguageFeatures,
         NamedDataType, RlmProtocolPluginConfig, TypeExpr, TypeField, format_type_expr,
     };
+    #[cfg(feature = "rlm")]
     pub use lash_rlm_types::RlmFinalAnswerFormat;
 }
 
@@ -177,8 +190,7 @@ pub mod remote {
     pub use lash_remote_protocol::{
         REMOTE_PROTOCOL_VERSION, RemoteAssistantOutput, RemoteAssistantOutputState,
         RemoteAttachmentRef, RemoteCausalRef, RemoteDiagnostic, RemoteExecutionSummary,
-        RemoteGenerationOptions, RemoteInputItem, RemoteLashlangProcessRef,
-        RemoteLashlangToolBinding, RemoteLiveReplayGap, RemoteLiveReplayGapReason,
+        RemoteGenerationOptions, RemoteInputItem, RemoteLiveReplayGap, RemoteLiveReplayGapReason,
         RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage, RemoteLlmOutputPart,
         RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestMetadata, RemoteLlmResponse,
         RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec,
@@ -238,7 +250,11 @@ pub mod process {
         ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
         ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
         ProcessWorkObserver, ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, SessionScope,
-        SessionScopeId, lashlang_process_event_types,
+        SessionScopeId,
+    };
+    #[cfg(feature = "rlm")]
+    pub use lash_lashlang_runtime::{
+        LashlangProcessInput, lashlang_process_event_types, lashlang_process_signal_event_types,
     };
 }
 
@@ -279,21 +295,24 @@ pub mod prompt {
 pub mod tracing {
     pub use lash_core::{
         JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceError,
-        TraceEvent, TraceLabelMetadata, TraceLashlangChildExecution, TraceLashlangEdgeSelection,
-        TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangGraph,
-        TraceLashlangGraphChildLink, TraceLashlangGraphEdge, TraceLashlangGraphNode,
-        TraceLashlangGraphStore, TraceLashlangMap, TraceLashlangMapEdge, TraceLashlangMapNode,
-        TraceLashlangNodeStatus, TraceLashlangStatus, TraceLlmMessage, TraceLlmRequest,
-        TraceLlmResponse, TracePromptComponent, TraceProviderStreamEvent, TraceRecord,
-        TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSinkError,
-        TraceTokenUsage, TraceToolSpec,
+        TraceEvent, TraceLabelMetadata, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse,
+        TracePromptComponent, TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope,
+        TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSinkError, TraceTokenUsage,
+        TraceToolSpec,
+    };
+    #[cfg(feature = "rlm")]
+    pub use lash_lashlang_runtime::{
+        TraceLashlangChildExecution, TraceLashlangEdgeSelection, TraceLashlangExecutionEvent,
+        TraceLashlangExecutionIdentity, TraceLashlangGraph, TraceLashlangGraphChildLink,
+        TraceLashlangGraphEdge, TraceLashlangGraphNode, TraceLashlangGraphStore, TraceLashlangMap,
+        TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangNodeStatus, TraceLashlangStatus,
     };
     pub use lash_trace::{StderrTraceSink, TeeTraceSink, TraceContext, TraceLevel, TraceSink};
 }
 
 /// Test helpers for embedders. Enable with `lash = { ..., features = ["testing"] }`
 /// to script model responses in integration tests without a live provider.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(any(test, feature = "testing"), feature = "rlm"))]
 pub mod testing;
 
 pub mod provider {

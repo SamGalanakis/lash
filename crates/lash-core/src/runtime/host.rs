@@ -1,9 +1,10 @@
-use std::sync::Arc;
-use std::sync::Mutex;
-
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
+use std::sync::Arc;
 
-use super::process::ProcessRegistry;
+use super::process::{
+    InMemoryProcessExecutionEnvStore, ProcessEngineRegistry, ProcessExecutionEnvStore,
+    ProcessRegistry,
+};
 use super::{
     EffectHost, InlineEffectHost, ProcessWorkPoke, QueuedWorkPoke, SessionStoreFactory,
     TerminationPolicy,
@@ -13,6 +14,7 @@ use super::{
 #[derive(Clone)]
 pub struct RuntimeHostConfig {
     pub durability: RuntimeDurabilityConfig,
+    pub process_engines: ProcessEngineRegistry,
     pub providers: RuntimeProviderConfig,
     pub prompt: RuntimePromptConfig,
     pub control: RuntimeControlConfig,
@@ -22,8 +24,7 @@ pub struct RuntimeHostConfig {
 #[derive(Clone)]
 pub struct RuntimeDurabilityConfig {
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
-    pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
-    pub lashlang_process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
+    pub process_env_store: Arc<dyn ProcessExecutionEnvStore>,
 }
 
 #[derive(Clone)]
@@ -46,7 +47,6 @@ pub struct RuntimeControlConfig {
 #[derive(Clone)]
 pub struct RuntimeTracingConfig {
     pub trace_sink: Option<Arc<dyn TraceSink>>,
-    pub lashlang_execution_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
 }
@@ -55,22 +55,20 @@ impl RuntimeHostConfig {
     /// Construct a config with the three host-owned dependencies named
     /// explicitly.
     ///
-    /// There is intentionally no `Default`. The effect host, Lashlang
-    /// artifact store, and attachment store decide a runtime's durability, so
-    /// hosts must choose them rather than silently inheriting in-memory
-    /// implementations. Use [`RuntimeHostConfig::in_memory`] to opt into the
-    /// in-process / in-memory versions by name.
+    /// There is intentionally no `Default`. The effect host and stores decide
+    /// a runtime's durability, so hosts must choose them rather than silently
+    /// inheriting in-memory implementations. Use [`RuntimeHostConfig::in_memory`]
+    /// to opt into the in-process / in-memory versions by name.
     pub fn new(
         effect_host: Arc<dyn EffectHost>,
-        lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
         Self {
             durability: RuntimeDurabilityConfig {
                 attachment_store,
-                lashlang_artifact_store,
-                lashlang_process_cache: Arc::new(Mutex::new(lashlang::CompiledProcessCache::new())),
+                process_env_store: Arc::new(InMemoryProcessExecutionEnvStore::new()),
             },
+            process_engines: ProcessEngineRegistry::new(),
             providers: RuntimeProviderConfig {
                 provider_resolver: Arc::new(crate::EmptyProviderResolver),
             },
@@ -84,7 +82,6 @@ impl RuntimeHostConfig {
             },
             tracing: RuntimeTracingConfig {
                 trace_sink: None,
-                lashlang_execution_sink: None,
                 trace_level: TraceLevel::Standard,
                 trace_context: TraceContext::default(),
             },
@@ -92,17 +89,23 @@ impl RuntimeHostConfig {
     }
 
     /// Explicit in-process / in-memory configuration: an
-    /// [`InlineEffectHost`], the process-global in-memory Lashlang
-    /// artifact store, and an in-memory attachment store.
+    /// [`InlineEffectHost`] and in-memory stores.
     ///
     /// Convenient for tests and local experiments; not durable. Named so the
     /// choice is never silent.
     pub fn in_memory() -> Self {
         Self::new(
             Arc::new(InlineEffectHost::default()),
-            lashlang::global_in_memory_lashlang_artifact_store(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
         )
+    }
+
+    pub fn with_process_env_store(
+        mut self,
+        process_env_store: Arc<dyn ProcessExecutionEnvStore>,
+    ) -> Self {
+        self.durability.process_env_store = process_env_store;
+        self
     }
 
     pub fn with_process_cancel_ability(
@@ -110,6 +113,11 @@ impl RuntimeHostConfig {
         process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     ) -> Self {
         self.control.process_cancel_ability = process_cancel_ability;
+        self
+    }
+
+    pub fn with_process_engine(mut self, engine: Arc<dyn crate::ProcessEngine>) -> Self {
+        self.process_engines = self.process_engines.with_engine(engine);
         self
     }
 }

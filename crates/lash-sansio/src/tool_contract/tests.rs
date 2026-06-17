@@ -301,7 +301,7 @@ mod tests {
         let contract = tool.compact_contract();
         assert_eq!(
             contract.signature,
-            "await tools.search_docs({ query: str, limit?: int <= 10 = 5 })?"
+            "search_docs({ query: str, limit?: int <= 10 = 5 })"
         );
         assert_eq!(
             contract.returns,
@@ -330,7 +330,7 @@ mod tests {
 
         let docs = ToolDefinition::format_tool_docs(&[tool]);
         assert!(docs.contains(
-            "### await tools.search_docs({ query: str, limit?: int <= 10 = 5 })? -> record{matches: list[str], next_page?: str | null}"
+            "### search_docs({ query: str, limit?: int <= 10 = 5 }) -> record{matches: list[str], next_page?: str | null}"
         ));
         assert!(!docs.contains("Returns:"));
         assert!(docs.contains("Parameters:\n- `query: str`\n- `limit?: int <= 10 = 5`"));
@@ -424,20 +424,19 @@ mod tests {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_lashlang_binding(LashlangToolBinding::new(["agents"], "spawn"))
         .with_output_from_input_schema("output", None);
 
         let contract = tool.compact_contract();
         assert_eq!(
             contract.signature,
-            "await agents.spawn<T = any>({ output?: TypeSpec<T> })?"
+            "spawn_agent<T = any>({ output?: TypeSpec<T> })"
         );
         assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
         assert_eq!(contract.render_returns(), "");
         assert_eq!(
             ToolDefinition::format_tool_docs(&[tool]),
-            "### await agents.spawn<T = any>({ output?: TypeSpec<T> })? -> T\nRun a subagent\nParameters:\n- `output?: TypeSpec<T>`"
+            "### spawn_agent<T = any>({ output?: TypeSpec<T> }) -> T\nRun a subagent\nParameters:\n- `output?: TypeSpec<T>`"
         );
     }
 
@@ -457,13 +456,12 @@ mod tests {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_lashlang_binding(LashlangToolBinding::new(["llm"], "query"))
         .with_output_from_input_schema("output", Some(serde_json::json!({ "type": "string" })));
 
         let contract = tool.compact_contract();
         assert_eq!(
             contract.signature,
-            "await llm.query<T = str>({ task: str, output?: TypeSpec<T> })?"
+            "llm_query<T = str>({ task: str, output?: TypeSpec<T> })"
         );
         assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
@@ -597,8 +595,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&contract).unwrap(),
             serde_json::json!({
-                "name": "tools.mcp__appworld__spotify_search_songs",
-                "signature": "await tools.mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null })?",
+                "name": "mcp__appworld__spotify_search_songs",
+                "signature": "mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null })",
                 "returns": "record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}",
                 "parameters": [
                     {
@@ -741,11 +739,11 @@ mod tests {
 
         assert_eq!(
             contract.render_markdown(),
-            "### await tools.mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null })? -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
+            "### mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null }) -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
         );
         assert_eq!(
             contract.render_signature(),
-            "await tools.mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null })? -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
+            "mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null }) -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
         );
         assert_eq!(
             contract.render_returns(),
@@ -841,8 +839,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&contract).unwrap(),
             serde_json::json!({
-                "name": "tools.mcp__appworld__spotify_show_album_library",
-                "signature": "await tools.mcp__appworld__spotify_show_album_library({ access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5 })?",
+                "name": "mcp__appworld__spotify_show_album_library",
+                "signature": "mcp__appworld__spotify_show_album_library({ access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5 })",
                 "returns": "record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}",
                 "parameters": [
                     {
@@ -930,23 +928,23 @@ mod tests {
         );
         assert_eq!(
             contract.render_markdown(),
-            "### await tools.mcp__appworld__spotify_show_album_library({ access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5 })? -> record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}\n[MCP appworld] Search or show a list of albums in your album library.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `page_index?: int >= 0 = 0` — The index of the page to return.\n- `page_limit?: int >= 1 <= 20 = 5` — The maximum number of results to return per page.\nReturn fields:\n- `response: list[record]` — Albums in the user's library.\n- `response[].added_at: str | null` — When the album was added to the library.\n- `response[].album_id: int`\n- `response[].genre: str min_len 1` — Album genre.\n- `response[].song_ids[]: int`\n- `response[].title: str min_len 1`\n- `response.message: str` — Failure or status message.\nExamples: show album library"
+            "### mcp__appworld__spotify_show_album_library({ access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5 }) -> record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}\n[MCP appworld] Search or show a list of albums in your album library.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `page_index?: int >= 0 = 0` — The index of the page to return.\n- `page_limit?: int >= 1 <= 20 = 5` — The maximum number of results to return per page.\nReturn fields:\n- `response: list[record]` — Albums in the user's library.\n- `response[].added_at: str | null` — When the album was added to the library.\n- `response[].album_id: int`\n- `response[].genre: str min_len 1` — Album genre.\n- `response[].song_ids[]: int`\n- `response[].title: str min_len 1`\n- `response.message: str` — Failure or status message.\nExamples: show album library"
         );
     }
 
     #[test]
-    fn tool_lashlang_binding_serde_defaults_are_empty() {
+    fn tool_bindings_serde_defaults_are_empty() {
         let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
             "id": "tool:read_file",
             "name": "read_file",
             "description": "Read a file"
         }))
         .unwrap();
-        assert!(tool.manifest.lashlang_binding.is_empty());
+        assert!(tool.manifest.bindings.is_empty());
     }
 
     #[test]
-    fn tool_lashlang_binding_controls_prompt_call_form() {
+    fn tool_bindings_round_trip_as_opaque_metadata() {
         let mut with_metadata = ToolDefinition::raw_with_id(
             "tool:read_file",
             "read_file",
@@ -954,12 +952,17 @@ mod tests {
             ToolDefinition::default_input_schema(),
             serde_json::json!({"type": "string"}),
         );
-        with_metadata.manifest.lashlang_binding =
-            LashlangToolBinding::new(["fs"], "read").with_aliases(["cat"]);
+        with_metadata
+            .manifest
+            .bindings
+            .insert("example.binding".to_string(), serde_json::json!({ "name": "read" }));
 
-        assert!(
-            ToolDefinition::format_tool_docs(&[with_metadata])
-                .contains("### await fs.read({})? -> str")
+        let encoded = serde_json::to_value(&with_metadata).expect("tool json");
+        assert_eq!(encoded["bindings"]["example.binding"]["name"], "read");
+        let decoded: ToolDefinition = serde_json::from_value(encoded).expect("round trip");
+        assert_eq!(
+            decoded.manifest.bindings["example.binding"]["name"],
+            "read"
         );
     }
 }

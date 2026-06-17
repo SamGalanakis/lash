@@ -22,8 +22,18 @@ impl PluginFactory for WorkbenchPluginFactory {
         "agent_workbench"
     }
 
-    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
-        workbench_lashlang_resources()
+    fn extension_contributions(&self) -> Vec<lash::plugins::PluginExtensionContribution> {
+        vec![
+            lash::plugins::PluginExtensionContribution::new(
+                lash::modes::LASHLANG_SURFACE_EXTENSION_ID,
+                lash::modes::LashlangSurfaceContribution::new(
+                    workbench_lashlang_abilities(),
+                    lash::modes::LashlangLanguageFeatures::default(),
+                    workbench_lashlang_resources(),
+                ),
+            )
+            .expect("workbench lashlang surface serializes"),
+        ]
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -62,13 +72,13 @@ impl SessionPlugin for WorkbenchSessionPlugin {
             BUTTON_TRIGGER_RESOURCE,
             BUTTON_TRIGGER_ALIAS,
             BUTTON_TRIGGER_EVENT,
-            button_trigger_event_type(),
+            button_trigger_payload_schema(),
         ))?;
         reg.triggers().declare(TriggerEvent::new(
             MAIL_EVENT_RESOURCE,
             MAIL_EVENT_ALIAS,
             MAIL_EVENT_EVENT,
-            mail_received_event_type(),
+            mail_received_payload_schema(),
         ))?;
         reg.tools()
             .provider(Arc::new(lash_tools::web::web_search_provider(
@@ -107,12 +117,31 @@ fn workbench_lashlang_resources() -> lashlang::LashlangHostCatalog {
         .expect("valid cron trigger source");
     resources
         .add_trigger_source_constructor(
+            BUTTON_TRIGGER_SOURCE_TYPE.split('.'),
+            lashlang::TypeExpr::Object(vec![]),
+            button_pressed_event_type(),
+        )
+        .expect("valid button trigger source");
+    resources
+        .add_trigger_source_constructor(
             MAIL_RECEIVED_SOURCE_TYPE.split('.'),
             lashlang::TypeExpr::Object(vec![]),
             mail_received_event_type(),
         )
         .expect("valid mail trigger source");
     resources
+}
+
+fn button_pressed_event_type() -> lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "ui.button.Pressed",
+        vec![
+            field("button", lashlang::TypeExpr::Str),
+            field("message", lashlang::TypeExpr::Str),
+            field("pressed_at", lashlang::TypeExpr::Str),
+        ],
+    )
+    .expect("valid button pressed event type")
 }
 
 fn mail_received_event_type() -> lashlang::NamedDataType {
@@ -125,6 +154,32 @@ fn mail_received_event_type() -> lashlang::NamedDataType {
         ],
     )
     .expect("valid mail received event type")
+}
+
+fn mail_received_payload_schema() -> lash::triggers::LashSchema {
+    lash::triggers::LashSchema::new(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "account": { "type": "string" },
+            "title": { "type": "string" },
+            "text": { "type": "string" }
+        },
+        "required": ["account", "title", "text"],
+        "additionalProperties": false
+    }))
+}
+
+fn button_trigger_payload_schema() -> lash::triggers::LashSchema {
+    lash::triggers::LashSchema::new(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "button": { "type": "string", "enum": ["Red", "Blue"] },
+            "message": { "type": "string" },
+            "pressed_at": { "type": "string" }
+        },
+        "required": ["button", "message", "pressed_at"],
+        "additionalProperties": false
+    }))
 }
 
 fn field(name: &str, ty: lashlang::TypeExpr) -> lashlang::TypeField {

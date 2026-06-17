@@ -1,7 +1,7 @@
 #[async_trait::async_trait]
 impl lashlang::LashlangArtifactStore for PostgresLashlangArtifactStore {
-    fn durability_tier(&self) -> DurabilityTier {
-        DurabilityTier::Durable
+    fn durability_tier(&self) -> lashlang::DurabilityTier {
+        lashlang::DurabilityTier::Durable
     }
 
     async fn put_module_artifact(

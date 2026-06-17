@@ -173,6 +173,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
             kind: "lashlang_code".to_string(),
         }));
         actions.push(DriverAction::StartExec {
+            language: "lashlang".to_string(),
             code: fence.code,
             driver_state: rlm_driver_state(state),
         });

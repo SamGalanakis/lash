@@ -140,7 +140,7 @@ fn find_llm_call(effects: &[Effect]) -> Option<(&EffectId, &LlmRequest)> {
 
 fn find_exec_call(effects: &[Effect]) -> Option<(&EffectId, &str)> {
     effects.iter().find_map(|effect| match effect {
-        Effect::ExecCode { id, code } => Some((id, code.as_str())),
+        Effect::ExecCode { id, code, .. } => Some((id, code.as_str())),
         _ => None,
     })
 }
@@ -364,6 +364,7 @@ struct ExecDriver;
 impl ProtocolDriverHandle for ExecDriver {
     fn prepare_protocol_iteration(&self, _ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartExec {
+            language: "code".to_string(),
             code: "print 1".to_string(),
             driver_state: serde_json::json!("exec-state"),
         }]

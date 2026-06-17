@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::ToolProvider;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -24,6 +25,24 @@ mod tests {
         assert!(properties.contains_key("limit"));
         assert!(!properties.contains_key("maxResults"));
         assert_eq!(properties["limit"]["default"], serde_json::json!(20));
+    }
+
+    #[cfg(not(feature = "lashlang"))]
+    #[test]
+    fn default_manifest_does_not_include_lashlang_binding() {
+        let manifest = grep_provider().tool_manifests().remove(0);
+        assert!(manifest.bindings.is_empty());
+    }
+
+    #[cfg(feature = "lashlang")]
+    #[test]
+    fn lashlang_manifest_includes_lashlang_binding() {
+        let manifest = grep_provider().tool_manifests().remove(0);
+        assert!(
+            manifest
+                .bindings
+                .contains_key(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
+        );
     }
 
     #[test]

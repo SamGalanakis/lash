@@ -383,8 +383,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
         "Button",
         "ui.button",
         "pressed",
-        lash_protocol_rlm::NamedDataType::object("ui.button.Pressed", Vec::new())
-            .expect("event type"),
+        lash_core::LashSchema::any(),
     );
     let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())

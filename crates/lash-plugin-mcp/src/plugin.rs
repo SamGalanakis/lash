@@ -275,18 +275,15 @@ mod tests {
         let defs = factory.pool().advertised_tools();
         assert_eq!(defs.len(), 1, "expected one imported tool, got {defs:?}");
         assert_eq!(defs[0].name(), "mcp__docs__search_docs");
-        assert_eq!(
-            defs[0].manifest.lashlang_binding.module_path,
-            vec!["docs".to_string()]
-        );
-        assert_eq!(
-            defs[0].manifest.lashlang_binding.operation.as_deref(),
-            Some("search_docs")
-        );
-        assert_eq!(
-            defs[0].manifest.lashlang_binding.aliases,
-            vec!["search-docs".to_string()]
-        );
+        #[cfg(feature = "lashlang")]
+        {
+            let binding = lash_lashlang_runtime::tool_lashlang_binding(&defs[0].manifest);
+            assert_eq!(binding.module_path, vec!["docs".to_string()]);
+            assert_eq!(binding.operation.as_deref(), Some("search_docs"));
+            assert_eq!(binding.aliases, vec!["search-docs".to_string()]);
+        }
+        #[cfg(not(feature = "lashlang"))]
+        assert!(defs[0].manifest.bindings.is_empty());
         assert_eq!(
             defs[0]
                 .contract

@@ -23,8 +23,8 @@ use std::sync::{Arc, RwLock};
 use crate::MAIL_RECEIVED_SOURCE_TYPE;
 use async_trait::async_trait;
 use lash::tools::{
-    LashlangToolBinding, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
-    ToolResult, ToolScheduling,
+    LashlangToolBinding, ToolCall, ToolContract, ToolDefinition, ToolDefinitionLashlangExt,
+    ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use serde::{Deserialize, Serialize};
@@ -524,7 +524,8 @@ mod tests {
             .into_iter()
             .find(|manifest| manifest.name == "inbox__work__send")
             .expect("work send manifest");
-        let surface = manifest.lashlang_binding.executable_for(&manifest.name);
+        let surface =
+            lash_lashlang_runtime::tool_lashlang_binding(&manifest).executable_for(&manifest.name);
         assert_eq!(surface.call_path(), "inbox.work.send");
         assert_eq!(surface.authority_type, "Inbox");
 

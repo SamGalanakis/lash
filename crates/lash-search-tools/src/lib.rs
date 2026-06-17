@@ -19,8 +19,8 @@ use lash_core::{
 };
 
 use lash_tool_support::{
-    StaticToolExecute, StaticToolProvider, canonicalize_under, object_schema,
-    parse_optional_usize_arg, require_str,
+    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, canonicalize_under,
+    object_schema, parse_optional_usize_arg, require_str,
 };
 
 const DEFAULT_MAX_RESULTS: usize = 20;

@@ -105,23 +105,7 @@ mod tests {
                     scope,
                 )
                 .await?;
-            let definition = match record.input.as_ref() {
-                lash_core::ProcessInput::LashlangProcess {
-                    module_ref,
-                    process_ref,
-                    host_requirements_ref,
-                    process_name,
-                    ..
-                } => Some(lashlang::ProcessDefinitionIdentity::new(
-                    module_ref.clone(),
-                    host_requirements_ref.clone(),
-                    process_ref.clone(),
-                    process_name.clone(),
-                )),
-                lash_core::ProcessInput::ToolCall { .. }
-                | lash_core::ProcessInput::SessionTurn { .. }
-                | lash_core::ProcessInput::External { .. } => None,
-            };
+            let definition = record.input.as_ref().definition();
             Ok(lash_core::ProcessHandleSummary::new(
                 record.id,
                 descriptor,

@@ -9,7 +9,7 @@ use super::model::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessCancelSource {
     Tool,
-    Lashlang,
+    Process,
     HostApi,
 }
 

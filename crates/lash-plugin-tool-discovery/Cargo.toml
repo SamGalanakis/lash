@@ -16,9 +16,11 @@ categories = ["asynchronous", "api-bindings"]
 [features]
 default = []
 semantic-tool-search = ["dep:model2vec-rs"]
+lashlang = ["dep:lash-lashlang-runtime", "lash-tool-support/lashlang"]
 
 [dependencies]
 lash-core = { workspace = true }
+lash-lashlang-runtime = { workspace = true, optional = true }
 lash-tool-support = { workspace = true }
 async-trait = { workspace = true }
 model2vec-rs = { version = "0.1.4", optional = true }

@@ -210,9 +210,6 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
                 .expect("valid model spec"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()
         .expect("core")

@@ -163,6 +163,7 @@ impl RuntimeTurnDriver<'_> {
         &mut self,
         machine: &mut TurnMachine,
         id: crate::sansio::EffectId,
+        language: String,
         code: String,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
@@ -188,7 +189,7 @@ impl RuntimeTurnDriver<'_> {
                     event_tx,
                     code_correlation_id.clone(),
                     TurnEvent::CodeBlockStarted {
-                        language: "lashlang".to_string(),
+                        language: language.clone(),
                         code: code.clone(),
                         graph_key: None,
                     },
@@ -198,7 +199,7 @@ impl RuntimeTurnDriver<'_> {
                     event_tx,
                     code_correlation_id.clone(),
                     TurnEvent::CodeBlockCompleted {
-                        language: "lashlang".to_string(),
+                        language: language.clone(),
                         output: String::new(),
                         error: Some(message),
                         success: false,
@@ -217,7 +218,7 @@ impl RuntimeTurnDriver<'_> {
             event_tx,
             code_correlation_id.clone(),
             TurnEvent::CodeBlockStarted {
-                language: "lashlang".to_string(),
+                language: language.clone(),
                 code: code.clone(),
                 graph_key: graph_key.clone(),
             },
@@ -225,7 +226,14 @@ impl RuntimeTurnDriver<'_> {
         .await;
         let exec_created_at = std::time::Instant::now();
         let result = match self
-            .invoke_turn_exec_effect(machine, invocation, code.clone(), event_tx, cancel)
+            .invoke_turn_exec_effect(
+                machine,
+                invocation,
+                language.clone(),
+                code.clone(),
+                event_tx,
+                cancel,
+            )
             .await
         {
             Ok(result) => result,
@@ -235,7 +243,7 @@ impl RuntimeTurnDriver<'_> {
                     event_tx,
                     code_correlation_id.clone(),
                     TurnEvent::CodeBlockCompleted {
-                        language: "lashlang".to_string(),
+                        language: language.clone(),
                         output: String::new(),
                         error: Some(message),
                         success: false,
@@ -255,7 +263,7 @@ impl RuntimeTurnDriver<'_> {
                     event_tx,
                     code_correlation_id.clone(),
                     TurnEvent::CodeBlockCompleted {
-                        language: "lashlang".to_string(),
+                        language: language.clone(),
                         output: output.observations.join("\n"),
                         error: output.error.clone(),
                         success: output.error.is_none(),
@@ -275,7 +283,7 @@ impl RuntimeTurnDriver<'_> {
                     event_tx,
                     code_correlation_id.clone(),
                     TurnEvent::CodeBlockCompleted {
-                        language: "lashlang".to_string(),
+                        language: language.clone(),
                         output: String::new(),
                         error: Some(error.clone()),
                         success: false,

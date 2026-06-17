@@ -30,8 +30,11 @@ fn remote_registry_call_paths(
 ) -> Result<Vec<String>, RemoteProtocolError> {
     let mut call_paths = grants
         .iter()
-        .map(RemoteToolGrant::call_path)
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(RemoteToolGrant::call_path_bindings)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     call_paths.sort();
     Ok(call_paths)
 }
@@ -77,8 +80,8 @@ pub enum RemoteProtocolError {
     InvalidAttachmentRef { id: String, message: String },
     #[error("turn input is not remote-safe: {0}")]
     NonRemoteSafeTurnInput(String),
-    #[error("remote tool grant `{tool_name}` is missing an explicit lashlang binding")]
-    MissingLashlangToolBinding { tool_name: String },
+    #[error("remote tool grant `{tool_name}` is missing required binding `{binding}`")]
+    MissingToolBinding { tool_name: String, binding: String },
     #[error("invalid remote tool grant `{tool_name}`: {message}")]
     InvalidToolGrant { tool_name: String, message: String },
     #[error("duplicate remote tool call path `{call_path}`")]

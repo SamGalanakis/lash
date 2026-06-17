@@ -19,6 +19,67 @@ use super::{
 };
 use crate::{PluginOptions, ToolProvider};
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PluginExtensionContribution {
+    pub extension_id: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+impl PluginExtensionContribution {
+    pub fn new(
+        extension_id: impl Into<String>,
+        payload: impl serde::Serialize,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            extension_id: extension_id.into(),
+            payload: serde_json::to_value(payload)?,
+        })
+    }
+
+    pub fn from_value(extension_id: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self {
+            extension_id: extension_id.into(),
+            payload,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginExtensions {
+    contributions: std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+}
+
+impl PluginExtensions {
+    pub fn from_contributions(
+        contributions: impl IntoIterator<Item = PluginExtensionContribution>,
+    ) -> Self {
+        let mut extensions = Self::default();
+        for contribution in contributions {
+            extensions.insert(contribution);
+        }
+        extensions
+    }
+
+    pub fn insert(&mut self, contribution: PluginExtensionContribution) {
+        self.contributions
+            .entry(contribution.extension_id)
+            .or_default()
+            .push(contribution.payload);
+    }
+
+    pub fn payloads(&self, extension_id: &str) -> &[serde_json::Value] {
+        self.contributions
+            .get(extension_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.contributions.is_empty()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct PluginSpec {
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
@@ -216,8 +277,7 @@ pub struct PluginSessionContext {
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionContext>,
     pub plugin_options: PluginOptions,
-    pub lashlang_abilities: lashlang::LashlangAbilities,
-    pub lashlang_language_features: lashlang::LashlangLanguageFeatures,
+    pub extensions: PluginExtensions,
     /// Session id of the caller that created this one. `None` identifies
     /// a root session; any subagent / compaction / forked-child session
     /// carries the parent here so plugin factories can gate themselves
@@ -329,21 +389,8 @@ pub trait SessionPlugin: Send + Sync {
 pub trait PluginFactory: Send + Sync {
     fn id(&self) -> &'static str;
 
-    fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
-        lashlang::LashlangAbilities::default()
-    }
-
-    fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
-        lashlang::LashlangLanguageFeatures::default()
-    }
-
-    /// Host-owned Lashlang catalog entries that code may link against.
-    ///
-    /// This only affects the execution environment. It is intentionally not
-    /// rendered into prompts automatically; hosts remain responsible for
-    /// describing their resources through prompt contributions.
-    fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
-        lashlang::LashlangHostCatalog::new()
+    fn extension_contributions(&self) -> Vec<PluginExtensionContribution> {
+        Vec::new()
     }
 
     /// Produce a session-scoped plugin. **Must be cheap** — see the

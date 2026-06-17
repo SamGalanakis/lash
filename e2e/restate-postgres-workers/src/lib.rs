@@ -1,12 +1,18 @@
 use anyhow::{Context, Result};
 use lash::durability::EffectHost;
-use lash::modes::{LashlangAbilities, RlmProtocolPluginConfig};
+use lash::modes::{
+    LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangSurfaceContribution,
+    RlmProtocolPluginConfig,
+};
 use lash::persistence::{AttachmentStore, LashlangArtifactStore, SessionStoreFactory};
-use lash::plugins::{PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin};
+use lash::plugins::{
+    PluginExtensionContribution, PluginFactory, PluginRegistrar, PluginSessionContext,
+    SessionPlugin,
+};
 use lash::process::{ProcessRegistry, ProcessWorkDriver};
 use lash::tools::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
-    ToolProvider, ToolResult,
+    ToolDefinitionLashlangExt, ToolProvider, ToolResult,
 };
 use lash::{ModeId, ModePreset};
 use lash_provider_openai::OpenAiCompatibleProvider;
@@ -540,15 +546,12 @@ impl PluginFactory for E2ePluginFactory {
         "restate-postgres-workers-e2e"
     }
 
-    fn lashlang_abilities(&self) -> LashlangAbilities {
-        LashlangAbilities::default()
+    fn extension_contributions(&self) -> Vec<PluginExtensionContribution> {
+        let abilities = LashlangAbilities::default()
             .with_processes()
             .with_sleep()
             .with_process_signals()
-            .with_triggers()
-    }
-
-    fn lashlang_resources(&self) -> lash::modes::LashlangHostCatalog {
+            .with_triggers();
         let mut resources = lash::modes::LashlangHostCatalog::new();
         resources
             .add_trigger_source_constructor(
@@ -557,7 +560,17 @@ impl PluginFactory for E2ePluginFactory {
                 button_pressed_event_type(),
             )
             .expect("valid e2e button trigger source");
-        resources
+        vec![
+            PluginExtensionContribution::new(
+                LASHLANG_SURFACE_EXTENSION_ID,
+                LashlangSurfaceContribution::new(
+                    abilities,
+                    lash::modes::LashlangLanguageFeatures::default(),
+                    resources,
+                ),
+            )
+            .expect("lashlang surface contribution serializes"),
+        ]
     }
 
     fn build(
@@ -591,7 +604,7 @@ impl SessionPlugin for E2eSessionPlugin {
             "Button",
             "ui.button",
             "pressed",
-            button_pressed_event_type(),
+            button_pressed_payload_schema(),
         ))?;
         reg.tools()
             .provider(e2e_tool_provider(
@@ -630,6 +643,19 @@ fn button_pressed_event_type() -> lash::modes::NamedDataType {
         ],
     )
     .expect("valid e2e button payload type")
+}
+
+fn button_pressed_payload_schema() -> lash::triggers::LashSchema {
+    lash::triggers::LashSchema::new(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "button": { "type": "string", "enum": ["Red", "Blue"] },
+            "message": { "type": "string" },
+            "pressed_at": { "type": "string" }
+        },
+        "required": ["button", "message", "pressed_at"],
+        "additionalProperties": false
+    }))
 }
 
 fn e2e_tool_provider(

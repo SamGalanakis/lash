@@ -7,9 +7,7 @@ use super::*;
 #[derive(Clone)]
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
-    lashlang_abilities: lashlang::LashlangAbilities,
-    lashlang_language_features: lashlang::LashlangLanguageFeatures,
-    lashlang_resources: lashlang::LashlangHostCatalog,
+    extensions: PluginExtensions,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -42,68 +40,33 @@ impl PluginHost {
             all_factories.retain(|factory| !override_ids.contains(factory.id()));
         }
         all_factories.extend(factories);
-        let lashlang_abilities = all_factories.iter().fold(
-            lashlang::LashlangAbilities::default(),
-            |abilities, factory| abilities.union(factory.lashlang_abilities()),
-        );
-        let lashlang_language_features = all_factories.iter().fold(
-            lashlang::LashlangLanguageFeatures::default(),
-            |features, factory| features.union(factory.lashlang_language_features()),
-        );
-        let lashlang_resources = all_factories.iter().fold(
-            lashlang::LashlangHostCatalog::new(),
-            |mut resources, factory| {
-                resources.extend(factory.lashlang_resources());
-                resources
-            },
+        let extensions = PluginExtensions::from_contributions(
+            all_factories
+                .iter()
+                .flat_map(|factory| factory.extension_contributions()),
         );
         Self {
             factories: Arc::new(all_factories),
-            lashlang_abilities,
-            lashlang_language_features,
-            lashlang_resources,
+            extensions,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
-    pub fn with_lashlang_abilities(mut self, abilities: lashlang::LashlangAbilities) -> Self {
-        self.lashlang_abilities = abilities;
-        self
-    }
-
-    pub fn with_lashlang_language_features(
-        mut self,
-        language_features: lashlang::LashlangLanguageFeatures,
-    ) -> Self {
-        self.lashlang_language_features = language_features;
-        self
-    }
-
-    pub fn with_lashlang_resources(mut self, resources: lashlang::LashlangHostCatalog) -> Self {
-        self.lashlang_resources = resources;
+    pub fn with_extensions(mut self, extensions: PluginExtensions) -> Self {
+        self.extensions = extensions;
         self
     }
 
     pub fn isolated_registry(&self) -> Self {
         Self {
             factories: Arc::clone(&self.factories),
-            lashlang_abilities: self.lashlang_abilities,
-            lashlang_language_features: self.lashlang_language_features,
-            lashlang_resources: self.lashlang_resources.clone(),
+            extensions: self.extensions.clone(),
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
-    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
-        self.lashlang_abilities
-    }
-
-    pub fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
-        self.lashlang_language_features
-    }
-
-    pub fn lashlang_resources(&self) -> lashlang::LashlangHostCatalog {
-        self.lashlang_resources.clone()
+    pub fn extensions(&self) -> &PluginExtensions {
+        &self.extensions
     }
 
     pub fn factories(&self) -> &[Arc<dyn PluginFactory>] {
@@ -198,8 +161,7 @@ impl PluginHost {
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
             plugin_options: authority.plugin_options.clone(),
-            lashlang_abilities: self.lashlang_abilities,
-            lashlang_language_features: self.lashlang_language_features,
+            extensions: self.extensions.clone(),
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
@@ -238,21 +200,6 @@ impl PluginHost {
             .map_err(|message| {
                 PluginError::Registration(format!("invalid trigger event catalog: {message}"))
             })?;
-        let mut lashlang_resources = self.lashlang_resources.clone();
-        for event in triggers.events() {
-            lashlang_resources
-                .add_trigger_source_constructor(
-                    event.source_type().split('.'),
-                    lashlang::TypeExpr::Object(Vec::new()),
-                    event.payload_type().clone(),
-                )
-                .map_err(|err| {
-                    PluginError::Registration(format!(
-                        "invalid trigger source `{}.{}`: {err}",
-                        event.alias, event.event
-                    ))
-                })?;
-        }
         let registry = match tool_snapshot {
             Some(snapshot) => Arc::new(
                 crate::ToolRegistry::from_tool_providers(contributions.tool_providers.clone())
@@ -284,9 +231,7 @@ impl PluginHost {
             tool_catalog_overlay,
             tool_access: authority.tool_access,
             subagent: authority.subagent,
-            lashlang_abilities: self.lashlang_abilities,
-            lashlang_language_features: self.lashlang_language_features,
-            lashlang_resources,
+            extensions: self.extensions.clone(),
             triggers,
             contributions,
         });

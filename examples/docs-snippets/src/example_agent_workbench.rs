@@ -49,6 +49,19 @@ fn button_trigger_event_type() -> lashlang::NamedDataType {
     .expect("valid button trigger event type")
 }
 
+fn button_trigger_payload_schema() -> lash::triggers::LashSchema {
+    lash::triggers::LashSchema::new(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "button": { "type": "string", "enum": ["Red", "Blue"] },
+            "message": { "type": "string" },
+            "pressed_at": { "type": "string" }
+        },
+        "required": ["button", "message", "pressed_at"],
+        "additionalProperties": false
+    }))
+}
+
 fn mail_received_event_type() -> lashlang::NamedDataType {
     lashlang::NamedDataType::object(
         "mail.Received",
@@ -85,7 +98,7 @@ fn declare_button_event(reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         "Button",
         "ui.button",
         "pressed",
-        button_trigger_event_type(),
+        button_trigger_payload_schema(),
     ))?;
     Ok(())
 }

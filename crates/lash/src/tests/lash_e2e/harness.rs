@@ -158,23 +158,7 @@ fn observed_process_summary(
         lash_core::ProcessHandleDescriptor::new(Some(process.kind), Some(process.label)),
         process.lifecycle,
     )
-    .with_definition(match &process.input {
-        lash_core::ProcessInput::LashlangProcess {
-            module_ref,
-            process_ref,
-            host_requirements_ref,
-            process_name,
-            ..
-        } => Some(lashlang::ProcessDefinitionIdentity::new(
-            module_ref.clone(),
-            host_requirements_ref.clone(),
-            process_ref.clone(),
-            process_name.clone(),
-        )),
-        lash_core::ProcessInput::ToolCall { .. }
-        | lash_core::ProcessInput::SessionTurn { .. }
-        | lash_core::ProcessInput::External { .. } => None,
-    })
+    .with_definition(process.input.definition())
 }
 
 async fn assert_remote_process_dto_surface(

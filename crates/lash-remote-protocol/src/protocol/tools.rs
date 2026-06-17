@@ -28,13 +28,13 @@ pub struct RemoteToolGrant {
     pub scheduling: Option<RemoteToolScheduling>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<RemoteToolRetryPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lashlang_binding: Option<RemoteLashlangToolBinding>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, serde_json::Value>,
 }
 
 impl RemoteToolGrant {
-    pub fn call_path(&self) -> Result<String, RemoteProtocolError> {
-        let binding = self.required_lashlang_binding()?;
+    pub fn binding_call_path(&self, binding_key: &str) -> Result<String, RemoteProtocolError> {
+        let binding = self.required_call_path_binding(binding_key)?;
         Ok(format!(
             "{}.{}",
             binding.module_path.join("."),
@@ -50,7 +50,14 @@ impl RemoteToolGrant {
                 message: "tool grant name cannot be empty".to_string(),
             });
         }
-        self.required_lashlang_binding()?;
+        for key in self.bindings.keys() {
+            if key.trim().is_empty() {
+                return Err(RemoteProtocolError::InvalidToolGrant {
+                    tool_name: self.name.clone(),
+                    message: "tool grant binding keys cannot be empty".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -58,44 +65,99 @@ impl RemoteToolGrant {
         let mut seen = HashSet::new();
         for grant in grants {
             grant.validate()?;
-            let call_path = grant.call_path()?;
-            if !seen.insert(call_path.clone()) {
-                return Err(RemoteProtocolError::DuplicateRemoteCallPath { call_path });
+            for call_path in grant.call_path_bindings()? {
+                if !seen.insert(call_path.clone()) {
+                    return Err(RemoteProtocolError::DuplicateRemoteCallPath { call_path });
+                }
             }
         }
         Ok(())
     }
 
-    fn required_lashlang_binding(&self) -> Result<&RemoteLashlangToolBinding, RemoteProtocolError> {
-        let Some(binding) = &self.lashlang_binding else {
-            return Err(RemoteProtocolError::MissingLashlangToolBinding {
+    pub fn call_path_bindings(&self) -> Result<Vec<String>, RemoteProtocolError> {
+        let mut paths = Vec::new();
+        for (key, value) in &self.bindings {
+            if let Some(binding) = RemoteCallPathBinding::from_value(value) {
+                validate_call_path_binding(&self.name, key, &binding)?;
+                paths.push(format!(
+                    "{}.{}",
+                    binding.module_path.join("."),
+                    binding.operation
+                ));
+            }
+        }
+        Ok(paths)
+    }
+
+    fn required_call_path_binding(
+        &self,
+        binding_key: &str,
+    ) -> Result<RemoteCallPathBinding, RemoteProtocolError> {
+        let Some(value) = self.bindings.get(binding_key) else {
+            return Err(RemoteProtocolError::MissingToolBinding {
                 tool_name: self.name.clone(),
+                binding: binding_key.to_string(),
             });
         };
-        if binding.module_path.is_empty() {
+        let Some(binding) = RemoteCallPathBinding::from_value(value) else {
             return Err(RemoteProtocolError::InvalidToolGrant {
                 tool_name: self.name.clone(),
-                message: "remote tool grant requires an explicit module path".to_string(),
+                message: format!("tool binding `{binding_key}` does not expose a call path"),
             });
-        }
-        if binding
-            .module_path
-            .iter()
-            .any(|part| part.trim().is_empty())
-        {
-            return Err(RemoteProtocolError::InvalidToolGrant {
-                tool_name: self.name.clone(),
-                message: "remote tool grant module path cannot contain empty segments".to_string(),
-            });
-        }
-        if binding.operation.trim().is_empty() {
-            return Err(RemoteProtocolError::InvalidToolGrant {
-                tool_name: self.name.clone(),
-                message: "remote tool grant requires an explicit operation".to_string(),
-            });
-        }
+        };
+        validate_call_path_binding(&self.name, binding_key, &binding)?;
         Ok(binding)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteCallPathBinding {
+    pub module_path: Vec<String>,
+    pub operation: String,
+}
+
+impl RemoteCallPathBinding {
+    fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let module_path = value
+            .get("module_path")?
+            .as_array()?
+            .iter()
+            .map(|part| part.as_str().map(ToOwned::to_owned))
+            .collect::<Option<Vec<_>>>()?;
+        let operation = value.get("operation")?.as_str()?.to_string();
+        Some(Self {
+            module_path,
+            operation,
+        })
+    }
+}
+
+fn validate_call_path_binding(
+    tool_name: &str,
+    binding_key: &str,
+    binding: &RemoteCallPathBinding,
+) -> Result<(), RemoteProtocolError> {
+    if binding.module_path.is_empty() {
+        return Err(RemoteProtocolError::InvalidToolGrant {
+            tool_name: tool_name.to_string(),
+            message: format!("tool binding `{binding_key}` requires an explicit module path"),
+        });
+    }
+    if binding.module_path.iter().any(|part| part.trim().is_empty()) {
+        return Err(RemoteProtocolError::InvalidToolGrant {
+            tool_name: tool_name.to_string(),
+            message: format!(
+                "tool binding `{binding_key}` module path cannot contain empty segments"
+            ),
+        });
+    }
+    if binding.operation.trim().is_empty() {
+        return Err(RemoteProtocolError::InvalidToolGrant {
+            tool_name: tool_name.to_string(),
+            message: format!("tool binding `{binding_key}` requires an explicit operation"),
+        });
+    }
+    Ok(())
 }
 
 fn default_input_schema() -> serde_json::Value {
@@ -104,30 +166,6 @@ fn default_input_schema() -> serde_json::Value {
         "properties": {},
         "additionalProperties": true
     })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteLashlangToolBinding {
-    pub module_path: Vec<String>,
-    pub operation: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authority_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-}
-
-impl RemoteLashlangToolBinding {
-    pub fn new(
-        module_path: impl IntoIterator<Item = impl Into<String>>,
-        operation: impl Into<String>,
-    ) -> Self {
-        Self {
-            module_path: module_path.into_iter().map(Into::into).collect(),
-            operation: operation.into(),
-            authority_type: None,
-            aliases: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

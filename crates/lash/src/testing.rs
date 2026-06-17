@@ -17,8 +17,12 @@ pub mod conformance {
     use std::time::Duration;
 
     use crate::core::LashCoreBuilder;
+    use crate::modes::{
+        LASHLANG_SURFACE_EXTENSION_ID, LashlangLanguageFeatures, LashlangSurfaceContribution,
+    };
     use crate::plugins::{
-        PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+        PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
+        PluginSessionContext, SessionPlugin,
     };
     use crate::testing::TestProvider;
     use crate::{LashCore, ModeId, ModePreset};
@@ -153,11 +157,7 @@ submit "registered"
             "rebuild-conformance-trigger"
         }
 
-        fn lashlang_abilities(&self) -> crate::modes::LashlangAbilities {
-            rebuild_abilities()
-        }
-
-        fn lashlang_resources(&self) -> crate::modes::LashlangHostCatalog {
+        fn extension_contributions(&self) -> Vec<PluginExtensionContribution> {
             let mut resources = crate::modes::LashlangHostCatalog::new();
             resources
                 .add_trigger_source_constructor(
@@ -177,7 +177,15 @@ submit "registered"
                     button_pressed_event_type(),
                 )
                 .expect("valid button trigger source");
-            resources
+            let contribution = LashlangSurfaceContribution::new(
+                rebuild_abilities(),
+                LashlangLanguageFeatures::default(),
+                resources,
+            );
+            vec![
+                PluginExtensionContribution::new(LASHLANG_SURFACE_EXTENSION_ID, contribution)
+                    .expect("lashlang surface contribution serializes"),
+            ]
         }
 
         fn build(
@@ -200,7 +208,7 @@ submit "registered"
                 "Button",
                 "ui.button",
                 "pressed",
-                button_pressed_event_type(),
+                lash_core::LashSchema::any(),
             ))?;
             Ok(())
         }
@@ -302,7 +310,7 @@ submit "registered"
         registration: lash_core::ProcessRegistration,
     ) -> lash_core::ProcessRegistration {
         let env_ref = lash_core::runtime::persist_process_execution_env(
-            core.env.core.durability.lashlang_artifact_store.as_ref(),
+            core.env.core.durability.process_env_store.as_ref(),
             &lash_core::ProcessExecutionEnvSpec::new(
                 lash_core::PluginOptions::default(),
                 lash_core::SessionPolicy {
