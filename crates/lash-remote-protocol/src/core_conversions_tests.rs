@@ -608,6 +608,30 @@ fn remote_tool_grants_convert_to_core_ids_without_binding_call_path() {
     let grant = demo_grant("one", "tools", "search");
     let definition = lash_core::ToolDefinition::try_from(&grant).expect("tool definition");
     assert_eq!(definition.manifest().id.as_str(), "remote-tool:one");
+    assert_eq!(
+        definition.manifest().bindings[EXAMPLE_BINDING_KEY],
+        grant.bindings[EXAMPLE_BINDING_KEY],
+        "remote bindings remain opaque metadata on the manifest"
+    );
+
+    let changed_binding = demo_grant("one", "other_module", "other_operation");
+    assert_eq!(
+        changed_binding
+            .binding_call_path(EXAMPLE_BINDING_KEY)
+            .expect("changed binding call path"),
+        "other_module.other_operation"
+    );
+    let definition =
+        lash_core::ToolDefinition::try_from(&changed_binding).expect("tool definition");
+    assert_eq!(
+        definition.manifest().id.as_str(),
+        "remote-tool:one",
+        "derived core IDs are based on remote grant names, not binding call paths"
+    );
+    assert_ne!(
+        definition.manifest().id.as_str(),
+        "remote-tool:other_module.other_operation"
+    );
 
     let mut explicit = grant;
     explicit.id = Some("remote-tool:explicit".to_string());

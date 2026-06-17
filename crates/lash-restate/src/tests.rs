@@ -2215,6 +2215,28 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
     .with_execution_env_ref(Some(env_ref))
 }
 
+fn assert_lashlang_engine_record(
+    record: &lash_core::ProcessRecord,
+    expected_process_name: &str,
+    expected_args: serde_json::Map<String, serde_json::Value>,
+) {
+    let ProcessInput::Engine { kind, payload } = record.input.as_ref() else {
+        panic!(
+            "persisted Lashlang process must use generic engine input, got {:?}",
+            record.input
+        );
+    };
+    assert_eq!(
+        kind,
+        lash_lashlang_runtime::LASHLANG_ENGINE_KIND,
+        "persisted row must dispatch through the registered Lashlang process engine"
+    );
+    let decoded = lash_lashlang_runtime::LashlangProcessInput::from_payload(payload.clone())
+        .expect("persisted Lashlang engine payload must decode after registry reopen");
+    assert_eq!(decoded.process_name, expected_process_name);
+    assert_eq!(decoded.args, expected_args);
+}
+
 /// Phase-B recovery: a TRIGGER-started process whose worker died mid-flight is
 /// left non-terminal in the durable registry; a subsequent worker reopening
 /// that registry must drive it to completion via the recovery sweep — the same
@@ -2253,17 +2275,6 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
         !persisted_before_rebuild.is_terminal(),
         "freshly trigger-started process must be non-terminal before recovery"
     );
-    let ProcessInput::Engine { kind, .. } = persisted_before_rebuild.input.as_ref() else {
-        panic!(
-            "trigger-started process must persist as a generic engine row, got {:?}",
-            persisted_before_rebuild.input
-        );
-    };
-    assert_eq!(
-        kind,
-        lash_lashlang_runtime::LASHLANG_ENGINE_KIND,
-        "reopened worker must dispatch this persisted row through the registered Lashlang engine"
-    );
     drop(registry_a);
 
     // Reopen the registry and stand up a fresh worker over it: the crash
@@ -2275,6 +2286,15 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
             .await
             .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
+    let reopened_record = registry_b
+        .get_process("trigger-notify")
+        .await
+        .expect("trigger-started process survives registry reopen");
+    assert_lashlang_engine_record(
+        &reopened_record,
+        "notify",
+        serde_json::Map::from_iter([("resource".to_string(), serde_json::json!("issue-42"))]),
+    );
     assert_eq!(
         registry_b
             .list_non_terminal()
