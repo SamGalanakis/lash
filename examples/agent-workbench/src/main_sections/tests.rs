@@ -35,6 +35,14 @@ mod tests {
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
             )))
+            .process_env_store(Arc::new(sync_await({
+                let path = data_dir.join("process-env.db");
+                async move {
+                    lash_sqlite_store::Store::open(&path)
+                        .await
+                        .expect("open process env store")
+                }
+            })))
             .lashlang_artifact_store(Arc::new(sync_await({
                 let path = data_dir.join("artifacts.db");
                 async move {
@@ -849,6 +857,11 @@ mod tests {
         );
         let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
             artifact_store.clone();
+        let process_env_store = Arc::new(
+            lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
+                .await
+                .expect("open process env store"),
+        );
         let provider = lash::testing::TestProvider::builder()
             .kind("workbench-test")
             .supported_variants(|_| &["low", "medium", "high"])
@@ -869,12 +882,13 @@ mod tests {
             .process_registry(Arc::clone(&process_registry))
             .trigger_store(trigger_store)
             .lashlang_artifact_store(artifact_store_for_core)
-            .runtime_host_config({
-                let mut config = lash::durability::RuntimeHostConfig::in_memory();
-                config.control.effect_host =
-                    Arc::new(lash::durability::InlineEffectHost::default());
-                config
-            })
+            .runtime_host_config(lash::durability::RuntimeHostConfig::new(
+                Arc::new(lash::durability::InlineEffectHost::default()),
+                Arc::new(lash::persistence::FileAttachmentStore::new(
+                    data_dir.join("attachments"),
+                )),
+                process_env_store,
+            ))
             .build()
             .expect("build core");
         let process_observer = core
@@ -1327,6 +1341,11 @@ mod tests {
                 .await
                 .expect("open trigger store"),
         );
+        let process_env_store = Arc::new(
+            lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
+                .await
+                .expect("open process env store"),
+        );
         let artifact_store = Arc::new(
             lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .await
@@ -1389,6 +1408,7 @@ mod tests {
                 data_dir.join("attachments"),
             )))
             .lashlang_artifact_store(artifact_store)
+            .process_env_store(process_env_store)
             .trigger_store(trigger_store)
             .trace_sink(Arc::clone(&trace_sink))
             .lashlang_execution_sink(lashlang_execution_sink)
@@ -1569,6 +1589,7 @@ mod tests {
         let process_registry_path = data_dir.join("processes.db");
         let trigger_store_path = data_dir.join("triggers.db");
         let artifact_store_path = data_dir.join("artifacts.db");
+        let process_env_store_path = data_dir.join("process-env.db");
         let session_id = WorkbenchSessionIds::fresh().current();
 
         {
@@ -1589,11 +1610,20 @@ mod tests {
                     .await
                     .expect("open trigger store"),
             );
+            let process_env_store = Arc::new(
+                lash_sqlite_store::Store::open(&process_env_store_path)
+                    .await
+                    .expect("open process env store"),
+            );
             let core = test_workbench_core(
                 session_store_factory.clone(),
                 process_registry,
                 trigger_store,
                 artifact_store_for_core,
+                Arc::new(lash::persistence::FileAttachmentStore::new(
+                    data_dir.join("attachments"),
+                )),
+                process_env_store,
             );
             let session = core
                 .session(session_id.clone())
@@ -1622,11 +1652,20 @@ mod tests {
                 .await
                 .expect("reopen trigger store"),
         );
+        let process_env_store = Arc::new(
+            lash_sqlite_store::Store::open(&process_env_store_path)
+                .await
+                .expect("reopen process env store"),
+        );
         let core = test_workbench_core(
             session_store_factory,
             Arc::clone(&process_registry),
             trigger_store,
             artifact_store_for_core,
+            Arc::new(lash::persistence::FileAttachmentStore::new(
+                data_dir.join("attachments"),
+            )),
+            process_env_store,
         );
         let _reopened = core
             .session(session_id)
@@ -1678,6 +1717,8 @@ mod tests {
         process_registry: Arc<dyn lash::process::ProcessRegistry>,
         trigger_store: Arc<lash_sqlite_store::SqliteTriggerStore>,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+        attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
+        process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
     ) -> RlmCore {
         let provider = trigger_registration_provider();
         let model =
@@ -1692,12 +1733,11 @@ mod tests {
             .process_registry(process_registry)
             .trigger_store(trigger_store)
             .lashlang_artifact_store(artifact_store)
-            .runtime_host_config({
-                let mut config = lash::durability::RuntimeHostConfig::in_memory();
-                config.control.effect_host =
-                    Arc::new(lash::durability::InlineEffectHost::default());
-                config
-            })
+            .runtime_host_config(lash::durability::RuntimeHostConfig::new(
+                Arc::new(lash::durability::InlineEffectHost::default()),
+                attachment_store,
+                process_env_store,
+            ))
             .build()
             .expect("build core")
     }

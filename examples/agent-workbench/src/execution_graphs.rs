@@ -487,6 +487,9 @@ mod tests {
             .store_factory(Arc::new(
                 lash::persistence::InMemorySessionStoreFactory::new(),
             ))
+            .process_env_store(Arc::new(
+                lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
             .process_registry(registry)
             .build()
             .expect("build core");

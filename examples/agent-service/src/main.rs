@@ -110,6 +110,11 @@ async fn async_main() -> anyhow_like::Result<()> {
             .await
             .map_err(|err| err.to_string())?,
     ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
+    let process_env_store = Arc::new(
+        lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
+            .await
+            .map_err(|err| err.to_string())?,
+    );
     let trigger_store = Arc::new(
         lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
             .await
@@ -133,6 +138,7 @@ async fn async_main() -> anyhow_like::Result<()> {
             data_dir.join("attachments"),
         )))
         .lashlang_artifact_store(artifact_store)
+        .process_env_store(process_env_store)
         .trace_sink(Arc::new(TeeTraceSink::new([
             Arc::new(StderrTraceSink::default()) as Arc<dyn TraceSink>,
             Arc::new(JsonlTraceSink::new(trace_path)),

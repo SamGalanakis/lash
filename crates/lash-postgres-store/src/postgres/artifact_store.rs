@@ -76,3 +76,41 @@ impl lashlang::LashlangArtifactStore for PostgresLashlangArtifactStore {
         .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 }
+
+#[async_trait::async_trait]
+impl lash_core::ProcessExecutionEnvStore for PostgresLashlangArtifactStore {
+    fn durability_tier(&self) -> lash_core::DurabilityTier {
+        lash_core::DurabilityTier::Durable
+    }
+
+    async fn put_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+        bytes: &[u8],
+    ) -> Result<(), lash_core::PluginError> {
+        sqlx::query(
+            "INSERT INTO lash_lashlang_artifacts (module_ref, artifact_bytes)
+             VALUES ($1, $2)
+             ON CONFLICT (module_ref) DO UPDATE SET artifact_bytes = EXCLUDED.artifact_bytes",
+        )
+        .bind(env_ref.as_str())
+        .bind(bytes)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_process_execution_env(
+        &self,
+        env_ref: &lash_core::ProcessExecutionEnvRef,
+    ) -> Result<Option<Vec<u8>>, lash_core::PluginError> {
+        sqlx::query_scalar(
+            "SELECT artifact_bytes FROM lash_lashlang_artifacts WHERE module_ref = $1",
+        )
+        .bind(env_ref.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))
+    }
+}
