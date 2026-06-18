@@ -41,6 +41,27 @@ pub trait QueuedWorkRunHandle: Send + Sync {
         &self,
         request: QueuedWorkRunRequest,
     ) -> Result<QueuedWorkRunOutcome, PluginError>;
+
+    /// Host-driven single pass: claim and submit ready queued work, optionally
+    /// narrowed to one session. The symmetric counterpart to
+    /// [`ProcessRunHandle::claim_and_run_pending`](super::ProcessRunHandle::claim_and_run_pending).
+    ///
+    /// Idempotency is the store claim's job ([`claim_ready_queued_work`]), not an
+    /// in-memory guard: a session whose turn is already in flight fails the claim
+    /// and yields [`QueuedWorkRunOutcome::Idle`]. Hosts call this on an event
+    /// (enqueue, process wake, turn completion) instead of polling.
+    ///
+    /// [`claim_ready_queued_work`]: crate::store::RuntimePersistence::claim_ready_queued_work
+    async fn claim_and_run_pending(
+        &self,
+        session_id: Option<&str>,
+        reason: &str,
+    ) -> Result<(), PluginError> {
+        let request =
+            QueuedWorkRunRequest::new(session_id.map(str::to_string), reason.to_string(), false);
+        self.run_queued_work(request).await?;
+        Ok(())
+    }
 }
 
 enum QueuedWorkRunnerCommand {
