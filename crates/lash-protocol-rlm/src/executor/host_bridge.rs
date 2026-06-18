@@ -392,9 +392,14 @@ impl HostBridge<'_> {
     async fn start_process(&self, start: ProcessStart) -> Result<FlowValue, ExecutionHostError> {
         let prepared = {
             let _phase = self.ctx.named_phase("rlm_process.prepare_start");
-            prepare_lashlang_process_start(std::sync::Arc::clone(&self.artifact_store), start)
-                .await
-                .map_err(ExecutionHostError::new)?
+            let parent_start_seed = lashlang_parent_start_seed(&self.ctx);
+            prepare_lashlang_process_start(
+                std::sync::Arc::clone(&self.artifact_store),
+                &parent_start_seed,
+                start,
+            )
+            .await
+            .map_err(ExecutionHostError::new)?
         };
         let reply = {
             let _phase = self.ctx.named_phase("rlm_process.start");
@@ -612,6 +617,18 @@ async fn handle_to_json(value: &FlowValue) -> Result<Value, ExecutionHostError> 
         FlowValue::Projected(_) => Ok(flow_to_json_value(value).await),
         _ => lashlang_value_to_json(value),
     }
+}
+
+fn lashlang_parent_start_seed(ctx: &RuntimeExecutionContext<'_>) -> String {
+    if let Some(invocation) = ctx.parent_invocation() {
+        if let Some(replay_key) = invocation.replay_key() {
+            return format!("runtime-replay:{replay_key}");
+        }
+        if let Some(effect_id) = invocation.effect_id() {
+            return format!("runtime-effect:{effect_id}");
+        }
+    }
+    format!("runtime-scope:{}", ctx.execution_scope_id())
 }
 
 fn lashlang_process_input_for_definition(

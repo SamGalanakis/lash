@@ -1,4 +1,4 @@
-use crate::{HostRequirementsRef, ModuleRef, ProcessRef};
+use crate::{HostRequirementsRef, LashlangExecutionCallSite, ModuleRef, ProcessRef};
 
 use super::{ExecutionScratch, ProfileReport, ProjectedBindings, Record, RuntimeFailure, Value};
 use crate::LashlangExecutionObservation;
@@ -42,6 +42,7 @@ pub struct ProcessStart {
     pub module_ref: ModuleRef,
     pub process_ref: ProcessRef,
     pub host_requirements_ref: HostRequirementsRef,
+    pub start_site: LashlangExecutionCallSite,
     pub process_name: String,
     pub args: Record,
 }

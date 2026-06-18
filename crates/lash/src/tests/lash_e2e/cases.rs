@@ -9,6 +9,7 @@ use super::harness::{
     ExpectedContracts, LashE2eCase, run_durable_input_request_case, run_session_turn_process_case,
     run_turn_case, run_turn_case_without_success_assertions,
 };
+use std::collections::BTreeSet;
 
 #[test]
 fn lash_e2e_foreground_labeled_tool_call() -> Result<()> {
@@ -127,7 +128,7 @@ submit result
 #[test]
 fn lash_e2e_nested_process_start_await() -> Result<()> {
     run_async_test_on_stack_budget("lash-e2e-nested-process", || async {
-        run_turn_case(LashE2eCase {
+        let run = run_turn_case(LashE2eCase {
             name: "nested process start await",
             session_id: "lash-e2e-nested-process",
             scripted_provider_responses: vec![
@@ -159,6 +160,7 @@ submit result
             },
         })
         .await?;
+        assert_lashlang_process_ids_unique_for_labels(&run.final_process_list, ["parent", "child"]);
         Ok(())
     })
 }
@@ -218,7 +220,7 @@ submit result
 #[test]
 fn lash_e2e_parallel_spawn_and_join() -> Result<()> {
     run_async_test_on_stack_budget("lash-e2e-parallel-spawn-join", || async {
-        run_turn_case(LashE2eCase {
+        let run = run_turn_case(LashE2eCase {
             name: "parallel process spawn and join",
             session_id: "lash-e2e-parallel-processes",
             scripted_provider_responses: vec![
@@ -248,6 +250,38 @@ submit { joined: [left_value, right_value] }
             },
         })
         .await?;
+        assert_lashlang_process_ids_unique_for_labels(&run.final_process_list, ["child", "child"]);
         Ok(())
     })
+}
+
+fn assert_lashlang_process_ids_unique_for_labels<const N: usize>(
+    processes: &[lash_core::ProcessHandleSummary],
+    expected_labels: [&str; N],
+) {
+    let mut ids = BTreeSet::new();
+    let mut labels = Vec::new();
+    for process in processes {
+        let Some(kind) = process.descriptor.kind.as_deref() else {
+            continue;
+        };
+        if kind != lash_lashlang_runtime::LASHLANG_ENGINE_KIND {
+            continue;
+        }
+        assert!(
+            process.process_id.starts_with("process:lashlang:sha256:"),
+            "lashlang process `{}` did not use a deterministic process id",
+            process.process_id
+        );
+        assert!(
+            ids.insert(process.process_id.as_str()),
+            "duplicate lashlang process id `{}`",
+            process.process_id
+        );
+        labels.push(process.descriptor.label.as_deref().unwrap_or("<missing>"));
+    }
+    labels.sort_unstable();
+    let mut expected = expected_labels;
+    expected.sort_unstable();
+    assert_eq!(labels, expected);
 }

@@ -99,6 +99,12 @@ impl<H: ExecutionHost> Vm<'_, H> {
             }
             VmEffect::StartProcess { process, keys } => {
                 let args = self.drain_record_from_stack(keys)?;
+                let start_site = active.map(lashlang_execution_call_site).ok_or_else(|| {
+                    RuntimeError::ValueError {
+                        message: "`start` requires a deterministic lashlang execution site"
+                            .to_string(),
+                    }
+                })?;
                 let process_name = self.chunk.names[process].text.to_string();
                 let module_context =
                     self.chunk
@@ -126,6 +132,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
                         module_ref: child_module_ref.clone(),
                         process_ref: process_ref.clone(),
                         host_requirements_ref: child_host_requirements_ref,
+                        start_site,
                         process_name: process_name.clone(),
                         args,
                     })))

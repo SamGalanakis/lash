@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use sha2::{Digest, Sha256};
+
 pub use lash_trace::{
     TraceLashlangChildExecution, TraceLashlangEdgeSelection, TraceLashlangExecutionEvent,
     TraceLashlangExecutionIdentity, TraceLashlangGraph, TraceLashlangGraphChildLink,
@@ -557,6 +559,7 @@ pub struct PreparedLashlangProcessStart {
 
 pub async fn prepare_lashlang_process_start(
     artifact_store: Arc<dyn LashlangArtifactStore>,
+    parent_start_seed: &str,
     start: lashlang::ProcessStart,
 ) -> Result<PreparedLashlangProcessStart, String> {
     let display_name = Some(start.process_name.clone());
@@ -601,10 +604,12 @@ pub async fn prepare_lashlang_process_start(
         args,
     };
     let identity = lashlang_process_identity(&process_input);
+    let process_id =
+        deterministic_lashlang_process_id(parent_start_seed, &start.start_site, &process_input)
+            .map_err(|err| format!("failed to derive deterministic process id: {err}"))?;
     let process_input = process_input
         .into_process_input()
         .map_err(|err| format!("failed to encode process input: {err}"))?;
-    let process_id = format!("process:{}", uuid::Uuid::new_v4());
     let registration = lash_core::ProcessRegistration::new(
         process_id,
         process_input,
@@ -620,6 +625,33 @@ pub async fn prepare_lashlang_process_start(
         registration,
         label: display_name,
     })
+}
+
+pub fn deterministic_lashlang_process_id(
+    parent_start_seed: &str,
+    start_site: &lashlang::LashlangExecutionCallSite,
+    input: &LashlangProcessInput,
+) -> Result<String, serde_json::Error> {
+    let args = serde_json::to_string(&input.args)?;
+    let occurrence = start_site.occurrence.to_string();
+    let process_ref = lashlang::process_ref_key(&input.process_ref);
+    let mut hasher = Sha256::new();
+    for part in [
+        "lashlang-process-start:v1",
+        parent_start_seed,
+        start_site.site.node_id.as_str(),
+        occurrence.as_str(),
+        input.module_ref.as_str(),
+        process_ref.as_str(),
+        input.host_requirements_ref.as_str(),
+        input.process_name.as_str(),
+        args.as_str(),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    Ok(format!("process:lashlang:sha256:{hash}"))
 }
 
 pub fn resolve_lashlang_module_operation(
@@ -942,6 +974,97 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_process_id_reuses_replayed_start_site_and_args() {
+        let input = test_process_input(serde_json::json!({ "root": "." }));
+        let site = test_start_site("child_process:scan", 1);
+
+        let first = deterministic_lashlang_process_id("parent:root", &site, &input)
+            .expect("process id derives");
+        let second = deterministic_lashlang_process_id("parent:root", &site, &input)
+            .expect("process id derives");
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("process:lashlang:sha256:"));
+    }
+
+    #[test]
+    fn deterministic_process_id_separates_parallel_sites_ordinals_and_parents() {
+        let input = test_process_input(serde_json::json!({ "root": "." }));
+        let left = deterministic_lashlang_process_id(
+            "parent:root",
+            &test_start_site("child_process:left", 1),
+            &input,
+        )
+        .expect("left id derives");
+        let right = deterministic_lashlang_process_id(
+            "parent:root",
+            &test_start_site("child_process:right", 1),
+            &input,
+        )
+        .expect("right id derives");
+        let second_ordinal = deterministic_lashlang_process_id(
+            "parent:root",
+            &test_start_site("child_process:left", 2),
+            &input,
+        )
+        .expect("second ordinal id derives");
+        let nested_parent = deterministic_lashlang_process_id(
+            "parent:nested",
+            &test_start_site("child_process:left", 1),
+            &input,
+        )
+        .expect("nested parent id derives");
+
+        assert_ne!(left, right);
+        assert_ne!(left, second_ordinal);
+        assert_ne!(left, nested_parent);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepared_start_replays_same_registration_id_without_duplicate_child_identity() {
+        let store = Arc::new(InMemoryLashlangArtifactStore::new());
+        let environment = LashlangHostEnvironment::new(
+            lashlang::LashlangHostCatalog::new(),
+            LashlangAbilities::default().with_processes(),
+        );
+        let output = lashlang::compile_module(lashlang::ModuleCompileRequest {
+            source: r#"process scan(root: str) -> str { finish root }"#,
+            environment: &environment,
+            artifact_store: Some(store.as_ref()),
+        })
+        .await
+        .expect("module compiles and persists");
+        let artifact_store: Arc<dyn LashlangArtifactStore> = store;
+        let site = test_start_site("child_process:scan", 1);
+
+        let first = prepare_lashlang_process_start(
+            Arc::clone(&artifact_store),
+            "parent:root",
+            test_process_start(&output, site.clone(), "."),
+        )
+        .await
+        .expect("first start prepares");
+        let replayed = prepare_lashlang_process_start(
+            Arc::clone(&artifact_store),
+            "parent:root",
+            test_process_start(&output, site.clone(), "."),
+        )
+        .await
+        .expect("replayed start prepares");
+        let sibling = prepare_lashlang_process_start(
+            Arc::clone(&artifact_store),
+            "parent:root",
+            test_process_start(&output, test_start_site("child_process:scan", 2), "."),
+        )
+        .await
+        .expect("sibling start prepares");
+
+        assert_eq!(first.registration.id, replayed.registration.id);
+        assert_eq!(first.registration.identity, replayed.registration.identity);
+        assert_ne!(first.registration.id, sibling.registration.id);
+    }
+
+    #[test]
     fn surface_merges_plugin_extensions() {
         let contribution = LashlangSurfaceContribution::new(
             LashlangAbilities::default().with_processes(),
@@ -990,6 +1113,54 @@ mod tests {
             scheduling: None,
             retry_policy: None,
             bindings: Default::default(),
+        }
+    }
+
+    fn test_process_input(args: serde_json::Value) -> LashlangProcessInput {
+        let hash = lashlang::ContentHash::new("abc123");
+        let args = args
+            .as_object()
+            .expect("test args must be an object")
+            .clone();
+        LashlangProcessInput {
+            module_ref: lashlang::ModuleRef::new(&hash),
+            process_ref: lashlang::ProcessRef::new(hash.clone(), 7),
+            host_requirements_ref: lashlang::HostRequirementsRef::new(&hash),
+            process_name: "scan".to_string(),
+            args,
+        }
+    }
+
+    fn test_start_site(node_id: &str, occurrence: u64) -> lashlang::LashlangExecutionCallSite {
+        lashlang::LashlangExecutionCallSite {
+            site: lashlang::LashlangExecutionSite {
+                node_id: node_id.to_string(),
+                node_kind: "child_process".to_string(),
+                label: "start scan".to_string(),
+                branch: None,
+            },
+            occurrence,
+        }
+    }
+
+    fn test_process_start(
+        output: &lashlang::ModuleCompileOutput,
+        start_site: lashlang::LashlangExecutionCallSite,
+        root: &str,
+    ) -> lashlang::ProcessStart {
+        let mut args = lashlang::Record::new();
+        args.insert("root".to_string(), lashlang::Value::String(root.into()));
+        lashlang::ProcessStart {
+            module_ref: output.module_ref.clone(),
+            process_ref: output
+                .artifact
+                .process_ref("scan")
+                .expect("scan process export")
+                .clone(),
+            host_requirements_ref: output.host_requirements_ref.clone(),
+            start_site,
+            process_name: "scan".to_string(),
+            args,
         }
     }
 }
