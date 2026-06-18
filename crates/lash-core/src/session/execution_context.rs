@@ -102,6 +102,14 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self.session_id
     }
 
+    pub fn execution_scope_id(&self) -> String {
+        self.dispatch
+            .effect_controller
+            .scoped()
+            .scope_id()
+            .to_string()
+    }
+
     pub fn session_scope(&self) -> crate::SessionScope {
         self.dispatch
             .agent_frame_id

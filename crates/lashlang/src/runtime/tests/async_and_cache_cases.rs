@@ -132,10 +132,14 @@ async fn start_process_returns_raw_handle_and_passes_explicit_input() {
     assert_eq!(start.process_name, "scan");
     assert_eq!(start.args["root"], Value::String(".".into()));
     assert!(start.module_ref.as_str().starts_with("lashlang:v1:sha256:"));
+    assert_eq!(start.start_site.site.node_kind, "child_process");
+    assert_eq!(start.start_site.site.label, "start scan");
+    assert_eq!(start.start_site.occurrence, 1);
+    assert!(start.start_site.site.node_id.starts_with("child_process:"));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unlinked_compiled_program_rejects_process_starts() {
+async fn unlinked_compiled_program_rejects_unsited_process_starts() {
     let program = crate::parse(
         r#"
         process scan() { finish 1 }
@@ -148,9 +152,12 @@ async fn unlinked_compiled_program_rejects_process_starts() {
 
     let err = execute_compiled(&compiled, &mut state, &RecordingProcessHost::default())
         .await
-        .expect_err("unlinked start should fail");
+        .expect_err("unsited start should fail");
 
-    assert!(err.to_string().contains("linked lashlang module artifact"));
+    assert!(
+        err.to_string()
+            .contains("requires a deterministic lashlang execution site")
+    );
 }
 
 #[test]

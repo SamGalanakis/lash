@@ -355,9 +355,14 @@ impl LashlangProcessHost<'_> {
     ) -> Result<lashlang::Value, ExecutionHostError> {
         let prepared = {
             let _phase = self.ctx.named_phase("rlm_process.prepare_start");
-            prepare_lashlang_process_start(Arc::clone(&self.artifact_store), start)
-                .await
-                .map_err(ExecutionHostError::new)?
+            let parent_start_seed = format!("parent-process:{}", self.process_id);
+            prepare_lashlang_process_start(
+                Arc::clone(&self.artifact_store),
+                &parent_start_seed,
+                start,
+            )
+            .await
+            .map_err(ExecutionHostError::new)?
         };
         let reply = {
             let _phase = self.ctx.named_phase("rlm_process.start");
