@@ -23,8 +23,8 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.57"
-lash-provider-openai = "=0.1.0-alpha.57"
+lash-runtime         = "=0.1.0-alpha.58"
+lash-provider-openai = "=0.1.0-alpha.58"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```
