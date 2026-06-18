@@ -10,11 +10,45 @@ use crate::{
     ToolFailureClass, ToolResult, TurnActivityId, TurnEvent,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolInvocation {
     pub id: String,
     pub name: String,
     pub args: serde_json::Value,
+    pub child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
+}
+
+impl ToolInvocation {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, args: serde_json::Value) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            args,
+            child_execution_trace_hook: None,
+        }
+    }
+
+    pub fn with_child_execution_trace_hook(
+        mut self,
+        hook: crate::ToolChildExecutionTraceHook,
+    ) -> Self {
+        self.child_execution_trace_hook = Some(hook);
+        self
+    }
+}
+
+impl std::fmt::Debug for ToolInvocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolInvocation")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("args", &self.args)
+            .field(
+                "child_execution_trace_hook",
+                &self.child_execution_trace_hook.as_ref().map(|_| "<hook>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -534,7 +568,21 @@ impl RuntimeExecutionContext<'_> {
             |(_, call)| self.tool_scheduling(&call.name),
             |(index, call)| {
                 let ctx = self.clone();
-                async move { ctx.call_tool(call.id, call.name, call.args, index).await }
+                async move {
+                    let executed = ctx
+                        .execute_tool_call(
+                            call.id,
+                            call.name,
+                            call.args,
+                            index,
+                            None,
+                            None,
+                            call.child_execution_trace_hook,
+                        )
+                        .await;
+                    ToolInvocationReply::from_output(executed.completed.output)
+                        .with_record(executed.record)
+                }
             },
         )
         .await

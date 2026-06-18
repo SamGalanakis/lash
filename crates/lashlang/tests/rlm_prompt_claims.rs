@@ -48,15 +48,20 @@ impl MockHost {
 impl ExecutionHost for MockHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::ResourceOperation(operation) => {
-                let args = operation
-                    .args
-                    .first()
-                    .and_then(Value::as_record)
-                    .cloned()
-                    .unwrap_or_default();
-                let name = test_host_operation(&operation)?;
-                self.call_tool(&name, args).await.map(AbilityResult::Value)
+            AbilityOp::ResourceOperation(operation) => self
+                .perform_resource_operation(operation)
+                .await
+                .map(AbilityResult::Value),
+            AbilityOp::ResourceOperationBatch(batch) => {
+                let mut results = Vec::with_capacity(batch.operations.len());
+                for operation in batch.operations {
+                    results.push(lashlang::ResourceOperationResult::from_result(
+                        self.perform_resource_operation(operation).await,
+                    ));
+                }
+                Ok(AbilityResult::ResourceOperationBatch(
+                    lashlang::ResourceOperationBatchResult { results },
+                ))
             }
             AbilityOp::StartProcess(start) => {
                 self.start_process(*start).await.map(AbilityResult::Value)
@@ -78,6 +83,22 @@ impl ExecutionHost for MockHost {
             }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
+    }
+}
+
+impl MockHost {
+    async fn perform_resource_operation(
+        &self,
+        operation: lashlang::ResourceOperation,
+    ) -> Result<Value, ExecutionHostError> {
+        let args = operation
+            .args
+            .first()
+            .and_then(Value::as_record)
+            .cloned()
+            .unwrap_or_default();
+        let name = test_host_operation(&operation)?;
+        self.call_tool(&name, args).await
     }
 }
 

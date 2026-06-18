@@ -31,6 +31,7 @@ pub(crate) struct Chunk {
     pub(crate) format_templates: Vec<CompiledFormatTemplate>,
     pub(crate) compiled_schemas: Vec<ValidationPlan>,
     pub(crate) assign_paths: Vec<CompiledAssignPath>,
+    pub(crate) resource_operation_batches: Vec<CompiledResourceOperationBatch>,
 }
 
 #[derive(Clone)]
@@ -70,6 +71,34 @@ pub(crate) struct CompiledAssignPath {
 pub(crate) enum CompiledAssignPathStep {
     Field(usize),
     Index,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledResourceOperationBatch {
+    pub(crate) leaves: Box<[CompiledResourceOperationBatchLeaf]>,
+    pub(crate) shape: CompiledAggregateAwaitShape,
+    pub(crate) stack_value_count: usize,
+    pub(crate) aggregate_unwrap: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledResourceOperationBatchLeaf {
+    pub(crate) operation: usize,
+    pub(crate) argc: usize,
+    pub(crate) receiver_stack_index: usize,
+    pub(crate) unwrap: bool,
+    pub(crate) site: Option<LashlangExecutionSite>,
+}
+
+#[derive(Clone)]
+pub(crate) enum CompiledAggregateAwaitShape {
+    BatchLeaf(usize),
+    Value(usize),
+    List(Box<[CompiledAggregateAwaitShape]>),
+    Record {
+        keys: usize,
+        values: Box<[CompiledAggregateAwaitShape]>,
+    },
 }
 
 pub(crate) struct ResultWrapperNames {
@@ -176,6 +205,7 @@ pub(crate) enum Instruction {
         operation: usize,
         argc: usize,
     },
+    ResourceOperationBatch(usize),
     StartProcess {
         process: usize,
         keys: usize,
@@ -320,6 +350,7 @@ impl Instruction {
             Instruction::ResourceCall { .. } | Instruction::ResourceCallUnwrap { .. } => {
                 InstructionProfileTag::ResourceCall
             }
+            Instruction::ResourceOperationBatch(_) => InstructionProfileTag::ResourceCall,
             Instruction::StartProcess { .. } => InstructionProfileTag::StartProcess,
             Instruction::AwaitHandle
             | Instruction::AwaitHandleUnwrap

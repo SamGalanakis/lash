@@ -9,6 +9,7 @@ use thiserror::Error;
 #[derive(Clone, Debug)]
 pub enum AbilityOp {
     ResourceOperation(ResourceOperation),
+    ResourceOperationBatch(ResourceOperationBatch),
     Await(Value),
     Cancel(Value),
     Print(Value),
@@ -25,6 +26,7 @@ pub enum AbilityOp {
 #[derive(Clone, Debug)]
 pub enum AbilityResult {
     Value(Value),
+    ResourceOperationBatch(ResourceOperationBatchResult),
     Unit,
 }
 
@@ -32,6 +34,9 @@ impl AbilityResult {
     pub fn into_value(self, op: &'static str) -> Result<Value, ExecutionHostError> {
         match self {
             Self::Value(value) => Ok(value),
+            Self::ResourceOperationBatch(_) => Err(ExecutionHostError::new(format!(
+                "{op} returned a resource operation batch result"
+            ))),
             Self::Unit => Err(ExecutionHostError::new(format!("{op} returned no value"))),
         }
     }
@@ -53,6 +58,31 @@ pub struct ResourceOperation {
     pub operation: String,
     pub args: Vec<Value>,
     pub call_site: Option<crate::LashlangExecutionCallSite>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResourceOperationBatch {
+    pub operations: Vec<ResourceOperation>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResourceOperationBatchResult {
+    pub results: Vec<ResourceOperationResult>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ResourceOperationResult {
+    Value(Value),
+    Error(ExecutionHostError),
+}
+
+impl ResourceOperationResult {
+    pub fn from_result(result: Result<Value, ExecutionHostError>) -> Self {
+        match result {
+            Ok(value) => Self::Value(value),
+            Err(error) => Self::Error(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

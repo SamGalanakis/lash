@@ -37,6 +37,7 @@ impl<'run> ToolDispatchClient<'run> {
                 async move {
                     child_context.tool_call_id = Some(call.id.clone());
                     child_context.prepared_payload = serde_json::Value::Null;
+                    child_context.child_execution_trace_hook = call.child_execution_trace_hook;
                     let outcome = crate::tool_dispatch::dispatch_tool_call_with_execution_context(
                         dispatch.as_ref(),
                         call.name,

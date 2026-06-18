@@ -181,7 +181,6 @@ pub async fn run_lashlang_process(
         lashlang_execution_trace: lashlang_execution_trace.clone(),
         sleep_sequence: AtomicU64::new(0),
         event_sequence: AtomicU64::new(0),
-        resource_tool_sequence: AtomicU64::new(0),
         signal_send_sequence: AtomicU64::new(0),
         signal_wait_ordinals: tokio::sync::Mutex::new(BTreeMap::new()),
     };
@@ -228,7 +227,6 @@ struct LashlangProcessHost<'run> {
     lashlang_execution_trace: LashlangProcessExecutionTrace,
     sleep_sequence: AtomicU64,
     event_sequence: AtomicU64,
-    resource_tool_sequence: AtomicU64,
     signal_send_sequence: AtomicU64,
     signal_wait_ordinals: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
@@ -257,28 +255,21 @@ impl LashlangProcessHost<'_> {
     fn resource_tool_call_id(
         &self,
         host_operation: &str,
-        call_site: Option<&lashlang::LashlangExecutionCallSite>,
+        call_site: &lashlang::LashlangExecutionCallSite,
     ) -> String {
-        if let Some(call_site) = call_site {
-            return format!(
-                "lashlang:{}:resource:{}:{}:{}",
-                self.process_id, host_operation, call_site.site.node_id, call_site.occurrence
-            );
-        }
-        let ordinal = self.resource_tool_sequence.fetch_add(1, Ordering::Relaxed);
         format!(
-            "lashlang:{}:resource:{}:ordinal:{}",
-            self.process_id, host_operation, ordinal
+            "lashlang:{}:resource:{}:{}:{}",
+            self.process_id, host_operation, call_site.site.node_id, call_site.occurrence
         )
     }
 
-    async fn resource_operation(
+    fn prepare_resource_invocation(
         &self,
         operation: String,
         receiver: lashlang::Value,
         args: Vec<lashlang::Value>,
         call_site: Option<lashlang::LashlangExecutionCallSite>,
-    ) -> Result<lashlang::Value, ExecutionHostError> {
+    ) -> Result<(String, lash_core::ToolInvocation), ExecutionHostError> {
         let receiver = match &receiver {
             lashlang::Value::Resource(receiver) => receiver,
             _ => {
@@ -296,27 +287,87 @@ impl LashlangProcessHost<'_> {
             ))
         })?;
         let payload = self.resource_payload(&args)?;
-        let call_id = self.resource_tool_call_id(&host_operation, call_site.as_ref());
-        let call_site = call_site.and_then(|call_site| {
-            self.lashlang_execution_trace
-                .tool_child_execution_trace_hook(call_site)
-        });
-        let reply = if let Some(call_site) = call_site {
+        let call_site = call_site.ok_or_else(|| {
+            ExecutionHostError::new(format!(
+                "module operation `{operation}` resolved to host operation `{host_operation}` but has no deterministic lashlang execution call site"
+            ))
+        })?;
+        let call_id = self.resource_tool_call_id(&host_operation, &call_site);
+        let mut invocation =
+            lash_core::ToolInvocation::new(call_id, manifest.name.clone(), payload);
+        if let Some(hook) = self
+            .lashlang_execution_trace
+            .tool_child_execution_trace_hook(call_site)
+        {
+            invocation = invocation.with_child_execution_trace_hook(hook);
+        }
+        Ok((host_operation, invocation))
+    }
+
+    async fn resource_operation(
+        &self,
+        operation: String,
+        receiver: lashlang::Value,
+        args: Vec<lashlang::Value>,
+        call_site: Option<lashlang::LashlangExecutionCallSite>,
+    ) -> Result<lashlang::Value, ExecutionHostError> {
+        let (_, invocation) =
+            self.prepare_resource_invocation(operation, receiver, args, call_site)?;
+        let lash_core::ToolInvocation {
+            id,
+            name,
+            args,
+            child_execution_trace_hook,
+        } = invocation;
+        let reply = if let Some(call_site) = child_execution_trace_hook {
             self.ctx
-                .call_tool_with_child_execution_trace_hook(
-                    call_id,
-                    manifest.name.clone(),
-                    payload,
-                    0,
-                    call_site,
-                )
+                .call_tool_with_child_execution_trace_hook(id, name, args, 0, call_site)
                 .await
         } else {
-            self.ctx
-                .call_tool(call_id, manifest.name.clone(), payload, 0)
-                .await
+            self.ctx.call_tool(id, name, args, 0).await
         };
         protocol_tool_reply_to_lashlang_value(reply)
+    }
+
+    async fn resource_operation_batch(
+        &self,
+        batch: lashlang::ResourceOperationBatch,
+    ) -> lashlang::ResourceOperationBatchResult {
+        let mut results = vec![None; batch.operations.len()];
+        let mut positions = Vec::new();
+        let mut invocations = Vec::new();
+        for (index, operation) in batch.operations.into_iter().enumerate() {
+            match self.prepare_resource_invocation(
+                operation.operation,
+                operation.receiver,
+                operation.args,
+                operation.call_site,
+            ) {
+                Ok((_, invocation)) => {
+                    positions.push(index);
+                    invocations.push(invocation);
+                }
+                Err(error) => {
+                    results[index] = Some(lashlang::ResourceOperationResult::Error(error));
+                }
+            }
+        }
+
+        for (index, reply) in positions
+            .into_iter()
+            .zip(self.ctx.call_tool_batch(invocations).await)
+        {
+            results[index] = Some(lashlang::ResourceOperationResult::from_result(
+                protocol_tool_reply_to_lashlang_value(reply),
+            ));
+        }
+
+        lashlang::ResourceOperationBatchResult {
+            results: results
+                .into_iter()
+                .map(|result| result.expect("every batch result slot should be filled"))
+                .collect(),
+        }
     }
 
     async fn await_handle(
@@ -561,6 +612,11 @@ impl lashlang::ExecutionHost for LashlangProcessHost<'_> {
                 )
                 .await
                 .map(lashlang::AbilityResult::Value),
+            lashlang::AbilityOp::ResourceOperationBatch(batch) => {
+                Ok(lashlang::AbilityResult::ResourceOperationBatch(
+                    self.resource_operation_batch(batch).await,
+                ))
+            }
             lashlang::AbilityOp::Await(handle) => self
                 .await_handle(handle)
                 .await

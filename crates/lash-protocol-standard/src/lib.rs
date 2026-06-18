@@ -199,15 +199,15 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
         }
         parallel_specs.push((
             spec.index,
-            ToolInvocation {
-                id: format!(
+            ToolInvocation::new(
+                format!(
                     "{}:{:02}",
                     call.context.tool_call_id().unwrap_or("batch"),
                     spec.index
                 ),
-                name: spec.tool,
-                args: spec.parameters,
-            },
+                spec.tool,
+                spec.parameters,
+            ),
         ));
     }
 

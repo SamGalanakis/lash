@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_core::{
     AttachmentRef, ExecImage, RuntimeExecutionContext, TextProjectionMetadata,
-    ToolChildExecutionTraceHook, ToolInvocationReply, TraceBranchSelection, TraceContext,
-    TraceEvent, TraceRecord, TraceRuntimeSubject, TraceSink,
+    ToolChildExecutionTraceHook, ToolInvocation, ToolInvocationReply, TraceBranchSelection,
+    TraceContext, TraceEvent, TraceRecord, TraceRuntimeSubject, TraceSink,
 };
 use lash_lashlang_runtime::{
     LASHLANG_ENGINE_KIND, LashlangProcessInput, TraceLashlangChildExecution,
@@ -124,7 +124,6 @@ pub(super) struct LashlangExecutionTrace {
 }
 
 impl LashlangExecutionTrace {
-    #[allow(dead_code)]
     pub(super) fn new(
         sink: std::sync::Arc<dyn TraceSink>,
         base_context: TraceContext,
@@ -251,6 +250,94 @@ impl HostBridge<'_> {
                 .await
         };
         self.consume_reply(&host_operation, reply)
+    }
+
+    async fn resource_operation_batch(
+        &self,
+        batch: lashlang::ResourceOperationBatch,
+    ) -> lashlang::ResourceOperationBatchResult {
+        let mut results = vec![None; batch.operations.len()];
+        let mut positions = Vec::new();
+        let mut host_operations = Vec::new();
+        let mut invocations = Vec::new();
+
+        for (source_index, operation) in batch.operations.into_iter().enumerate() {
+            let result = async {
+                let receiver = match &operation.receiver {
+                    FlowValue::Resource(receiver) => receiver,
+                    _ => {
+                        return Err(ExecutionHostError::new(format!(
+                            "module operation `{}` requires a module authority receiver",
+                            operation.operation
+                        )));
+                    }
+                };
+                let host_operation = resolve_lashlang_module_operation(
+                    &self.host_environment,
+                    receiver,
+                    &operation.operation,
+                )?;
+                let mut payload = if let [FlowValue::Record(record)] = operation.args.as_slice() {
+                    flow_record_json(record).await
+                } else {
+                    serde_json::json!({
+                        "args": flow_values_to_json(&operation.args).await,
+                    })
+                };
+                payload.as_object_mut().ok_or_else(|| {
+                    ExecutionHostError::new("module operation payload must be an object")
+                })?;
+                Ok::<_, ExecutionHostError>((host_operation, payload, operation.call_site))
+            }
+            .await;
+
+            let (host_operation, payload, call_site) = match result {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    results[source_index] = Some(lashlang::ResourceOperationResult::Error(error));
+                    continue;
+                }
+            };
+
+            if let Some(trigger_operation) =
+                lashlang::TriggerHostOperation::from_host_operation(&host_operation)
+            {
+                results[source_index] = Some(lashlang::ResourceOperationResult::from_result(
+                    self.trigger_operation(trigger_operation, payload).await,
+                ));
+                continue;
+            }
+
+            let call_id = uuid::Uuid::new_v4().to_string();
+            let mut invocation = ToolInvocation::new(call_id, host_operation.clone(), payload);
+            if let Some(call_site) = call_site.and_then(|call_site| {
+                self.lashlang_execution_trace
+                    .as_ref()
+                    .map(|trace| trace.tool_child_execution_trace_hook(call_site))
+            }) {
+                invocation = invocation.with_child_execution_trace_hook(call_site);
+            }
+            positions.push(source_index);
+            host_operations.push(host_operation);
+            invocations.push(invocation);
+        }
+
+        for ((source_index, host_operation), reply) in positions
+            .into_iter()
+            .zip(host_operations)
+            .zip(self.ctx.call_tool_batch(invocations).await)
+        {
+            results[source_index] = Some(lashlang::ResourceOperationResult::from_result(
+                self.consume_reply(&host_operation, reply),
+            ));
+        }
+
+        lashlang::ResourceOperationBatchResult {
+            results: results
+                .into_iter()
+                .map(|result| result.expect("every batch result slot should be filled"))
+                .collect(),
+        }
     }
 
     async fn trigger_operation(
@@ -500,6 +587,9 @@ impl ExecutionHost for HostBridge<'_> {
                     .await
                     .map(AbilityResult::Value)
             }
+            AbilityOp::ResourceOperationBatch(batch) => Ok(AbilityResult::ResourceOperationBatch(
+                self.resource_operation_batch(batch).await,
+            )),
             AbilityOp::StartProcess(start) => {
                 self.start_process(*start).await.map(AbilityResult::Value)
             }

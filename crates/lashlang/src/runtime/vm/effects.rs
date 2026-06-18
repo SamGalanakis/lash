@@ -4,11 +4,11 @@ use crate::{LashlangExecutionCallSite, LashlangExecutionChild};
 
 use super::super::host::{
     AbilityOp, AbilityResult, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessStart,
-    ResourceOperation, Sleep, SleepKind,
+    ResourceOperation, ResourceOperationBatch, ResourceOperationResult, Sleep, SleepKind,
 };
 use super::super::{
-    ExecutionHost, RuntimeError, Value, error_value, is_process_handle_record,
-    record_with_capacity, success, unwrap_tool_result,
+    CompiledAggregateAwaitShape, ExecutionHost, RuntimeError, Value, error_value,
+    is_process_handle_record, record_with_capacity, success, unwrap_tool_result,
 };
 use super::control::VmOutcome;
 use super::{ActiveLashlangExecutionNode, Vm};
@@ -17,6 +17,7 @@ use super::{ActiveLashlangExecutionNode, Vm};
 pub(super) enum VmEffect {
     ResourceCall { operation: usize, argc: usize },
     ResourceCallUnwrap { operation: usize, argc: usize },
+    ResourceOperationBatch(usize),
     StartProcess { process: usize, keys: usize },
     AwaitHandle,
     Sleep(SleepKind),
@@ -73,6 +74,9 @@ impl<H: ExecutionHost> Vm<'_, H> {
                     .await
                 {
                     Ok(AbilityResult::Value(value)) => success(value),
+                    Ok(AbilityResult::ResourceOperationBatch(_)) => error_value(
+                        "module operation returned a resource operation batch result".to_string(),
+                    ),
                     Ok(AbilityResult::Unit) => {
                         error_value("module operation returned no value".to_string())
                     }
@@ -96,6 +100,9 @@ impl<H: ExecutionHost> Vm<'_, H> {
                         message: format!("`?` unwrapped failed module operation: {error}"),
                     })?;
                 self.stack.push(value);
+            }
+            VmEffect::ResourceOperationBatch(batch) => {
+                self.resolve_resource_operation_batch(batch).await?;
             }
             VmEffect::StartProcess { process, keys } => {
                 let args = self.drain_record_from_stack(keys)?;
@@ -290,6 +297,129 @@ impl<H: ExecutionHost> Vm<'_, H> {
         Ok(None)
     }
 
+    async fn resolve_resource_operation_batch(&mut self, batch: usize) -> Result<(), RuntimeError> {
+        let batch = &self.chunk.resource_operation_batches[batch];
+        let start = self.stack_drain_start(batch.stack_value_count)?;
+        let values = self.stack.drain(start..).collect::<Vec<_>>();
+        let mut operations = Vec::with_capacity(batch.leaves.len());
+        let mut active_nodes = Vec::with_capacity(batch.leaves.len());
+        for leaf in batch.leaves.iter() {
+            let active = leaf
+                .site
+                .clone()
+                .map(|site| self.begin_lashlang_execution_site(site));
+            let receiver = values
+                .get(leaf.receiver_stack_index)
+                .cloned()
+                .ok_or_else(|| RuntimeError::ValueError {
+                    message: "resource operation batch receiver index out of range".to_string(),
+                })?;
+            let args_start = leaf.receiver_stack_index + 1;
+            let args_end = args_start + leaf.argc;
+            let args = values
+                .get(args_start..args_end)
+                .ok_or_else(|| RuntimeError::ValueError {
+                    message: "resource operation batch argument index out of range".to_string(),
+                })?
+                .to_vec();
+            operations.push(ResourceOperation {
+                receiver,
+                operation: self.chunk.names[leaf.operation].text.to_string(),
+                args,
+                call_site: active.as_ref().map(lashlang_execution_call_site),
+            });
+            active_nodes.push(active);
+        }
+
+        let result = self
+            .host
+            .perform(AbilityOp::ResourceOperationBatch(ResourceOperationBatch {
+                operations,
+            }))
+            .await;
+        let result = match result {
+            Ok(AbilityResult::ResourceOperationBatch(result)) => result,
+            Ok(AbilityResult::Value(_)) | Ok(AbilityResult::Unit) => {
+                let error = RuntimeError::ValueError {
+                    message: "resource operation batch returned invalid result".to_string(),
+                };
+                for active in active_nodes.iter().flatten() {
+                    self.fail_lashlang_execution(active, error.to_string());
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                let runtime_error = RuntimeError::ValueError {
+                    message: format!("resource operation batch failed: {error}"),
+                };
+                for active in active_nodes.iter().flatten() {
+                    self.fail_lashlang_execution(active, runtime_error.to_string());
+                }
+                return Err(runtime_error);
+            }
+        };
+        if result.results.len() != batch.leaves.len() {
+            let error = RuntimeError::ValueError {
+                message: format!(
+                    "resource operation batch returned {} results for {} operations",
+                    result.results.len(),
+                    batch.leaves.len()
+                ),
+            };
+            for active in active_nodes.iter().flatten() {
+                self.fail_lashlang_execution(active, error.to_string());
+            }
+            return Err(error);
+        }
+
+        let mut first_unwrapped_error = None;
+        let mut leaf_values = Vec::with_capacity(batch.leaves.len());
+        for ((leaf, result), active) in batch
+            .leaves
+            .iter()
+            .zip(result.results)
+            .zip(active_nodes.iter())
+        {
+            match result {
+                ResourceOperationResult::Value(value) => {
+                    leaf_values.push(if leaf.unwrap { value } else { success(value) });
+                    if let Some(active) = active {
+                        self.complete_lashlang_execution(active);
+                    }
+                }
+                ResourceOperationResult::Error(error) => {
+                    if leaf.unwrap {
+                        if first_unwrapped_error.is_none() {
+                            first_unwrapped_error = Some(error.to_string());
+                        }
+                        if let Some(active) = active {
+                            self.fail_lashlang_execution(active, error.to_string());
+                        }
+                        leaf_values.push(Value::Null);
+                    } else {
+                        leaf_values.push(error_value(error.to_string()));
+                        if let Some(active) = active {
+                            self.complete_lashlang_execution(active);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = first_unwrapped_error {
+            return Err(RuntimeError::ValueError {
+                message: format!("`?` unwrapped failed module operation: {error}"),
+            });
+        }
+
+        let mut value = build_aggregate_await_shape(&batch.shape, &values, &leaf_values, self)?;
+        if batch.aggregate_unwrap {
+            value = unwrap_tool_result(value)?;
+        }
+        self.stack.push(value);
+        Ok(())
+    }
+
     fn await_value(
         &self,
         handle: Value,
@@ -310,6 +440,9 @@ impl<H: ExecutionHost> Vm<'_, H> {
                         .await
                     {
                         Ok(AbilityResult::Value(value)) => success(value),
+                        Ok(AbilityResult::ResourceOperationBatch(_)) => error_value(
+                            "await returned a resource operation batch result".to_string(),
+                        ),
                         Ok(AbilityResult::Unit) => {
                             error_value("await returned no value".to_string())
                         }
@@ -329,6 +462,9 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 }
                 handle => match self.host.perform(AbilityOp::Await(handle)).await {
                     Ok(AbilityResult::Value(value)) => success(value),
+                    Ok(AbilityResult::ResourceOperationBatch(_)) => {
+                        error_value("await returned a resource operation batch result".to_string())
+                    }
                     Ok(AbilityResult::Unit) => error_value("await returned no value".to_string()),
                     Err(error) => error_value(error.to_string()),
                 },
@@ -355,6 +491,51 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 .map_err(|error| RuntimeError::ValueError {
                     message: format!("`?` unwrapped failed tool result: {error}"),
                 }),
+        }
+    }
+}
+
+fn build_aggregate_await_shape<H: ExecutionHost>(
+    shape: &CompiledAggregateAwaitShape,
+    stack_values: &[Value],
+    leaf_values: &[Value],
+    vm: &Vm<'_, H>,
+) -> Result<Value, RuntimeError> {
+    match shape {
+        CompiledAggregateAwaitShape::BatchLeaf(index) => leaf_values
+            .get(*index)
+            .cloned()
+            .ok_or_else(|| RuntimeError::ValueError {
+                message: "aggregate await leaf index out of range".to_string(),
+            }),
+        CompiledAggregateAwaitShape::Value(index) => {
+            stack_values
+                .get(*index)
+                .cloned()
+                .ok_or_else(|| RuntimeError::ValueError {
+                    message: "aggregate await value index out of range".to_string(),
+                })
+        }
+        CompiledAggregateAwaitShape::List(values) => values
+            .iter()
+            .map(|value| build_aggregate_await_shape(value, stack_values, leaf_values, vm))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| Value::List(values.into())),
+        CompiledAggregateAwaitShape::Record { keys, values } => {
+            let key_indices = &vm.chunk.key_lists[*keys];
+            if key_indices.len() != values.len() {
+                return Err(RuntimeError::ValueError {
+                    message: "aggregate await record shape is invalid".to_string(),
+                });
+            }
+            let mut record = record_with_capacity(values.len());
+            for (key, value_shape) in key_indices.iter().zip(values.iter()) {
+                let name_entry = &vm.chunk.names[*key];
+                let value =
+                    build_aggregate_await_shape(value_shape, stack_values, leaf_values, vm)?;
+                record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
+            }
+            Ok(Value::Record(Arc::new(record)))
         }
     }
 }

@@ -74,6 +74,7 @@ impl Compiler {
             format_templates: Vec::new(),
             compiled_schemas: Vec::new(),
             assign_paths: Vec::new(),
+            resource_operation_batches: Vec::new(),
             compile_stats,
             const_slots: Vec::new(),
             loop_contexts: Vec::new(),
@@ -101,6 +102,7 @@ impl Compiler {
             format_templates: self.format_templates,
             compiled_schemas: self.compiled_schemas,
             assign_paths: self.assign_paths,
+            resource_operation_batches: self.resource_operation_batches,
         }
     }
 
@@ -187,6 +189,15 @@ impl Compiler {
             steps,
             dynamic_index_count,
         });
+        index
+    }
+
+    fn push_resource_operation_batch(
+        &mut self,
+        batch: CompiledResourceOperationBatch,
+    ) -> usize {
+        let index = self.resource_operation_batches.len();
+        self.resource_operation_batches.push(batch);
         index
     }
 

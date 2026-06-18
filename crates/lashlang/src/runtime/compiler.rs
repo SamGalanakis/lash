@@ -27,7 +27,8 @@ use crate::tracking::{LashlangAstPath, LashlangExecutionContext, LashlangExecuti
 use super::record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
 use super::schema::{ValidationPlan, compile_schema_value};
 use super::{
-    Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep, CompiledFormatTemplate,
+    Chunk, CompileStats, CompiledAggregateAwaitShape, CompiledAssignPath, CompiledAssignPathStep,
+    CompiledFormatTemplate, CompiledResourceOperationBatch, CompiledResourceOperationBatchLeaf,
     Instruction, IntrinsicOp, LASH_HOST_REQUIREMENTS_REF_KEY, LASH_MODULE_REF_KEY,
     LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_TYPE_KEY, Name,
     Value, as_number, compile_format_template, eval_binary_values, execute_integer_div_builtin,
@@ -48,6 +49,7 @@ pub(crate) struct Compiler {
     format_templates: Vec<CompiledFormatTemplate>,
     compiled_schemas: Vec<ValidationPlan>,
     assign_paths: Vec<CompiledAssignPath>,
+    resource_operation_batches: Vec<CompiledResourceOperationBatch>,
     compile_stats: Rc<RefCell<CompileStats>>,
     const_slots: Vec<Option<Value>>,
     loop_contexts: Vec<LoopContext>,
