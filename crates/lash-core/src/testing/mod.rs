@@ -992,11 +992,7 @@ mod test_protocol_fakes {
                 .unwrap_or_else(|| serde_json::json!({}));
             parallel_specs.push((
                 index,
-                crate::ToolInvocation {
-                    id: format!("test-batch:{index}"),
-                    name: tool.to_string(),
-                    args: parameters,
-                },
+                crate::ToolInvocation::new(format!("test-batch:{index}"), tool, parameters),
             ));
         }
 

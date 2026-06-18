@@ -25,15 +25,24 @@ impl TestHost {
 impl ExecutionHost for TestHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::ResourceOperation(operation) => {
-                let empty = Record::new();
-                let args = operation
-                    .args
-                    .first()
-                    .and_then(Value::as_record)
-                    .map_or(&empty, |record| record);
-                let name = test_host_operation(&operation)?;
-                self.call_tool(&name, args).await.map(AbilityResult::Value)
+            AbilityOp::ResourceOperation(operation) => self
+                .perform_resource_operation(operation)
+                .await
+                .map(AbilityResult::Value),
+            AbilityOp::ResourceOperationBatch(batch) => {
+                let results = futures::future::join_all(
+                    batch
+                        .operations
+                        .into_iter()
+                        .map(|operation| self.perform_resource_operation(operation)),
+                )
+                .await
+                .into_iter()
+                .map(lashlang::ResourceOperationResult::from_result)
+                .collect();
+                Ok(AbilityResult::ResourceOperationBatch(
+                    lashlang::ResourceOperationBatchResult { results },
+                ))
             }
             AbilityOp::StartProcess(start) => self
                 .call_tool(&start.process_name, &start.args)
@@ -56,6 +65,20 @@ impl ExecutionHost for TestHost {
 }
 
 impl TestHost {
+    async fn perform_resource_operation(
+        &self,
+        operation: lashlang::ResourceOperation,
+    ) -> Result<Value, ExecutionHostError> {
+        let empty = Record::new();
+        let args = operation
+            .args
+            .first()
+            .and_then(Value::as_record)
+            .map_or(&empty, |record| record);
+        let name = test_host_operation(&operation)?;
+        self.call_tool(&name, args).await
+    }
+
     async fn call_tool(&self, name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         match name {
             "read_file" => {
@@ -190,6 +213,14 @@ fn test_host_environment() -> lashlang::LashlangHostEnvironment {
         "Agents",
         "spawn",
         "spawn_agent",
+        TypeExpr::Any,
+        TypeExpr::Any,
+    );
+    resources.add_module_operation(
+        ["tools"],
+        "Tools",
+        "sleep_echo",
+        "sleep_echo",
         TypeExpr::Any,
         TypeExpr::Any,
     );
@@ -1555,6 +1586,39 @@ async fn tool_calls_return_result_records() {
     assert_eq!(
         record["missing"].as_record().unwrap()["ok"],
         Value::Bool(false)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_await_resource_calls_run_concurrently_and_preserve_record_shape() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        results = await {
+          left: tools.sleep_echo({ value: "a" })?,
+          right: tools.sleep_echo({ value: "b" })?
+        }
+        submit results
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(record["left"], Value::String("a".into()));
+    assert_eq!(record["right"], Value::String("b".into()));
+    assert_eq!(
+        host.max_active.load(Ordering::SeqCst),
+        2,
+        "aggregate await should dispatch independent tools concurrently"
     );
 }
 

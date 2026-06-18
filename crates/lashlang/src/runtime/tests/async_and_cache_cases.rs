@@ -6,6 +6,9 @@ impl ExecutionHost for AsyncHost {
             AbilityOp::ResourceOperation(operation) => {
                 Host.perform(AbilityOp::ResourceOperation(operation)).await
             }
+            AbilityOp::ResourceOperationBatch(batch) => {
+                Host.perform(AbilityOp::ResourceOperationBatch(batch)).await
+            }
             AbilityOp::StartProcess(start) => {
                 let mut record = Record::default();
                 record.insert("__handle__".to_string(), Value::String("process".into()));

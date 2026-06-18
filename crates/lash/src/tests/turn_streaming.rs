@@ -326,14 +326,13 @@ async fn execute_runtime_batch_tool(
         let Some(tool_name) = item.get("tool").and_then(serde_json::Value::as_str) else {
             return lash_core::ToolResult::err_fmt(format!("Invalid tool_calls[{index}].tool"));
         };
-        invocations.push(lash_core::ToolInvocation {
-            id: format!("runtime-batch:{index}"),
-            name: tool_name.to_string(),
-            args: item
-                .get("parameters")
+        invocations.push(lash_core::ToolInvocation::new(
+            format!("runtime-batch:{index}"),
+            tool_name,
+            item.get("parameters")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({})),
-        });
+        ));
     }
 
     let outcomes = context.dispatch().batch(invocations.clone()).await;

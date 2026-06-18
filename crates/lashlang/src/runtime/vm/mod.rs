@@ -295,6 +295,13 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
         instruction_ip: usize,
     ) -> Option<ActiveLashlangExecutionNode> {
         let site = self.lashlang_execution_site_at(instruction_ip)?.clone();
+        Some(self.begin_lashlang_execution_site(site))
+    }
+
+    pub(super) fn begin_lashlang_execution_site(
+        &mut self,
+        site: LashlangExecutionSite,
+    ) -> ActiveLashlangExecutionNode {
         let occurrence = self
             .lashlang_execution_occurrences
             .entry(site.node_id.clone())
@@ -306,7 +313,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 site: site.clone(),
                 occurrence,
             });
-        Some(ActiveLashlangExecutionNode { site, occurrence })
+        ActiveLashlangExecutionNode { site, occurrence }
     }
 
     pub(super) fn complete_lashlang_execution(&self, active: &ActiveLashlangExecutionNode) {
@@ -1147,6 +1154,9 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     operation,
                     argc,
                 }));
+            }
+            Instruction::ResourceOperationBatch(batch) => {
+                return Ok(VmStep::Effect(VmEffect::ResourceOperationBatch(batch)));
             }
             Instruction::StartProcess { process, keys } => {
                 return Ok(VmStep::Effect(VmEffect::StartProcess { process, keys }));

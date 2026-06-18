@@ -152,6 +152,9 @@ impl Compiler {
         unwrap_result: bool,
         forced_site: Option<LashlangExecutionSite>,
     ) -> bool {
+        if self.compile_aggregate_await_expr(handle, unwrap_result, forced_site.clone()) {
+            return true;
+        }
         match handle {
             Expr::ReceiverCall {
                 receiver,
@@ -201,6 +204,143 @@ impl Compiler {
             }
         }
         true
+    }
+
+    fn compile_aggregate_await_expr(
+        &mut self,
+        handle: &Expr,
+        aggregate_unwrap: bool,
+        forced_site: Option<LashlangExecutionSite>,
+    ) -> bool {
+        let Some(leaf_count) = aggregate_await_shape_leaf_count(handle) else {
+            return false;
+        };
+        if leaf_count == 0 {
+            return false;
+        }
+
+        let mut leaves = Vec::with_capacity(leaf_count);
+        let mut stack_value_count = 0;
+        let shape =
+            self.compile_aggregate_await_shape(handle, &mut leaves, &mut stack_value_count);
+        let batch = self.push_resource_operation_batch(CompiledResourceOperationBatch {
+            leaves: leaves.into_boxed_slice(),
+            shape,
+            stack_value_count,
+            aggregate_unwrap,
+        });
+        let instruction = self.code.len();
+        self.code.push(Instruction::ResourceOperationBatch(batch));
+        self.mark_forced_lashlang_execution_site(instruction, forced_site);
+        true
+    }
+
+    fn compile_aggregate_await_shape(
+        &mut self,
+        expr: &Expr,
+        leaves: &mut Vec<CompiledResourceOperationBatchLeaf>,
+        stack_value_count: &mut usize,
+    ) -> CompiledAggregateAwaitShape {
+        match expr {
+            Expr::ReceiverCall {
+                receiver,
+                operation,
+                args,
+            } => self.compile_aggregate_await_leaf(
+                expr,
+                receiver,
+                operation,
+                args,
+                false,
+                leaves,
+                stack_value_count,
+            ),
+            Expr::ResultUnwrap(inner) => {
+                let Expr::ReceiverCall {
+                    receiver,
+                    operation,
+                    args,
+                } = inner.as_ref()
+                else {
+                    unreachable!("aggregate await shape was pre-validated")
+                };
+                self.compile_aggregate_await_leaf(
+                    inner,
+                    receiver,
+                    operation,
+                    args,
+                    true,
+                    leaves,
+                    stack_value_count,
+                )
+            }
+            Expr::List(items) => {
+                let values = items
+                    .iter()
+                    .map(|item| {
+                        self.compile_aggregate_await_shape(item, leaves, stack_value_count)
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                CompiledAggregateAwaitShape::List(values)
+            }
+            Expr::Record(entries) => {
+                let values = entries
+                    .iter()
+                    .map(|(_, value)| {
+                        self.compile_aggregate_await_shape(value, leaves, stack_value_count)
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                let keys = self.push_key_list(entries.iter().map(|(key, _)| key.as_str()));
+                CompiledAggregateAwaitShape::Record { keys, values }
+            }
+            _ => self.compile_aggregate_await_value(expr, stack_value_count),
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "aggregate await leaves mirror receiver-call syntax"
+    )]
+    fn compile_aggregate_await_leaf(
+        &mut self,
+        site_expr: &Expr,
+        receiver: &Expr,
+        operation: &str,
+        args: &[Expr],
+        unwrap: bool,
+        leaves: &mut Vec<CompiledResourceOperationBatchLeaf>,
+        stack_value_count: &mut usize,
+    ) -> CompiledAggregateAwaitShape {
+        let receiver_stack_index = *stack_value_count;
+        self.compile_expr(receiver);
+        for arg in args {
+            self.compile_expr(arg);
+        }
+        let operation_index = self.push_name(operation);
+        let site = self.lashlang_execution_site(site_expr, "resource_operation", operation);
+        let leaf_index = leaves.len();
+        leaves.push(CompiledResourceOperationBatchLeaf {
+            operation: operation_index,
+            argc: args.len(),
+            receiver_stack_index,
+            unwrap,
+            site,
+        });
+        *stack_value_count += args.len() + 1;
+        CompiledAggregateAwaitShape::BatchLeaf(leaf_index)
+    }
+
+    fn compile_aggregate_await_value(
+        &mut self,
+        expr: &Expr,
+        stack_value_count: &mut usize,
+    ) -> CompiledAggregateAwaitShape {
+        let value_index = *stack_value_count;
+        self.compile_expr(expr);
+        *stack_value_count += 1;
+        CompiledAggregateAwaitShape::Value(value_index)
     }
 
     fn mark_awaitable_effect_site(
@@ -554,5 +694,32 @@ impl Compiler {
             | Instruction::IterNext { jump_to: slot } => *slot = target,
             _ => unreachable!("patched non-jump instruction"),
         }
+    }
+}
+
+fn aggregate_await_shape_leaf_count(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::List(items) => items.iter().try_fold(0usize, |count, item| {
+            Some(count + aggregate_await_leaf_count(item)?)
+        }),
+        Expr::Record(entries) => entries.iter().try_fold(0usize, |count, (_, value)| {
+            Some(count + aggregate_await_leaf_count(value)?)
+        }),
+        _ => None,
+    }
+}
+
+fn aggregate_await_leaf_count(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::ReceiverCall { .. } => Some(1),
+        Expr::ResultUnwrap(inner) if matches!(inner.as_ref(), Expr::ReceiverCall { .. }) => Some(1),
+        Expr::List(items) => items.iter().try_fold(0usize, |count, item| {
+            Some(count + aggregate_await_leaf_count(item)?)
+        }),
+        Expr::Record(entries) => entries.iter().try_fold(0usize, |count, (_, value)| {
+            Some(count + aggregate_await_leaf_count(value)?)
+        }),
+        expr if is_pure_expr(expr) => Some(0),
+        _ => None,
     }
 }

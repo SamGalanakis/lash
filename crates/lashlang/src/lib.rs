@@ -57,7 +57,8 @@ pub use runtime::{
     LinkedProgramCache, LinkedProgramCacheError, ListValue, ProcessEvent, ProcessEventKind,
     ProcessSignal, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
     ProjectedBindings, ProjectedFuture, ProjectedHostDescriptor, ProjectedReadRequest,
-    ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation, RuntimeError,
+    ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation,
+    ResourceOperationBatch, ResourceOperationBatchResult, ResourceOperationResult, RuntimeError,
     RuntimeFailure, Sleep, SleepKind, Snapshot, State, Value, compile, compile_linked,
     compile_linked_process, compile_module_artifact_process, compile_process, execute, from_json,
     prewarm, unwrap_type_value,
@@ -207,6 +208,28 @@ mod tests {
                         Record::from_iter([("ok".to_string(), Value::Bool(true))]),
                     ))))
                 }
+                AbilityOp::ResourceOperationBatch(batch) => Ok(
+                    AbilityResult::ResourceOperationBatch(ResourceOperationBatchResult {
+                        results: batch
+                            .operations
+                            .into_iter()
+                            .map(|operation| {
+                                if operation.operation == "anything" {
+                                    ResourceOperationResult::Value(Value::Record(
+                                        std::sync::Arc::new(Record::from_iter([(
+                                            "ok".to_string(),
+                                            Value::Bool(true),
+                                        )])),
+                                    ))
+                                } else {
+                                    ResourceOperationResult::Error(ExecutionHostError::new(
+                                        "unsupported host ability",
+                                    ))
+                                }
+                            })
+                            .collect(),
+                    }),
+                ),
                 AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }

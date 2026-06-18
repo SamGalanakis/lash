@@ -40,6 +40,333 @@ fn label_on_await_assignment_attaches_to_await_instruction() {
 }
 
 #[test]
+fn aggregate_await_record_of_resource_calls_emits_batch_instruction() {
+    let compiled = compile_source(
+        r#"
+        results = await {
+          first: tools.echo({ value: "a" }),
+          second: tools.echo({ value: "b" })
+        }
+        submit results
+        "#,
+    )
+    .expect("program should compile");
+    let listing = compiled_instruction_listing(&compiled);
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ResourceOperationBatch(_))),
+        "aggregate await should compile to one batch instruction:\n{listing}"
+    );
+    assert!(
+        !compiled.chunk.code.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::ResourceCall { .. } | Instruction::ResourceCallUnwrap { .. }
+        )),
+        "aggregate await should not emit sequential resource calls:\n{listing}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_await_nested_resource_calls_reconstructs_shape() {
+    let value = exec(
+        r#"
+        result = await {
+          outer: [
+            tools.echo({ value: "a" })?,
+            { inner: tools.echo({ value: "b" })? }
+          ]
+        }
+        submit result
+        "#,
+    )
+    .await
+    .expect("program should run");
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    let Value::List(outer) = &record["outer"] else {
+        panic!("expected outer list");
+    };
+    assert_eq!(outer[0], Value::String("a".into()));
+    assert_eq!(
+        outer[1].as_record().unwrap()["inner"],
+        Value::String("b".into())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_await_mixed_pure_values_batch_resource_leaves_and_reconstructs_shape() {
+    struct MixedHost {
+        batch_len: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ExecutionHost for MixedHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            match op {
+                AbilityOp::ResourceOperationBatch(batch) => {
+                    self.batch_len
+                        .store(batch.operations.len(), std::sync::atomic::Ordering::SeqCst);
+                    Ok(AbilityResult::ResourceOperationBatch(
+                        ResourceOperationBatchResult {
+                            results: batch
+                                .operations
+                                .into_iter()
+                                .map(|operation| {
+                                    ResourceOperationResult::Value(
+                                        operation
+                                            .args
+                                            .first()
+                                            .and_then(Value::as_record)
+                                            .and_then(|record| record.get("value"))
+                                            .cloned()
+                                            .unwrap_or(Value::Null),
+                                    )
+                                })
+                                .collect(),
+                        },
+                    ))
+                }
+                AbilityOp::ResourceOperation(_) => Err(ExecutionHostError::new(
+                    "mixed aggregate should use the batch host ability",
+                )),
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
+                }
+                _ => Err(ExecutionHostError::new("unsupported host ability")),
+            }
+        }
+    }
+
+    let host = MixedHost {
+        batch_len: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let program = crate::parse(
+        r#"
+        label = "cache-miss"
+        result = await {
+          first: tools.echo({ value: "a" })?,
+          source: label,
+          nested: [
+            3,
+            tools.echo({ value: "b" })?,
+            { ok: true, total: len([1, 2, 3]) }
+          ]
+        }
+        submit result
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &host)
+        .await
+        .expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("program should finish");
+    };
+
+    assert_eq!(
+        host.batch_len.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    let record = value.as_record().expect("result record");
+    assert_eq!(record["first"], Value::String("a".into()));
+    assert_eq!(record["source"], Value::String("cache-miss".into()));
+    let Value::List(nested) = &record["nested"] else {
+        panic!("nested list");
+    };
+    assert_eq!(nested[0], Value::Number(3.0));
+    assert_eq!(nested[1], Value::String("b".into()));
+    let nested_record = nested[2].as_record().expect("nested record");
+    assert_eq!(nested_record["ok"], Value::Bool(true));
+    assert_eq!(nested_record["total"], Value::Number(3.0));
+}
+
+#[test]
+fn aggregate_await_effectful_non_tool_leaf_keeps_existing_path() {
+    let compiled = compile_source(
+        r#"
+        process child() { finish "done" }
+        result = await {
+          child: start child(),
+          tool: tools.echo({ value: "x" })?
+        }
+        submit result
+        "#,
+    )
+    .expect("program should compile");
+    let listing = compiled_instruction_listing(&compiled);
+    assert!(
+        !compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ResourceOperationBatch(_))),
+        "effectful non-tool leaves should keep the existing await path:\n{listing}"
+    );
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::StartProcess { .. })),
+        "test should cover a non-tool effect leaf:\n{listing}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_await_evaluates_arguments_once_in_source_order_before_batch() {
+    #[derive(Default)]
+    struct OrderHost {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl OrderHost {
+        fn echo_value(operation: &ResourceOperation) -> Value {
+            operation
+                .args
+                .first()
+                .and_then(Value::as_record)
+                .and_then(|record| record.get("value"))
+                .cloned()
+                .unwrap_or(Value::Null)
+        }
+    }
+
+    impl ExecutionHost for OrderHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            match op {
+                AbilityOp::ResourceOperation(operation) => {
+                    let value = Self::echo_value(&operation);
+                    self.events
+                        .lock()
+                        .expect("events")
+                        .push(format!("single:{value}"));
+                    Ok(AbilityResult::Value(value))
+                }
+                AbilityOp::ResourceOperationBatch(batch) => {
+                    let values = batch
+                        .operations
+                        .iter()
+                        .map(Self::echo_value)
+                        .collect::<Vec<_>>();
+                    self.events.lock().expect("events").push(format!(
+                        "batch:{}",
+                        values
+                            .iter()
+                            .map(Value::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
+                    Ok(AbilityResult::ResourceOperationBatch(
+                        ResourceOperationBatchResult {
+                            results: values
+                                .into_iter()
+                                .map(ResourceOperationResult::Value)
+                                .collect(),
+                        },
+                    ))
+                }
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
+                }
+                _ => Err(ExecutionHostError::new("unsupported host ability")),
+            }
+        }
+    }
+
+    let host = OrderHost::default();
+    let program = crate::parse(
+        r#"
+        result = await {
+          first: tools.echo({ value: tools.echo({ value: "arg-a" })? })?,
+          second: tools.echo({ value: tools.echo({ value: "arg-b" })? })?
+        }
+        submit result
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &host)
+        .await
+        .expect("program should run");
+    assert!(matches!(outcome, ExecutionOutcome::Finished(_)));
+    assert_eq!(
+        host.events.lock().expect("events").as_slice(),
+        ["single:arg-a", "single:arg-b", "batch:arg-a,arg-b"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_await_leaf_unwrap_waits_for_all_siblings_then_reports_first_error() {
+    struct CountingBatchHost {
+        batch_len: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ExecutionHost for CountingBatchHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            match op {
+                AbilityOp::ResourceOperationBatch(batch) => {
+                    self.batch_len
+                        .store(batch.operations.len(), std::sync::atomic::Ordering::SeqCst);
+                    Ok(AbilityResult::ResourceOperationBatch(
+                        ResourceOperationBatchResult {
+                            results: batch
+                                .operations
+                                .into_iter()
+                                .map(|operation| {
+                                    if operation.operation == "err" {
+                                        ResourceOperationResult::Error(ExecutionHostError::new(
+                                            "boom",
+                                        ))
+                                    } else {
+                                        ResourceOperationResult::Value(Value::String("ok".into()))
+                                    }
+                                })
+                                .collect(),
+                        },
+                    ))
+                }
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
+                }
+                _ => Err(ExecutionHostError::new("unexpected non-batch host ability")),
+            }
+        }
+    }
+
+    let host = CountingBatchHost {
+        batch_len: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let program = crate::parse(
+        r#"
+        result = await {
+          bad: tools.err()?,
+          good: tools.echo({ value: "ok" })?
+        }
+        submit result
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let err = execute_program(&program, &mut state, &host)
+        .await
+        .expect_err("program should fail after batch completes");
+    assert_eq!(
+        host.batch_len.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert!(
+        err.to_string()
+            .contains("`?` unwrapped failed module operation: boom"),
+        "{err}"
+    );
+}
+
+#[test]
 fn labeled_process_resource_operation_site_matches_static_graph_node() {
     let program = crate::parse(
         r#"

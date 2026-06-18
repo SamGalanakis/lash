@@ -9,25 +9,48 @@ use std::sync::{
 #[derive(Default)]
 struct Host;
 
+impl Host {
+    fn perform_resource_operation(
+        operation: ResourceOperation,
+    ) -> Result<Value, ExecutionHostError> {
+        match operation.operation.as_str() {
+            "echo" => {
+                let value = operation
+                    .args
+                    .first()
+                    .and_then(Value::as_record)
+                    .and_then(|record| record.get("value"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                Ok(value)
+            }
+            "err" => Err(ExecutionHostError::new("boom")),
+            other => Err(ExecutionHostError::new(format!(
+                "unknown module operation: {other}"
+            ))),
+        }
+    }
+}
+
 impl ExecutionHost for Host {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::ResourceOperation(operation) => match operation.operation.as_str() {
-                "echo" => {
-                    let value = operation
-                        .args
-                        .first()
-                        .and_then(Value::as_record)
-                        .and_then(|record| record.get("value"))
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    Ok(AbilityResult::Value(value))
-                }
-                "err" => Err(ExecutionHostError::new("boom")),
-                other => Err(ExecutionHostError::new(format!(
-                    "unknown module operation: {other}"
-                ))),
-            },
+            AbilityOp::ResourceOperation(operation) => {
+                Self::perform_resource_operation(operation).map(AbilityResult::Value)
+            }
+            AbilityOp::ResourceOperationBatch(batch) => Ok(AbilityResult::ResourceOperationBatch(
+                ResourceOperationBatchResult {
+                    results: batch
+                        .operations
+                        .into_iter()
+                        .map(|operation| {
+                            ResourceOperationResult::from_result(Self::perform_resource_operation(
+                                operation,
+                            ))
+                        })
+                        .collect(),
+                },
+            )),
             AbilityOp::Await(handle) => match handle {
                 Value::Record(_) => Ok(AbilityResult::Value(Value::Null)),
                 _ => Err(ExecutionHostError::new("expected handle record")),
@@ -66,9 +89,9 @@ struct RecordingProcessHost {
 impl ExecutionHost for RecordingProcessHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::ResourceOperation(_) => Err(ExecutionHostError::new(
-                "module operations are not supported by this host",
-            )),
+            AbilityOp::ResourceOperation(_) | AbilityOp::ResourceOperationBatch(_) => Err(
+                ExecutionHostError::new("module operations are not supported by this host"),
+            ),
             AbilityOp::StartProcess(start) => {
                 self.starts.lock().expect("starts lock").push(*start);
                 let mut handle = Record::new();
@@ -625,6 +648,15 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             format!(
                 "resource_call_unwrap {} argc={argc}",
                 name_text(chunk, operation)
+            )
+        }
+        Instruction::ResourceOperationBatch(batch) => {
+            let batch = &chunk.resource_operation_batches[batch];
+            format!(
+                "resource_operation_batch leaves={} values={} unwrap={}",
+                batch.leaves.len(),
+                batch.stack_value_count,
+                batch.aggregate_unwrap
             )
         }
         Instruction::StartProcess { process, keys } => format!(

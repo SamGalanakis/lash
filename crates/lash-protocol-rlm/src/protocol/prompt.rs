@@ -369,9 +369,9 @@ fn render_language_section(
     }
     if has_operations {
         let scheduling = if abilities.processes {
-            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent slow effects, wrap one branch in a named `process`, `start` every branch first, then join the handles with `await handles` or `await { key: handle }`. Call operations directly only for single effects, cheap probes, or steps that depend on earlier results."
+            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent module operations, use aggregate await: `results = await { first: module.a({ ... }), second: module.b({ ... }), label: \"kept\" }`; direct receiver-call leaves in nested lists/records fan out through the host scheduler, pure value leaves are preserved, and results keep the same shape. Put `?` on each operation leaf you want unwrapped, e.g. `first: module.a({ ... })?`; all siblings finish before the first source-order failure is reported. Process parallelism still comes from starting all independent process handles before joining them with `await handles` or `await { key: handle }`."
         } else {
-            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. Direct operation calls are serial when process handles are unavailable; do not describe sequential awaits as parallel."
+            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent module operations, use aggregate await: `results = await { first: module.a({ ... }), second: module.b({ ... }), label: \"kept\" }`; direct receiver-call leaves in nested lists/records fan out through the host scheduler, pure value leaves are preserved, and results keep the same shape. Put `?` on each operation leaf you want unwrapped, e.g. `first: module.a({ ... })?`; all siblings finish before the first source-order failure is reported."
         };
         bullets.push(scheduling.to_string());
     }
@@ -423,14 +423,14 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     );
     if has_operations {
         if processes {
-            section.push_str("\n- Several independent slow operations are needed -> define one small branch `process`, start every branch handle first, then join the handles with `await handles`.");
+            section.push_str("\n- Several independent slow operations are needed -> use aggregate await over a record/list of direct module calls plus any pure values you want preserved, putting `?` on each operation leaf that should unwrap.");
         } else {
-            section.push_str("\n- Several operations are needed -> call each module operation and keep the values in variables; these awaits are serial without process handles.");
+            section.push_str("\n- Several independent operations are needed -> use aggregate await over a record/list of direct module calls plus any pure values you want preserved, putting `?` on each operation leaf that should unwrap.");
         }
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations && processes {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (start first, then await handles; use `?` to unwrap each finished value):\n\n```lashlang\nprocess lookup(query: str) {\n  result = await web.search({ query: query })?\n  finish result\n}\n\nhandles = {\n  one: start lookup(query: \"one\"),\n  two: start lookup(query: \"two\")\n}\nresults = await handles\none = results.one?\ntwo = results.two?\nsubmit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(one), 0, 800), slice(to_string(two), 0, 800))\n```");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n```lashlang\nresults = await {\n  one: web.search({ query: \"one\" })?,\n  two: web.search({ query: \"two\" })?\n}\nsubmit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n```");
     } else if has_operations {
         section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.");
     } else {

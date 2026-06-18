@@ -295,23 +295,19 @@ core.triggers()
         <div class="section" id="fanout-with-await">
           <div class="section-header">
             <h2>Fanout With Await</h2>
-            <p>Independent work starts as handles and joins through <code>await</code>. Records and lists of handles are the concurrency join path.</p>
+            <p>Independent module operations fan out through aggregate <code>await</code>. Process work still starts as handles first, then joins through <code>await</code>.</p>
           </div>
           <dl class="def-list">
-            <dt>Named joins</dt>
-            <dd><code>await { first: h1, second: h2 }</code> resolves handles concurrently and returns wrapper records keyed by name. Named joins are preferred because results can be read as <code>results.first</code>.</dd>
-            <dt>Positional joins</dt>
-            <dd><code>await [h1, h2]</code> resolves handles concurrently and returns wrappers in list order. Use ordinary list/record expressions for computed values; fanout branches must naturally produce handles.</dd>
+            <dt>Module operation fanout</dt>
+            <dd><code>await { first: web.search({ query: "a" }), second: web.search({ query: "b" }), label: "kept" }</code> batches direct receiver-call leaves, preserves pure value leaves, runs operations through the host scheduler, and reconstructs the same record/list shape. Put <code>?</code> on each operation leaf to unwrap it after the whole batch finishes.</dd>
+            <dt>Process handle joins</dt>
+            <dd><code>await { first: h1, second: h2 }</code> resolves handles and returns wrapper records keyed by name. <code>await [h1, h2]</code> resolves handles in list order. Start all independent process handles before joining them.</dd>
           </dl>
-          <pre><code>process read_task(agent: Agents, task: str) {
-  result = await agent.spawn({ task: task, capability: "explore" })?
-  finish result
+          <pre><code>results = await {
+  one: web.search({ query: "Read file A" })?,
+  two: web.search({ query: "Read file B" })?
 }
-
-a = start read_task(agent: agents.default, task: "Read file A")
-b = start read_task(agent: agents.default, task: "Read file B")
-results = await { one: a, two: b }
-submit { a: results.one?, b: results.two? }</code></pre>
+submit { a: results.one, b: results.two }</code></pre>
         </div>
 
         <div class="section" id="builtins">

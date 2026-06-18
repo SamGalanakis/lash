@@ -10,6 +10,27 @@ impl ExecutionHost for BenchHost {
                     .unwrap_or(&empty);
                 bench_resource_call(&operation, args).map(AbilityResult::Value)
             }
+            AbilityOp::ResourceOperationBatch(batch) => {
+                Ok(AbilityResult::ResourceOperationBatch(
+                    lashlang::ResourceOperationBatchResult {
+                        results: batch
+                            .operations
+                            .into_iter()
+                            .map(|operation| {
+                                let empty = Record::new();
+                                let args = operation
+                                    .args
+                                    .first()
+                                    .and_then(Value::as_record)
+                                    .unwrap_or(&empty);
+                                lashlang::ResourceOperationResult::from_result(
+                                    bench_resource_call(&operation, args),
+                                )
+                            })
+                            .collect(),
+                    },
+                ))
+            }
             AbilityOp::StartProcess(start) => {
                 Self::task_handle(&start.process_name, &start.args).map(AbilityResult::Value)
             }
