@@ -214,21 +214,37 @@ fn replayed_terminal_event_repairs_non_terminal_status_projection() {
     .with_replay_key("process-repair-terminal");
     let first = prepare_process_event_append(&record, request.clone(), 1, None, 42)
         .expect("prepare first terminal event");
+    let ProcessEventAppendPlan::Insert {
+        event: first_event,
+        payload_hash: first_payload_hash,
+        ..
+    } = first
+    else {
+        panic!("first terminal event should insert");
+    };
 
     let replayed = prepare_process_event_append(
         &record,
         request,
         99,
-        Some((first.payload_hash, first.event)),
+        Some((first_payload_hash, first_event)),
         100,
     )
     .expect("prepare replayed terminal event");
 
-    assert!(replayed.replayed);
-    assert_eq!(replayed.event.sequence, 1);
-    assert_eq!(replayed.occurred_at_ms, 42);
+    let ProcessEventAppendPlan::Replay {
+        event,
+        repair_status,
+        occurred_at_ms,
+        ..
+    } = replayed
+    else {
+        panic!("terminal event replay should replay");
+    };
+    assert_eq!(event.sequence, 1);
+    assert_eq!(occurred_at_ms, 42);
     assert!(matches!(
-        replayed.status_update,
+        repair_status,
         Some(ProcessStatus::Completed {
             await_output: ProcessAwaitOutput::Success { .. }
         })

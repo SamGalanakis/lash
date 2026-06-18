@@ -565,6 +565,7 @@ submit "registered"
             lash_core::ProcessInput::ToolCall {
                 call: lash_core::PreparedToolCall::from_parts(
                     "rebuild-tool-call",
+                    "tool:rebuild_echo",
                     "rebuild_echo",
                     serde_json::json!({ "value": "recovered" }),
                     None,

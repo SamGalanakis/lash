@@ -99,6 +99,7 @@ mod tests {
             crate::ProcessInput::ToolCall {
                 call: crate::PreparedToolCall {
                     call_id: "call-123".to_string(),
+                    tool_id: crate::ToolId::from("tool:echo"),
                     tool_name: "echo".to_string(),
                     args: serde_json::json!({"value": "hi"}),
                     replay: None,

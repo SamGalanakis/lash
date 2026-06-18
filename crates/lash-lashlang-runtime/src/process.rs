@@ -280,7 +280,8 @@ impl LashlangProcessHost<'_> {
         };
         let host_operation =
             resolve_lashlang_module_operation(&self.host_environment, receiver, &operation)?;
-        let manifest = self.ctx.callable_tool_manifest(&host_operation).ok_or_else(|| {
+        let tool_id = lash_core::ToolId::from(host_operation.as_str());
+        let manifest = self.ctx.callable_tool_manifest_by_id(&tool_id).ok_or_else(|| {
             ExecutionHostError::new(format!(
                 "module operation `{}` resolved to unavailable host operation `{host_operation}`",
                 operation
@@ -293,8 +294,7 @@ impl LashlangProcessHost<'_> {
             ))
         })?;
         let call_id = self.resource_tool_call_id(&host_operation, &call_site);
-        let mut invocation =
-            lash_core::ToolInvocation::new(call_id, manifest.name.clone(), payload);
+        let mut invocation = lash_core::ToolInvocation::new(call_id, manifest.id.clone(), payload);
         if let Some(hook) = self
             .lashlang_execution_trace
             .tool_child_execution_trace_hook(call_site)
@@ -315,16 +315,16 @@ impl LashlangProcessHost<'_> {
             self.prepare_resource_invocation(operation, receiver, args, call_site)?;
         let lash_core::ToolInvocation {
             id,
-            name,
+            tool_id,
             args,
             child_execution_trace_hook,
         } = invocation;
         let reply = if let Some(call_site) = child_execution_trace_hook {
             self.ctx
-                .call_tool_with_child_execution_trace_hook(id, name, args, 0, call_site)
+                .call_tool_by_id_with_child_execution_trace_hook(id, tool_id, args, 0, call_site)
                 .await
         } else {
-            self.ctx.call_tool(id, name, args, 0).await
+            self.ctx.call_tool_by_id(id, tool_id, args, 0).await
         };
         protocol_tool_reply_to_lashlang_value(reply)
     }

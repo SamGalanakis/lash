@@ -1,5 +1,3 @@
-use lash_core::session_model::{Message, PartKind};
-
 use crate::trace::LlmCallUsage;
 
 pub(crate) struct RenderCtx {
@@ -16,28 +14,6 @@ impl RenderCtx {
         self.next_index += 1;
         format!("e{n}")
     }
-}
-
-pub(crate) fn submit_value_text(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
-pub(crate) fn message_matches_text(message: &Message, expected: &str) -> bool {
-    let expected = expected.trim();
-    if expected.is_empty() {
-        return false;
-    }
-    let collected: String = message
-        .parts
-        .iter()
-        .filter(|p| matches!(p.kind, PartKind::Text | PartKind::Prose))
-        .map(|p| p.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    collected.trim() == expected
 }
 
 pub(crate) fn compact_usage_label(
@@ -163,77 +139,4 @@ pub(crate) fn format_duration(ms: u64) -> String {
         let s = total_s % 60;
         format!("{m}m{s:02}s")
     }
-}
-
-pub(crate) fn format_count(n: u64) -> String {
-    if n < 1024 {
-        format!("{n}b")
-    } else if n < 1024 * 1024 {
-        format!("{:.1}kb", n as f64 / 1024.0)
-    } else if n < 1024 * 1024 * 1024 {
-        format!("{:.1}mb", n as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2}gb", n as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
-pub(crate) fn format_tokens(n: i64) -> String {
-    let n = n.max(0) as f64;
-    if n < 1_000.0 {
-        format!("{}", n as u64)
-    } else if n < 1_000_000.0 {
-        format!("{:.1}k", n / 1_000.0)
-    } else {
-        format!("{:.2}m", n / 1_000_000.0)
-    }
-}
-
-pub(crate) fn strip_first_lashlang_fence(text: &str) -> String {
-    let Some(open_rel) = text.find("```") else {
-        return text.to_string();
-    };
-    let opener_len = text.as_bytes()[open_rel..]
-        .iter()
-        .take_while(|&&b| b == b'`')
-        .count();
-    let after_open = open_rel + opener_len;
-    let rest = &text[after_open..];
-    let Some(lang_end_rel) = rest.find('\n') else {
-        return text[..open_rel].to_string();
-    };
-    let lang = rest[..lang_end_rel].trim();
-    if !matches!(lang, "lashlang" | "rlm" | "lash") {
-        return text.to_string();
-    }
-    let body_start = after_open + lang_end_rel + 1;
-    let body_bytes = &text.as_bytes()[body_start..];
-    let mut close = text.len();
-    let mut consumed = 0usize;
-    let mut i = 0;
-    while i < body_bytes.len() {
-        if body_bytes[i] == b'`' {
-            let start = i;
-            while i < body_bytes.len() && body_bytes[i] == b'`' {
-                i += 1;
-            }
-            if i - start >= opener_len {
-                close = body_start + start;
-                consumed = opener_len;
-                break;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    let after_close = (close + consumed).min(text.len());
-    let mut out = String::new();
-    out.push_str(text[..open_rel].trim_end());
-    let tail = text[after_close..].trim_start();
-    if !tail.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(tail);
-    }
-    out
 }

@@ -1,6 +1,6 @@
 use crate::{
-    PreparedToolCall, ProgressSender, ToolCall, ToolCallOutcome, ToolContext, ToolFailure,
-    ToolFailureClass, ToolManifest, ToolResult, ToolRetryDisposition, ToolRetryPolicy,
+    PreparedToolCall, ProgressSender, ToolCallOutcome, ToolContext, ToolFailure, ToolFailureClass,
+    ToolManifest, ToolResult, ToolRetryDisposition, ToolRetryPolicy,
 };
 
 use super::context::ToolDispatchContext;
@@ -12,7 +12,7 @@ pub(super) async fn execute_tool_call<'run>(
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolResult {
-    let tool_name = prepared.tool_name.as_str();
+    let tool_name = manifest.name.as_str();
     let retry_policy = manifest.retry_policy;
     let max_attempts = retry_policy.max_attempts();
     let replay_key = derive_retry_replay_key(&tool_context, tool_name);
@@ -70,16 +70,10 @@ async fn execute_once<'run>(
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolResult {
-    let tool_name = prepared.tool_name.as_str();
     let args = &prepared.args;
     context
         .tools
-        .execute(ToolCall {
-            name: tool_name,
-            args,
-            context: &tool_context,
-            progress,
-        })
+        .execute_by_id(&prepared.tool_id, args, &tool_context, progress)
         .await
 }
 

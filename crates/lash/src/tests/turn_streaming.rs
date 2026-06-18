@@ -322,34 +322,60 @@ async fn execute_runtime_batch_tool(
         return lash_core::ToolResult::err_fmt("Missing required parameter: tool_calls");
     };
     let mut invocations = Vec::with_capacity(raw_calls.len());
+    let mut immediate_results = Vec::new();
+    let dispatch = context.dispatch();
     for (index, item) in raw_calls.iter().enumerate() {
         let Some(tool_name) = item.get("tool").and_then(serde_json::Value::as_str) else {
             return lash_core::ToolResult::err_fmt(format!("Invalid tool_calls[{index}].tool"));
         };
-        invocations.push(lash_core::ToolInvocation::new(
-            format!("runtime-batch:{index}"),
-            tool_name,
-            item.get("parameters")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({})),
+        let Some(manifest) = dispatch.callable_tool_manifest(tool_name) else {
+            immediate_results.push(serde_json::json!({
+                "index": index,
+                "tool": tool_name,
+                "success": false,
+                "value": format!("Tool '{tool_name}' is unavailable in this session"),
+            }));
+            continue;
+        };
+        invocations.push((
+            index,
+            lash_core::ToolInvocation::new(
+                format!("runtime-batch:{index}"),
+                manifest.id,
+                item.get("parameters")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            ),
         ));
     }
 
-    let outcomes = context.dispatch().batch(invocations.clone()).await;
-    let results = invocations
+    let outcomes = dispatch
+        .batch(
+            invocations
+                .iter()
+                .map(|(_, invocation)| invocation.clone())
+                .collect(),
+        )
+        .await;
+    let mut results = invocations
         .into_iter()
         .zip(outcomes)
-        .enumerate()
-        .map(|(index, (invocation, outcome))| {
+        .map(|((index, invocation), outcome)| {
+            let tool = outcome
+                .record
+                .as_ref()
+                .map(|record| record.tool.clone())
+                .unwrap_or_else(|| invocation.label());
             let output = outcome.output;
             serde_json::json!({
                 "index": index,
-                "tool": invocation.name,
+                "tool": tool,
                 "success": output.is_success(),
                 "value": output.value_for_projection(),
             })
         })
         .collect::<Vec<_>>();
+    results.extend(immediate_results);
     lash_core::ToolResult::ok(serde_json::json!({ "results": results }))
 }
 

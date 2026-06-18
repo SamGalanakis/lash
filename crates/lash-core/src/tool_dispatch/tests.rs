@@ -770,6 +770,7 @@ fn pending_dispatch_context(
 fn pending_prepared_call() -> crate::PreparedToolCall {
     crate::PreparedToolCall::from_parts(
         "pending-call",
+        "tool:pending_probe",
         "pending_probe",
         json!({ "value": "runtime perf benchmark ok" }),
         None,

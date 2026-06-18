@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::plugin::{
     PluginError, SessionGraphService, SessionLifecycleService, SessionSnapshot, SessionStateService,
 };
-use crate::{AttachmentStore, ToolContract, ToolManifest, ToolResult};
+use crate::{AttachmentStore, ToolContract, ToolId, ToolManifest, ToolResult};
 
 mod attachments;
 mod direct_completion;
@@ -888,6 +888,7 @@ impl<'ctx, 'run> ToolDurableEffects<'ctx, 'run> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedToolCall {
     pub call_id: String,
+    pub tool_id: ToolId,
     pub tool_name: String,
     pub args: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -897,9 +898,10 @@ pub struct PreparedToolCall {
 }
 
 impl PreparedToolCall {
-    pub fn identity(call: crate::sansio::PendingToolCall) -> Self {
+    pub fn identity(tool_id: ToolId, call: crate::sansio::PendingToolCall) -> Self {
         Self {
             call_id: call.call_id,
+            tool_id,
             tool_name: call.tool_name,
             args: call.args,
             replay: call.replay,
@@ -909,6 +911,7 @@ impl PreparedToolCall {
 
     pub fn from_parts(
         call_id: impl Into<String>,
+        tool_id: impl Into<ToolId>,
         tool_name: impl Into<String>,
         args: serde_json::Value,
         replay: Option<ProviderReplayMeta>,
@@ -916,6 +919,7 @@ impl PreparedToolCall {
     ) -> Self {
         Self {
             call_id: call_id.into(),
+            tool_id: tool_id.into(),
             tool_name: tool_name.into(),
             args,
             replay,
@@ -983,6 +987,7 @@ impl ToolPrepareContext {
 
 /// Inputs handed to [`ToolProvider::prepare_tool_call`].
 pub struct ToolPrepareCall<'a> {
+    pub tool_id: ToolId,
     pub pending: crate::sansio::PendingToolCall,
     pub context: &'a ToolPrepareContext,
 }
@@ -1015,14 +1020,41 @@ pub trait ToolProvider: Send + Sync + 'static {
             .into_iter()
             .find(|manifest| manifest.name == name)
     }
+    fn resolve_manifest_by_id(&self, id: &ToolId) -> Option<ToolManifest> {
+        self.tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.id == *id)
+    }
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
+    fn resolve_contract_by_id(&self, id: &ToolId) -> Option<Arc<ToolContract>> {
+        let manifest = self.resolve_manifest_by_id(id)?;
+        self.resolve_contract(&manifest.name)
+    }
     async fn prepare_tool_call(
         &self,
         call: ToolPrepareCall<'_>,
     ) -> Result<PreparedToolCall, ToolResult> {
-        Ok(PreparedToolCall::identity(call.pending))
+        Ok(PreparedToolCall::identity(call.tool_id, call.pending))
     }
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult;
+    async fn execute_by_id(
+        &self,
+        tool_id: &ToolId,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let Some(manifest) = self.resolve_manifest_by_id(tool_id) else {
+            return ToolResult::err_fmt(format!("Unknown tool id: {tool_id}"));
+        };
+        self.execute(ToolCall {
+            name: &manifest.name,
+            args,
+            context,
+            progress,
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -1074,6 +1106,7 @@ mod tests {
         let cancellation = tokio_util::sync::CancellationToken::new();
         let prepared = PreparedToolCall::from_parts(
             "call-1",
+            "tool:demo_tool",
             "demo_tool",
             serde_json::json!({ "input": true }),
             None,

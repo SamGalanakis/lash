@@ -235,7 +235,8 @@ mod tests {
         module: Option<&str>,
         aliases: Vec<&str>,
     ) -> Value {
-        let tool = ToolDefinition::raw_named(
+        let tool = ToolDefinition::raw(
+            format!("tool:test/{name}"),
             name,
             description,
             ToolContract::default_input_schema(),
@@ -374,7 +375,7 @@ mod tests {
         let value = result.value_for_projection();
         let results = value.as_array().expect("search result list");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["id"], json!("tool:read_file"));
+        assert_eq!(results[0]["id"], json!("tool:test/read_file"));
         assert_eq!(results[0]["name"], json!("read_file"));
         #[cfg(feature = "lashlang")]
         assert_eq!(results[0]["call"], json!("filesystem.read"));

@@ -1124,7 +1124,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     opened
         .admin()
         .tools()
-        .set_availability("app_lookup", ToolAvailability::Off)
+        .set_availability("tool:app_lookup", ToolAvailability::Off)
         .await?;
     let mut persisted = opened.admin().state().persist_current().await?;
     let expected_generation = opened
@@ -1154,7 +1154,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     assert_eq!(state.generation(), expected_generation);
     assert_eq!(
         state
-            .get("app_lookup")
+            .get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );

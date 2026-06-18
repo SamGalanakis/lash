@@ -616,8 +616,9 @@ mod tests {
             .await
             .expect("reopen session after account removal");
         let tool_state = reopened.tools().state().await.expect("tool state");
+        let send_tool_id = lash_core::ToolId::from("tool:inbox__late_account__send");
         let send_entry = tool_state
-            .get("inbox__late_account__send")
+            .get(&send_tool_id)
             .expect("removed account tool is kept as an orphan");
         assert!(
             send_entry.is_orphaned(),
@@ -643,7 +644,7 @@ mod tests {
             .expect("reopen session after account re-add");
         let tool_state = reopened.tools().state().await.expect("tool state");
         let send_entry = tool_state
-            .get("inbox__late_account__send")
+            .get(&send_tool_id)
             .expect("re-added account tool is present");
         assert!(
             !send_entry.is_orphaned(),

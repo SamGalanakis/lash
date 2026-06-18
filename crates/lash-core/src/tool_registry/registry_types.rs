@@ -46,18 +46,18 @@ impl ToolRegistryEntry {
 #[derive(Clone)]
 struct ToolRegistryState {
     generation: u64,
-    tools: BTreeMap<String, ToolRegistryEntry>,
+    tools: BTreeMap<ToolId, ToolRegistryEntry>,
     next_live_source_id: u64,
 }
 
 /// Outcome of [`ToolRegistry::restore_state`]: the adopted generation plus the
-/// names of persisted tools that no registered source currently resolves.
+/// ids of persisted tools that no registered source currently resolves.
 /// Hosts should surface a non-empty `orphaned` list to the user — the session
 /// opened, but those tools are `Off` until their source returns.
 #[derive(Clone, Debug, Default)]
 pub struct ToolRestoreReport {
     pub generation: u64,
-    pub orphaned: Vec<String>,
+    pub orphaned: Vec<ToolId>,
 }
 
 #[derive(Debug, thiserror::Error)]

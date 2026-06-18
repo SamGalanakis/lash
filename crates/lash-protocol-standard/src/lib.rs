@@ -185,6 +185,7 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
 
     let mut immediate_outcomes = Vec::new();
     let mut parallel_specs = Vec::new();
+    let dispatch = call.context.dispatch();
 
     for spec in specs.into_iter().take(BATCH_MAX_TOOL_CALLS) {
         if spec.tool == "batch" {
@@ -197,6 +198,17 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
             }));
             continue;
         }
+        let Some(manifest) = dispatch.callable_tool_manifest(&spec.tool) else {
+            let error = format!("Tool '{}' is unavailable in this session", spec.tool);
+            immediate_outcomes.push(serde_json::json!({
+                "index": spec.index,
+                "tool": spec.tool,
+                "success": false,
+                "duration_ms": 0,
+                "error": error,
+            }));
+            continue;
+        };
         parallel_specs.push((
             spec.index,
             ToolInvocation::new(
@@ -205,15 +217,13 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
                     call.context.tool_call_id().unwrap_or("batch"),
                     spec.index
                 ),
-                spec.tool,
+                manifest.id,
                 spec.parameters,
             ),
         ));
     }
 
-    let mut parallel_outcomes = call
-        .context
-        .dispatch()
+    let mut parallel_outcomes = dispatch
         .batch(
             parallel_specs
                 .iter()
@@ -224,9 +234,10 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
     for ((index, invocation), outcome) in
         parallel_specs.into_iter().zip(parallel_outcomes.drain(..))
     {
+        let tool_label = invocation.label();
         let tool_record = outcome.record.unwrap_or(lash_core::ToolCallRecord {
             call_id: Some(invocation.id),
-            tool: invocation.name,
+            tool: tool_label,
             args: invocation.args,
             output: outcome.output,
             duration_ms: 0,

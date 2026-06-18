@@ -366,40 +366,55 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             replay_lookup,
             current_epoch_ms(),
         )?;
-        if prepared.replayed {
-            if let Some(status) = prepared.status_update.clone() {
-                record.record.status = status;
-                if record.record.status.is_terminal() {
-                    record.record.wait = None;
+        match prepared {
+            super::ProcessEventAppendPlan::Replay {
+                event,
+                repair_status,
+                wake_delivery,
+                occurred_at_ms,
+            } => {
+                if let Some(status) = repair_status {
+                    super::apply_process_status_projection(
+                        &mut record.record,
+                        status,
+                        occurred_at_ms,
+                    );
+                    record.notify.notify_waiters();
                 }
-                record.record.updated_at_ms = prepared.occurred_at_ms;
+                Ok(ProcessEventAppendResult {
+                    event,
+                    wake_delivery,
+                })
+            }
+            super::ProcessEventAppendPlan::Insert {
+                event,
+                payload_hash,
+                status_update,
+                wake_delivery,
+                occurred_at_ms,
+            } => {
+                if let Some(status) = status_update {
+                    super::apply_process_status_projection(
+                        &mut record.record,
+                        status,
+                        occurred_at_ms,
+                    );
+                } else {
+                    record.record.updated_at_ms = occurred_at_ms;
+                }
+                record.events.push(event.clone());
+                if let Some(replay) = event.invocation.replay.clone() {
+                    record
+                        .keyed_events
+                        .insert(replay.key, (payload_hash, event.clone()));
+                }
                 record.notify.notify_waiters();
-            }
-            return Ok(ProcessEventAppendResult {
-                event: prepared.event,
-                wake_delivery: prepared.wake_delivery,
-            });
-        }
-        let event = prepared.event;
-        if let Some(status) = prepared.status_update.clone() {
-            record.record.status = status;
-            if record.record.status.is_terminal() {
-                record.record.wait = None;
+                Ok(ProcessEventAppendResult {
+                    event,
+                    wake_delivery,
+                })
             }
         }
-        record.record.updated_at_ms = prepared.occurred_at_ms;
-        record.events.push(event.clone());
-        if let Some(replay) = event.invocation.replay.clone() {
-            record
-                .keyed_events
-                .insert(replay.key, (prepared.payload_hash, event.clone()));
-        }
-        let wake_delivery = prepared.wake_delivery;
-        record.notify.notify_waiters();
-        Ok(ProcessEventAppendResult {
-            event,
-            wake_delivery,
-        })
     }
 
     async fn events_after(

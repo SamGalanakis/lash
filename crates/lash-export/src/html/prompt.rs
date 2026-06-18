@@ -5,12 +5,11 @@ use lash_core::ChronologicalPayload;
 use lash_core::session_model::MessageRole;
 
 use crate::trace::LlmPromptSnapshot;
+use crate::transcript::{format_count, format_tokens, rlm_transcript_step_from_event};
 
-use super::chronological_rlm_step;
 use super::escaping::{escape, escape_attr};
 use super::view_model::{
-    RenderCtx, compact_usage_label, context_percent, context_percent_label, format_count,
-    format_tokens, percent_of, usage_title,
+    RenderCtx, compact_usage_label, context_percent, context_percent_label, percent_of, usage_title,
 };
 
 #[derive(Clone)]
@@ -95,7 +94,7 @@ pub(crate) fn compute_prompt_insertions(
     let has_rlm_steps = chronological.iter().any(|e| {
         matches!(
             &e.payload,
-            ChronologicalPayload::ProtocolEvent(event) if chronological_rlm_step(event).is_some()
+            ChronologicalPayload::ProtocolEvent(event) if rlm_transcript_step_from_event(event).is_some()
         )
     });
 
@@ -132,7 +131,7 @@ pub(crate) fn compute_prompt_insertions(
         for (i, entry) in chronological.iter().enumerate() {
             match &entry.payload {
                 ChronologicalPayload::ProtocolEvent(event) => {
-                    let Some(step) = chronological_rlm_step(event) else {
+                    let Some(step) = rlm_transcript_step_from_event(event) else {
                         continue;
                     };
                     let protocol_iteration = step.protocol_iteration as u64;

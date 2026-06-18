@@ -49,6 +49,19 @@ pub(crate) fn resolve_tool_scheduling(
         .unwrap_or_default()
 }
 
+pub(crate) fn resolve_tool_scheduling_by_id(
+    context: &ToolDispatchContext<'_>,
+    tool_id: &crate::ToolId,
+) -> ToolScheduling {
+    context
+        .tool_catalog
+        .tools
+        .iter()
+        .find(|def| def.manifest.id == *tool_id)
+        .map(|def| def.manifest.scheduling)
+        .unwrap_or_default()
+}
+
 /// Schedule a batch using Lash's tool execution policy.
 ///
 /// Parallel-safe tools run concurrently first, then serial tools run

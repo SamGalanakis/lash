@@ -659,48 +659,75 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         replay_lookup,
                         occurred_at_ms,
                     )?;
-                    if prepared.replayed {
-                        return Ok((
-                            ProcessEventAppendResult {
-                                event: prepared.event,
-                                wake_delivery: prepared.wake_delivery,
-                            },
-                            false,
-                        ));
-                    }
-                    let event = prepared.event;
-                    tx.execute(
-                        "INSERT INTO process_events (
-                            process_id, sequence, event_type, payload_hash, idempotency_key,
-                            occurred_at_ms, event_json
-                         )
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![
-                            process_id,
-                            sequence as i64,
-                            event.event_type.as_str(),
-                            prepared.payload_hash.as_str(),
-                            event.invocation.replay_key(),
-                            prepared.occurred_at_ms as i64,
-                            process_encode_json(&event)?,
-                        ],
-                    )
-                    .map_err(process_sqlite_error)?;
-                    if let Some(status) = prepared.status_update.clone() {
-                        record.status = status;
-                        if record.status.is_terminal() {
-                            record.wait = None;
+                    match prepared {
+                        lash_core::ProcessEventAppendPlan::Replay {
+                            event,
+                            repair_status,
+                            wake_delivery,
+                            occurred_at_ms,
+                        } => {
+                            let repaired = if let Some(status) = repair_status {
+                                lash_core::apply_process_status_projection(
+                                    &mut record,
+                                    status,
+                                    occurred_at_ms,
+                                );
+                                Self::save_process_conn(tx, &record)?;
+                                true
+                            } else {
+                                false
+                            };
+                            Ok((
+                                ProcessEventAppendResult {
+                                    event,
+                                    wake_delivery,
+                                },
+                                repaired,
+                            ))
+                        }
+                        lash_core::ProcessEventAppendPlan::Insert {
+                            event,
+                            payload_hash,
+                            status_update,
+                            wake_delivery,
+                            occurred_at_ms,
+                        } => {
+                            tx.execute(
+                                "INSERT INTO process_events (
+                                    process_id, sequence, event_type, payload_hash, idempotency_key,
+                                    occurred_at_ms, event_json
+                                 )
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                                params![
+                                    process_id,
+                                    sequence as i64,
+                                    event.event_type.as_str(),
+                                    payload_hash.as_str(),
+                                    event.invocation.replay_key(),
+                                    occurred_at_ms as i64,
+                                    process_encode_json(&event)?,
+                                ],
+                            )
+                            .map_err(process_sqlite_error)?;
+                            if let Some(status) = status_update {
+                                lash_core::apply_process_status_projection(
+                                    &mut record,
+                                    status,
+                                    occurred_at_ms,
+                                );
+                            } else {
+                                record.updated_at_ms = occurred_at_ms;
+                            }
+                            Self::save_process_conn(tx, &record)?;
+                            Ok((
+                                ProcessEventAppendResult {
+                                    event,
+                                    wake_delivery,
+                                },
+                                true,
+                            ))
                         }
                     }
-                    record.updated_at_ms = prepared.occurred_at_ms;
-                    Self::save_process_conn(tx, &record)?;
-                    Ok((
-                        ProcessEventAppendResult {
-                            event,
-                            wake_delivery: prepared.wake_delivery,
-                        },
-                        true,
-                    ))
                 })()))
             })
             .await

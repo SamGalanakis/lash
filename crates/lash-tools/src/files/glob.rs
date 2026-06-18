@@ -4,10 +4,13 @@ use std::path::PathBuf;
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
 use lash_tool_support::{
-    FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
-    build_path_entry, filesystem_entries_output_schema, filesystem_entries_result, object_schema,
-    parse_optional_bool, parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
+    FS_DEFAULTS_PREAMBLE, FilesystemEntriesOutput, OptionalUsizeArg, StaticToolExecute,
+    StaticToolProvider, ToolDefinitionLashlangExt, build_path_entry, default_glob_limit,
+    default_path_dot, default_true, execute_typed_tool, filesystem_entries_output,
+    invalid_tool_args, non_empty_string, rg_file_list, run_blocking_value,
 };
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// Find files by glob pattern.
 #[derive(Default)]
@@ -18,107 +21,115 @@ pub fn glob_provider() -> StaticToolProvider<Glob> {
     StaticToolProvider::new(vec![glob_tool_definition()], Glob)
 }
 
-const MAX_RESULTS: usize = 100;
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GlobArgs {
+    /// Glob pattern to match.
+    pattern: String,
+    /// Base directory to search in.
+    #[serde(default = "default_path_dot")]
+    path: String,
+    /// Maximum results to return. Use null or "none" for no cap.
+    #[serde(default = "default_glob_limit")]
+    limit: OptionalUsizeArg,
+    /// Count text lines for file entries.
+    #[serde(default)]
+    with_lines: bool,
+    /// Include dotfiles and dot-directories.
+    #[serde(default = "default_true")]
+    include_hidden: bool,
+    /// Respect `.gitignore` and related ignore files.
+    #[serde(default = "default_true")]
+    respect_gitignore: bool,
+}
 
 #[async_trait::async_trait]
 impl StaticToolExecute for Glob {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let args = call.args;
-        let pattern = match require_str(args, "pattern") {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let limit = match parse_limit(args) {
-            Ok(limit) => limit,
-            Err(e) => return e,
-        };
-        let with_lines = match parse_optional_bool(args, "with_lines", false) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let include_hidden = match parse_optional_bool(args, "include_hidden", true) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let respect_gitignore = match parse_optional_bool(args, "respect_gitignore", true) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let base = PathBuf::from(base_dir);
-        let pattern = pattern.to_string();
-
-        run_blocking(move || {
-            if !base.exists() {
-                return ToolResult::err_fmt(format_args!("Path does not exist: {}", base.display()));
-            }
-            if !base.is_dir() {
-                return ToolResult::err_fmt(format_args!(
-                    "{} is a file, not a directory. Pass the parent directory as path and use the pattern to match files.",
-                    base.display()
-                ));
-            }
-
-            let glob = match globset::GlobBuilder::new(&pattern)
-                .literal_separator(false)
-                .build()
-            {
-                Ok(glob) => glob,
-                Err(err) => return ToolResult::err_fmt(format_args!("Invalid glob pattern: {err}")),
-            };
-            let matcher = match globset::GlobSetBuilder::new().add(glob).build() {
-                Ok(matcher) => matcher,
-                Err(err) => {
-                    return ToolResult::err_fmt(format_args!("Failed to build glob matcher: {err}"));
+        execute_typed_tool::<GlobArgs, FilesystemEntriesOutput, _, _>(
+            call.args,
+            |args| async move {
+                match run_blocking_value(move || execute_glob_sync(args)).await {
+                    Ok(result) => result,
+                    Err(err) => Err(ToolResult::err_fmt(format_args!("{err}"))),
                 }
-            };
-
-            let files = match rg_file_list(&base, include_hidden, respect_gitignore, None, &[]) {
-                Ok(files) => files,
-                Err(err) => return err,
-            };
-
-            let mut matched_paths = BTreeSet::new();
-            for file in files {
-                let Ok(rel_path) = file.strip_prefix(&base) else {
-                    continue;
-                };
-                if matcher.is_match(rel_path) {
-                    matched_paths.insert(file.clone());
-                }
-                let components = rel_path.components().collect::<Vec<_>>();
-                if components.len() <= 1 {
-                    continue;
-                }
-                let mut current = PathBuf::new();
-                for component in components.iter().take(components.len() - 1) {
-                    current.push(component.as_os_str());
-                    if matcher.is_match(&current) {
-                        matched_paths.insert(base.join(&current));
-                    }
-                }
-            }
-
-            let mut matches = matched_paths
-                .into_iter()
-                .map(|path| build_path_entry(&path, with_lines))
-                .collect::<Vec<_>>();
-            matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.path.cmp(&b.0.path)));
-            let total_matches = matches.len();
-            if let Some(limit) = limit {
-                matches.truncate(limit);
-            }
-
-            let items = matches.into_iter().map(|(entry, _)| entry).collect();
-            ToolResult::ok(filesystem_entries_result(items, total_matches))
-        })
+            },
+        )
         .await
     }
 }
 
+fn execute_glob_sync(args: GlobArgs) -> Result<FilesystemEntriesOutput, ToolResult> {
+    non_empty_string(&args.pattern, "pattern")?;
+    let limit = args.limit.into_option("limit", 1)?;
+    let base = PathBuf::from(args.path);
+    if !base.exists() {
+        return Err(ToolResult::err_fmt(format_args!(
+            "Path does not exist: {}",
+            base.display()
+        )));
+    }
+    if !base.is_dir() {
+        return Err(ToolResult::err_fmt(format_args!(
+            "{} is a file, not a directory. Pass the parent directory as path and use the pattern to match files.",
+            base.display()
+        )));
+    }
+
+    let glob = globset::GlobBuilder::new(&args.pattern)
+        .literal_separator(false)
+        .build()
+        .map_err(|err| invalid_tool_args(format!("Invalid glob pattern: {err}")))?;
+    let matcher = globset::GlobSetBuilder::new()
+        .add(glob)
+        .build()
+        .map_err(|err| ToolResult::err_fmt(format_args!("Failed to build glob matcher: {err}")))?;
+
+    let files = rg_file_list(
+        &base,
+        args.include_hidden,
+        args.respect_gitignore,
+        None,
+        &[],
+    )?;
+
+    let mut matched_paths = BTreeSet::new();
+    for file in files {
+        let Ok(rel_path) = file.strip_prefix(&base) else {
+            continue;
+        };
+        if matcher.is_match(rel_path) {
+            matched_paths.insert(file.clone());
+        }
+        let components = rel_path.components().collect::<Vec<_>>();
+        if components.len() <= 1 {
+            continue;
+        }
+        let mut current = PathBuf::new();
+        for component in components.iter().take(components.len() - 1) {
+            current.push(component.as_os_str());
+            if matcher.is_match(&current) {
+                matched_paths.insert(base.join(&current));
+            }
+        }
+    }
+
+    let mut matches = matched_paths
+        .into_iter()
+        .map(|path| build_path_entry(&path, args.with_lines))
+        .collect::<Vec<_>>();
+    matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.path.cmp(&b.0.path)));
+    let total_matches = matches.len();
+    if let Some(limit) = limit {
+        matches.truncate(limit);
+    }
+
+    let items = matches.into_iter().map(|(entry, _)| entry).collect();
+    Ok(filesystem_entries_output(items, total_matches))
+}
+
 fn glob_tool_definition() -> ToolDefinition {
-    ToolDefinition::raw(
+    ToolDefinition::typed::<GlobArgs, FilesystemEntriesOutput>(
                 "tool:glob",
                 "glob",
                 [
@@ -127,39 +138,6 @@ fn glob_tool_definition() -> ToolDefinition {
                     " Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit=100, with_lines=false, include_hidden=true, respect_gitignore=true.",
                 ]
                 .concat(),
-                object_schema(
-                    serde_json::json!({
-                        "pattern": { "type": "string" },
-                        "path": {
-                            "type": "string",
-                            "default": ".",
-                            "description": "Base directory to search in (default: current directory)"
-                        },
-                        "limit": {
-                            "type": ["integer", "null", "string"],
-                            "minimum": 1,
-                            "default": MAX_RESULTS,
-                            "description": "Maximum results to return (default: 100). Use null or \"none\" for no cap."
-                        },
-                        "with_lines": {
-                            "type": "boolean",
-                            "default": false,
-                            "description": "Count text lines for file entries (`lines`). Default: false."
-                        },
-                        "include_hidden": {
-                            "type": "boolean",
-                            "default": true,
-                            "description": "Include dotfiles and dot-directories. Default: true."
-                        },
-                        "respect_gitignore": {
-                            "type": "boolean",
-                            "default": true,
-                            "description": "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled."
-                        }
-                    }),
-                    &["pattern"],
-                ),
-                filesystem_entries_output_schema(),
             )
             .with_examples(vec![
                 r#"await files.glob({ pattern: "**/*.rs", path: "crates/lash/src", limit: 50 })?"#.into(),
@@ -172,10 +150,6 @@ fn glob_tool_definition() -> ToolDefinition {
             ))
             .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
-}
-
-fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
-    parse_optional_usize_arg(args, "limit", Some(MAX_RESULTS), true, 1)
 }
 
 #[cfg(test)]

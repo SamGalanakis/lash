@@ -1,8 +1,7 @@
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteToolGrant {
     pub protocol_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -44,6 +43,12 @@ impl RemoteToolGrant {
 
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
+        if self.id.trim().is_empty() {
+            return Err(RemoteProtocolError::InvalidToolGrant {
+                tool_name: self.name.clone(),
+                message: "tool grant id cannot be empty".to_string(),
+            });
+        }
         if self.name.trim().is_empty() {
             return Err(RemoteProtocolError::InvalidToolGrant {
                 tool_name: self.name.clone(),
@@ -62,11 +67,25 @@ impl RemoteToolGrant {
     }
 
     pub fn validate_all(grants: &[Self]) -> Result<(), RemoteProtocolError> {
-        let mut seen = HashSet::new();
+        let mut seen_ids = HashSet::new();
+        let mut seen_names = HashSet::new();
+        let mut seen_call_paths = HashSet::new();
         for grant in grants {
             grant.validate()?;
+            if !seen_ids.insert(grant.id.clone()) {
+                return Err(RemoteProtocolError::InvalidToolGrant {
+                    tool_name: grant.name.clone(),
+                    message: format!("duplicate tool grant id `{}`", grant.id),
+                });
+            }
+            if !seen_names.insert(grant.name.clone()) {
+                return Err(RemoteProtocolError::InvalidToolGrant {
+                    tool_name: grant.name.clone(),
+                    message: format!("duplicate tool grant name `{}`", grant.name),
+                });
+            }
             for call_path in grant.call_path_bindings()? {
-                if !seen.insert(call_path.clone()) {
+                if !seen_call_paths.insert(call_path.clone()) {
                     return Err(RemoteProtocolError::DuplicateRemoteCallPath { call_path });
                 }
             }

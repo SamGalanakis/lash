@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    PreparedToolCall, ProgressSender, ToolCall, ToolContext, ToolContract, ToolManifest,
+    PreparedToolCall, ProgressSender, ToolCall, ToolContext, ToolContract, ToolId, ToolManifest,
     ToolPrepareCall, ToolProvider, ToolResult,
 };
 

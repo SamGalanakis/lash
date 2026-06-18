@@ -6,8 +6,10 @@ pub mod timeouts;
 pub mod util;
 
 pub use normalize::{
-    frame_sse_payload, http_error_envelope, merge_usage, serialize_options_tail,
-    terminal_reason_from_parts,
+    frame_sse_payload, http_error_envelope, merge_usage,
+    openai_terminal_reason_from_chat_finish_reason, openai_terminal_reason_from_chat_value,
+    openai_terminal_reason_from_response_value, openai_usage_from_response_value,
+    openai_usage_from_usage_value, serialize_options_tail, terminal_reason_from_parts,
 };
 pub use timeouts::{
     DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts, RequestBodySnapshot,

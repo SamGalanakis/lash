@@ -358,6 +358,7 @@ mod tests {
             self.prepares.fetch_add(1, Ordering::SeqCst);
             Ok(PreparedToolCall::from_parts(
                 call.pending.call_id,
+                call.tool_id,
                 call.pending.tool_name,
                 call.pending.args,
                 call.pending.replay,

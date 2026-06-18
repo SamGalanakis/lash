@@ -313,18 +313,7 @@ fn is_default_tool_argument_projection_policy(policy: &ToolArgumentProjectionPol
     policy.is_materialize_projected_values()
 }
 
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(transparent)]
 pub struct ToolId(String);
 
@@ -335,12 +324,21 @@ impl ToolId {
         Self(id)
     }
 
-    pub fn default_for_name(name: &str) -> Self {
-        Self::new(format!("tool:{name}"))
-    }
-
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let id = <String as serde::Deserialize>::deserialize(deserializer)?;
+        if id.trim().is_empty() {
+            return Err(serde::de::Error::custom("tool id must not be empty"));
+        }
+        Ok(Self(id))
     }
 }
 
@@ -365,7 +363,7 @@ impl std::fmt::Display for ToolId {
 /// Tool metadata exposed to prompts, catalogs, UI, and availability checks.
 /// The optional compact contract is the catalog-facing projection of the
 /// resolved contract; full schemas stay in [`ToolContract`].
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolManifest {
     pub id: ToolId,
     pub name: String,
@@ -634,7 +632,7 @@ impl CompactToolContract {
 }
 
 impl ToolDefinition {
-    pub fn raw_with_id(
+    pub fn raw(
         id: impl Into<ToolId>,
         name: impl Into<String>,
         description: impl Into<String>,
@@ -647,7 +645,13 @@ impl ToolDefinition {
                 name: name.into(),
                 description: description.into(),
                 compact_contract: None,
-                ..ToolManifest::default()
+                availability: ToolAvailabilityConfig::default(),
+                activation: ToolActivation::default(),
+                availability_override: None,
+                bindings: std::collections::BTreeMap::new(),
+                argument_projection: ToolArgumentProjectionPolicy::default(),
+                scheduling: default_tool_scheduling(),
+                retry_policy: default_tool_retry_policy(),
             },
             contract: ToolContract {
                 input_schema,
@@ -657,23 +661,7 @@ impl ToolDefinition {
         }
     }
 
-    pub fn raw_named(
-        name: impl Into<String>,
-        description: impl Into<String>,
-        input_schema: serde_json::Value,
-        output_schema: serde_json::Value,
-    ) -> Self {
-        let name = name.into();
-        Self::raw_with_id(
-            ToolId::default_for_name(&name),
-            name,
-            description,
-            input_schema,
-            output_schema,
-        )
-    }
-
-    pub fn typed_with_id<Args, Output>(
+    pub fn typed<Args, Output>(
         id: impl Into<ToolId>,
         name: impl Into<String>,
         description: impl Into<String>,
@@ -682,32 +670,13 @@ impl ToolDefinition {
         Args: schemars::JsonSchema,
         Output: schemars::JsonSchema,
     {
-        Self::raw_with_id(
+        Self::raw(
             id,
             name,
             description,
             schema_for::<Args>(),
             schema_for::<Output>(),
         )
-    }
-
-    pub fn typed<Args, Output>(name: impl Into<String>, description: impl Into<String>) -> Self
-    where
-        Args: schemars::JsonSchema,
-        Output: schemars::JsonSchema,
-    {
-        let name = name.into();
-        Self::typed_with_id::<Args, Output>(ToolId::default_for_name(&name), name, description)
-    }
-
-    pub fn raw(
-        id: impl Into<ToolId>,
-        name: impl Into<String>,
-        description: impl Into<String>,
-        input_schema: serde_json::Value,
-        output_schema: serde_json::Value,
-    ) -> Self {
-        Self::raw_with_id(id, name, description, input_schema, output_schema)
     }
 
     pub fn with_examples(mut self, examples: Vec<String>) -> Self {

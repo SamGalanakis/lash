@@ -3,10 +3,13 @@ use std::path::{Path, PathBuf};
 
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 use lash_tool_support::{
-    FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
-    build_path_entry, filesystem_entries_output_schema, filesystem_entries_result, object_schema,
-    parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
+    FS_DEFAULTS_PREAMBLE, FilesystemEntriesOutput, OptionalUsizeArg, StaticToolExecute,
+    StaticToolProvider, ToolDefinitionLashlangExt, build_path_entry, default_ls_depth,
+    default_ls_limit, default_path_dot, default_true, execute_typed_tool,
+    filesystem_entries_output, rg_file_list, run_blocking_value,
 };
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
@@ -17,79 +20,47 @@ pub fn ls_provider() -> StaticToolProvider<Ls> {
     StaticToolProvider::new(vec![ls_tool_definition()], Ls)
 }
 
-const DEFAULT_DEPTH: usize = 3;
-const MAX_ENTRIES: usize = 500;
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct LsArgs {
+    /// Directory to list.
+    #[serde(default = "default_path_dot")]
+    path: String,
+    /// Additional glob patterns to ignore.
+    #[serde(default)]
+    ignore: Vec<String>,
+    /// Maximum directory depth to traverse. Use null or "none" for no cap.
+    #[serde(default = "default_ls_depth")]
+    depth: OptionalUsizeArg,
+    /// Maximum entries to return. Use null or "none" for no cap.
+    #[serde(default = "default_ls_limit")]
+    limit: OptionalUsizeArg,
+    /// Count text lines for file entries.
+    #[serde(default)]
+    with_lines: bool,
+    /// Include dotfiles and dot-directories.
+    #[serde(default = "default_true")]
+    include_hidden: bool,
+    /// Respect `.gitignore` and related ignore files.
+    #[serde(default = "default_true")]
+    respect_gitignore: bool,
+}
 
 #[async_trait::async_trait]
 impl StaticToolExecute for Ls {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let args = call.args;
-        let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-
-        let ignore_patterns: Vec<&str> = args
-            .get("ignore")
-            .and_then(|v| v.as_array())
-            .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
-            .unwrap_or_default();
-
-        let max_depth = match parse_depth(args) {
-            Ok(d) => d,
-            Err(e) => return e,
-        };
-        let limit = match parse_limit(args) {
-            Ok(d) => d,
-            Err(e) => return e,
-        };
-        let with_lines = match parse_optional_bool(args, "with_lines", false) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let include_hidden = match parse_optional_bool(args, "include_hidden", true) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let respect_gitignore = match parse_optional_bool(args, "respect_gitignore", true) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let base = PathBuf::from(base_dir);
-        let ignore_patterns = ignore_patterns
-            .into_iter()
-            .map(|pattern| pattern.to_string())
-            .collect::<Vec<_>>();
-        run_blocking(move || {
-            if !base.is_dir() {
-                return ToolResult::err_fmt(format_args!("Not a directory: {}", base.display()));
+        execute_typed_tool::<LsArgs, FilesystemEntriesOutput, _, _>(call.args, |args| async move {
+            match run_blocking_value(move || execute_ls_sync(args)).await {
+                Ok(result) => result,
+                Err(err) => Err(ToolResult::err_fmt(format_args!("{err}"))),
             }
-
-            let globs = ignore_patterns
-                .into_iter()
-                .map(|pattern| format!("!{pattern}"))
-                .collect::<Vec<_>>();
-
-            let files = match rg_file_list(&base, include_hidden, respect_gitignore, None, &globs) {
-                Ok(files) => files,
-                Err(err) => return err,
-            };
-
-            let all_paths = collect_ls_paths(&base, &files, max_depth);
-            let total_entries = all_paths.len();
-            let shown_paths = match limit {
-                Some(limit) => all_paths.into_iter().take(limit).collect::<Vec<_>>(),
-                None => all_paths.into_iter().collect::<Vec<_>>(),
-            };
-            let items = shown_paths
-                .into_iter()
-                .map(|path| build_path_entry(&path, with_lines).0)
-                .collect();
-            ToolResult::ok(filesystem_entries_result(items, total_entries))
         })
         .await
     }
 }
 
 fn ls_tool_definition() -> ToolDefinition {
-    ToolDefinition::raw(
+    ToolDefinition::typed::<LsArgs, FilesystemEntriesOutput>(
                 "tool:ls",
                 "ls",
                 [
@@ -98,49 +69,6 @@ fn ls_tool_definition() -> ToolDefinition {
                     " Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth=3, limit=500, with_lines=false, include_hidden=true, respect_gitignore=true.",
                 ]
                 .concat(),
-                object_schema(
-                    serde_json::json!({
-                        "path": {
-                            "type": "string",
-                            "default": ".",
-                            "description": "Directory to list (default: current directory)"
-                        },
-                        "ignore": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Additional glob patterns to ignore."
-                        },
-                        "depth": {
-                            "type": ["integer", "null", "string"],
-                            "minimum": 1,
-                            "default": DEFAULT_DEPTH,
-                            "description": "Maximum directory depth to traverse (default: 3). Use null or \"none\" for no depth cap."
-                        },
-                        "limit": {
-                            "type": ["integer", "null", "string"],
-                            "minimum": 1,
-                            "default": MAX_ENTRIES,
-                            "description": "Maximum entries to return (default: 500). Use null or \"none\" for no cap."
-                        },
-                        "with_lines": {
-                            "type": "boolean",
-                            "default": false,
-                            "description": "Count text lines for file entries (`lines`). Default: false."
-                        },
-                        "include_hidden": {
-                            "type": "boolean",
-                            "default": true,
-                            "description": "Include dotfiles and dot-directories. Default: true."
-                        },
-                        "respect_gitignore": {
-                            "type": "boolean",
-                            "default": true,
-                            "description": "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled."
-                        }
-                    }),
-                    &[],
-                ),
-                filesystem_entries_output_schema(),
             )
             .with_examples(vec![
                 r#"await files.list({ path: ".", depth: 1, limit: 100 })?"#.into(),
@@ -155,12 +83,42 @@ fn ls_tool_definition() -> ToolDefinition {
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 
-fn parse_depth(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
-    parse_optional_usize_arg(args, "depth", Some(DEFAULT_DEPTH), true, 1)
-}
+fn execute_ls_sync(args: LsArgs) -> Result<FilesystemEntriesOutput, ToolResult> {
+    let max_depth = args.depth.into_option("depth", 1)?;
+    let limit = args.limit.into_option("limit", 1)?;
+    let base = PathBuf::from(args.path);
+    if !base.is_dir() {
+        return Err(ToolResult::err_fmt(format_args!(
+            "Not a directory: {}",
+            base.display()
+        )));
+    }
 
-fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
-    parse_optional_usize_arg(args, "limit", Some(MAX_ENTRIES), true, 1)
+    let globs = args
+        .ignore
+        .into_iter()
+        .map(|pattern| format!("!{pattern}"))
+        .collect::<Vec<_>>();
+
+    let files = rg_file_list(
+        &base,
+        args.include_hidden,
+        args.respect_gitignore,
+        None,
+        &globs,
+    )?;
+
+    let all_paths = collect_ls_paths(&base, &files, max_depth);
+    let total_entries = all_paths.len();
+    let shown_paths = match limit {
+        Some(limit) => all_paths.into_iter().take(limit).collect::<Vec<_>>(),
+        None => all_paths.into_iter().collect::<Vec<_>>(),
+    };
+    let items = shown_paths
+        .into_iter()
+        .map(|path| build_path_entry(&path, args.with_lines).0)
+        .collect();
+    Ok(filesystem_entries_output(items, total_entries))
 }
 
 fn collect_ls_paths(base: &Path, files: &[PathBuf], max_depth: Option<usize>) -> BTreeSet<PathBuf> {

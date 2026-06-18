@@ -1,5 +1,8 @@
 use super::*;
 use crate::assistant_text::{merge_assistant_reasoning_text, normalize_assistant_text};
+use lash_export::transcript::{
+    TranscriptEntryKind, projection_transcript_entries, submitted_value_display_text,
+};
 use std::collections::HashMap;
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
@@ -146,9 +149,9 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
     let mut activity_state = ActivityState::default();
     let tool_call_map = HashMap::new();
 
-    for entry in projection.entries() {
-        match &entry.payload {
-            lash_core::ChronologicalPayload::Message(message) => {
+    for entry in projection_transcript_entries(projection) {
+        match entry.kind {
+            TranscriptEntryKind::Message(message) => {
                 append_transcript_items(
                     &mut timeline,
                     message,
@@ -157,12 +160,8 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                     false,
                 );
             }
-            lash_core::ChronologicalPayload::ProtocolEvent(event) => {
-                if let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry)) =
-                    lash_protocol_rlm::decode_rlm_protocol_event(event)
-                {
-                    append_rlm_trajectory_items(&mut timeline, &entry);
-                }
+            TranscriptEntryKind::RlmStep(step) => {
+                append_rlm_step_items(&mut timeline, &step);
             }
         }
     }
@@ -170,59 +169,23 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
     timeline
 }
 
-fn append_rlm_trajectory_items(
+fn append_rlm_step_items(
     timeline: &mut UiTimeline,
-    entry: &lash_rlm_types::RlmTrajectoryEntry,
+    step: &lash_export::transcript::RlmTranscriptStep,
 ) {
-    if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
-        let _ = push_assistant_reasoning_item(timeline, &reasoning);
+    if let Some(reasoning) = step.reasoning.as_deref() {
+        let _ = push_assistant_reasoning_item(timeline, reasoning);
     }
-    timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
+    timeline.push(UiTimelineItem::LashlangCode(step.code.clone()));
     // Mirror the live path (`CodeBlockCompleted`): a failed block keeps its
     // code on screen with the error rendered after it, so scrollback shows the
     // same thing the turn did.
-    if let Some(error) = &entry.error {
+    if let Some(error) = &step.error {
         timeline.push(UiTimelineItem::Error(error.clone()));
     }
-    if let Some(final_output) = &entry.final_output {
-        let _ = push_assistant_text_item(timeline, &render_submitted_value(final_output));
+    if let Some(final_output) = &step.final_output {
+        let _ = push_assistant_text_item(timeline, &submitted_value_display_text(final_output));
     }
-}
-
-fn rlm_reasoning_display_text(text: &str) -> Option<String> {
-    let cleaned = strip_first_lashlang_fence(text).trim().to_string();
-    (!cleaned.is_empty()).then_some(cleaned)
-}
-
-fn strip_first_lashlang_fence(text: &str) -> String {
-    let Some(open_rel) = text.find("```") else {
-        return text.to_string();
-    };
-    let after_open = open_rel + 3;
-    let rest = &text[after_open..];
-    let Some(lang_end_rel) = rest.find('\n') else {
-        return text[..open_rel].to_string();
-    };
-    let lang = rest[..lang_end_rel].trim();
-    if !matches!(lang, "lashlang" | "rlm" | "lash") {
-        return text.to_string();
-    }
-    let body_start = after_open + lang_end_rel + 1;
-    let close = text[body_start..]
-        .find("```")
-        .map(|rel| body_start + rel)
-        .unwrap_or(text.len());
-    let after_close = (close + 3).min(text.len());
-    let mut out = String::new();
-    out.push_str(text[..open_rel].trim_end());
-    let tail = text[after_close..].trim_start();
-    if !tail.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(tail);
-    }
-    out
 }
 
 pub(crate) fn interrupted_assistant_tail(blocks: &[UiTimelineItem], text: &str) -> Option<String> {
@@ -589,14 +552,6 @@ fn push_assistant_text_item(timeline: &mut UiTimeline, text: &str) -> bool {
     }
     timeline.push(UiTimelineItem::AssistantText(cleaned));
     true
-}
-
-pub(crate) fn render_submitted_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(text) => text.clone(),
-        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-    }
 }
 
 fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool {

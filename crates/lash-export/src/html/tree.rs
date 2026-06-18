@@ -1,14 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use lash_core::ChronologicalPayload;
-use lash_core::session_model::MessageRole;
-
 use crate::LoadedSession;
+use crate::transcript::{
+    TranscriptEntryKind, project_chronological_entry, suppressed_rlm_final_output_message_ids,
+};
 use crate::tree::{LoadedSessionNode, LoadedSessionTree, NodeRelation};
 
 use super::assets::{CSS, JS};
-use super::chronological_rlm_step;
 use super::entries::{render_message, render_rlm_step};
 use super::escaping::{escape, escape_attr, js_escape};
 use super::prompt::{
@@ -16,7 +15,7 @@ use super::prompt::{
 };
 use super::session::write_controls;
 use super::stats::{SessionStats, compute_stats};
-use super::view_model::{RenderCtx, message_matches_text, one_line_summary, submit_value_text};
+use super::view_model::{RenderCtx, one_line_summary};
 
 pub fn render_tree(tree: &LoadedSessionTree) -> String {
     let mut out = String::with_capacity(128 * 1024);
@@ -359,25 +358,7 @@ fn render_node_entries(
     let mut first_seen: HashMap<String, PromptAnchor> = HashMap::new();
     let mut usage_chart = String::new();
 
-    let mut suppressed_message_ids: HashSet<String> = HashSet::new();
-    let mut last_final_output: Option<String> = None;
-    for entry in session.chronological.iter() {
-        match &entry.payload {
-            ChronologicalPayload::ProtocolEvent(event) => {
-                last_final_output = chronological_rlm_step(event)
-                    .and_then(|step| step.final_output.map(|value| submit_value_text(&value)));
-            }
-            ChronologicalPayload::Message(message) => {
-                if matches!(message.role, MessageRole::Assistant)
-                    && let Some(prev) = last_final_output.as_deref()
-                    && message_matches_text(message, prev)
-                {
-                    suppressed_message_ids.insert(message.id.clone());
-                }
-                last_final_output = None;
-            }
-        }
-    }
+    let suppressed_message_ids = suppressed_rlm_final_output_message_ids(&session.chronological);
 
     for (i, entry) in session.chronological.iter().enumerate() {
         for &prompt_idx in &insertions.before_index[i] {
@@ -392,19 +373,17 @@ fn render_node_entries(
                 prompt_idx,
             );
         }
-        match &entry.payload {
-            ChronologicalPayload::Message(message) => {
+        match project_chronological_entry(entry).map(|entry| entry.kind) {
+            Some(TranscriptEntryKind::Message(message)) => {
                 if message.is_transient() || suppressed_message_ids.contains(&message.id) {
                     continue;
                 }
                 render_message(out, spine, ctx, message);
             }
-            ChronologicalPayload::ProtocolEvent(event) => {
-                let Some(step) = chronological_rlm_step(event) else {
-                    continue;
-                };
+            Some(TranscriptEntryKind::RlmStep(step)) => {
                 render_rlm_step(out, spine, ctx, &step);
             }
+            None => {}
         }
     }
 

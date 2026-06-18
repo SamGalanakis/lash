@@ -4,9 +4,13 @@ use std::sync::LazyLock;
 use lash_llm_transport::timeouts::build_http_client;
 use lash_llm_transport::util::emit_provider_trace;
 
-pub(crate) use crate::responses_shared::{
-    merge_usage, terminal_reason_from_parts, terminal_reason_from_response_value,
-    usage_from_response_value, usage_from_usage_value,
+pub(crate) use lash_llm_transport::{
+    merge_usage,
+    openai_terminal_reason_from_chat_finish_reason as terminal_reason_from_chat_finish_reason,
+    openai_terminal_reason_from_chat_value as terminal_reason_from_chat_value,
+    openai_terminal_reason_from_response_value as terminal_reason_from_responses_value,
+    openai_usage_from_response_value as usage_from_response_value,
+    openai_usage_from_usage_value as usage_from_usage_value, terminal_reason_from_parts,
 };
 
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -46,35 +50,6 @@ pub(crate) fn has_response_content(parts: &[lash_core::llm::types::LlmOutputPart
         lash_core::llm::types::LlmOutputPart::Reasoning { .. } => true,
         lash_core::llm::types::LlmOutputPart::ToolCall { .. } => true,
     })
-}
-
-pub(crate) fn terminal_reason_from_chat_value(
-    value: &Value,
-    parts: &[lash_core::llm::types::LlmOutputPart],
-) -> lash_core::llm::types::LlmTerminalReason {
-    let finish = value
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("finish_reason"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    match finish {
-        "stop" => lash_core::llm::types::LlmTerminalReason::Stop,
-        "tool_calls" | "function_call" => lash_core::llm::types::LlmTerminalReason::ToolUse,
-        "length" | "max_tokens" => lash_core::llm::types::LlmTerminalReason::OutputLimit,
-        "content_filter" | "safety" => lash_core::llm::types::LlmTerminalReason::ContentFilter,
-        "" => terminal_reason_from_parts(parts),
-        _ => lash_core::llm::types::LlmTerminalReason::ProviderError,
-    }
-}
-
-/// Driver-facing alias for the shared Responses terminal-reason mapper.
-pub(crate) fn terminal_reason_from_responses_value(
-    value: &Value,
-    parts: &[lash_core::llm::types::LlmOutputPart],
-) -> lash_core::llm::types::LlmTerminalReason {
-    terminal_reason_from_response_value(value, parts)
 }
 
 pub(crate) fn empty_response_error(raw: String) -> lash_core::llm::transport::LlmTransportError {

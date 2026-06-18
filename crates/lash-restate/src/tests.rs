@@ -100,13 +100,14 @@ fn llm_spec() -> lash_core::LlmRequestSpec {
 }
 
 fn prepared_tool_call() -> lash_core::PreparedToolCall {
-    lash_core::PreparedToolCall {
-        call_id: "call-1".to_string(),
-        tool_name: "tool".to_string(),
-        args: serde_json::json!({}),
-        replay: None,
-        prepared_payload: serde_json::Value::Null,
-    }
+    lash_core::PreparedToolCall::from_parts(
+        "call-1",
+        "tool:tool",
+        "tool",
+        serde_json::json!({}),
+        None,
+        serde_json::Value::Null,
+    )
 }
 
 fn external_registration(id: &str) -> ProcessRegistration {
@@ -1869,7 +1870,7 @@ async fn snapshot_lashlang_registration(
         ["tools"],
         "Tools",
         "snapshot_echo",
-        "snapshot_echo",
+        "tool:snapshot_echo",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
@@ -1948,13 +1949,14 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
     let registration = ProcessRegistration::new(
         "recover-tool",
         ProcessInput::ToolCall {
-            call: lash_core::PreparedToolCall {
-                call_id: "recover-call".to_string(),
-                tool_name: "recovery_echo".to_string(),
-                args: serde_json::json!({ "line": "wake-after-rebuild" }),
-                replay: None,
-                prepared_payload: serde_json::Value::Null,
-            },
+            call: lash_core::PreparedToolCall::from_parts(
+                "recover-call",
+                "tool:recovery_echo",
+                "recovery_echo",
+                serde_json::json!({ "line": "wake-after-rebuild" }),
+                None,
+                serde_json::Value::Null,
+            ),
         },
         lash_core::ProcessProvenance::session(creator_scope.clone()),
     )

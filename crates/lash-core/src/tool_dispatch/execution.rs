@@ -9,7 +9,6 @@ use super::context::{
     launch_done, outcome, runtime_failure,
 };
 use super::directives::apply_after_tool_directives;
-use super::preparation::resolve_callable_manifest;
 use super::retry::execute_tool_call;
 
 pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
@@ -34,11 +33,13 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolCallLaunch {
-    let tool_name = prepared.tool_name.clone();
+    let prepared_tool_name = prepared.tool_name.clone();
     let args = prepared.args.clone();
-    let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
+    let Some(manifest) =
+        super::preparation::resolve_callable_manifest_by_id(context, &prepared.tool_id)
+    else {
         return launch_done(outcome(
-            tool_name,
+            prepared_tool_name,
             args,
             runtime_failure(
                 ToolFailureClass::Unavailable,
@@ -48,6 +49,7 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
             0,
         ));
     };
+    let tool_name = manifest.name.clone();
 
     let tool_start = Instant::now();
     let tool_context = tool_context.with_prepared_payload(prepared.prepared_payload.clone());

@@ -66,7 +66,8 @@ fn serial_tool(
     // docs:start:serial-tool
     use lash::tools::{ToolDefinition, ToolScheduling};
 
-    ToolDefinition::raw_named(
+    ToolDefinition::raw(
+        "tool:write_file",
         "write_file",
         "Replace a file's contents.",
         input_schema,

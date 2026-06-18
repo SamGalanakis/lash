@@ -625,7 +625,8 @@ mod tests {
     use serde_json::{Value, json};
 
     fn catalog_tool(name: &str, description: &str) -> Value {
-        catalog_tool_from_definition(ToolDefinition::raw_named(
+        catalog_tool_from_definition(ToolDefinition::raw(
+            format!("tool:test/{name}"),
             name,
             description,
             ToolContract::default_input_schema(),
@@ -639,7 +640,8 @@ mod tests {
         module: Option<&str>,
         aliases: Vec<&str>,
     ) -> Value {
-        let tool = ToolDefinition::raw_named(
+        let tool = ToolDefinition::raw(
+            format!("tool:test/{name}"),
             name,
             description,
             ToolContract::default_input_schema(),
@@ -734,7 +736,8 @@ mod tests {
 
     #[test]
     fn ranking_prefers_output_fields_over_input_filter_matches() {
-        let filter_songs = ToolDefinition::raw_named(
+        let filter_songs = ToolDefinition::raw(
+            "mcp:appworld/mcp__appworld__spotify_filter_songs",
             "mcp__appworld__spotify_filter_songs",
             "Search Spotify songs by filters.",
             json!({
@@ -777,7 +780,8 @@ mod tests {
             LashlangToolBinding::new(["appworld"], "spotify_filter_songs")
                 .with_aliases(["spotify_filter_songs"]),
         );
-        let show_song = ToolDefinition::raw_named(
+        let show_song = ToolDefinition::raw(
+            "mcp:appworld/mcp__appworld__spotify_show_song",
             "mcp__appworld__spotify_show_song",
             "Get a Spotify song record.",
             json!({
@@ -839,7 +843,8 @@ mod tests {
 
     #[test]
     fn search_results_include_compact_schema_parameter_restrictions() {
-        let spotify = ToolDefinition::raw_named(
+        let spotify = ToolDefinition::raw(
+            "mcp:appworld/mcp__appworld__spotify_search_songs",
             "mcp__appworld__spotify_search_songs",
             "Find songs",
             json!({

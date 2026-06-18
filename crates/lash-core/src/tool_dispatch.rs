@@ -25,4 +25,6 @@ pub(crate) use preparation::{
     resolve_callable_manifest, resolve_callable_manifest_by_id,
     resolve_tool_argument_projection_policy,
 };
-pub(crate) use scheduling::{resolve_tool_scheduling, schedule_tool_batch};
+pub(crate) use scheduling::{
+    resolve_tool_scheduling, resolve_tool_scheduling_by_id, schedule_tool_batch,
+};

@@ -53,8 +53,14 @@ pub trait SessionStateService: Send + Sync {
     ) -> Result<u64, PluginError> {
         let mut snapshot = self.tool_state(session_id).await?;
         for name in tool_names {
+            let id = snapshot
+                .tool_manifests()
+                .into_iter()
+                .find(|manifest| manifest.name == *name)
+                .map(|manifest| manifest.id)
+                .ok_or_else(|| PluginError::Session(format!("unknown tool `{name}`")))?;
             snapshot
-                .set_availability(name, availability)
+                .set_availability(&id, availability)
                 .map_err(|err| PluginError::Session(err.to_string()))?;
         }
         self.apply_tool_state(session_id, snapshot).await
@@ -67,8 +73,14 @@ pub trait SessionStateService: Send + Sync {
         availability: Option<ToolAvailability>,
     ) -> Result<u64, PluginError> {
         let mut snapshot = self.tool_state(session_id).await?;
+        let id = snapshot
+            .tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == tool_name)
+            .map(|manifest| manifest.id)
+            .ok_or_else(|| PluginError::Session(format!("unknown tool `{tool_name}`")))?;
         snapshot
-            .set_availability(tool_name, availability)
+            .set_availability(&id, availability)
             .map_err(|err| PluginError::Session(err.to_string()))?;
         self.apply_tool_state(session_id, snapshot).await
     }

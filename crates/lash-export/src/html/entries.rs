@@ -1,21 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use lash_core::ChronologicalPayload;
 use lash_core::session_model::{Message, MessageRole, Part, PartKind, PruneState};
-use lash_rlm_types::RlmTrajectoryEntry;
 
-use super::chronological_rlm_step;
 use super::escaping::{escape, escape_attr, json_highlight};
 use super::prompt::{
     CoalesceState, PromptAnchor, compute_coalesce_states, compute_prompt_insertions,
     render_system_prompt, render_system_prompt_banner, write_usage_chart_bar,
 };
-use super::view_model::{
-    RenderCtx, format_count, json_byte_size, message_matches_text, one_line_summary, pretty_json,
-    strip_first_lashlang_fence, submit_value_text, truncate,
-};
+use super::view_model::{RenderCtx, json_byte_size, one_line_summary, pretty_json, truncate};
 use crate::LoadedSession;
+use crate::transcript::{
+    RlmTranscriptStep, TranscriptEntryKind, format_count, project_chronological_entry,
+    suppressed_rlm_final_output_message_ids,
+};
 
 pub(crate) struct EntriesHtml {
     pub(crate) entries: String,
@@ -41,28 +39,7 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx) -> En
         /* threshold (run length) = */ 3,
     );
 
-    // Identify assistant messages that just echo the prior RlmStep's submit
-    // value — they're a runtime side-effect of `submit`, not a separate
-    // model utterance. Suppressing avoids showing the same text twice.
-    let mut suppressed_message_ids: HashSet<String> = HashSet::new();
-    let mut last_final_output: Option<String> = None;
-    for entry in session.chronological.iter() {
-        match &entry.payload {
-            ChronologicalPayload::ProtocolEvent(event) => {
-                last_final_output = chronological_rlm_step(event)
-                    .and_then(|step| step.final_output.map(|value| submit_value_text(&value)));
-            }
-            ChronologicalPayload::Message(message) => {
-                if matches!(message.role, MessageRole::Assistant)
-                    && let Some(prev) = last_final_output.as_deref()
-                    && message_matches_text(message, prev)
-                {
-                    suppressed_message_ids.insert(message.id.clone());
-                }
-                last_final_output = None;
-            }
-        }
-    }
+    let suppressed_message_ids = suppressed_rlm_final_output_message_ids(&session.chronological);
 
     let emit_prompt = |entries: &mut String,
                        spine: &mut String,
@@ -145,19 +122,17 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx) -> En
                 prompt_idx,
             );
         }
-        match &entry.payload {
-            ChronologicalPayload::Message(message) => {
+        match project_chronological_entry(entry).map(|entry| entry.kind) {
+            Some(TranscriptEntryKind::Message(message)) => {
                 if message.is_transient() || suppressed_message_ids.contains(&message.id) {
                     continue;
                 }
                 render_message(&mut entries, &mut spine, ctx, message);
             }
-            ChronologicalPayload::ProtocolEvent(event) => {
-                let Some(step) = chronological_rlm_step(event) else {
-                    continue;
-                };
+            Some(TranscriptEntryKind::RlmStep(step)) => {
                 render_rlm_step(&mut entries, &mut spine, ctx, &step);
             }
+            None => {}
         }
     }
 
@@ -349,13 +324,13 @@ pub(crate) fn render_rlm_step(
     out: &mut String,
     spine: &mut String,
     ctx: &mut RenderCtx,
-    step: &RlmTrajectoryEntry,
+    step: &RlmTranscriptStep,
 ) {
     let id = ctx.next_id();
     let has_err = step.error.is_some();
     let status_key = if has_err { "err" } else { "ok" };
-    let reasoning = strip_first_lashlang_fence(&step.reasoning);
-    let has_reasoning_body = !reasoning.trim().is_empty();
+    let reasoning = step.reasoning.as_deref().unwrap_or("");
+    let has_reasoning_body = !reasoning.is_empty();
     let output_preview = if has_reasoning_body {
         one_line_summary(&reasoning, 200)
     } else if let Some(out_item) = step.output.iter().find(|o| !o.trim().is_empty()) {

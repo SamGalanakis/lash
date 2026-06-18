@@ -2,8 +2,7 @@ use lash_core::ChronologicalPayload;
 use lash_core::session_model::{MessageRole, PruneState};
 
 use crate::LoadedSession;
-
-use super::chronological_rlm_step;
+use crate::transcript::rlm_transcript_step_from_event;
 
 #[derive(Default, Debug)]
 pub(crate) struct SessionStats {
@@ -90,7 +89,7 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
                 }
             }
             ChronologicalPayload::ProtocolEvent(event) => {
-                let Some(step) = chronological_rlm_step(event) else {
+                let Some(step) = rlm_transcript_step_from_event(event) else {
                     continue;
                 };
                 s.rlm_iterations += 1;

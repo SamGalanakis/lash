@@ -229,6 +229,7 @@ impl HostBridge<'_> {
         }
         let index = self.next_index();
         let call_id = uuid::Uuid::new_v4().to_string();
+        let tool_id = lash_core::ToolId::from(host_operation.as_str());
         let call_site = call_site.and_then(|call_site| {
             self.lashlang_execution_trace
                 .as_ref()
@@ -236,17 +237,13 @@ impl HostBridge<'_> {
         });
         let reply = if let Some(call_site) = call_site {
             self.ctx
-                .call_tool_with_child_execution_trace_hook(
-                    call_id,
-                    host_operation.clone(),
-                    payload,
-                    index,
-                    call_site,
+                .call_tool_by_id_with_child_execution_trace_hook(
+                    call_id, tool_id, payload, index, call_site,
                 )
                 .await
         } else {
             self.ctx
-                .call_tool(call_id, host_operation.clone(), payload, index)
+                .call_tool_by_id(call_id, tool_id, payload, index)
                 .await
         };
         self.consume_reply(&host_operation, reply)
@@ -309,7 +306,11 @@ impl HostBridge<'_> {
             }
 
             let call_id = uuid::Uuid::new_v4().to_string();
-            let mut invocation = ToolInvocation::new(call_id, host_operation.clone(), payload);
+            let mut invocation = ToolInvocation::new(
+                call_id,
+                lash_core::ToolId::from(host_operation.as_str()),
+                payload,
+            );
             if let Some(call_site) = call_site.and_then(|call_site| {
                 self.lashlang_execution_trace
                     .as_ref()

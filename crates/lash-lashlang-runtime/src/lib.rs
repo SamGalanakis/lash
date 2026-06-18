@@ -336,7 +336,7 @@ pub fn lashlang_resources_from_tool_catalog(
                 lashlang_binding.module_path.iter().map(String::as_str),
                 lashlang_binding.authority_type.clone(),
                 lashlang_binding.operation.clone(),
-                entry.manifest.name.clone(),
+                entry.manifest.id.to_string(),
                 lashlang::TypeExpr::Any,
                 lashlang::TypeExpr::Any,
             );
@@ -883,7 +883,8 @@ mod tests {
 
     #[test]
     fn tool_binding_defaults_remain_lashlang_local_policy() {
-        let tool = lash_core::ToolDefinition::raw_named(
+        let tool = lash_core::ToolDefinition::raw(
+            "tool:test/read_file",
             "read_file",
             "read a file",
             lash_core::ToolDefinition::default_input_schema(),
@@ -900,7 +901,8 @@ mod tests {
 
     #[test]
     fn explicit_tool_binding_attaches_lashlang_metadata() {
-        let tool = lash_core::ToolDefinition::raw_named(
+        let tool = lash_core::ToolDefinition::raw(
+            "tool:test/read_file",
             "read_file",
             "read a file",
             lash_core::ToolDefinition::default_input_schema(),
@@ -922,7 +924,8 @@ mod tests {
 
     #[test]
     fn manifest_lashlang_binding_accessor_reports_absent_valid_and_malformed() {
-        let mut manifest = lash_core::ToolDefinition::raw_named(
+        let mut manifest = lash_core::ToolDefinition::raw(
+            "tool:test/read_file",
             "read_file",
             "read a file",
             lash_core::ToolDefinition::default_input_schema(),
@@ -1098,7 +1101,7 @@ mod tests {
     fn remote_tool_grant(name: &str) -> lash_remote_protocol::RemoteToolGrant {
         lash_remote_protocol::RemoteToolGrant {
             protocol_version: lash_remote_protocol::REMOTE_PROTOCOL_VERSION,
-            id: None,
+            id: format!("remote-tool:{name}"),
             name: name.to_string(),
             description: String::new(),
             input_schema: lash_core::ToolDefinition::default_input_schema(),

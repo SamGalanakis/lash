@@ -43,7 +43,8 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
         "Search catalogued tools by name, id, description, signatures, return fields, and examples. Use this when the capability you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints."
     };
 
-    ToolDefinition::raw_named(
+    ToolDefinition::raw(
+        "tool:search_tools",
         "search_tools",
         description,
         schema_for::<SearchToolsArgs>(),

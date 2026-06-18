@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::html::escaping::escape_breaks;
+use lash_core::ChronologicalPayload;
 
 pub(crate) fn render_part(out: &mut String, part: &Part) {
     match &part.prune_state {

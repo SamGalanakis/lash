@@ -645,7 +645,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
     session
         .admin()
         .tools()
-        .set_availability("app_lookup", ToolAvailability::Off)
+        .set_availability("tool:app_lookup", ToolAvailability::Off)
         .await?;
     let tool_state = session
         .observe()
@@ -653,7 +653,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
         .expect("tool state should be observable");
     assert_eq!(
         tool_state
-            .get("app_lookup")
+            .get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );

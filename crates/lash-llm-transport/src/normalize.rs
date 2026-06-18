@@ -13,6 +13,9 @@
 use lash_core::LlmTransportError;
 use lash_core::provider::ProviderOptions;
 use lash_sansio::llm::types::{LlmOutputPart, LlmTerminalReason, LlmUsage};
+use serde_json::Value;
+
+use crate::util::parse_i64;
 
 /// Merge incremental streaming usage: overwrite each `dst` field with the
 /// corresponding `next` field only when `next` reports a non-zero value,
@@ -48,6 +51,135 @@ pub fn terminal_reason_from_parts(parts: &[LlmOutputPart]) -> LlmTerminalReason 
     } else {
         LlmTerminalReason::Stop
     }
+}
+
+/// Parse token usage from an OpenAI-compatible response object. Handles both
+/// Responses (`input_tokens` / `output_tokens`) and Chat Completions
+/// (`prompt_tokens` / `completion_tokens`) shapes, plus common gateway aliases.
+pub fn openai_usage_from_response_value(value: &Value) -> LlmUsage {
+    openai_usage_from_usage_value(value.get("usage").unwrap_or(&Value::Null))
+}
+
+/// Parse token usage from an OpenAI-compatible `usage` object. Cache-write
+/// tokens are excluded from cached-input totals to match provider billing
+/// semantics used by the rest of lash.
+pub fn openai_usage_from_usage_value(usage: &Value) -> LlmUsage {
+    let cached_tokens = parse_i64(
+        usage
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+            })
+            .or_else(|| usage.get("cached_input_tokens"))
+            .or_else(|| usage.get("cached_tokens"))
+            .or_else(|| usage.get("prompt_cache_hit_tokens")),
+    );
+    let cache_write_tokens = parse_i64(
+        usage
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cache_write_tokens"))
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cache_write_tokens"))
+            }),
+    );
+    LlmUsage {
+        input_tokens: parse_i64(
+            usage
+                .get("input_tokens")
+                .or_else(|| usage.get("prompt_tokens")),
+        ),
+        output_tokens: parse_i64(
+            usage
+                .get("output_tokens")
+                .or_else(|| usage.get("completion_tokens")),
+        ),
+        cached_input_tokens: if cache_write_tokens > 0 {
+            cached_tokens.saturating_sub(cache_write_tokens).max(0)
+        } else {
+            cached_tokens
+        },
+        reasoning_tokens: parse_i64(
+            usage
+                .get("reasoning_tokens")
+                .or_else(|| {
+                    usage
+                        .get("output_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                })
+                .or_else(|| {
+                    usage
+                        .get("completion_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                }),
+        ),
+    }
+}
+
+/// Map a final OpenAI Responses object to a terminal reason. Honors both
+/// snake_case and camelCase incomplete details emitted by compatible gateways.
+pub fn openai_terminal_reason_from_response_value(
+    value: &Value,
+    parts: &[LlmOutputPart],
+) -> LlmTerminalReason {
+    let incomplete_details = value
+        .get("incomplete_details")
+        .or_else(|| value.get("incompleteDetails"))
+        .filter(|details| !details.is_null());
+    let incomplete_reason =
+        incomplete_details.and_then(|details| details.get("reason").and_then(Value::as_str));
+    match incomplete_reason {
+        Some("max_output_tokens" | "max_tokens") => return LlmTerminalReason::OutputLimit,
+        Some("content_filter" | "safety") => return LlmTerminalReason::ContentFilter,
+        Some(_) => return LlmTerminalReason::ProviderError,
+        None => {}
+    }
+    if value.get("status").and_then(Value::as_str) == Some("cancelled") {
+        return LlmTerminalReason::Cancelled;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("failed") {
+        return LlmTerminalReason::ProviderError;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("incomplete") && parts.is_empty() {
+        return LlmTerminalReason::ProviderError;
+    }
+    terminal_reason_from_parts(parts)
+}
+
+/// Map a Chat Completions `finish_reason` value, preserving the provided
+/// fallback when the finish reason is absent or empty.
+pub fn openai_terminal_reason_from_chat_finish_reason(
+    finish_reason: &str,
+    empty_fallback: LlmTerminalReason,
+) -> LlmTerminalReason {
+    match finish_reason {
+        "stop" => LlmTerminalReason::Stop,
+        "tool_calls" | "function_call" => LlmTerminalReason::ToolUse,
+        "length" | "max_tokens" => LlmTerminalReason::OutputLimit,
+        "content_filter" | "safety" => LlmTerminalReason::ContentFilter,
+        "" => empty_fallback,
+        _ => LlmTerminalReason::ProviderError,
+    }
+}
+
+/// Map a final OpenAI-compatible Chat Completions object to a terminal reason,
+/// falling back to assembled parts when no finish reason is present.
+pub fn openai_terminal_reason_from_chat_value(
+    value: &Value,
+    parts: &[LlmOutputPart],
+) -> LlmTerminalReason {
+    let finish = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    openai_terminal_reason_from_chat_finish_reason(finish, terminal_reason_from_parts(parts))
 }
 
 /// Frame a buffered SSE payload — possibly several `data:`/`event:` lines
@@ -172,6 +304,66 @@ mod tests {
         })
         .unwrap();
         assert_eq!(events, vec!["a\nb".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn openai_usage_parser_accepts_responses_and_chat_completion_shapes() {
+        let responses_usage = openai_usage_from_response_value(&serde_json::json!({
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 2},
+                "output_tokens_details": {"reasoning_tokens": 5}
+            }
+        }));
+        assert_eq!(responses_usage.input_tokens, 11);
+        assert_eq!(responses_usage.output_tokens, 7);
+        assert_eq!(responses_usage.cached_input_tokens, 3);
+        assert_eq!(responses_usage.reasoning_tokens, 5);
+
+        let chat_usage = openai_usage_from_response_value(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 13,
+                "completion_tokens": 17,
+                "prompt_tokens_details": {"cached_tokens": 6, "cache_write_tokens": 4},
+                "completion_tokens_details": {"reasoning_tokens": 4}
+            }
+        }));
+        assert_eq!(chat_usage.input_tokens, 13);
+        assert_eq!(chat_usage.output_tokens, 17);
+        assert_eq!(chat_usage.cached_input_tokens, 2);
+        assert_eq!(chat_usage.reasoning_tokens, 4);
+    }
+
+    #[test]
+    fn openai_terminal_mappers_use_wire_reason_then_parts_fallback() {
+        let tool_parts = vec![LlmOutputPart::ToolCall {
+            call_id: "c".into(),
+            tool_name: "t".into(),
+            input_json: "{}".into(),
+            replay: None,
+        }];
+        assert_eq!(
+            openai_terminal_reason_from_chat_value(
+                &serde_json::json!({"choices":[{"finish_reason":"length"}]}),
+                &tool_parts,
+            ),
+            LlmTerminalReason::OutputLimit
+        );
+        assert_eq!(
+            openai_terminal_reason_from_chat_value(
+                &serde_json::json!({"choices":[{}]}),
+                &tool_parts
+            ),
+            LlmTerminalReason::ToolUse
+        );
+        assert_eq!(
+            openai_terminal_reason_from_response_value(
+                &serde_json::json!({"status":"incomplete","incomplete_details":{"reason":"safety"}}),
+                &[],
+            ),
+            LlmTerminalReason::ContentFilter
+        );
     }
 
     #[test]

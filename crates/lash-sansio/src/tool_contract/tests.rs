@@ -3,7 +3,7 @@ mod tests {
     use super::*;
     #[test]
     fn tool_definition_uses_canonical_model_schemas() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:mcp__demo__search",
             "mcp__demo__search",
             "Search demo server",
@@ -39,7 +39,7 @@ mod tests {
 
     #[test]
     fn tool_retry_policy_defaults_to_never_and_is_omitted_from_manifest_json() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:demo",
             "demo",
             "Demo",
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn tool_retry_policy_propagates_through_manifest_and_definition_roundtrip() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:demo",
             "demo",
             "Demo",
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn tool_argument_projection_defaults_to_materialize_and_is_omitted_from_manifest_json() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:demo",
             "demo",
             "Demo",
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn tool_argument_projection_propagates_through_manifest_and_definition_roundtrip() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:demo",
             "demo",
             "Demo",
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn model_tool_preserves_schema_projection_overrides() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:demo",
             "demo",
             "Demo",
@@ -207,7 +207,7 @@ mod tests {
             confidence: f32,
         }
 
-        let tool = ToolDefinition::typed::<Args, Output>("demo", "Demo");
+        let tool = ToolDefinition::typed::<Args, Output>("tool:test/demo", "demo", "Demo");
         let metadata = tool.parameter_metadata();
         assert!(metadata.iter().any(|param| {
             param["name"] == "page_limit"
@@ -254,7 +254,7 @@ mod tests {
             "x-result": ["exact"]
         });
 
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:raw_demo",
             "raw_demo",
             "Raw demo",
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn compact_tool_contract_renders_prompt_and_search_shape_from_schemas() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:search_docs",
             "search_docs",
             "Search indexed docs",
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn compact_tool_contract_resolves_local_refs_in_string_or_list_parameters() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:search_tools",
             "search_tools",
             "Search tools",
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn static_output_contract_keeps_existing_compact_docs_and_serde_shape() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:read_text",
             "read_text",
             "Read text",
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn dynamic_output_contract_renders_schema_from_input_without_return_fields() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:spawn_agent",
             "spawn_agent",
             "Run a subagent",
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn dynamic_output_contract_renders_default_schema() {
-        let tool = ToolDefinition::raw_with_id(
+        let tool = ToolDefinition::raw(
             "tool:llm_query",
             "llm_query",
             "Run a lightweight LLM query",
@@ -945,7 +945,7 @@ mod tests {
 
     #[test]
     fn tool_bindings_round_trip_as_opaque_metadata() {
-        let mut with_metadata = ToolDefinition::raw_with_id(
+        let mut with_metadata = ToolDefinition::raw(
             "tool:read_file",
             "read_file",
             "Read a file",

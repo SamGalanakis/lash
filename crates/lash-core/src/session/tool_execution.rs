@@ -13,19 +13,23 @@ use crate::{
 #[derive(Clone)]
 pub struct ToolInvocation {
     pub id: String,
-    pub name: String,
+    pub tool_id: crate::ToolId,
     pub args: serde_json::Value,
     pub child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
 }
 
 impl ToolInvocation {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, args: serde_json::Value) -> Self {
+    pub fn new(id: impl Into<String>, tool_id: crate::ToolId, args: serde_json::Value) -> Self {
         Self {
             id: id.into(),
-            name: name.into(),
+            tool_id,
             args,
             child_execution_trace_hook: None,
         }
+    }
+
+    pub fn label(&self) -> String {
+        self.tool_id.to_string()
     }
 
     pub fn with_child_execution_trace_hook(
@@ -41,7 +45,7 @@ impl std::fmt::Debug for ToolInvocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolInvocation")
             .field("id", &self.id)
-            .field("name", &self.name)
+            .field("tool_id", &self.tool_id)
             .field("args", &self.args)
             .field(
                 "child_execution_trace_hook",
@@ -225,6 +229,53 @@ impl RuntimeExecutionContext<'_> {
 
         self.complete_tool_call(index, call_id, replay, outcome, tool_correlation_id)
             .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "tool execution carries explicit runtime call metadata"
+    )]
+    pub(crate) async fn execute_tool_call_by_id(
+        &self,
+        call_id: String,
+        tool_id: crate::ToolId,
+        args: serde_json::Value,
+        index: usize,
+        replay: Option<crate::llm::types::ProviderReplayMeta>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
+        child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
+    ) -> CompletedProtocolToolCall {
+        let Some(manifest) =
+            crate::tool_dispatch::resolve_callable_manifest_by_id(self.dispatch.as_ref(), &tool_id)
+        else {
+            let outcome = ToolDispatchOutcome {
+                record: ToolCallRecord {
+                    call_id: Some(call_id.clone()),
+                    tool: tool_id.to_string(),
+                    args,
+                    output: ToolCallOutput::failure(ToolFailure::runtime(
+                        ToolFailureClass::Unavailable,
+                        "tool_unavailable",
+                        format!("Tool id `{tool_id}` is unavailable in this session"),
+                    )),
+                    duration_ms: 0,
+                },
+            };
+            let activity_id = TurnActivityId::new(format!("tool:{call_id}"));
+            return self
+                .complete_tool_call(index, call_id, replay, outcome, activity_id)
+                .await;
+        };
+        self.execute_tool_call(
+            call_id,
+            manifest.name,
+            args,
+            index,
+            replay,
+            parent_invocation,
+            child_execution_trace_hook,
+        )
+        .await
     }
 
     pub(crate) async fn prepare_tool_call(
@@ -531,30 +582,30 @@ impl RuntimeExecutionContext<'_> {
         .await
     }
 
-    pub async fn call_tool(
+    pub async fn call_tool_by_id(
         &self,
         call_id: String,
-        name: String,
+        tool_id: crate::ToolId,
         args: serde_json::Value,
         index: usize,
     ) -> ToolInvocationReply {
         let executed = self
-            .execute_tool_call(call_id, name, args, index, None, None, None)
+            .execute_tool_call_by_id(call_id, tool_id, args, index, None, None, None)
             .await;
         let reply = ToolInvocationReply::from_output(executed.completed.output);
         reply.with_record(executed.record)
     }
 
-    pub async fn call_tool_with_child_execution_trace_hook(
+    pub async fn call_tool_by_id_with_child_execution_trace_hook(
         &self,
         call_id: String,
-        name: String,
+        tool_id: crate::ToolId,
         args: serde_json::Value,
         index: usize,
         trace_hook: crate::ToolChildExecutionTraceHook,
     ) -> ToolInvocationReply {
         let executed = self
-            .execute_tool_call(call_id, name, args, index, None, None, Some(trace_hook))
+            .execute_tool_call_by_id(call_id, tool_id, args, index, None, None, Some(trace_hook))
             .await;
         let reply = ToolInvocationReply::from_output(executed.completed.output);
         reply.with_record(executed.record)
@@ -565,14 +616,19 @@ impl RuntimeExecutionContext<'_> {
         schedule_tool_batch(
             indexed_calls,
             |(index, _)| *index,
-            |(_, call)| self.tool_scheduling(&call.name),
+            |(_, call)| {
+                crate::tool_dispatch::resolve_tool_scheduling_by_id(
+                    self.dispatch.as_ref(),
+                    &call.tool_id,
+                )
+            },
             |(index, call)| {
                 let ctx = self.clone();
                 async move {
                     let executed = ctx
-                        .execute_tool_call(
+                        .execute_tool_call_by_id(
                             call.id,
-                            call.name,
+                            call.tool_id,
                             call.args,
                             index,
                             None,

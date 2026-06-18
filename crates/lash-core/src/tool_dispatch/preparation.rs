@@ -146,12 +146,28 @@ pub(crate) async fn prepare_tool_call_with_context(
     match context
         .tools
         .prepare_tool_call(ToolPrepareCall {
+            tool_id: manifest.id.clone(),
             pending,
             context: &prepare_context,
         })
         .await
     {
-        Ok(prepared) => ToolPreparationOutcome::Prepared(prepared),
+        Ok(prepared) if prepared.tool_id == manifest.id => {
+            ToolPreparationOutcome::Prepared(prepared)
+        }
+        Ok(prepared) => completed_preparation(outcome(
+            tool_name,
+            args,
+            runtime_failure(
+                ToolFailureClass::Internal,
+                "prepared_tool_id_mismatch",
+                format!(
+                    "Tool provider prepared id `{}` for tool `{}`, expected `{}`",
+                    prepared.tool_id, prepared.tool_name, manifest.id
+                ),
+            ),
+            0,
+        )),
         Err(result) => completed_preparation(outcome(tool_name, args, result, 0)),
     }
 }

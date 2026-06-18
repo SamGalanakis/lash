@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolPrepareCall, ToolPrepareContext,
-    ToolProvider, ToolResult, sansio::PendingToolCall,
+    ToolCall, ToolContract, ToolDefinition, ToolId, ToolManifest, ToolPrepareCall,
+    ToolPrepareContext, ToolProvider, ToolResult, sansio::PendingToolCall,
 };
 
 /// Per-call execution behavior for a [`StaticToolProvider`].
@@ -34,10 +34,14 @@ pub trait StaticToolExecute: Send + Sync + 'static {
     /// [`ToolProvider::prepare_tool_call`]. Defaults to the identity transform.
     async fn prepare_tool_call(
         &self,
+        tool_id: &ToolId,
         pending: PendingToolCall,
         _context: &ToolPrepareContext,
     ) -> Result<lash_core::PreparedToolCall, ToolResult> {
-        Ok(lash_core::PreparedToolCall::identity(pending))
+        Ok(lash_core::PreparedToolCall::identity(
+            tool_id.clone(),
+            pending,
+        ))
     }
 }
 
@@ -46,6 +50,7 @@ pub trait StaticToolExecute: Send + Sync + 'static {
 pub struct StaticToolProvider<E: StaticToolExecute> {
     manifests: Vec<ToolManifest>,
     contracts: HashMap<String, Arc<ToolContract>>,
+    contracts_by_id: HashMap<ToolId, Arc<ToolContract>>,
     executor: E,
 }
 
@@ -57,14 +62,18 @@ impl<E: StaticToolExecute> StaticToolProvider<E> {
     pub fn new(definitions: Vec<ToolDefinition>, executor: E) -> Self {
         let mut manifests = Vec::with_capacity(definitions.len());
         let mut contracts = HashMap::with_capacity(definitions.len());
+        let mut contracts_by_id = HashMap::with_capacity(definitions.len());
         for def in &definitions {
             let manifest = def.manifest();
-            contracts.insert(manifest.name.clone(), Arc::new(def.contract()));
+            let contract = Arc::new(def.contract());
+            contracts.insert(manifest.name.clone(), Arc::clone(&contract));
+            contracts_by_id.insert(manifest.id.clone(), contract);
             manifests.push(manifest);
         }
         Self {
             manifests,
             contracts,
+            contracts_by_id,
             executor,
         }
     }
@@ -89,8 +98,19 @@ impl<E: StaticToolExecute> ToolProvider for StaticToolProvider<E> {
             .cloned()
     }
 
+    fn resolve_manifest_by_id(&self, id: &ToolId) -> Option<ToolManifest> {
+        self.manifests
+            .iter()
+            .find(|manifest| manifest.id == *id)
+            .cloned()
+    }
+
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
         self.contracts.get(name).cloned()
+    }
+
+    fn resolve_contract_by_id(&self, id: &ToolId) -> Option<Arc<ToolContract>> {
+        self.contracts_by_id.get(id).cloned()
     }
 
     async fn prepare_tool_call(
@@ -98,7 +118,7 @@ impl<E: StaticToolExecute> ToolProvider for StaticToolProvider<E> {
         call: ToolPrepareCall<'_>,
     ) -> Result<lash_core::PreparedToolCall, ToolResult> {
         self.executor
-            .prepare_tool_call(call.pending, call.context)
+            .prepare_tool_call(&call.tool_id, call.pending, call.context)
             .await
     }
 

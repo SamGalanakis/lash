@@ -20,6 +20,9 @@ use lash_llm_transport::timeouts::{
     response_start_timeout, send_request,
 };
 use lash_llm_transport::util::emit_provider_trace;
+use lash_llm_transport::{
+    openai_terminal_reason_from_response_value, openai_usage_from_response_value,
+};
 
 pub mod oauth;
 
@@ -574,7 +577,7 @@ impl Provider for CodexProvider {
                     .with_raw(text.clone())
             })?;
             let content = shared::extract_text(&value);
-            let usage = shared::usage_from_response_value(&value);
+            let usage = openai_usage_from_response_value(&value);
             let mut parts = shared::response_parts_from_value(&value);
             if parts.is_empty() && !content.is_empty() {
                 parts.push(lash_core::llm::types::LlmOutputPart::Text {
@@ -590,7 +593,7 @@ impl Provider for CodexProvider {
                     tx.send(LlmStreamEvent::Delta(content.clone()));
                 }
             }
-            let terminal_reason = shared::terminal_reason_from_response_value(&value, &parts);
+            let terminal_reason = openai_terminal_reason_from_response_value(&value, &parts);
             return Ok(LlmResponse {
                 full_text: content,
                 parts,
@@ -779,7 +782,7 @@ mod tests {
 
     #[test]
     fn codex_null_incomplete_details_does_not_map_to_output_limit() {
-        let terminal_reason = shared::terminal_reason_from_response_value(
+        let terminal_reason = openai_terminal_reason_from_response_value(
             &json!({"status":"completed","incomplete_details":null}),
             &[LlmOutputPart::Text {
                 text: "Hi".to_string(),
@@ -792,7 +795,7 @@ mod tests {
 
     #[test]
     fn codex_content_filter_incomplete_maps_to_content_filter() {
-        let terminal_reason = shared::terminal_reason_from_response_value(
+        let terminal_reason = openai_terminal_reason_from_response_value(
             &json!({"status":"incomplete","incomplete_details":{"reason":"content_filter"}}),
             &[],
         );
@@ -1112,6 +1115,9 @@ mod tests {
             CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
             provider_conformance,
         };
+        use lash_llm_transport::{
+            openai_terminal_reason_from_response_value, openai_usage_from_response_value,
+        };
         use serde_json::{Value, json};
 
         struct CodexNormalizer;
@@ -1234,7 +1240,7 @@ mod tests {
             }
 
             fn usage_from_wire(&self, body: &Value) -> LlmUsage {
-                shared::usage_from_response_value(body)
+                openai_usage_from_response_value(body)
             }
 
             fn terminal_from_wire(
@@ -1242,7 +1248,7 @@ mod tests {
                 body: &Value,
                 parts: &[LlmOutputPart],
             ) -> LlmTerminalReason {
-                shared::terminal_reason_from_response_value(body, parts)
+                openai_terminal_reason_from_response_value(body, parts)
             }
 
             fn assemble_stream(&self, sse_events: &[String]) -> StreamAssembly {
