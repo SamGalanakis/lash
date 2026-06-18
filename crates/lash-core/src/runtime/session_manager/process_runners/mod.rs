@@ -132,6 +132,7 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
                 &self.services.current.host.core.durability.attachment_store,
             ),
             turn_context: crate::TurnContext::default(),
+            clock: Arc::clone(&self.services.current.host.core.clock),
         });
         Ok(ProcessRunContext {
             dispatch,

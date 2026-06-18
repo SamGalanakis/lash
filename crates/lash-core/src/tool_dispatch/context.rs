@@ -93,6 +93,7 @@ pub struct ToolDispatchContext<'run> {
     pub(crate) trigger_outcomes: ToolTriggerOutcomeBuffer,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub turn_context: crate::TurnContext,
+    pub clock: Arc<dyn crate::Clock>,
 }
 
 impl<'run> ToolDispatchContext<'run> {

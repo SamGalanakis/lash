@@ -341,6 +341,7 @@ impl Session {
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::clone(&self.services.attachment_store),
             turn_context: turn_context.clone(),
+            clock: Arc::clone(&self.services.clock),
         });
         Ok(RuntimeExecutionContext::new(
             session_id.to_string(),

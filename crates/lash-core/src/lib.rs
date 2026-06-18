@@ -237,7 +237,7 @@ pub use provider::{
 pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
     AgentFrameRun, AssembledTurn, AssistantOutput, AwaitEventKey, AwaitEventWaitIdentity,
-    CausalRef, CodeOutputRecord, DefaultProcessCancelAbility, DeliveryPolicy,
+    CausalRef, Clock, CodeOutputRecord, DefaultProcessCancelAbility, DeliveryPolicy,
     DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig, DurableStoreFacet,
     EffectHost, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionScope,
     ExecutionSummary, ExternalCompletionError, InMemoryLiveReplayStore,
@@ -272,7 +272,7 @@ pub use runtime::{
     SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
     SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision, SessionScope,
     SessionScopeId, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
-    TerminationPolicy, TokenLedgerEntry, ToolCallLaunch, TurnActivity, TurnActivityId,
+    SystemClock, TerminationPolicy, TokenLedgerEntry, ToolCallLaunch, TurnActivity, TurnActivityId,
     TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
     UnavailableProcessService, UsageReportRow, UsageTotals, WaitKind, WaitState,
     apply_process_status_projection, current_epoch_ms, diff_token_ledger, diff_usage_reports,

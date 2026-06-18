@@ -1,6 +1,7 @@
 mod assembly;
 mod builder;
 pub(crate) mod causal;
+mod clock;
 mod config_ops;
 mod effect;
 mod environment;
@@ -78,6 +79,7 @@ use assembly::{
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use causal::process_event_invocation;
+pub use clock::{Clock, SystemClock};
 pub(crate) use causal::tool_retry_sleep_invocation;
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{

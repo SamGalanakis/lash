@@ -368,6 +368,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -417,6 +418,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -473,6 +475,7 @@ fn projection_policy_dispatch_context(
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -633,6 +636,7 @@ fn lazy_contract_dispatch_context(
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -671,6 +675,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -764,6 +769,7 @@ fn pending_dispatch_context(
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -825,6 +831,7 @@ fn parallel_dispatch_context(
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -1571,6 +1578,7 @@ fn serial_dispatch_context(
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     }
 }
 
@@ -1727,6 +1735,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     });
 
     let outcomes = dispatch_parallel_tool_calls(
@@ -1869,6 +1878,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     });
 
     let specs = vec![

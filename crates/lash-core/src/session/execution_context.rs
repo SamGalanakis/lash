@@ -645,6 +645,7 @@ mod tests {
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
+            clock: std::sync::Arc::new(crate::SystemClock),
         });
         let ctx = RuntimeExecutionContext::new(
             "session".to_string(),

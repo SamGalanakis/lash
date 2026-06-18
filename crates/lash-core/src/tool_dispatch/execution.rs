@@ -51,7 +51,7 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
     };
     let tool_name = manifest.name.clone();
 
-    let tool_start = Instant::now();
+    let tool_start = context.clock.now();
     let tool_context = tool_context.with_prepared_payload(prepared.prepared_payload.clone());
     let completion_context = tool_context.clone();
     let result = Box::pin(execute_tool_call(
@@ -62,7 +62,7 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
         tool_context,
     ))
     .await;
-    let duration_ms = tool_start.elapsed().as_millis() as u64;
+    let duration_ms = context.clock.now().duration_since(tool_start).as_millis() as u64;
     let result = match result {
         ToolResult::Done(_) => result,
         ToolResult::Pending(pending) => {

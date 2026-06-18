@@ -68,7 +68,8 @@ impl LashRuntime {
         }
         let services = services
             .with_attachment_store(Arc::clone(&host.core.durability.attachment_store))
-            .with_process_env_store(Arc::clone(&host.core.durability.process_env_store));
+            .with_process_env_store(Arc::clone(&host.core.durability.process_env_store))
+            .with_clock(Arc::clone(&host.core.clock));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone() {
             // Cold rebuild restores the exact persisted tool catalog, adopting

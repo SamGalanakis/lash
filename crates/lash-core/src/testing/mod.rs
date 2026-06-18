@@ -326,6 +326,7 @@ fn code_execution_context_with_tool_catalog_and_trigger_router(
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::clone(&attachment_store),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     });
     crate::RuntimeExecutionContext::new(
         "test-session".to_string(),
