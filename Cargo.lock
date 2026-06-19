@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "agent-service"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "axum",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "agent-workbench"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "docs-snippets"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "lash-autoresearch"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "lash-cli"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "lash-core"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "lash-export"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "clap",
@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "lash-file-index"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "ignore",
  "notify",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "lash-harness-opt"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "lash-lashlang-runtime"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2625,7 +2625,7 @@ dependencies = [
 
 [[package]]
 name = "lash-llm-tools"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "lash-llm-transport"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "bytes",
  "lash-core",
@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "lash-perf"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-mcp"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-observational-memory"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2708,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-plan-mode"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-process-controls"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-tool-discovery"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-tool-output-budget"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "lash-core",
  "serde",
@@ -2762,7 +2762,7 @@ dependencies = [
 
 [[package]]
 name = "lash-postgres-store"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "lash-protocol-rlm"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "insta",
@@ -2799,7 +2799,7 @@ dependencies = [
 
 [[package]]
 name = "lash-protocol-standard"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-anthropic"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2827,7 +2827,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-auth"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.13.3",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-google"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-openai"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2872,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "lash-remote-protocol"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "base64 0.22.1",
  "lash-core",
@@ -2885,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "lash-restate"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2934,7 +2934,7 @@ dependencies = [
 
 [[package]]
 name = "lash-rlm-types"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "lash-sansio",
  "serde",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "lash-runtime"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2970,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "lash-s3-store"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "lash-sansio"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "schemars",
  "serde",
@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "lash-search-tools"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "fff-search",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "lash-sqlite-store"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "flate2",
@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "lash-standard-plugins"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-core",
@@ -3045,7 +3045,7 @@ dependencies = [
 
 [[package]]
 name = "lash-subagents"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -3063,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "lash-tool-support"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "lash-tools"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "globset",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "lash-trace"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "chrono",
  "opentelemetry",
@@ -3114,7 +3114,7 @@ dependencies = [
 
 [[package]]
 name = "lash-trace-viewer"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "clap",
@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "lash-tui"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -3133,7 +3133,7 @@ dependencies = [
 
 [[package]]
 name = "lash-tui-extensions"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "lash-plugin-plan-mode",
@@ -3144,7 +3144,7 @@ dependencies = [
 
 [[package]]
 name = "lashlang"
-version = "0.1.0-alpha.59"
+version = "0.1.0-alpha.60"
 dependencies = [
  "async-trait",
  "compact_str",
