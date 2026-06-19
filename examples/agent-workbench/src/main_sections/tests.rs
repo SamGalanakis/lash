@@ -691,6 +691,7 @@ mod tests {
             .store_factory(Arc::clone(&core_store_factory))
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(Arc::clone(&process_registry))
+            .disable_queued_work_driver()
             .build()
             .expect("build core");
         let session = core
