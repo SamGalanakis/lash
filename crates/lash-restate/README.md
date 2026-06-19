@@ -47,9 +47,22 @@ outcomes, validates the current Lash envelope hash, and retries the final commit
 without exposing partial session state.
 
 For host-tier HTTP integration, use `RestateIngressClient` to submit `/send`
-requests and capture the returned invocation id, and `RestateAdminClient` to
-cancel or inspect invocations through the Admin API. The Restate CLI remains a
+requests and capture the returned invocation id. The client accepts Restate's
+`Accepted` and `PreviouslyAccepted` send statuses and returns the
+`RestateInvocationId` from the response body, so the host can track a durable
+turn invocation instead of modeling it as local in-process work.
+`RestateAdminClient` cancels those active invocations through the Admin API,
+queries invocation status, and exposes unfinished-invocation introspection for
+tests and cleanup. `kill_invocation_for_test_cleanup` is intentionally reserved
+for test/dev cleanup after graceful cancel fails. The Restate CLI remains a
 useful operator tool, but Lash tests and examples use these HTTP APIs directly.
+
+Deterministic contract failures are terminal handler errors, not retry loops.
+If a replayed recorded effect no longer matches the current Lash envelope hash,
+or a previously recorded Restate run completed with a terminal failure, the
+adapter returns an explicit terminal error code to the handler. Hosts should
+surface that failure and clear their running state rather than leaving the
+invocation to back off forever.
 
 Background tasks are scheduled through the first-party
 `LashProcessWorkflow`. Bind it on your Restate endpoint with `.serve()`:

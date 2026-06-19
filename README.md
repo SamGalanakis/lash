@@ -11,7 +11,7 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 ## What's inside
 
 - **Durable per-turn commits** — every completed turn lands as one atomic `RuntimeCommit` against a `SessionGraph`. Effects are the replay boundary; turns are the semantic commit boundary. → [persistence](https://lash.run/persistence.html)
-- **Workflow-host integration** — a sans-IO turn machine behind one `EffectHost` boundary. The default `InlineEffectHost` runs in-process; the first-party Restate adapter replays effects from host history and retries the final idempotent commit. → [durability](https://lash.run/architecture/durability.html)
+- **Workflow-host integration** — a sans-IO turn machine behind one `EffectHost` boundary. The default `InlineEffectHost` runs in-process; the first-party Restate adapter replays effects from host history, exposes invocation identity for host cancellation and inspection, and retries the final idempotent commit. → [durability](https://lash.run/architecture/durability.html)
 - **Two execution modes, one commit unit** — `standard` uses native provider tool-calling with concurrent dispatch; `rlm` runs `lashlang` programs in a sandboxed VM where every effect crosses the host. → [RLM](https://lash.run/rlm.html)
 - **Tool providers and plugins** — ordinary host operations are `ToolProvider`s; plugins add runtime/session behavior such as prompts, planning, memory, subagents, history transforms, UI activity, catalog policy, and tool-output budgeting. Hosts compose only what they embed. → [tools](https://lash.run/tools.html), [plugins](https://lash.run/plugins.html)
 - **Provider portability** — Anthropic, OpenAI Responses, any OpenAI-compatible Chat Completions endpoint, OpenAI Codex, and Google Gemini / Code Assist. MCP servers attach through `lash-plugin-mcp`. → [providers](https://lash.run/architecture/providers.html)
@@ -23,8 +23,8 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.62"
-lash-provider-openai = "=0.1.0-alpha.62"
+lash-runtime         = "=0.1.0-alpha.63"
+lash-provider-openai = "=0.1.0-alpha.63"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```

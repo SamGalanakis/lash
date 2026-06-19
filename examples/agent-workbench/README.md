@@ -337,8 +337,11 @@ reg.triggers().declare(
 ```
 
 For a model-free live smoke that starts Restate, registers the endpoint through
-Admin, schedules `cron.Schedule({ expr: "*/2 * * * * *", tz: "UTC" })`, waits
-for a tick, and checks the JSONL trace, run:
+Admin, submits a deterministic turn through Restate `/send`, verifies the
+returned invocation completed successfully, schedules
+`cron.Schedule({ expr: "*/2 * * * * *", tz: "UTC" })`, waits for a tick, checks
+the JSONL trace, and asserts no workbench/process invocation remains active,
+run:
 
 ```bash
 just agent-workbench-restate-e2e
