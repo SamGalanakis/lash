@@ -661,6 +661,34 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
         })
     }
 
+    fn await_process_terminal<'run>(
+        &'run self,
+        process_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<ProcessAwaitOutput, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        let result = restate_process_terminal_await_key(&process_id)
+            .map_err(TerminalError::from_error)
+            .and_then(|key| {
+                self.awaited_events
+                    .lock()
+                    .expect("awaited events lock")
+                    .get(&key.promise_key())
+                    .cloned()
+                    .ok_or_else(|| {
+                        TerminalError::new(format!(
+                            "process terminal await is unresolved: {process_id}"
+                        ))
+                    })
+            })
+            .and_then(|resolution| {
+                restate_process_terminal_output(&process_id, resolution)
+                    .map_err(TerminalError::from_error)
+            });
+        Box::pin(async move { result })
+    }
+
     fn resolve_event<'run>(
         &'run self,
         request: RestateProcessEventResolveRequest,
@@ -819,6 +847,16 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<PositionalReplayContext> {
         Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
     }
 
+    fn await_process_terminal<'run>(
+        &'run self,
+        _process_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<ProcessAwaitOutput, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("process terminal await is unsupported")) })
+    }
+
     fn resolve_event<'run>(
         &'run self,
         _request: RestateProcessEventResolveRequest,
@@ -920,6 +958,16 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
         'ctx: 'run,
     {
         Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
+    }
+
+    fn await_process_terminal<'run>(
+        &'run self,
+        _process_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<ProcessAwaitOutput, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("process terminal await is unsupported")) })
     }
 
     fn resolve_event<'run>(
@@ -2647,7 +2695,7 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         discovery.ty.to_string(),
         restate_sdk::discovery::ServiceType::Workflow.to_string()
     );
-    assert_eq!(discovery.handlers.len(), 3);
+    assert_eq!(discovery.handlers.len(), 4);
 
     let run = discovery
         .handlers
@@ -2664,6 +2712,11 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         .iter()
         .find(|handler| handler.name.to_string() == "resolve_event")
         .expect("resolve_event handler discovery");
+    let await_terminal = discovery
+        .handlers
+        .iter()
+        .find(|handler| handler.name.to_string() == "await_terminal")
+        .expect("await_terminal handler discovery");
 
     assert_eq!(
         run.ty.as_ref().map(ToString::to_string).as_deref(),
@@ -2675,6 +2728,14 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
     );
     assert_eq!(
         resolve_event
+            .ty
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("SHARED")
+    );
+    assert_eq!(
+        await_terminal
             .ty
             .as_ref()
             .map(ToString::to_string)
@@ -2727,6 +2788,11 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
             .iter()
             .any(|handler| handler["name"] == "resolve_event" && handler["ty"] == "SHARED")
     );
+    assert!(
+        handlers
+            .iter()
+            .any(|handler| handler["name"] == "await_terminal" && handler["ty"] == "SHARED")
+    );
 }
 
 #[tokio::test]
@@ -2758,6 +2824,10 @@ async fn process_deployment_driver_and_workflow_share_registry() {
     }));
     assert!(discovery.handlers.iter().any(|handler| {
         handler.name.to_string() == "resolve_event"
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
+    }));
+    assert!(discovery.handlers.iter().any(|handler| {
+        handler.name.to_string() == "await_terminal"
             && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
     }));
 

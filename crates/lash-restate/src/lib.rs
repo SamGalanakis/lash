@@ -599,6 +599,11 @@ pub trait LashProcessWorkflow {
     ) -> HandlerResult<Json<ProcessAwaitOutput>>;
 
     #[shared]
+    async fn await_terminal(
+        request: Json<RestateProcessAwaitRequest>,
+    ) -> HandlerResult<Json<ProcessAwaitOutput>>;
+
+    #[shared]
     async fn cancel(request: Json<RestateProcessCancelRequest>) -> HandlerResult<Json<()>>;
 
     #[shared]
@@ -619,6 +624,11 @@ pub struct RestateProcessEventResolveRequest {
     pub process_id: String,
     pub key: String,
     pub resolution: Resolution,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateProcessAwaitRequest {
+    pub process_id: String,
 }
 
 pub struct LashProcessWorkflowImpl<R> {
@@ -737,6 +747,22 @@ where
             .map_err(|err| TerminalError::from_error(err).into())
     }
 
+    async fn await_terminal(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        Json(request): Json<RestateProcessAwaitRequest>,
+    ) -> HandlerResult<Json<ProcessAwaitOutput>> {
+        let key = restate_process_terminal_await_key(&request.process_id)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        let promise_key = key.promise_key();
+        let payload = ctx.promise::<String>(&promise_key).await?;
+        let resolution = serde_json::from_str(&payload)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        let output = restate_process_terminal_output(&request.process_id, resolution)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        Ok(Json(output))
+    }
+
     async fn resolve_event(
         &self,
         ctx: SharedWorkflowContext<'_>,
@@ -818,6 +844,13 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
         &'run self,
         key: String,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run;
+
+    fn await_process_terminal<'run>(
+        &'run self,
+        process_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<ProcessAwaitOutput, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
 
@@ -984,6 +1017,33 @@ macro_rules! impl_restate_controller_context {
                     'ctx: 'run,
                 {
                     RestateAwaitEventContext::await_event_json(self, key)
+                }
+
+                fn await_process_terminal<'run>(
+                    &'run self,
+                    process_id: String,
+                ) -> Pin<Box<dyn Future<Output = Result<ProcessAwaitOutput, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    let request: restate_sdk::context::Request<
+                        '_,
+                        Json<RestateProcessAwaitRequest>,
+                        Json<ProcessAwaitOutput>,
+                    > = ContextClient::request(
+                        self,
+                        RequestTarget::workflow(
+                            "LashProcessWorkflow",
+                            process_id.clone(),
+                            "await_terminal",
+                        ),
+                        Json(RestateProcessAwaitRequest { process_id }),
+                    );
+                    let call = request.call();
+                    Box::pin(async move {
+                        let Json(output) = call.await?;
+                        Ok(output)
+                    })
                 }
 
                 fn resolve_event<'run>(
@@ -1331,15 +1391,12 @@ where
             if registry.get_process(&process_id).await.is_none() {
                 return Err(PluginError::Session(format!("unknown process `{process_id}`")).into());
             }
-            let key = restate_process_terminal_await_key(&process_id)
-                .map_err(RuntimeEffectControllerError::from)?;
-            let resolution = context
-                .await_event(key.promise_key())
+            let output = context
+                .await_process_terminal(process_id.clone())
                 .await
                 .map_err(|err| {
                     RuntimeEffectControllerError::new("restate_process_await", err.to_string())
                 })?;
-            let output = restate_process_terminal_output(&process_id, resolution)?;
             Ok(ProcessEffectOutcome::Await { output })
         }
         ProcessCommand::Cancel { process_id, reason } => {
