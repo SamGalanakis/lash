@@ -307,6 +307,28 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
             }],
             output_schema_projections: Vec::new(),
         },
+        LlmToolSpec {
+            name: "schemars".to_string(),
+            description: "Schemars".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "description": "Maximum number of results.",
+                        "allOf": [
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 100
+                            }
+                        ]
+                    }
+                }
+            }),
+            output_schema: json!({}),
+            input_schema_projections: Vec::new(),
+            output_schema_projections: Vec::new(),
+        },
     ]);
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
@@ -320,6 +342,15 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
     assert_eq!(
         body["tools"][1]["function"]["parameters"]["properties"]["raw"],
         json!({ "type": "string", "enum": ["x"] })
+    );
+    assert_eq!(
+        body["tools"][2]["function"]["parameters"]["properties"]["limit"],
+        json!({
+            "description": "Maximum number of results.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+        })
     );
 }
 
