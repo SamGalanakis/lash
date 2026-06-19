@@ -46,6 +46,7 @@ KNOWN_RUNTIME_SCENARIOS = [
     "rlm_tool_calls",
     "rlm_async_tool_completion",
     "rlm_process_handles",
+    "rlm_trigger_mail_pipeline",
     "rlm_process_async_tool_completion",
     "rlm_subagent_spawn",
     "rlm_llm_query",

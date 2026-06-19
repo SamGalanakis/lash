@@ -475,6 +475,19 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "rlm_lashlang.compile_link",
             "rlm_lashlang.execute",
         ],
+        RuntimePerfScenario::RlmTriggerMailPipeline => &[
+            "context_transform",
+            "before_turn_hooks",
+            "prompt_build",
+            "effect_loop",
+            "finalize_turn",
+            "persist_turn",
+            "final_commit",
+            "post_persist_hooks",
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.store_module_artifact",
+            "rlm_lashlang.execute",
+        ],
         RuntimePerfScenario::RlmProcessHandles
         | RuntimePerfScenario::RlmProcessAsyncToolCompletion => &[
             "context_transform",
@@ -515,6 +528,7 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
 fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::RlmAsyncToolCompletion => 96_000_000.0,
+        RuntimePerfScenario::RlmTriggerMailPipeline => 128_000_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 160_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
         RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
@@ -529,6 +543,7 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
 fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::RlmAsyncToolCompletion => 64_000_000.0,
+        RuntimePerfScenario::RlmTriggerMailPipeline => 64_000_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 128_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 96_000_000.0,
@@ -542,6 +557,7 @@ fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
 fn wall_clock_budget_ms(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::RlmAsyncToolCompletion => 1_000.0,
+        RuntimePerfScenario::RlmTriggerMailPipeline => 2_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 2_000.0,
         RuntimePerfScenario::ToolDiscoverySearch | RuntimePerfScenario::RlmLargeToolCatalog => {
             20_000.0
@@ -756,6 +772,29 @@ mod tests {
                 "missing required phase {expected}"
             );
         }
+    }
+
+    #[test]
+    fn rlm_trigger_mail_pipeline_has_specific_guard_budgets_and_phases() {
+        let phases = required_phases(RuntimePerfScenario::RlmTriggerMailPipeline);
+        for expected in [
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.store_module_artifact",
+            "rlm_lashlang.execute",
+        ] {
+            assert!(
+                phases.contains(&expected),
+                "missing required phase {expected}"
+            );
+        }
+        assert!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline) < 200_000_000.0
+        );
+        assert!(
+            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline)
+                < 100_000_000.0
+        );
+        assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmTriggerMailPipeline) < 10_000.0);
     }
 
     #[test]

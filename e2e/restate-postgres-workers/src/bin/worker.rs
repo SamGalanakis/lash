@@ -22,7 +22,7 @@ use lash_restate_postgres_workers_e2e::{
     record_turn_activity, record_worker_event, required_env, s3_store_from_env,
 };
 
-const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 fn terminal_error(err: impl Display) -> TerminalError {
     TerminalError::new(err.to_string())

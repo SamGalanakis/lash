@@ -24,6 +24,8 @@ async fn async_main() -> AnyhowResult<()> {
         .context("invalid AGENT_WORKBENCH_RESTATE_ADDR")?;
     let restate_ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let restate_admin_url = std::env::var("RESTATE_ADMIN_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:19070".to_string());
     let data_dir = std::env::var("AGENT_WORKBENCH_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".agent-workbench"));
@@ -107,6 +109,7 @@ async fn async_main() -> AnyhowResult<()> {
     let session_ids = WorkbenchSessionIds::fresh();
     let (event_tx, _) = broadcast::channel(1024);
     let restate_http = reqwest::Client::new();
+    let active_restate_invocations = ActiveRestateInvocations::default();
     let process_deployment =
         lash_restate::RestateProcessDeployment::new(restate_ingress_url.clone(), process_registry);
     let queued_work_driver =
@@ -115,6 +118,7 @@ async fn async_main() -> AnyhowResult<()> {
             store_factory: Arc::clone(&core_store_factory),
             restate_ingress_url: restate_ingress_url.clone(),
             restate_http: restate_http.clone(),
+            active_restate_invocations: active_restate_invocations.clone(),
         }));
 
     let runtime_host_config = lash::durability::RuntimeHostConfig::new(
@@ -185,10 +189,11 @@ async fn async_main() -> AnyhowResult<()> {
         event_tx,
         queued_work_driver,
         restate_ingress_url,
+        restate_admin_url,
         restate_http,
         restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-        turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
         mail_world,
+        active_restate_invocations,
     };
     restate::spawn_restate_endpoint(
         restate_endpoint_addr,

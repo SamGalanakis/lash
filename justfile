@@ -36,7 +36,7 @@ agent-workbench-foreground port='3030':
 agent-service-restate-e2e:
   #!/usr/bin/env bash
   set -euo pipefail
-  image="${AGENT_SERVICE_RESTATE_IMAGE:-restatedev/restate:1.6.2}"
+  image="${AGENT_SERVICE_RESTATE_IMAGE:-restatedev/restate:1.7.0}"
   container="${AGENT_SERVICE_RESTATE_CONTAINER:-lash-agent-service-restate-e2e}"
   admin_port="${RESTATE_ADMIN_PORT:-19070}"
   ingress_port="${RESTATE_INGRESS_PORT:-18080}"
@@ -88,7 +88,7 @@ agent-service-restate-e2e:
 agent-workbench-restate-e2e:
   #!/usr/bin/env bash
   set -euo pipefail
-  image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:1.6.2}"
+  image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:1.7.0}"
   container="${AGENT_WORKBENCH_RESTATE_CONTAINER:-lash-agent-workbench-restate-e2e}"
   admin_port="${AGENT_WORKBENCH_RESTATE_ADMIN_PORT:-19071}"
   ingress_port="${AGENT_WORKBENCH_RESTATE_INGRESS_PORT:-18081}"

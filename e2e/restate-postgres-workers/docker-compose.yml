@@ -39,7 +39,7 @@ services:
       "
 
   restate:
-    image: restatedev/restate:1.6.2
+    image: restatedev/restate:1.7.0
     environment:
       RESTATE_ADMIN__BIND_PORT: "9070"
       RESTATE_INGRESS__BIND_PORT: "8080"

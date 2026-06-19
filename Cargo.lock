@@ -63,6 +63,7 @@ dependencies = [
  "chrono-tz",
  "croner",
  "dotenvy",
+ "futures-util",
  "lash-core",
  "lash-lashlang-runtime",
  "lash-plugin-process-controls",

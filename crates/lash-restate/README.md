@@ -46,6 +46,11 @@ Replaying a handler with the same turn id returns Restate-recorded effect
 outcomes, validates the current Lash envelope hash, and retries the final commit
 without exposing partial session state.
 
+For host-tier HTTP integration, use `RestateIngressClient` to submit `/send`
+requests and capture the returned invocation id, and `RestateAdminClient` to
+cancel or inspect invocations through the Admin API. The Restate CLI remains a
+useful operator tool, but Lash tests and examples use these HTTP APIs directly.
+
 Background tasks are scheduled through the first-party
 `LashProcessWorkflow`. Bind it on your Restate endpoint with `.serve()`:
 

@@ -83,9 +83,6 @@ use serde::{Serialize, de::DeserializeOwned};
 
 pub use restate_sdk;
 
-type RestateHandlerFuture<'a, T> =
-    Pin<Box<dyn Future<Output = HandlerResult<Json<T>>> + Send + 'a>>;
-
 fn restate_await_event_key(
     scope: &ExecutionScope,
     wait: AwaitEventWaitIdentity,
@@ -206,6 +203,374 @@ impl RestateEffectError {
     fn into_plugin_error(self) -> PluginError {
         PluginError::Session(self.to_string())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+pub struct RestateInvocationId(String);
+
+impl RestateInvocationId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for RestateInvocationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<String> for RestateInvocationId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for RestateInvocationId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RestateHttpError {
+    #[error("{operation} request failed for {url}: {source}")]
+    Request {
+        operation: &'static str,
+        url: String,
+        source: reqwest::Error,
+    },
+    #[error("{operation} returned status {status} for {url}: {body}")]
+    Status {
+        operation: &'static str,
+        url: String,
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error("{operation} response decode failed for {url}: {source}")]
+    Decode {
+        operation: &'static str,
+        url: String,
+        source: reqwest::Error,
+    },
+    #[error("Restate /send returned unexpected status `{status}` for {url}")]
+    UnexpectedSendStatus { url: String, status: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct RestateIngressClient {
+    http: reqwest::Client,
+    ingress_url: String,
+}
+
+impl RestateIngressClient {
+    pub fn new(ingress_url: impl Into<String>) -> Self {
+        Self::with_client(reqwest::Client::new(), ingress_url)
+    }
+
+    pub fn with_client(http: reqwest::Client, ingress_url: impl Into<String>) -> Self {
+        Self {
+            http,
+            ingress_url: ingress_url.into(),
+        }
+    }
+
+    pub fn ingress_url(&self) -> &str {
+        &self.ingress_url
+    }
+
+    pub async fn send_json_path<T: Serialize + ?Sized>(
+        &self,
+        path: impl AsRef<str>,
+        body: &T,
+    ) -> Result<RestateInvocationId, RestateHttpError> {
+        let url = format_restate_url(&self.ingress_url, path.as_ref());
+        let response = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|source| RestateHttpError::Request {
+                operation: "Restate /send",
+                url: url.clone(),
+                source,
+            })?;
+        if !response.status().is_success() {
+            return Err(status_error("Restate /send", url, response).await);
+        }
+        let accepted: RestateSendResponse =
+            response
+                .json()
+                .await
+                .map_err(|source| RestateHttpError::Decode {
+                    operation: "Restate /send",
+                    url: url.clone(),
+                    source,
+                })?;
+        if !matches_restate_accepted_status(&accepted.status) {
+            return Err(RestateHttpError::UnexpectedSendStatus {
+                url,
+                status: accepted.status,
+            });
+        }
+        Ok(RestateInvocationId::new(accepted.invocation_id))
+    }
+
+    pub async fn send_workflow_json<T: Serialize + ?Sized>(
+        &self,
+        workflow: &str,
+        workflow_key: &str,
+        handler: &str,
+        body: &T,
+    ) -> Result<RestateInvocationId, RestateHttpError> {
+        self.send_json_path(format!("{workflow}/{workflow_key}/{handler}/send"), body)
+            .await
+    }
+
+    pub async fn send_service_json<T: Serialize + ?Sized>(
+        &self,
+        service: &str,
+        handler: &str,
+        body: &T,
+    ) -> Result<RestateInvocationId, RestateHttpError> {
+        self.send_json_path(format!("{service}/{handler}/send"), body)
+            .await
+    }
+
+    pub async fn send_object_json<T: Serialize + ?Sized>(
+        &self,
+        object: &str,
+        key: &str,
+        handler: &str,
+        body: &T,
+    ) -> Result<RestateInvocationId, RestateHttpError> {
+        self.send_json_path(format!("{object}/{key}/{handler}/send"), body)
+            .await
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RestateSendResponse {
+    #[serde(rename = "invocationId")]
+    invocation_id: String,
+    status: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RestateAdminClient {
+    http: reqwest::Client,
+    admin_url: String,
+}
+
+impl RestateAdminClient {
+    pub fn new(admin_url: impl Into<String>) -> Self {
+        Self::with_client(reqwest::Client::new(), admin_url)
+    }
+
+    pub fn with_client(http: reqwest::Client, admin_url: impl Into<String>) -> Self {
+        Self {
+            http,
+            admin_url: admin_url.into(),
+        }
+    }
+
+    pub fn admin_url(&self) -> &str {
+        &self.admin_url
+    }
+
+    pub async fn cancel_invocation(
+        &self,
+        invocation_id: &RestateInvocationId,
+    ) -> Result<(), RestateHttpError> {
+        self.patch_invocation(invocation_id, "cancel", "Restate invocation cancel")
+            .await
+    }
+
+    /// Forcefully kill an invocation. This is intended for test/dev cleanup
+    /// after graceful cancellation has failed.
+    pub async fn kill_invocation_for_test_cleanup(
+        &self,
+        invocation_id: &RestateInvocationId,
+    ) -> Result<(), RestateHttpError> {
+        self.patch_invocation(invocation_id, "kill", "Restate invocation kill")
+            .await
+    }
+
+    pub async fn invocation_status(
+        &self,
+        invocation_id: &RestateInvocationId,
+    ) -> Result<Option<RestateInvocationStatus>, RestateHttpError> {
+        let id = sql_string_literal(invocation_id.as_str());
+        let mut rows = self
+            .query_json::<RestateInvocationStatus>(&format!(
+                "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure FROM sys_invocation WHERE id = {id}"
+            ))
+            .await?;
+        Ok(rows.pop())
+    }
+
+    pub async fn unfinished_invocations_for_service_prefixes(
+        &self,
+        prefixes: &[&str],
+    ) -> Result<Vec<RestateInvocationStatus>, RestateHttpError> {
+        if prefixes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let service_filter = prefixes
+            .iter()
+            .map(|prefix| {
+                format!(
+                    "target_service_name LIKE {}",
+                    sql_string_literal(&format!("{prefix}%"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        self.query_json(&format!(
+            "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure FROM sys_invocation WHERE status IN ('pending', 'ready', 'running', 'backing-off', 'suspended') AND ({service_filter}) ORDER BY modified_at DESC"
+        ))
+        .await
+    }
+
+    pub async fn query_json<T: DeserializeOwned>(
+        &self,
+        query: &str,
+    ) -> Result<Vec<T>, RestateHttpError> {
+        #[derive(Serialize)]
+        struct QueryRequest<'a> {
+            query: &'a str,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct QueryResponse<T> {
+            rows: Vec<T>,
+        }
+
+        let url = format_restate_url(&self.admin_url, "query");
+        let response = self
+            .http
+            .post(&url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&QueryRequest { query })
+            .send()
+            .await
+            .map_err(|source| RestateHttpError::Request {
+                operation: "Restate SQL query",
+                url: url.clone(),
+                source,
+            })?;
+        if !response.status().is_success() {
+            return Err(status_error("Restate SQL query", url, response).await);
+        }
+        response
+            .json::<QueryResponse<T>>()
+            .await
+            .map(|response| response.rows)
+            .map_err(|source| RestateHttpError::Decode {
+                operation: "Restate SQL query",
+                url,
+                source,
+            })
+    }
+
+    async fn patch_invocation(
+        &self,
+        invocation_id: &RestateInvocationId,
+        action: &str,
+        operation: &'static str,
+    ) -> Result<(), RestateHttpError> {
+        let url = format_restate_url(
+            &self.admin_url,
+            &format!("invocations/{invocation_id}/{action}"),
+        );
+        let response =
+            self.http
+                .patch(&url)
+                .send()
+                .await
+                .map_err(|source| RestateHttpError::Request {
+                    operation,
+                    url: url.clone(),
+                    source,
+                })?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(status_error(operation, url, response).await)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RestateInvocationStatus {
+    pub id: String,
+    pub target: String,
+    pub target_service_name: String,
+    #[serde(default)]
+    pub target_service_key: Option<String>,
+    pub target_handler_name: String,
+    pub status: String,
+    #[serde(default)]
+    pub completion_result: Option<String>,
+    #[serde(default)]
+    pub completion_failure: Option<String>,
+}
+
+impl RestateInvocationStatus {
+    pub fn invocation_id(&self) -> RestateInvocationId {
+        RestateInvocationId::new(self.id.clone())
+    }
+
+    pub fn is_still_active(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "pending" | "ready" | "running" | "backing-off" | "suspended"
+        )
+    }
+
+    pub fn completed_successfully(&self) -> bool {
+        self.status == "completed" && self.completion_result.as_deref() == Some("success")
+    }
+}
+
+fn format_restate_url(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+async fn status_error(
+    operation: &'static str,
+    url: String,
+    response: reqwest::Response,
+) -> RestateHttpError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    RestateHttpError::Status {
+        operation,
+        url,
+        status,
+        body,
+    }
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn matches_restate_accepted_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("accepted") || status.eq_ignore_ascii_case("previouslyaccepted")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -469,8 +834,7 @@ impl RuntimeEffectController for RestateEffectHostController {
 /// coalesces by workflow key, so duplicate submits are idempotent and no Lash
 /// registry lease is needed at the Restate tier.
 pub struct RestateProcessIngressRunner {
-    http: reqwest::Client,
-    ingress_url: String,
+    ingress: RestateIngressClient,
     registry: Arc<dyn ProcessRegistry>,
 }
 
@@ -479,8 +843,7 @@ impl RestateProcessIngressRunner {
     /// process registry.
     pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
         Self {
-            http: reqwest::Client::new(),
-            ingress_url: ingress_url.into(),
+            ingress: RestateIngressClient::new(ingress_url),
             registry,
         }
     }
@@ -507,19 +870,17 @@ impl RestateProcessIngressRunner {
             wake_target: record.wake_target,
         };
         let execution_context = ProcessExecutionContext::default();
-        let url = format!(
-            "{}/LashProcessWorkflow/{}/run/send",
-            self.ingress_url.trim_end_matches('/'),
-            process_id
-        );
-        let response = self
-            .http
-            .post(url)
-            .json(&RestateProcessWorkflowInput {
-                registration,
-                execution_context,
-            })
-            .send()
+        let invocation_id = self
+            .ingress
+            .send_workflow_json(
+                "LashProcessWorkflow",
+                &process_id,
+                "run",
+                &RestateProcessWorkflowInput {
+                    registration,
+                    execution_context,
+                },
+            )
             .await
             .map_err(|err| {
                 RestateEffectError::BackgroundScheduler(format!(
@@ -527,14 +888,6 @@ impl RestateProcessIngressRunner {
                 ))
                 .into_plugin_error()
             })?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(RestateEffectError::BackgroundScheduler(format!(
-                "ingress submit for process `{process_id}` returned status {status}: {body}"
-            ))
-            .into_plugin_error());
-        }
         // Record the durable backend reference so the process is observably
         // owned by Restate, mirroring `schedule_restate_process`.
         self.registry
@@ -543,7 +896,7 @@ impl RestateProcessIngressRunner {
                 ProcessExternalRef {
                     backend: "restate".to_string(),
                     id: format!("LashProcessWorkflow/{process_id}"),
-                    metadata: None,
+                    metadata: Some(serde_json::json!({ "invocation_id": invocation_id })),
                 },
             )
             .await
@@ -941,15 +1294,17 @@ macro_rules! impl_restate_controller_context {
                     T: Serialize + DeserializeOwned + Send + 'static,
                     Fut: Future<Output = T> + Send + 'run,
                 {
-                    let future: RestateHandlerFuture<'run, T> =
-                        Box::pin(async move { Ok(Json(future.await)) });
-                    let run = restate_sdk::context::ContextSideEffects::run(self, move || future);
-                    let run = restate_sdk::context::RunFuture::name(run, effect_name);
-                    let run = match retry_policy {
-                        Some(policy) => restate_sdk::context::RunFuture::retry_policy(run, policy),
-                        None => run,
-                    };
-                    Box::pin(run)
+                    Box::pin(async move {
+                        let run = restate_sdk::context::ContextSideEffects::run(self, move || async move {
+                            Ok::<Json<T>, HandlerError>(Json(future.await))
+                        });
+                        let run = restate_sdk::context::RunFuture::name(run, effect_name);
+                        let run = match retry_policy {
+                            Some(policy) => restate_sdk::context::RunFuture::retry_policy(run, policy),
+                            None => run,
+                        };
+                        run.await
+                    })
                 }
 
                 fn start_process_workflow<'run>(
