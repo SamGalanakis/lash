@@ -42,7 +42,8 @@
           </div>
           <pre data-lang="rust" data-snippet="plugins_tools#serial-tool"><code>use lash::tools::{ToolDefinition, ToolScheduling};
 
-ToolDefinition::raw_named(
+ToolDefinition::raw(
+    "tool:write_file",
     "write_file",
     "Replace a file's contents.",
     input_schema,

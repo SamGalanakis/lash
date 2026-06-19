@@ -102,6 +102,7 @@ impl StaticToolExecute for WeatherTools {
 
 pub fn weather_provider() -&gt; Arc&lt;dyn ToolProvider&gt; {
     let definition = ToolDefinition::typed::&lt;WeatherArgs, WeatherReport&gt;(
+        "tool:weather_lookup",
         "weather_lookup",
         "Look up the current weather for a city.",
     );
