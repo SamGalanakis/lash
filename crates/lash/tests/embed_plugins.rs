@@ -117,7 +117,10 @@ impl ToolProvider for TestTools {
         call: lash::tools::ToolPrepareCall<'_>,
     ) -> Result<lash::tools::PreparedToolCall, ToolResult> {
         if call.pending.tool_name != "typed_probe" {
-            return Ok(lash::tools::PreparedToolCall::identity(call.pending));
+            return Ok(lash::tools::PreparedToolCall::identity(
+                call.tool_id,
+                call.pending,
+            ));
         }
         let Some(input) = call.context.plugin_input::<TestTurnInput>(TestPlugin::ID) else {
             return Err(ToolResult::err_fmt("missing typed input"));
@@ -126,6 +129,7 @@ impl ToolProvider for TestTools {
             .map_err(|err| ToolResult::err_fmt(format!("failed to prepare typed input: {err}")))?;
         Ok(lash::tools::PreparedToolCall::from_parts(
             call.pending.call_id,
+            call.tool_id,
             call.pending.tool_name,
             call.pending.args,
             call.pending.replay,

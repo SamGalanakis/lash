@@ -208,6 +208,18 @@ fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
         )
 }
 
+fn showcase_plan_exit_for_direct_execute(session: &lash_core::plugin::PluginSession) {
+    let registry = session.tool_registry();
+    let mut state = registry.export_state();
+    state
+        .set_availability(
+            &lash_core::ToolId::from("tool:plan_exit"),
+            Some(lash_core::ToolAvailability::Showcased),
+        )
+        .expect("plan_exit exists");
+    registry.apply_state(state).expect("apply plan_exit state");
+}
+
 fn plan_mode_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -370,7 +382,8 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .tool_state("root")
         .await
         .expect("initial tool state");
-    assert!(initial.get("plan_exit").is_some_and(|tool| {
+    let plan_exit_tool_id = lash_core::ToolId::from("tool:plan_exit");
+    assert!(initial.get(&plan_exit_tool_id).is_some_and(|tool| {
         tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
 
@@ -392,7 +405,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .tool_state("root")
         .await
         .expect("enabled tool state");
-    assert!(enabled.get("plan_exit").is_some_and(|tool| {
+    assert!(enabled.get(&plan_exit_tool_id).is_some_and(|tool| {
         tool.manifest().effective_availability() == lash_core::ToolAvailability::Showcased
     }));
 
@@ -414,7 +427,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .tool_state("root")
         .await
         .expect("disabled tool state");
-    assert!(disabled.get("plan_exit").is_some_and(|tool| {
+    assert!(disabled.get(&plan_exit_tool_id).is_some_and(|tool| {
         tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
 }
@@ -908,6 +921,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .await
         .expect("before_turn");
 
+    showcase_plan_exit_for_direct_execute(&session);
     let plan_exit_args = json!({});
     let plan_exit_ctx = lash_core::testing::mock_tool_context_with_host(manager_host.clone());
     let result = session
@@ -919,7 +933,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             progress: None,
         })
         .await;
-    assert!(result.is_success());
+    assert!(result.is_success(), "{:?}", result.value_for_projection());
     let result_value = result.value_for_projection();
     assert_eq!(
         result_value
@@ -942,7 +956,8 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     let dynamic = SessionStateService::tool_state(manager.as_ref(), "root")
         .await
         .expect("tool state");
-    assert!(dynamic.get("plan_exit").is_some_and(|tool| {
+    let plan_exit_tool_id = lash_core::ToolId::from("tool:plan_exit");
+    assert!(dynamic.get(&plan_exit_tool_id).is_some_and(|tool| {
         tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
 }
@@ -1034,6 +1049,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
         .await
         .expect("before_turn");
 
+    showcase_plan_exit_for_direct_execute(&session);
     let plan_exit_args = json!({});
     let plan_exit_ctx = lash_core::testing::mock_tool_context_with_host(manager.clone());
     let result = session
@@ -1045,7 +1061,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             progress: None,
         })
         .await;
-    assert!(result.is_success());
+    assert!(result.is_success(), "{:?}", result.value_for_projection());
     let result_value = result.value_for_projection();
     assert!(
         result_value
@@ -1141,6 +1157,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
         .await
         .expect("before_turn");
 
+    showcase_plan_exit_for_direct_execute(&session);
     let plan_exit_args = json!({});
     let plan_exit_ctx = lash_core::testing::mock_tool_context_with_host(manager.clone());
     let result = session
@@ -1152,7 +1169,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             progress: None,
         })
         .await;
-    assert!(result.is_success());
+    assert!(result.is_success(), "{:?}", result.value_for_projection());
     let result_value = result.value_for_projection();
     assert_eq!(
         result_value

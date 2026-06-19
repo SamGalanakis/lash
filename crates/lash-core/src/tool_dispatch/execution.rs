@@ -1,17 +1,18 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::plugin::ToolResultHookContext;
 use crate::{PreparedToolCall, ProgressSender, ToolContext, ToolFailureClass, ToolResult};
 
+#[cfg(test)]
+use super::context::ToolDispatchOutcome;
 use super::context::{
-    PendingToolDispatchOutcome, ToolCallLaunch, ToolDispatchContext, ToolDispatchOutcome,
-    launch_done, outcome, runtime_failure,
+    PendingToolDispatchOutcome, ToolCallLaunch, ToolDispatchContext, launch_done, outcome,
+    runtime_failure,
 };
 use super::directives::apply_after_tool_directives;
-use super::preparation::resolve_callable_manifest;
 use super::retry::execute_tool_call;
 
+#[cfg(test)]
 pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: PreparedToolCall,
@@ -34,11 +35,13 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolCallLaunch {
-    let tool_name = prepared.tool_name.clone();
+    let prepared_tool_name = prepared.tool_name.clone();
     let args = prepared.args.clone();
-    let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
+    let Some(manifest) =
+        super::preparation::resolve_callable_manifest_by_id(context, &prepared.tool_id)
+    else {
         return launch_done(outcome(
-            tool_name,
+            prepared_tool_name,
             args,
             runtime_failure(
                 ToolFailureClass::Unavailable,
@@ -48,8 +51,9 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
             0,
         ));
     };
+    let tool_name = manifest.name.clone();
 
-    let tool_start = Instant::now();
+    let tool_start = context.clock.now();
     let tool_context = tool_context.with_prepared_payload(prepared.prepared_payload.clone());
     let completion_context = tool_context.clone();
     let result = Box::pin(execute_tool_call(
@@ -60,7 +64,7 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
         tool_context,
     ))
     .await;
-    let duration_ms = tool_start.elapsed().as_millis() as u64;
+    let duration_ms = context.clock.now().duration_since(tool_start).as_millis() as u64;
     let result = match result {
         ToolResult::Done(_) => result,
         ToolResult::Pending(pending) => {
@@ -142,10 +146,12 @@ pub(crate) async fn finalize_tool_result_with_execution_context(
     }
 }
 
+#[cfg(test)]
 trait ToolCallLaunchExt {
     fn into_done_or_runtime_failure(self) -> ToolDispatchOutcome;
 }
 
+#[cfg(test)]
 impl ToolCallLaunchExt for ToolCallLaunch {
     fn into_done_or_runtime_failure(self) -> ToolDispatchOutcome {
         match self {

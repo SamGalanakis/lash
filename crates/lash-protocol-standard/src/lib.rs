@@ -185,6 +185,7 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
 
     let mut immediate_outcomes = Vec::new();
     let mut parallel_specs = Vec::new();
+    let dispatch = call.context.dispatch();
 
     for spec in specs.into_iter().take(BATCH_MAX_TOOL_CALLS) {
         if spec.tool == "batch" {
@@ -197,6 +198,17 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
             }));
             continue;
         }
+        let Some(manifest) = dispatch.callable_tool_manifest(&spec.tool) else {
+            let error = format!("Tool '{}' is unavailable in this session", spec.tool);
+            immediate_outcomes.push(serde_json::json!({
+                "index": spec.index,
+                "tool": spec.tool,
+                "success": false,
+                "duration_ms": 0,
+                "error": error,
+            }));
+            continue;
+        };
         parallel_specs.push((
             spec.index,
             ToolInvocation::new(
@@ -205,15 +217,13 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
                     call.context.tool_call_id().unwrap_or("batch"),
                     spec.index
                 ),
-                spec.tool,
+                manifest.id,
                 spec.parameters,
             ),
         ));
     }
 
-    let mut parallel_outcomes = call
-        .context
-        .dispatch()
+    let mut parallel_outcomes = dispatch
         .batch(
             parallel_specs
                 .iter()
@@ -224,9 +234,10 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
     for ((index, invocation), outcome) in
         parallel_specs.into_iter().zip(parallel_outcomes.drain(..))
     {
+        let tool_label = invocation.label();
         let tool_record = outcome.record.unwrap_or(lash_core::ToolCallRecord {
             call_id: Some(invocation.id),
-            tool: invocation.name,
+            tool: tool_label,
             args: invocation.args,
             output: outcome.output,
             duration_ms: 0,
@@ -724,6 +735,9 @@ mod tests {
         AttachmentId, AttachmentMeta, ImageMediaType, MediaType, ModelToolReturn, ToolCallOutput,
         ToolValue,
     };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::Barrier;
+    use tokio::time::{Duration, timeout};
 
     fn image_ref(id: &str) -> lash_core::AttachmentRef {
         AttachmentMeta::new(
@@ -735,6 +749,283 @@ mod tests {
             Some("tiny".to_string()),
         )
         .as_ref()
+    }
+
+    #[derive(Clone, Debug)]
+    struct BatchRuntimeProvider {
+        calls: Arc<AtomicUsize>,
+        saw_batch_result: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl lash_core::Provider for BatchRuntimeProvider {
+        fn kind(&self) -> &'static str {
+            "stub"
+        }
+
+        fn options(&self) -> lash_core::ProviderOptions {
+            lash_core::ProviderOptions::default()
+        }
+
+        fn set_options(&mut self, _options: lash_core::ProviderOptions) {}
+
+        fn serialize_config(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        async fn complete(
+            &mut self,
+            request: lash_core::LlmRequest,
+        ) -> Result<lash_core::LlmResponse, lash_core::LlmTransportError> {
+            let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call_index == 0 {
+                return Ok(lash_core::LlmResponse {
+                    parts: vec![lash_core::LlmOutputPart::ToolCall {
+                        call_id: "batch-call".to_string(),
+                        tool_name: "batch".to_string(),
+                        input_json: serde_json::json!({
+                            "tool_calls": [
+                                {"tool": "alpha", "parameters": {}},
+                                {"tool": "beta", "parameters": {"value": "fail"}}
+                            ]
+                        })
+                        .to_string(),
+                        replay: None,
+                    }],
+                    ..lash_core::LlmResponse::default()
+                });
+            }
+
+            let projected_messages = format!("{:?}", request.messages);
+            if projected_messages.contains("alpha") && projected_messages.contains("beta failed") {
+                self.saw_batch_result.store(true, Ordering::SeqCst);
+            }
+            Ok(lash_core::LlmResponse {
+                full_text: "done".to_string(),
+                parts: vec![lash_core::LlmOutputPart::Text {
+                    text: "done".to_string(),
+                    response_meta: None,
+                }],
+                ..lash_core::LlmResponse::default()
+            })
+        }
+
+        fn clone_boxed(&self) -> Box<dyn lash_core::Provider> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct BatchRuntimeTools {
+        barrier: Arc<Barrier>,
+        started: Arc<AtomicUsize>,
+    }
+
+    fn runtime_test_tool(name: &str) -> lash_core::ToolDefinition {
+        lash_core::ToolDefinition::raw(
+            format!("tool:{name}"),
+            name,
+            "",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                },
+                "additionalProperties": true
+            }),
+            serde_json::json!({ "type": "string" }),
+        )
+        .with_scheduling(lash_core::ToolScheduling::Parallel)
+    }
+
+    #[async_trait::async_trait]
+    impl ToolProvider for BatchRuntimeTools {
+        fn tool_manifests(&self) -> Vec<ToolManifest> {
+            vec![
+                runtime_test_tool("alpha").manifest(),
+                runtime_test_tool("beta").manifest(),
+            ]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+            match name {
+                "alpha" | "beta" => Some(Arc::new(runtime_test_tool(name).contract())),
+                _ => None,
+            }
+        }
+
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            if timeout(Duration::from_millis(100), self.barrier.wait())
+                .await
+                .is_err()
+            {
+                return ToolResult::err_fmt("batch child tools did not run concurrently");
+            }
+            if call.name == "beta"
+                && call.args.get("value").and_then(|value| value.as_str()) == Some("fail")
+            {
+                return ToolResult::err_fmt("beta failed");
+            }
+            ToolResult::ok(serde_json::json!(call.name))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingEffectController {
+        kinds: Arc<std::sync::Mutex<Vec<lash_core::RuntimeEffectKind>>>,
+    }
+
+    impl CountingEffectController {
+        fn count(&self, kind: lash_core::RuntimeEffectKind) -> usize {
+            self.kinds
+                .lock()
+                .expect("effect kinds")
+                .iter()
+                .filter(|candidate| **candidate == kind)
+                .count()
+        }
+    }
+
+    #[derive(Default)]
+    struct DurableMemoryAttachmentStore {
+        inner: lash_core::InMemoryAttachmentStore,
+    }
+
+    #[async_trait::async_trait]
+    impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
+        fn persistence(&self) -> lash_core::AttachmentStorePersistence {
+            lash_core::AttachmentStorePersistence::Durable
+        }
+
+        async fn put(
+            &self,
+            bytes: Vec<u8>,
+            meta: lash_core::AttachmentCreateMeta,
+        ) -> Result<lash_core::AttachmentRef, lash_core::AttachmentStoreError> {
+            self.inner.put(bytes, meta).await
+        }
+
+        async fn get(
+            &self,
+            id: &lash_core::AttachmentId,
+        ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
+            self.inner.get(id).await
+        }
+    }
+
+    #[derive(Default)]
+    struct DurableMemoryProcessEnvStore {
+        inner: lash_core::InMemoryProcessExecutionEnvStore,
+    }
+
+    #[async_trait::async_trait]
+    impl lash_core::ProcessExecutionEnvStore for DurableMemoryProcessEnvStore {
+        fn durability_tier(&self) -> lash_core::DurabilityTier {
+            lash_core::DurabilityTier::Durable
+        }
+
+        async fn put_process_execution_env(
+            &self,
+            env_ref: &lash_core::ProcessExecutionEnvRef,
+            bytes: &[u8],
+        ) -> Result<(), lash_core::PluginError> {
+            self.inner.put_process_execution_env(env_ref, bytes).await
+        }
+
+        async fn get_process_execution_env(
+            &self,
+            env_ref: &lash_core::ProcessExecutionEnvRef,
+        ) -> Result<Option<Vec<u8>>, lash_core::PluginError> {
+            self.inner.get_process_execution_env(env_ref).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl lash_core::RuntimeEffectController for CountingEffectController {
+        fn durability_tier(&self) -> lash_core::DurabilityTier {
+            lash_core::DurabilityTier::Durable
+        }
+
+        async fn execute_effect(
+            &self,
+            envelope: lash_core::RuntimeEffectEnvelope,
+            local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<lash_core::RuntimeEffectOutcome, lash_core::RuntimeEffectControllerError>
+        {
+            self.kinds
+                .lock()
+                .expect("effect kinds")
+                .push(envelope.command.kind());
+            local_executor.execute(envelope).await
+        }
+    }
+
+    #[tokio::test]
+    async fn standard_batch_tool_uses_core_tool_batch_under_durable_boundary() {
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let saw_batch_result = Arc::new(AtomicBool::new(false));
+        let provider = BatchRuntimeProvider {
+            calls: Arc::clone(&provider_calls),
+            saw_batch_result: Arc::clone(&saw_batch_result),
+        };
+        let provider_handle = lash_core::ProviderHandle::new(lash_core::ProviderComponents::new(
+            Box::new(provider),
+            Arc::new(lash_core::StaticModelPolicy::new()),
+        ));
+        let mut host = lash_core::RuntimeHostConfig::in_memory();
+        host.providers.provider_resolver =
+            Arc::new(lash_core::SingleProviderResolver::new(provider_handle));
+        host.durability.attachment_store = Arc::new(DurableMemoryAttachmentStore::default());
+        host.durability.process_env_store = Arc::new(DurableMemoryProcessEnvStore::default());
+        let started = Arc::new(AtomicUsize::new(0));
+        let factories: Vec<Arc<dyn lash_core::PluginFactory>> = vec![
+            Arc::new(StandardProtocolPluginFactory::new()),
+            Arc::new(lash_core::plugin::StaticPluginFactory::new(
+                "standard-batch-test-tools",
+                lash_core::PluginSpec::new().with_tool_provider(Arc::new(BatchRuntimeTools {
+                    barrier: Arc::new(Barrier::new(2)),
+                    started: Arc::clone(&started),
+                })),
+            )),
+        ];
+        let policy = lash_core::SessionPolicy {
+            provider_id: "stub".to_string(),
+            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+                .expect("valid model"),
+            ..lash_core::SessionPolicy::default()
+        };
+        let controller = CountingEffectController::default();
+        let scoped_controller = lash_core::ScopedEffectController::shared(
+            Arc::new(controller.clone()),
+            lash_core::ExecutionScope::turn("standard-batch-session", "turn-1"),
+        )
+        .expect("scoped controller");
+        let mut runtime = lash_core::LashRuntime::builder()
+            .with_session_id("standard-batch-session")
+            .with_policy(policy)
+            .with_runtime_host(host)
+            .with_plugin_factories(factories)
+            .build()
+            .await
+            .expect("runtime");
+
+        let turn = runtime
+            .stream_turn(
+                lash_core::TurnInput::text("run the batch"),
+                lash_core::TurnOptions::new(
+                    tokio_util::sync::CancellationToken::new(),
+                    scoped_controller,
+                ),
+            )
+            .await
+            .expect("turn");
+
+        assert!(matches!(turn.outcome, lash_core::TurnOutcome::Finished(_)));
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        assert!(saw_batch_result.load(Ordering::SeqCst));
+        assert_eq!(controller.count(lash_core::RuntimeEffectKind::ToolBatch), 1);
     }
 
     #[test]

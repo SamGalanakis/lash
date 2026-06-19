@@ -877,6 +877,7 @@ pub enum RemoteRuntimeEffectKind {
     LlmCall,
     Direct,
     ToolCall,
+    ToolBatch,
     Process,
     ExecCode,
     Checkpoint,

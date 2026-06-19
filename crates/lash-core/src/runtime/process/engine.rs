@@ -85,7 +85,7 @@ pub struct ProcessEngineRunContext<'run> {
     plugins: Arc<crate::PluginSession>,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
     session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
-    queued_work_poke: Option<crate::QueuedWorkPoke>,
+    queued_work_driver: Option<crate::QueuedWorkDriver>,
     process_registry_available: bool,
     cancellation: CancellationToken,
     turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
@@ -102,7 +102,7 @@ impl<'run> ProcessEngineRunContext<'run> {
         plugins: Arc<crate::PluginSession>,
         store: Option<Arc<dyn crate::RuntimePersistence>>,
         session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
-        queued_work_poke: Option<crate::QueuedWorkPoke>,
+        queued_work_driver: Option<crate::QueuedWorkDriver>,
         process_registry_available: bool,
         cancellation: CancellationToken,
         turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
@@ -116,7 +116,7 @@ impl<'run> ProcessEngineRunContext<'run> {
             plugins,
             store,
             session_store_factory,
-            queued_work_poke,
+            queued_work_driver,
             process_registry_available,
             cancellation,
             turn_phase_probe,
@@ -152,8 +152,8 @@ impl<'run> ProcessEngineRunContext<'run> {
         self.session_store_factory.clone()
     }
 
-    pub fn queued_work_poke(&self) -> Option<crate::QueuedWorkPoke> {
-        self.queued_work_poke.clone()
+    pub fn queued_work_driver(&self) -> Option<crate::QueuedWorkDriver> {
+        self.queued_work_driver.clone()
     }
 
     pub fn process_registry_available(&self) -> bool {

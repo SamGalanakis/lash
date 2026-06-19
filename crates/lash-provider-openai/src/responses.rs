@@ -4,11 +4,6 @@ use crate::support::*;
 const PROVIDER: &str = "OpenAI-compatible";
 
 impl OpenAiCompatibleProvider {
-    #[cfg(test)]
-    pub(crate) fn usage_from_response_value(value: &Value) -> LlmUsage {
-        shared::usage_from_response_value(value)
-    }
-
     pub(crate) fn build_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
         shared::build_tools(PROVIDER, req)
     }

@@ -601,6 +601,7 @@ mod tests {
                 ProcessInput::ToolCall {
                     call: PreparedToolCall::from_parts(
                         "call-1",
+                        "tool:shell.run",
                         "shell.run",
                         json!({}),
                         None,

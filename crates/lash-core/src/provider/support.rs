@@ -7,7 +7,6 @@ pub(super) use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub(super) use crate::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 pub(super) use crate::llm::types::{LlmContentBlock, LlmRequest, LlmResponse};
-pub(super) use tokio::time::Instant;
 
 pub(super) use super::handle::*;
 pub(super) use super::model_policy::*;

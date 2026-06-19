@@ -33,6 +33,7 @@ pub const EXPECTED_FINAL_TEXT: &str = "kitchen-sink-complete";
 pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";
 pub const EXPECTED_ASYNC_TEXT: &str = "async-completion-complete";
 pub const EXPECTED_DURABLE_INPUT_TEXT: &str = "durable-input-complete";
+pub const EXPECTED_TOOL_BATCH_TEXT: &str = "tool-batch-complete";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
 
@@ -76,6 +77,7 @@ pub enum TurnScenario {
     SignalProcess,
     AsyncCompletion,
     DurableInputRequest,
+    ToolBatch,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -747,6 +749,32 @@ fn e2e_tool_provider(
                 LashlangToolBinding::new(["tools"], "make_attachment"),
             ),
             e2e_tool_definition(
+                "tool:batch_side_effect",
+                "batch_side_effect",
+                "Record a deterministic side effect for aggregate tool-batch replay coverage.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": { "type": "string" },
+                        "key": { "type": "string" },
+                        "delay_ms": { "type": "integer" }
+                    },
+                    "required": ["workflow_id", "key"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" },
+                        "value": { "type": "string" },
+                        "worker_id": { "type": "string" }
+                    },
+                    "required": ["key", "value", "worker_id"],
+                    "additionalProperties": false
+                }),
+                LashlangToolBinding::new(["tools"], "batch_side_effect"),
+            ),
+            e2e_tool_definition(
                 "tool:crash_once",
                 "crash_once",
                 "Crash one worker once for a requested workflow, after previous durable effects replay.",
@@ -830,6 +858,7 @@ impl StaticToolExecute for E2eTools {
         match call.name {
             "app_lookup" => self.app_lookup(call).await,
             "async_lookup" => self.async_lookup(call).await,
+            "batch_side_effect" => self.batch_side_effect(call).await,
             "make_attachment" => self.make_attachment(call).await,
             "crash_once" => self.crash_once(call).await,
             "durable_input_request" => self.durable_input_request(call).await,
@@ -927,6 +956,40 @@ impl E2eTools {
         });
 
         ToolResult::pending(lash_core::PendingCompletion::new())
+    }
+
+    async fn batch_side_effect(&self, call: ToolCall<'_>) -> ToolResult {
+        let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
+        let key = call
+            .args
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default")
+            .to_string();
+        let delay_ms = call
+            .args
+            .get("delay_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        let result = serde_json::json!({
+            "key": key,
+            "value": format!("batch:{key}"),
+            "worker_id": self.worker_id,
+        });
+        let _ = record_tool_event(
+            &self.pool,
+            &workflow_id,
+            &self.worker_id,
+            call.name,
+            call.context.tool_call_id(),
+            call.args.to_owned(),
+            result.clone(),
+        )
+        .await;
+        ToolResult::ok(result)
     }
 
     async fn make_attachment(&self, call: ToolCall<'_>) -> ToolResult {

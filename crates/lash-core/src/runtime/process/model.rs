@@ -9,7 +9,6 @@ use super::events::{
     ProcessAwaitOutput, ProcessEventType, ProcessTerminalSemantics, ProcessTerminalState,
     default_process_event_types,
 };
-use super::time::current_epoch_ms;
 use super::validation::{
     ensure_core_event_types, process_registration_hash, validate_process_registration,
 };
@@ -768,13 +767,20 @@ pub enum WaitKind {
 }
 
 impl ProcessRecord {
-    pub fn from_registration(mut registration: ProcessRegistration) -> Self {
+    pub fn from_registration(registration: ProcessRegistration) -> Self {
+        Self::from_registration_with_clock(registration, &crate::SystemClock)
+    }
+
+    pub fn from_registration_with_clock(
+        mut registration: ProcessRegistration,
+        clock: &dyn crate::Clock,
+    ) -> Self {
         ensure_core_event_types(&mut registration);
         validate_process_registration(&registration)
             .expect("process registration should be valid before record construction");
         let registration_hash = process_registration_hash(&registration)
             .expect("process registration should hash before record construction");
-        Self::from_prepared_registration(registration, registration_hash, current_epoch_ms())
+        Self::from_prepared_registration(registration, registration_hash, clock.timestamp_ms())
     }
 
     pub fn from_prepared_registration(
@@ -804,13 +810,21 @@ impl ProcessRecord {
     }
 
     pub fn clear_wake_target_for_session(&mut self, session_id: &str) -> bool {
+        self.clear_wake_target_for_session_with_clock(session_id, &crate::SystemClock)
+    }
+
+    pub fn clear_wake_target_for_session_with_clock(
+        &mut self,
+        session_id: &str,
+        clock: &dyn crate::Clock,
+    ) -> bool {
         let should_clear = self
             .wake_target
             .as_ref()
             .is_some_and(|scope| scope.session_id == session_id);
         if should_clear {
             self.wake_target = None;
-            self.updated_at_ms = current_epoch_ms();
+            self.updated_at_ms = clock.timestamp_ms();
         }
         should_clear
     }

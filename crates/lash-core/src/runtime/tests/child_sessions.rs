@@ -59,7 +59,11 @@ async fn inherited_child_session_carries_parent_tool_state() {
         .session_lifecycle_service()
         .expect("session lifecycle");
     let mut snapshot = manager.tool_state("root").await.expect("tool state");
-    assert!(snapshot.remove("memory_probe").is_some());
+    assert!(
+        snapshot
+            .remove(&crate::ToolId::from("tool:memory_probe"))
+            .is_some()
+    );
     manager
         .apply_tool_state("root", snapshot)
         .await
@@ -148,7 +152,7 @@ async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
             .tool_state("root")
             .await
             .expect("tool state")
-            .contains("memory_probe")
+            .contains(&crate::ToolId::from("tool:memory_probe"))
     );
 
     let handle = lifecycle

@@ -326,6 +326,7 @@ fn code_execution_context_with_tool_catalog_and_trigger_router(
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::clone(&attachment_store),
         turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
     });
     crate::RuntimeExecutionContext::new(
         "test-session".to_string(),
@@ -960,6 +961,7 @@ mod test_protocol_fakes {
 
         let mut results = Vec::new();
         let mut parallel_specs = Vec::new();
+        let dispatch = context.dispatch();
         for (index, item) in raw_calls.iter().enumerate().take(MAX) {
             let Some(obj) = item.as_object() else {
                 return crate::ToolResult::err_fmt(format_args!(
@@ -990,14 +992,23 @@ mod test_protocol_fakes {
                 .get("parameters")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
+            let Some(manifest) = dispatch.callable_tool_manifest(tool) else {
+                results.push(serde_json::json!({
+                    "index": index,
+                    "tool": tool,
+                    "success": false,
+                    "duration_ms": 0,
+                    "error": format!("Tool '{tool}' is unavailable in this session"),
+                }));
+                continue;
+            };
             parallel_specs.push((
                 index,
-                crate::ToolInvocation::new(format!("test-batch:{index}"), tool, parameters),
+                crate::ToolInvocation::new(format!("test-batch:{index}"), manifest.id, parameters),
             ));
         }
 
-        let outcomes = context
-            .dispatch()
+        let outcomes = dispatch
             .batch(
                 parallel_specs
                     .iter()
@@ -1006,9 +1017,10 @@ mod test_protocol_fakes {
             )
             .await;
         for ((index, invocation), outcome) in parallel_specs.into_iter().zip(outcomes) {
+            let tool_label = invocation.label();
             let tool_record = outcome.record.unwrap_or(crate::ToolCallRecord {
                 call_id: Some(invocation.id),
-                tool: invocation.name,
+                tool: tool_label,
                 args: invocation.args,
                 output: outcome.output,
                 duration_ms: 0,

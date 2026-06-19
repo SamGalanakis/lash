@@ -1,6 +1,7 @@
 mod assembly;
 mod builder;
 pub(crate) mod causal;
+mod clock;
 mod config_ops;
 mod effect;
 mod environment;
@@ -11,9 +12,9 @@ mod io;
 mod lifecycle;
 mod observation;
 mod process;
-mod process_work_runner;
+mod process_work_driver;
 mod process_worker;
-mod queued_work_runner;
+mod queued_work_driver;
 mod session_api;
 mod session_manager;
 mod session_ops;
@@ -79,6 +80,7 @@ use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use causal::process_event_invocation;
 pub(crate) use causal::tool_retry_sleep_invocation;
+pub use clock::{Clock, SystemClock};
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
     AwaitEventKey, AwaitEventWaitIdentity, CausalRef, EffectHost, ExecutionScope,
@@ -87,7 +89,7 @@ pub use effect::{
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
-    ToolCallLaunch,
+    ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
@@ -106,43 +108,38 @@ pub use observation::{
 pub use process::TestLocalProcessRegistry;
 pub use process::{
     DefaultProcessCancelAbility, InMemoryProcessExecutionEnvStore, ObservedProcess,
-    ObservedProcessEvent, ObservedWorkItem, PROCESS_LEASE_SCHEMA_VERSION,
-    PreparedProcessEventAppend, ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest,
-    ProcessCancelRequest, ProcessCancelSource, ProcessCancelSummary, ProcessEngine,
-    ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
-    ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
-    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
-    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef,
-    ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessIdentity,
-    ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
-    ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessService, ProcessSessionDeleteReport,
-    ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
-    ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec,
-    ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
-    ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver, ProcessWorkSnapshot, SessionScope,
-    SessionScopeId, UnavailableProcessService, WaitKind, WaitState, current_epoch_ms,
-    epoch_ms_from_system_time, load_process_execution_env, materialize_process_event_semantics,
-    persist_process_execution_env, prepare_process_event_append, prepare_process_registration,
-    process_event_payload_hash, process_signal_event_type, process_signal_name_from_event_type,
-    process_signal_wait_key, process_wake_delivery, process_wake_input_from_event_payload,
-    process_wake_turn_cause, process_wake_turn_text, require_event_replay,
-    system_time_from_epoch_ms, validate_process_signal_name,
+    ObservedProcessEvent, ObservedWorkItem, PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput,
+    ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
+    ProcessCancelSummary, ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext,
+    ProcessEngineRunGuard, ProcessEngineRuntimeContext, ProcessEngineValidationContext,
+    ProcessEvent, ProcessEventAppendPlan, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
+    ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
+    ProcessId, ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
+    ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator,
+    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessService,
+    ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
+    ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
+    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver,
+    ProcessWorkSnapshot, SessionScope, SessionScopeId, UnavailableProcessService, WaitKind,
+    WaitState, apply_process_status_projection, current_epoch_ms, epoch_ms_from_system_time,
+    load_process_execution_env, materialize_process_event_semantics, persist_process_execution_env,
+    prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
+    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
+    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
+    process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
+    validate_process_signal_name,
 };
-pub use process_work_runner::{
-    InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner,
-};
+pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
-pub use queued_work_runner::{
-    QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest,
-    QueuedWorkRunner,
-};
+pub use queued_work_driver::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest};
 pub use session_manager::DirectCompletionClient;
 pub use state::RuntimeSessionState;
 use state::{
-    append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
-    apply_session_head, normalize_session_graph, open_agent_frame_in_state,
+    append_session_nodes_to_state_with_clock, apply_residency_on_load, apply_session_checkpoint,
+    apply_session_head, normalize_session_graph, open_agent_frame_in_state_with_clock,
 };
 pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{

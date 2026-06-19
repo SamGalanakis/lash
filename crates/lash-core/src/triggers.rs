@@ -553,9 +553,28 @@ pub trait TriggerStore: Send + Sync {
     ) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
 }
 
-#[derive(Default)]
 pub struct InMemoryTriggerStore {
+    clock: Arc<dyn crate::Clock>,
     state: Mutex<InMemoryTriggerEventState>,
+}
+
+impl InMemoryTriggerStore {
+    pub fn new() -> Self {
+        Self::with_clock(Arc::new(crate::SystemClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn crate::Clock>) -> Self {
+        Self {
+            clock,
+            state: Mutex::new(InMemoryTriggerEventState::default()),
+        }
+    }
+}
+
+impl Default for InMemoryTriggerStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Default)]
@@ -582,7 +601,7 @@ impl TriggerStore for InMemoryTriggerStore {
         state.next_subscription_seq = state.next_subscription_seq.saturating_add(1);
         let handle = format!("trigger:{}", state.next_subscription_seq);
         let subscription_id = format!("subscription:{}", state.next_subscription_seq);
-        let now = crate::runtime::current_epoch_ms();
+        let now = self.clock.timestamp_ms();
         let record = TriggerSubscriptionRecord {
             subscription_id: subscription_id.clone(),
             registrant: draft.registrant,
@@ -638,7 +657,7 @@ impl TriggerStore for InMemoryTriggerStore {
             .state
             .lock()
             .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let now = crate::runtime::current_epoch_ms();
+        let now = self.clock.timestamp_ms();
         let Some(record) = state.subscriptions.values_mut().find(|record| {
             record.registrant_session_id() == Some(session_id) && record.handle == handle
         }) else {
@@ -702,7 +721,7 @@ impl TriggerStore for InMemoryTriggerStore {
             payload: request.payload,
             idempotency_key: request.idempotency_key.clone(),
             source: request.source,
-            occurred_at_ms: crate::runtime::current_epoch_ms(),
+            occurred_at_ms: self.clock.timestamp_ms(),
         };
         state
             .occurrence_id_by_idempotency_key
@@ -804,19 +823,19 @@ pub fn deterministic_delivery_process_id(
 pub struct TriggerRouter {
     store: Arc<dyn TriggerStore>,
     process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
-    process_work_poke: Option<crate::ProcessWorkPoke>,
+    process_work_driver: Option<crate::ProcessWorkDriver>,
 }
 
 impl TriggerRouter {
     pub fn new(
         store: Arc<dyn TriggerStore>,
         process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
-        process_work_poke: Option<crate::ProcessWorkPoke>,
+        process_work_driver: Option<crate::ProcessWorkDriver>,
     ) -> Self {
         Self {
             store,
             process_registry,
-            process_work_poke,
+            process_work_driver,
         }
     }
 
@@ -863,9 +882,9 @@ impl TriggerRouter {
             started_process_ids.push(process_id);
         }
         if !started_process_ids.is_empty()
-            && let Some(poke) = self.process_work_poke.as_ref()
+            && let Some(driver) = self.process_work_driver.as_ref()
         {
-            poke.poke();
+            driver.claim_and_run_pending("trigger_delivery").await?;
         }
         if started_process_ids.is_empty()
             && let Some(message) = trigger_delivery_failure_summary(&start_errors)

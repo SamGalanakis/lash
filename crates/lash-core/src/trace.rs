@@ -17,8 +17,15 @@ pub(crate) fn emit_trace(
     base_context: &TraceContext,
     context: TraceContext,
     event: TraceEvent,
+    clock: &dyn crate::Clock,
 ) {
-    emit_trace_at(sink, base_context, context, event, chrono::Utc::now());
+    emit_trace_at(
+        sink,
+        base_context,
+        context,
+        event,
+        clock.timestamp_datetime(),
+    );
 }
 
 pub(crate) fn emit_trace_at(

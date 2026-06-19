@@ -52,7 +52,7 @@ impl RuntimeSessionServices {
                 registry,
                 self.current.store.clone(),
                 self.current.host.session_store_factory.clone(),
-                self.current.host.queued_work_poke.clone(),
+                self.current.host.queued_work_driver.clone(),
             )
             .build();
         let launch = Box::pin(
@@ -103,12 +103,13 @@ impl RuntimeSessionServices {
                             invocation,
                             crate::RuntimeEffectCommand::AwaitEvent { key: pending.key },
                         ),
-                        crate::RuntimeEffectLocalExecutor::await_event(
+                        crate::RuntimeEffectLocalExecutor::await_event_with_clock(
                             await_cancellation.clone(),
                             pending
                                 .pending
                                 .deadline
-                                .map(|duration| std::time::Instant::now() + duration),
+                                .map(|duration| dispatch.clock.now() + duration),
+                            std::sync::Arc::clone(&dispatch.clock),
                         ),
                     ),
                 )

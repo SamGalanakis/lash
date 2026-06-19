@@ -148,7 +148,7 @@ pub(super) async fn apply_autonomous_tool_policy(
 }
 
 fn retain_autonomous_tools(snapshot: &mut ToolState) {
-    snapshot.retain(|name, _| autonomous_tool_allowed(name));
+    snapshot.retain(|_, entry| autonomous_tool_allowed(&entry.manifest().name));
 }
 
 pub(super) fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
@@ -392,10 +392,10 @@ mod tests {
 
         let mut snapshot = tool_registry.export_state();
         retain_autonomous_tools(&mut snapshot);
-        assert!(snapshot.contains("read_file"));
-        assert!(!snapshot.contains("ask"));
-        assert!(!snapshot.contains("plan_exit"));
-        assert!(!snapshot.contains("showcase"));
+        assert!(snapshot.contains(&lash_core::ToolId::from("tool:read_file")));
+        assert!(!snapshot.contains(&lash_core::ToolId::from("tool:ask")));
+        assert!(!snapshot.contains(&lash_core::ToolId::from("tool:plan_exit")));
+        assert!(!snapshot.contains(&lash_core::ToolId::from("tool:showcase")));
     }
 
     #[test]

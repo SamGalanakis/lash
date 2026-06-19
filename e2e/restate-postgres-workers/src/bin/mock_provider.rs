@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
-    EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_WAKE_TEXT,
-    ensure_e2e_schema, env, record_provider_call, required_env,
+    EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
+    EXPECTED_TOOL_BATCH_TEXT, EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call,
+    required_env,
 };
 
 #[derive(Clone)]
@@ -65,6 +66,10 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
         MockScenario::DurableInputRequest => (
             "durable_input_request",
             durable_input_request_script(&workflow_id),
+        ),
+        MockScenario::ToolBatch => (
+            "tool_batch",
+            tool_batch_script(&workflow_id, full_text.contains("fail_once=true")),
         ),
         MockScenario::KitchenSink => (
             "kitchen_sink",
@@ -168,10 +173,12 @@ enum MockScenario {
     SignalSuspend,
     AsyncCompletion,
     DurableInputRequest,
+    ToolBatch,
 }
 
 fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     [
+        ("tool_batch=true", MockScenario::ToolBatch),
         (
             "durable_input_request=true",
             MockScenario::DurableInputRequest,
@@ -378,6 +385,45 @@ submit {{
   workflow_id: "{workflow_id}",
   durable: result,
   final: "{EXPECTED_DURABLE_INPUT_TEXT}"
+}}
+```
+"#
+    )
+}
+
+fn tool_batch_script(workflow_id: &str, fail_once: bool) -> String {
+    let crash = if fail_once {
+        format!(
+            r#"
+crash = await tools.crash_once({{ workflow_id: "{workflow_id}" }})?
+"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"
+Exercise direct aggregate resource batching.
+
+```lashlang
+batch = await {{
+  slow: tools.batch_side_effect({{
+    workflow_id: "{workflow_id}",
+    key: "slow",
+    delay_ms: 75
+  }})?,
+  fast: tools.batch_side_effect({{
+    workflow_id: "{workflow_id}",
+    key: "fast",
+    delay_ms: 5
+  }})?,
+  literal: "kept"
+}}
+{crash}
+submit {{
+  workflow_id: "{workflow_id}",
+  batch: batch,
+  final: "{EXPECTED_TOOL_BATCH_TEXT}"
 }}
 ```
 "#

@@ -535,25 +535,40 @@ submit "registered"
             .open()
             .await
             .expect("reopen session");
-        let queued = session.queued_work().await.expect("queued wake");
-        let wake = queued
-            .iter()
-            .flat_map(|batch| &batch.items)
-            .find_map(|item| match &item.payload {
-                lash_core::runtime::QueuedWorkPayload::ProcessWake { wake } => Some(wake),
-                _ => None,
-            })
-            .expect("process wake queued for trigger-triggered process");
-        assert_eq!(wake.process_id, process_id);
-        assert_eq!(wake.process_caused_by, Some(process_caused_by));
-        assert!(matches!(
-            &wake.event_invocation.subject,
-            lash_core::runtime::RuntimeSubject::ProcessEvent {
-                process_id: wake_process_id,
-                event_type,
-                ..
-            } if wake_process_id == &process_id && event_type == "process.wake"
-        ));
+        assert!(
+            session
+                .queued_work()
+                .await
+                .expect("queued wake drained by open-time work driver")
+                .is_empty()
+        );
+        drop(session);
+
+        let session = core
+            .session(SESSION_ID)
+            .open()
+            .await
+            .expect("reopen drained session");
+        let read_view = session.read_view();
+        let messages = read_view.messages();
+        assert!(
+            messages.iter().any(|message| {
+                message.role == lash_core::MessageRole::Event
+                    && matches!(
+                        &message.origin,
+                        Some(lash_core::MessageOrigin::Process {
+                            process_id: wake_process_id,
+                            event_type,
+                            sequence: 1,
+                            caused_by,
+                            ..
+                        }) if wake_process_id == &process_id
+                            && event_type == "process.wake"
+                            && caused_by.as_ref() == Some(&process_caused_by)
+                    )
+            }),
+            "drained process wake should persist as an event message with trigger provenance"
+        );
     }
 
     async fn worker_recovers_tool_call_process_in_restarted_session(
@@ -565,6 +580,7 @@ submit "registered"
             lash_core::ProcessInput::ToolCall {
                 call: lash_core::PreparedToolCall::from_parts(
                     "rebuild-tool-call",
+                    "tool:rebuild_echo",
                     "rebuild_echo",
                     serde_json::json!({ "value": "recovered" }),
                     None,

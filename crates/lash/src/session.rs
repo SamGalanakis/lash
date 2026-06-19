@@ -149,43 +149,7 @@ impl SessionBuilder {
         &self,
         store: &dyn RuntimePersistence,
     ) -> Result<Option<RuntimeSessionState>> {
-        match self.core.env.residency {
-            Residency::KeepAll => {
-                let loaded = lash_core::store::load_persisted_session_state(store)
-                    .await
-                    .map_err(|err| {
-                        SessionError::Protocol(format!("failed to load store: {err}"))
-                    })?;
-                Ok(loaded)
-            }
-            Residency::ActivePathOnly => {
-                let active =
-                    lash_core::store::load_persisted_session_state_active_path(store, None)
-                        .await
-                        .map_err(|err| {
-                            SessionError::Protocol(format!(
-                                "failed to load active-path store: {err}"
-                            ))
-                        })?;
-                if active
-                    .as_ref()
-                    .is_some_and(|state| state.session_graph.nodes.is_empty())
-                {
-                    let mut full = lash_core::store::load_persisted_session_state(store)
-                        .await
-                        .map_err(|err| {
-                            SessionError::Protocol(format!(
-                                "failed to heal active-path store from full graph: {err}"
-                            ))
-                        })?;
-                    if let Some(state) = full.as_mut() {
-                        state.graph_replace_required = true;
-                    }
-                    return Ok(full);
-                }
-                Ok(active)
-            }
-        }
+        load_persisted_state_for_residency(self.core.env.residency, store).await
     }
 
     async fn open_resolved(
@@ -209,12 +173,15 @@ impl SessionBuilder {
             .runtime_host_for_plugin_host(env.core.clone(), &plugin_host)?;
         env.plugin_host = Some(Arc::new(plugin_host));
         let effect_host = Arc::clone(&env.core.control.effect_host);
-        // Lazily spawn the default process work runner (Decision 3: deferred to
-        // the first open so a tokio runtime is guaranteed; idempotent via the
-        // shared once-guard) and thread its poke onto this session's host so the
-        // process admin seam can wake the runner after a successful start.
-        env.process_work_poke = self.core.process_work_runner.poke().await;
+        let drivers = self.core.work_driver.drivers().await;
+        env.process_work_driver = drivers.process.clone();
+        env.queued_work_driver = drivers.queued.clone();
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
+        if drivers.drive_process_on_open
+            && let Some(driver) = drivers.process.as_ref()
+        {
+            driver.claim_and_run_pending("session_open").await?;
+        }
         let handle = RuntimeHandle::with_live_replay_store(
             runtime,
             Arc::clone(&self.core.live_replay_store),
@@ -224,7 +191,7 @@ impl SessionBuilder {
             effect_host,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
-            process_phase_probe_slot: self.core.process_work_runner.phase_probe_slot(),
+            process_phase_probe_slot: self.core.work_driver.phase_probe_slot(),
             turn_cancels: crate::turn::TurnCancelRegistry::default(),
         })
     }
@@ -259,6 +226,69 @@ impl SessionBuilder {
                 session_id: self.session_id.clone(),
                 message,
             })
+    }
+}
+
+pub(crate) async fn load_state_for_residency(
+    residency: Residency,
+    session_id: &str,
+    policy: &SessionPolicy,
+    store: &dyn RuntimePersistence,
+) -> Result<RuntimeSessionState> {
+    let mut state = load_persisted_state_for_residency(residency, store)
+        .await?
+        .unwrap_or_else(|| RuntimeSessionState {
+            session_id: session_id.to_string(),
+            policy: policy.clone(),
+            ..RuntimeSessionState::default()
+        });
+    if state.session_id != session_id {
+        return Err(EmbedError::StoreSessionMismatch {
+            loaded: state.session_id,
+            requested: session_id.to_string(),
+        });
+    }
+    let recorded_provider_id = state.policy.recorded_provider_id().to_string();
+    state.policy = policy.clone();
+    state.policy.provider_id = recorded_provider_id;
+    Ok(state)
+}
+
+async fn load_persisted_state_for_residency(
+    residency: Residency,
+    store: &dyn RuntimePersistence,
+) -> Result<Option<RuntimeSessionState>> {
+    match residency {
+        Residency::KeepAll => {
+            let loaded = lash_core::store::load_persisted_session_state(store)
+                .await
+                .map_err(|err| SessionError::Protocol(format!("failed to load store: {err}")))?;
+            Ok(loaded)
+        }
+        Residency::ActivePathOnly => {
+            let active = lash_core::store::load_persisted_session_state_active_path(store, None)
+                .await
+                .map_err(|err| {
+                    SessionError::Protocol(format!("failed to load active-path store: {err}"))
+                })?;
+            if active
+                .as_ref()
+                .is_some_and(|state| state.session_graph.nodes.is_empty())
+            {
+                let mut full = lash_core::store::load_persisted_session_state(store)
+                    .await
+                    .map_err(|err| {
+                        SessionError::Protocol(format!(
+                            "failed to heal active-path store from full graph: {err}"
+                        ))
+                    })?;
+                if let Some(state) = full.as_mut() {
+                    state.graph_replace_required = true;
+                }
+                return Ok(full);
+            }
+            Ok(active)
+        }
     }
 }
 

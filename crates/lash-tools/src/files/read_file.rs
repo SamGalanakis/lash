@@ -1,3 +1,5 @@
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -5,8 +7,8 @@ use std::path::Path;
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
 use lash_tool_support::{
-    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, object_schema,
-    parse_optional_usize_arg, require_str, run_blocking_value,
+    StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, execute_typed_tool_result,
+    invalid_tool_args, non_empty_string, run_blocking_value,
 };
 
 /// Read files with line-number-prefixed output. Supports images natively.
@@ -22,6 +24,29 @@ const DEFAULT_LIMIT: usize = 2000;
 const MAX_LINE_LEN: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_BYTES_LABEL: &str = "50 KB";
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadFileArgs {
+    /// File path to read.
+    path: String,
+    /// Line offset to start reading from (1-based).
+    #[serde(default = "default_offset")]
+    #[schemars(range(min = 1))]
+    offset: usize,
+    /// Maximum lines to read.
+    #[serde(default = "default_limit")]
+    #[schemars(range(min = 1))]
+    limit: usize,
+}
+
+fn default_offset() -> usize {
+    1
+}
+
+fn default_limit() -> usize {
+    DEFAULT_LIMIT
+}
 
 struct ImageAttachmentData {
     data: Vec<u8>,
@@ -52,54 +77,32 @@ impl ReadFileBlockingResult {
 #[async_trait::async_trait]
 impl StaticToolExecute for ReadFile {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let args = call.args;
-        let path_str = match require_str(args, "path") {
-            Ok(s) => s.to_string(),
-            Err(e) => return e,
-        };
+        execute_typed_tool_result::<ReadFileArgs, _, _>(call.args, |args| async move {
+            if let Err(err) = non_empty_string(&args.path, "path") {
+                return err;
+            }
+            if args.limit < 1 {
+                return invalid_tool_args("Invalid limit: must be >= 1");
+            }
+            let path_str = args.path;
+            let offset = args.offset.max(1);
+            let limit = args.limit;
 
-        let offset = args
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(1)
-            .max(1);
-
-        let limit = match parse_limit(args) {
-            Ok(limit) => limit,
-            Err(e) => return e,
-        };
-
-        match run_blocking_value(move || execute_read_file_sync(&path_str, offset, limit)).await {
-            Ok(result) => result.into_tool_result(call.context).await,
-            Err(err) => ToolResult::err_fmt(format_args!("{err}")),
-        }
+            match run_blocking_value(move || execute_read_file_sync(&path_str, offset, limit)).await
+            {
+                Ok(result) => result.into_tool_result(call.context).await,
+                Err(err) => ToolResult::err_fmt(format_args!("{err}")),
+            }
+        })
+        .await
     }
 }
 
 fn read_file_tool_definition() -> ToolDefinition {
-    ToolDefinition::raw(
+    ToolDefinition::typed::<ReadFileArgs, String>(
                 "tool:read_file",
                 "read_file",
                 "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `ls` for directories.",
-                object_schema(
-                    serde_json::json!({
-                        "path": { "type": "string" },
-                        "offset": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "description": "Line offset to start reading from (1-based)"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "default": DEFAULT_LIMIT,
-                            "description": "Maximum lines to read (default: 2000)."
-                        }
-                    }),
-                    &["path"],
-                ),
-                serde_json::json!({ "type": "string" }),
             )
             .with_examples(vec![
                 r#"await files.read({ path: "Cargo.toml" })?"#.into(),
@@ -112,13 +115,6 @@ fn read_file_tool_definition() -> ToolDefinition {
             ))
             .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
-}
-
-fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
-    Ok(
-        parse_optional_usize_arg(args, "limit", Some(DEFAULT_LIMIT), false, 1)?
-            .unwrap_or(DEFAULT_LIMIT),
-    )
 }
 
 fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFileBlockingResult {

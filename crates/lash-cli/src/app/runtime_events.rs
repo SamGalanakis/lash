@@ -190,7 +190,7 @@ impl App {
             }
             TurnEvent::SubmittedValue { value } => {
                 self.finalize_live_markdown();
-                let text = self::projection::render_submitted_value(&value);
+                let text = lash_export::transcript::submitted_value_display_text(&value);
                 if push_assistant_text_block(&mut self.timeline, &text) {
                     self.mark_first_token_arrived();
                     self.usage.live_output_chars_estimate += text.chars().count() as i64;

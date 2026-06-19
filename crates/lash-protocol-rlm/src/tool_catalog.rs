@@ -119,7 +119,8 @@ mod tests {
     use std::sync::Arc;
 
     fn search_tools_definition() -> ToolDefinition {
-        ToolDefinition::raw_named(
+        ToolDefinition::raw(
+            "tool:test/search_tools",
             "search_tools",
             "Search tools",
             ToolContract::default_input_schema(),
@@ -132,7 +133,8 @@ mod tests {
     fn rlm_catalog_promotes_searchable_tools() {
         let tools = [
             search_tools_definition(),
-            ToolDefinition::raw_named(
+            ToolDefinition::raw(
+                "tool:test/fetch_url",
                 "fetch_url",
                 "Fetch URL",
                 ToolContract::default_input_schema(),

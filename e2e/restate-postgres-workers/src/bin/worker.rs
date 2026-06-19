@@ -240,6 +240,9 @@ impl AppState {
                 TurnScenario::SignalProcess => "signal-sent",
                 TurnScenario::AsyncCompletion => EXPECTED_ASYNC_TEXT,
                 TurnScenario::DurableInputRequest => EXPECTED_DURABLE_INPUT_TEXT,
+                TurnScenario::ToolBatch => {
+                    lash_restate_postgres_workers_e2e::EXPECTED_TOOL_BATCH_TEXT
+                }
             })
             .to_string();
         let response = TurnResponse {
@@ -384,6 +387,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
             "Run the E2E durable input request scenario. workflow_id={} durable_input_request=true",
             request.workflow_id
         ),
+        TurnScenario::ToolBatch => format!(
+            "Run the E2E tool batch scenario. workflow_id={} tool_batch=true fail_once={}",
+            request.workflow_id, request.fail_once
+        ),
     }
 }
 
@@ -518,7 +525,6 @@ async fn async_main() -> Result<()> {
     let core = state.build_core()?;
     let process_worker = DurableProcessWorker::new(core.durable_process_worker_config()?);
     let process_workflow = deployment.workflow(process_worker);
-    let _process_poke = deployment.spawn();
 
     let port = env("WORKER_PORT", "18100");
     let addr: SocketAddr = format!("0.0.0.0:{port}")

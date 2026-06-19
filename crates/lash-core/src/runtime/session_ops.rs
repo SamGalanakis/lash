@@ -8,7 +8,9 @@ use std::sync::Arc;
 use crate::{PluginActionInvokeError, SessionError};
 
 use super::LashRuntime;
-use super::state::{RuntimeSessionState, append_session_nodes_to_state, normalize_session_graph};
+use super::state::{
+    RuntimeSessionState, append_session_nodes_to_state_with_clock, normalize_session_graph,
+};
 
 impl LashRuntime {
     /// Replace the host-owned state envelope.
@@ -63,7 +65,11 @@ impl LashRuntime {
                 current_leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
             });
         }
-        let node_ids = append_session_nodes_to_state(&mut self.state, &request.nodes);
+        let node_ids = append_session_nodes_to_state_with_clock(
+            &mut self.state,
+            &request.nodes,
+            self.host.core.clock.as_ref(),
+        );
         if let Some(session) = self.session.as_mut() {
             let protocol_session = Arc::clone(session.plugins().protocol_session());
             let session_id = self.state.session_id.clone();

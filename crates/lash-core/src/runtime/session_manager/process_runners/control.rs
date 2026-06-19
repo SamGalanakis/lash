@@ -208,8 +208,8 @@ impl<'scope> ProcessCommandRunner<'scope> {
                 crate::RuntimeEffectLocalExecutor::processes(Arc::clone(&self.registry)),
             )
             .await?;
-        if is_start && let Some(poke) = self.current.host.process_work_poke.as_ref() {
-            poke.poke();
+        if is_start && let Some(driver) = self.current.host.process_work_driver.as_ref() {
+            driver.claim_and_run_pending("process_start").await?;
         }
         outcome.into_process().map_err(crate::PluginError::from)
     }

@@ -23,88 +23,6 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
 }
 
 #[test]
-fn chat_finish_reasons_map_to_terminal_reasons() {
-    let parts = vec![LlmOutputPart::Text {
-        text: "partial".to_string(),
-        response_meta: None,
-    }];
-    assert_eq!(
-        terminal_reason_from_chat_value(&json!({"choices":[{"finish_reason":"length"}]}), &parts),
-        LlmTerminalReason::OutputLimit
-    );
-    assert_eq!(
-        terminal_reason_from_chat_value(
-            &json!({"choices":[{"finish_reason":"content_filter"}]}),
-            &parts
-        ),
-        LlmTerminalReason::ContentFilter
-    );
-    assert_eq!(
-        terminal_reason_from_chat_value(
-            &json!({"choices":[{"finish_reason":"tool_calls"}]}),
-            &parts
-        ),
-        LlmTerminalReason::ToolUse
-    );
-}
-
-#[test]
-fn responses_incomplete_maps_to_output_limit() {
-    assert_eq!(
-        terminal_reason_from_responses_value(
-            &json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}),
-            &[]
-        ),
-        LlmTerminalReason::OutputLimit
-    );
-}
-
-#[test]
-fn responses_null_incomplete_details_does_not_map_to_output_limit() {
-    let parts = vec![LlmOutputPart::Text {
-        text: "Hi".to_string(),
-        response_meta: None,
-    }];
-    assert_eq!(
-        terminal_reason_from_responses_value(
-            &json!({"status":"completed","incomplete_details":null}),
-            &parts
-        ),
-        LlmTerminalReason::Stop
-    );
-}
-
-#[test]
-fn responses_content_filter_incomplete_maps_to_content_filter() {
-    let parts = vec![LlmOutputPart::Text {
-        text: "partial".into(),
-        response_meta: None,
-    }];
-    assert_eq!(
-        terminal_reason_from_responses_value(
-            &json!({"status":"incomplete","incomplete_details":{"reason":"content_filter"}}),
-            &parts
-        ),
-        LlmTerminalReason::ContentFilter
-    );
-}
-
-#[test]
-fn chat_unknown_finish_reason_maps_to_provider_error() {
-    let parts = vec![LlmOutputPart::Text {
-        text: "partial".into(),
-        response_meta: None,
-    }];
-    assert_eq!(
-        terminal_reason_from_chat_value(
-            &json!({"choices":[{"finish_reason":"network_error"}]}),
-            &parts
-        ),
-        LlmTerminalReason::ProviderError
-    );
-}
-
-#[test]
 fn chat_image_attachment_serializes_as_data_url() {
     let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
     let png_bytes = vec![0x89, 0x50, 0x4E, 0x47];
@@ -626,45 +544,6 @@ fn legacy_assistant_text_gets_deterministic_id() {
 }
 
 #[test]
-fn usage_parser_accepts_responses_and_chat_completion_shapes() {
-    let responses_usage = OpenAiCompatibleProvider::usage_from_response_value(&serde_json::json!({
-        "usage": {
-            "input_tokens": 11,
-            "output_tokens": 7,
-            "input_tokens_details": { "cached_tokens": 3 },
-            "output_tokens_details": { "reasoning_tokens": 5 }
-        }
-    }));
-    assert_eq!(responses_usage.input_tokens, 11);
-    assert_eq!(responses_usage.output_tokens, 7);
-    assert_eq!(responses_usage.cached_input_tokens, 3);
-    assert_eq!(responses_usage.reasoning_tokens, 5);
-
-    let chat_usage = OpenAiCompatibleProvider::usage_from_response_value(&serde_json::json!({
-        "usage": {
-            "prompt_tokens": 13,
-            "completion_tokens": 17,
-            "prompt_tokens_details": { "cached_tokens": 7, "cache_write_tokens": 5 },
-            "completion_tokens_details": { "reasoning_tokens": 4 }
-        }
-    }));
-    assert_eq!(chat_usage.input_tokens, 13);
-    assert_eq!(chat_usage.output_tokens, 17);
-    assert_eq!(chat_usage.cached_input_tokens, 2);
-    assert_eq!(chat_usage.reasoning_tokens, 4);
-
-    let write_only_usage =
-        OpenAiCompatibleProvider::usage_from_response_value(&serde_json::json!({
-            "usage": {
-                "prompt_tokens": 5353,
-                "completion_tokens": 433,
-                "prompt_tokens_details": { "cached_tokens": 3, "cache_write_tokens": 5353 }
-            }
-        }));
-    assert_eq!(write_only_usage.cached_input_tokens, 0);
-}
-
-#[test]
 fn chat_body_replays_openrouter_reasoning_details_on_tool_calls() {
     let req = request(vec![LlmMessage::new(
         LlmRole::Assistant,
@@ -731,7 +610,7 @@ fn non_streaming_chat_parser_captures_text_tool_and_usage() {
     });
 
     let parts = OpenAiCompatibleProvider::chat_response_parts_from_value(&value);
-    let usage = OpenAiCompatibleProvider::usage_from_response_value(&value);
+    let usage = lash_llm_transport::openai_usage_from_response_value(&value);
 
     assert!(matches!(&parts[0], LlmOutputPart::Reasoning { text, .. } if text == "think"));
     assert!(matches!(&parts[1], LlmOutputPart::Text { text, .. } if text == "hello"));
@@ -931,7 +810,6 @@ fn response_failed_server_error_is_retryable() {
 mod conformance {
     use crate::OpenAiCompatibleProvider;
     use crate::chat::ChatStreamState;
-    use crate::common::terminal_reason_from_chat_value;
     use lash_core::llm::types::{LlmOutputPart, LlmTerminalReason, LlmUsage};
     use lash_llm_transport::conformance::{
         CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
@@ -1059,11 +937,11 @@ mod conformance {
         }
 
         fn usage_from_wire(&self, body: &Value) -> LlmUsage {
-            OpenAiCompatibleProvider::usage_from_response_value(body)
+            lash_llm_transport::openai_usage_from_response_value(body)
         }
 
         fn terminal_from_wire(&self, body: &Value, parts: &[LlmOutputPart]) -> LlmTerminalReason {
-            terminal_reason_from_chat_value(body, parts)
+            lash_llm_transport::openai_terminal_reason_from_chat_value(body, parts)
         }
 
         fn assemble_stream(&self, sse_events: &[String]) -> StreamAssembly {

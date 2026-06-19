@@ -224,7 +224,7 @@ impl RuntimeTurnDriver<'_> {
             },
         )
         .await;
-        let exec_created_at = std::time::Instant::now();
+        let exec_created_at = self.host.core.clock.now();
         let result = match self
             .invoke_turn_exec_effect(
                 machine,
@@ -247,7 +247,13 @@ impl RuntimeTurnDriver<'_> {
                         output: String::new(),
                         error: Some(message),
                         success: false,
-                        duration_ms: exec_created_at.elapsed().as_millis() as u64,
+                        duration_ms: self
+                            .host
+                            .core
+                            .clock
+                            .now()
+                            .saturating_duration_since(exec_created_at)
+                            .as_millis() as u64,
                         tool_call_ids: Vec::new(),
                         graph_key: graph_key.clone(),
                     },
@@ -287,7 +293,13 @@ impl RuntimeTurnDriver<'_> {
                         output: String::new(),
                         error: Some(error.clone()),
                         success: false,
-                        duration_ms: exec_created_at.elapsed().as_millis() as u64,
+                        duration_ms: self
+                            .host
+                            .core
+                            .clock
+                            .now()
+                            .saturating_duration_since(exec_created_at)
+                            .as_millis() as u64,
                         tool_call_ids: Vec::new(),
                         graph_key: graph_key.clone(),
                     },

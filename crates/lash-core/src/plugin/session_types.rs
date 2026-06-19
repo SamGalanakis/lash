@@ -253,6 +253,28 @@ impl AgentFrameRecord {
         assignment: AgentFrameAssignment,
         protocol_turn_options: ProtocolTurnOptions,
     ) -> Self {
+        Self::new_at(
+            frame_id,
+            session_id,
+            previous_frame_id,
+            reason,
+            caused_by,
+            assignment,
+            protocol_turn_options,
+            <crate::SystemClock as crate::Clock>::timestamp_rfc3339(&crate::SystemClock),
+        )
+    }
+
+    pub fn new_at(
+        frame_id: impl Into<AgentFrameId>,
+        session_id: impl Into<String>,
+        previous_frame_id: Option<AgentFrameId>,
+        reason: AgentFrameReason,
+        caused_by: Option<crate::CausalRef>,
+        assignment: AgentFrameAssignment,
+        protocol_turn_options: ProtocolTurnOptions,
+        created_at: impl Into<String>,
+    ) -> Self {
         Self {
             frame_id: frame_id.into(),
             session_id: session_id.into(),
@@ -260,7 +282,7 @@ impl AgentFrameRecord {
             status: AgentFrameStatus::Active,
             reason,
             caused_by,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: created_at.into(),
             assignment,
             protocol_turn_options,
             execution_state_ref: None,

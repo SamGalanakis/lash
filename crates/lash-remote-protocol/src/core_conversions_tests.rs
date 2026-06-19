@@ -607,7 +607,7 @@ fn remote_tool_grants_validate_explicit_bindings_and_duplicates() {
 }
 
 #[test]
-fn remote_tool_grants_convert_to_core_ids_without_binding_call_path() {
+fn remote_tool_grants_convert_explicit_core_ids_without_binding_call_path() {
     let grant = demo_grant("one", "tools", "search");
     let definition = lash_core::ToolDefinition::try_from(&grant).expect("tool definition");
     assert_eq!(definition.manifest().id.as_str(), "remote-tool:one");
@@ -629,17 +629,21 @@ fn remote_tool_grants_convert_to_core_ids_without_binding_call_path() {
     assert_eq!(
         definition.manifest().id.as_str(),
         "remote-tool:one",
-        "derived core IDs are based on remote grant names, not binding call paths"
+        "remote grant IDs are independent of binding call paths"
     );
     assert_ne!(
         definition.manifest().id.as_str(),
         "remote-tool:other_module.other_operation"
     );
 
-    let mut explicit = grant;
-    explicit.id = Some("remote-tool:explicit".to_string());
-    let definition = lash_core::ToolDefinition::try_from(&explicit).expect("tool definition");
-    assert_eq!(definition.manifest().id.as_str(), "remote-tool:explicit");
+    let mut renamed = grant;
+    renamed.name = "renamed_one".to_string();
+    let definition = lash_core::ToolDefinition::try_from(&renamed).expect("tool definition");
+    assert_eq!(
+        definition.manifest().id.as_str(),
+        "remote-tool:one",
+        "remote grant IDs are stable across model-facing renames"
+    );
 }
 
 #[test]
@@ -761,7 +765,7 @@ fn remote_session_observation_from_core_maps_all_payload_variants() {
 fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
     RemoteToolGrant {
         protocol_version: REMOTE_PROTOCOL_VERSION,
-        id: None,
+        id: format!("remote-tool:{name}"),
         name: name.to_string(),
         description: "demo".to_string(),
         input_schema: default_input_schema(),

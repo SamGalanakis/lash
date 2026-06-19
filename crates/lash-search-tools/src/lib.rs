@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock,
@@ -12,7 +12,9 @@ use fff_search::{
     AiGrepConfig, ContentCacheBudget, FFFMode, FileItem, FilePicker, FilePickerOptions,
     FuzzySearchOptions, GrepMatch, PaginationArgs, QueryParser, SharedFrecency, SharedPicker,
 };
-use serde_json::json;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use lash_core::{
     ToolCall, ToolDefinition, ToolFailureClass, ToolResult, ToolRetryPolicy, ToolScheduling,
@@ -20,7 +22,7 @@ use lash_core::{
 
 use lash_tool_support::{
     StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, canonicalize_under,
-    object_schema, parse_optional_usize_arg, require_str,
+    invalid_tool_args, non_empty_string, typed_tool_args, typed_tool_ok,
 };
 
 const DEFAULT_MAX_RESULTS: usize = 20;
@@ -30,6 +32,88 @@ const MAX_FFF_FUZZY_QUERY_BYTES: usize = (u16::MAX as usize) / (16 * 50);
 const GREP_WALL_TIMEOUT: Duration = Duration::from_secs(5);
 const FFF_SEARCH_BUDGET: Duration = Duration::from_secs(3);
 const DIRECT_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepArgs {
+    /// Search text or regex query with optional constraint prefixes.
+    query: String,
+    /// Optional file or directory to search within.
+    #[serde(default)]
+    path: Option<String>,
+    /// Max matching lines.
+    #[serde(default = "default_grep_limit")]
+    #[schemars(range(min = 1))]
+    limit: usize,
+    /// Cursor from a previous grep result.
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+fn default_grep_limit() -> usize {
+    DEFAULT_MAX_RESULTS
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepOutput {
+    query: String,
+    query_used: String,
+    broadened_from: Option<String>,
+    regex_fallback_error: Option<String>,
+    matches: Vec<GrepMatchOutput>,
+    files: Vec<GrepFileOutput>,
+    count: usize,
+    shown: usize,
+    files_with_matches: usize,
+    truncated: bool,
+    cursor: Option<String>,
+    suggested_path: Option<String>,
+    approximate: bool,
+    timed_out: bool,
+    cancelled: bool,
+    error: Option<GrepErrorOutput>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepMatchOutput {
+    path: String,
+    line: u64,
+    column: u32,
+    byte_column: u32,
+    excerpt: String,
+    #[serde(rename = "match")]
+    match_text: String,
+    ranges: Vec<GrepMatchRangeOutput>,
+    is_definition: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepMatchRangeOutput {
+    start: u32,
+    end: u32,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepFileOutput {
+    path: String,
+    count: usize,
+    size_bytes: u64,
+    is_binary: bool,
+    git_status: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+struct GrepErrorOutput {
+    kind: String,
+    message: String,
+    stage: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
 
 /// Search file contents using an indexed fff-search backend.
 pub struct Grep {
@@ -102,7 +186,7 @@ impl Grep {
         max_results: usize,
         cursor_id: Option<&str>,
         control: &GrepRunControl,
-    ) -> Result<serde_json::Value, ToolResult> {
+    ) -> Result<GrepOutput, ToolResult> {
         control.check(query)?;
         let file_offset = cursor_id
             .and_then(|id| cursor_store.lock().ok()?.get(id))
@@ -219,24 +303,24 @@ impl Grep {
                 {
                     let query_len = query.len() as i32;
                     if score.base_score > query_len * 10 {
-                        return Ok(json!({
-                            "query": query,
-                            "query_used": query,
-                            "matches": [],
-                            "files": [],
-                            "count": 0,
-                            "shown": 0,
-                            "files_with_matches": 0,
-                            "truncated": false,
-                            "cursor": null,
-                            "suggested_path": top.relative_path(picker),
-                            "approximate": false,
-                            "broadened_from": null,
-                            "regex_fallback_error": null,
-                            "timed_out": false,
-                            "cancelled": false,
-                            "error": null,
-                        }));
+                        return Ok(GrepOutput {
+                            query: query.to_string(),
+                            query_used: query.to_string(),
+                            broadened_from: None,
+                            regex_fallback_error: None,
+                            matches: Vec::new(),
+                            files: Vec::new(),
+                            count: 0,
+                            shown: 0,
+                            files_with_matches: 0,
+                            truncated: false,
+                            cursor: None,
+                            suggested_path: Some(top.relative_path(picker)),
+                            approximate: false,
+                            timed_out: false,
+                            cancelled: false,
+                            error: None,
+                        });
                     }
                 }
             }
@@ -285,39 +369,19 @@ pub fn grep_provider() -> StaticToolProvider<Grep> {
 impl StaticToolExecute for Grep {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let cancellation_token = call.context.cancellation_token().cloned();
-        self.execute_inner(call.args, cancellation_token).await
+        let args = match typed_tool_args::<GrepArgs>(call.args) {
+            Ok(args) => args,
+            Err(err) => return err,
+        };
+        self.execute_inner(args, cancellation_token).await
     }
 }
 
 fn grep_tool_definition() -> ToolDefinition {
-    ToolDefinition::raw(
+    ToolDefinition::typed::<GrepArgs, GrepOutput>(
                 "tool:grep",
                 "grep",
                 "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). If `query` accidentally starts with an obvious filesystem path followed by search text, grep treats that prefix as `path`. Within a search root, use inline constraints in the query as a leading token: `*.rs term` (extension), `src/ term` (path segment), `**/foo/* term` (glob), `!*.test.ts term` (negate). Constraints AND together; one search term per query.",
-                object_schema(
-                    json!({
-                        "query": {
-                            "type": "string",
-                            "description": "Search text or regex query with optional constraint prefixes. Pattern is matched within a single line (no cross-line matches). Use a literal token, a short phrase, or a regex — not a multi-clause natural-language query."
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "Optional file or directory to search within. Accepts absolute paths or paths relative to the workspace root. A directory becomes the search root; a file searches that one file only. When omitted, searches the current workspace."
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "default": DEFAULT_MAX_RESULTS,
-                            "description": "Max matching lines (default 20)."
-                        },
-                        "cursor": {
-                            "type": "string",
-                            "description": "Cursor from a previous grep result. Only use if previous results were not sufficient."
-                        }
-                    }),
-                    &["query"],
-                ),
-                grep_output_schema(),
             )
             .with_examples(vec![
                 r#"await files.grep({ query: "ToolProvider", path: "crates/lash/src" })?"#.into(),
@@ -333,153 +397,24 @@ fn grep_tool_definition() -> ToolDefinition {
             .with_retry_policy(ToolRetryPolicy::safe(2, 50, 150))
 }
 
-fn grep_output_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "query": { "type": "string" },
-            "query_used": {
-                "type": "string",
-                "description": "The concrete query executed after path/constraint/fuzzy broadening."
-            },
-            "broadened_from": nullable_schema(json!({ "type": "string" })),
-            "regex_fallback_error": nullable_schema(json!({ "type": "string" })),
-            "matches": {
-                "type": "array",
-                "items": grep_match_output_schema()
-            },
-            "files": {
-                "type": "array",
-                "items": grep_file_output_schema()
-            },
-            "count": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Total matching lines found, including results not shown due to limit/cursor."
-            },
-            "shown": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Number of match records included in this response."
-            },
-            "files_with_matches": { "type": "integer", "minimum": 0 },
-            "truncated": { "type": "boolean" },
-            "cursor": nullable_schema(json!({ "type": "string" })),
-            "suggested_path": nullable_schema(json!({ "type": "string" })),
-            "approximate": {
-                "type": "boolean",
-                "description": "True when a fuzzy fallback produced the matches."
-            },
-            "timed_out": { "type": "boolean" },
-            "cancelled": { "type": "boolean" },
-            "error": nullable_schema(json!({
-                "type": "object",
-                "properties": {
-                    "kind": { "type": "string" },
-                    "message": { "type": "string" },
-                    "stage": { "type": "string" }
-                },
-                "required": ["kind", "message", "stage"],
-                "additionalProperties": true
-            }))
-        },
-        "required": [
-            "query",
-            "query_used",
-            "broadened_from",
-            "regex_fallback_error",
-            "matches",
-            "files",
-            "count",
-            "shown",
-            "files_with_matches",
-            "truncated",
-            "cursor",
-            "suggested_path",
-            "approximate",
-            "timed_out",
-            "cancelled",
-            "error"
-        ],
-        "additionalProperties": false
-    })
-}
-
-fn grep_match_output_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "path": { "type": "string" },
-            "line": { "type": "integer", "minimum": 1 },
-            "column": { "type": "integer", "minimum": 1 },
-            "byte_column": { "type": "integer", "minimum": 0 },
-            "excerpt": { "type": "string" },
-            "match": { "type": "string" },
-            "ranges": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "start": { "type": "integer", "minimum": 0 },
-                        "end": { "type": "integer", "minimum": 0 }
-                    },
-                    "required": ["start", "end"],
-                    "additionalProperties": false
-                }
-            },
-            "is_definition": { "type": "boolean" }
-        },
-        "required": [
-            "path",
-            "line",
-            "column",
-            "byte_column",
-            "excerpt",
-            "match",
-            "ranges",
-            "is_definition"
-        ],
-        "additionalProperties": false
-    })
-}
-
-fn grep_file_output_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "path": { "type": "string" },
-            "count": { "type": "integer", "minimum": 0 },
-            "size_bytes": { "type": "integer", "minimum": 0 },
-            "is_binary": { "type": "boolean" },
-            "git_status": nullable_schema(json!({ "type": "string" }))
-        },
-        "required": ["path", "count", "size_bytes", "is_binary", "git_status"],
-        "additionalProperties": false
-    })
-}
-
-fn nullable_schema(schema: serde_json::Value) -> serde_json::Value {
-    json!({ "anyOf": [schema, { "type": "null" }] })
-}
-
 impl Grep {
     async fn execute_inner(
         &self,
-        args: &serde_json::Value,
+        args: GrepArgs,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> ToolResult {
-        let raw_query = match require_str(args, "query") {
-            Ok(query) => query,
-            Err(err) => return err,
-        };
-        let max_results = match parse_limit(args) {
-            Ok(max_results) => max_results,
-            Err(err) => return err,
-        };
-        let cursor = args.get("cursor").and_then(|value| value.as_str());
+        if let Err(err) = non_empty_string(&args.query, "query") {
+            return err;
+        }
+        if args.limit < 1 {
+            return invalid_tool_args("Invalid limit: must be >= 1");
+        }
+        let raw_query = args.query.as_str();
+        let max_results = args.limit;
+        let cursor = args.cursor.as_deref();
         let path_arg = args
-            .get("path")
-            .and_then(|value| value.as_str())
+            .path
+            .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
 
@@ -633,28 +568,17 @@ async fn bounded_indexed_grep(
     });
 
     let result = match tokio::time::timeout(GREP_WALL_TIMEOUT, handle).await {
-        Ok(Ok(Ok(value))) => ToolResult::ok(value),
+        Ok(Ok(Ok(value))) => typed_tool_ok(value),
         Ok(Ok(Err(err))) => err,
-        Ok(Err(err)) => ToolResult::err(serde_json::json!({
-            "query": timeout_query,
-            "query_used": timeout_query,
-            "matches": [],
-            "files": [],
-            "count": 0,
-            "shown": 0,
-            "files_with_matches": 0,
-            "truncated": false,
-            "cursor": null,
-            "suggested_path": null,
-            "approximate": false,
-            "timed_out": false,
-            "cancelled": false,
-            "error": {
-                "kind": "panic",
-                "message": format!("grep worker failed: {err}"),
-                "stage": "fff_search",
-            },
-        })),
+        Ok(Err(err)) => ToolResult::err(grep_output_value(grep_error_output(
+            &timeout_query,
+            &timeout_query,
+            "panic",
+            format!("grep worker failed: {err}"),
+            "fff_search",
+            ErrorFlags::default(),
+            BTreeMap::new(),
+        ))),
         Err(_) => {
             abort_signal.store(true, Ordering::Relaxed);
             timeout_grep_result(
@@ -702,26 +626,15 @@ async fn direct_file_grep(
     });
     let result = match tokio::time::timeout(GREP_WALL_TIMEOUT, handle).await {
         Ok(Ok(result)) => result,
-        Ok(Err(err)) => ToolResult::err(serde_json::json!({
-            "query": timeout_query,
-            "query_used": timeout_query,
-            "matches": [],
-            "files": [],
-            "count": 0,
-            "shown": 0,
-            "files_with_matches": 0,
-            "truncated": false,
-            "cursor": null,
-            "suggested_path": null,
-            "approximate": false,
-            "timed_out": false,
-            "cancelled": false,
-            "error": {
-                "kind": "panic",
-                "message": format!("direct grep worker failed: {err}"),
-                "stage": "direct_file",
-            },
-        })),
+        Ok(Err(err)) => ToolResult::err(grep_output_value(grep_error_output(
+            &timeout_query,
+            &timeout_query,
+            "panic",
+            format!("direct grep worker failed: {err}"),
+            "direct_file",
+            ErrorFlags::default(),
+            BTreeMap::new(),
+        ))),
         Err(_) => {
             abort_signal.store(true, Ordering::Relaxed);
             timeout_grep_result(
@@ -882,104 +795,61 @@ fn direct_file_grep_sync(
     let metadata = match std::fs::metadata(file_path) {
         Ok(metadata) => metadata,
         Err(err) => {
-            return ToolResult::err(serde_json::json!({
-                "query": query,
-                "query_used": query,
-                "matches": [],
-                "files": [],
-                "count": 0,
-                "shown": 0,
-                "files_with_matches": 0,
-                "truncated": false,
-                "cursor": null,
-                "suggested_path": null,
-                "approximate": false,
-                "timed_out": false,
-                "cancelled": false,
-                "error": {
-                    "kind": "io",
-                    "message": format!("failed to stat file: {err}"),
-                    "stage": "direct_file",
-                },
-            }));
+            return ToolResult::err(grep_output_value(grep_error_output(
+                query,
+                query,
+                "io",
+                format!("failed to stat file: {err}"),
+                "direct_file",
+                ErrorFlags::default(),
+                BTreeMap::new(),
+            )));
         }
     };
     if !metadata.is_file() {
-        return ToolResult::err(serde_json::json!({
-            "query": query,
-            "query_used": query,
-            "matches": [],
-            "files": [],
-            "count": 0,
-            "shown": 0,
-            "files_with_matches": 0,
-            "truncated": false,
-            "cursor": null,
-            "suggested_path": null,
-            "approximate": false,
-            "timed_out": false,
-            "cancelled": false,
-            "error": {
-                "kind": "not_a_file",
-                "message": "path is not a regular file",
-                "stage": "direct_file",
-            },
-        }));
+        return ToolResult::err(grep_output_value(grep_error_output(
+            query,
+            query,
+            "not_a_file",
+            "path is not a regular file",
+            "direct_file",
+            ErrorFlags::default(),
+            BTreeMap::new(),
+        )));
     }
     if metadata.len() > DIRECT_FILE_MAX_SIZE {
-        return ToolResult::err(serde_json::json!({
-            "query": query,
-            "query_used": query,
-            "matches": [],
-            "files": [],
-            "count": 0,
-            "shown": 0,
-            "files_with_matches": 0,
-            "truncated": false,
-            "cursor": null,
-            "suggested_path": null,
-            "approximate": false,
-            "timed_out": false,
-            "cancelled": false,
-            "error": {
-                "kind": "file_too_large",
-                "message": format!("file exceeds grep limit of {DIRECT_FILE_MAX_SIZE} bytes"),
-                "stage": "direct_file",
-                "size_bytes": metadata.len(),
-                "max_size_bytes": DIRECT_FILE_MAX_SIZE,
-            },
-        }));
+        let mut extra = BTreeMap::new();
+        extra.insert("size_bytes".to_string(), json!(metadata.len()));
+        extra.insert("max_size_bytes".to_string(), json!(DIRECT_FILE_MAX_SIZE));
+        return ToolResult::err(grep_output_value(grep_error_output(
+            query,
+            query,
+            "file_too_large",
+            format!("file exceeds grep limit of {DIRECT_FILE_MAX_SIZE} bytes"),
+            "direct_file",
+            ErrorFlags::default(),
+            extra,
+        )));
     }
 
     let parsed = QueryParser::new(AiGrepConfig).parse(query);
     let grep_text = parsed.grep_text();
     if grep_text.is_empty() {
-        return ToolResult::ok(empty_grep_result(query));
+        return typed_tool_ok(empty_grep_result(query));
     }
 
     let bytes = match std::fs::read(file_path) {
         Ok(bytes) => bytes,
         Err(err) => {
-            return ToolResult::err(serde_json::json!({
-                "query": query,
-                "query_used": grep_text,
-                "matches": [],
-                "files": [],
-                "count": 0,
-                "shown": 0,
-                "files_with_matches": 0,
-                "truncated": false,
-                "cursor": null,
-                "suggested_path": null,
-                "approximate": false,
-                "timed_out": false,
-                "cancelled": false,
-                "error": {
-                    "kind": "io",
-                    "message": format!("failed to read file: {err}"),
-                    "stage": "direct_file",
-                },
-            }));
+            return ToolResult::err(grep_output_value(grep_error_output(
+                query,
+                &grep_text,
+                "io",
+                format!("failed to read file: {err}"),
+                "direct_file",
+                ErrorFlags::default(),
+                BTreeMap::new(),
+            )));
         }
     };
     if abort_signal.load(Ordering::Relaxed) {
@@ -1005,62 +875,64 @@ fn direct_file_grep_sync(
             total_matches += 1;
             if matches.len() < max_results {
                 let first = ranges[0];
-                let json_ranges = ranges
+                let output_ranges = ranges
                     .iter()
-                    .map(|(start, end)| {
-                        json!({
-                            "start": start,
-                            "end": end,
-                        })
+                    .map(|(start, end)| GrepMatchRangeOutput {
+                        start: *start,
+                        end: *end,
                     })
                     .collect::<Vec<_>>();
                 let match_text =
                     direct_match_text(line, first.0 as usize, first.1 as usize).to_string();
-                matches.push(json!({
-                    "path": display_path.clone(),
-                    "line": (line_index + 1) as u64,
-                    "column": first.0.saturating_add(1),
-                    "byte_column": first.0,
-                    "excerpt": truncate_line_for_ai(line, Some(ranges.as_slice()), MAX_LINE_LEN),
-                    "match": match_text,
-                    "ranges": json_ranges,
-                    "is_definition": looks_like_definition_line(line),
-                }));
+                matches.push(GrepMatchOutput {
+                    path: display_path.clone(),
+                    line: (line_index + 1) as u64,
+                    column: first.0.saturating_add(1),
+                    byte_column: first.0,
+                    excerpt: truncate_line_for_ai(line, Some(ranges.as_slice()), MAX_LINE_LEN),
+                    match_text,
+                    ranges: output_ranges,
+                    is_definition: looks_like_definition_line(line),
+                });
             }
         }
     }
 
     let shown = matches.len();
     let files = if total_matches > 0 {
-        vec![json!({
-            "path": display_path.clone(),
-            "count": total_matches,
-            "size_bytes": metadata.len(),
-            "is_binary": bytes.contains(&0),
-            "git_status": null,
-        })]
+        vec![GrepFileOutput {
+            path: display_path.clone(),
+            count: total_matches,
+            size_bytes: metadata.len(),
+            is_binary: bytes.contains(&0),
+            git_status: None,
+        }]
     } else {
         Vec::new()
     };
 
-    ToolResult::ok(json!({
-        "query": query,
-        "query_used": grep_text,
-        "broadened_from": null,
-        "regex_fallback_error": matcher.regex_error(),
-        "matches": matches,
-        "files": files,
-        "count": total_matches,
-        "shown": shown,
-        "files_with_matches": if total_matches > 0 { 1 } else { 0 },
-        "truncated": total_matches > shown,
-        "cursor": null,
-        "suggested_path": if total_matches > 0 { Some(display_path) } else { None },
-        "approximate": false,
-        "timed_out": false,
-        "cancelled": false,
-        "error": null,
-    }))
+    typed_tool_ok(GrepOutput {
+        query: query.to_string(),
+        query_used: grep_text,
+        broadened_from: None,
+        regex_fallback_error: matcher.regex_error().map(str::to_string),
+        matches,
+        files,
+        count: total_matches,
+        shown,
+        files_with_matches: if total_matches > 0 { 1 } else { 0 },
+        truncated: total_matches > shown,
+        cursor: None,
+        suggested_path: if total_matches > 0 {
+            Some(display_path)
+        } else {
+            None
+        },
+        approximate: false,
+        timed_out: false,
+        cancelled: false,
+        error: None,
+    })
 }
 
 enum DirectMatcher {
@@ -1184,13 +1056,6 @@ fn looks_like_definition_line(line: &str) -> bool {
     .any(|prefix| trimmed.starts_with(prefix))
 }
 
-fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
-    Ok(
-        parse_optional_usize_arg(args, "limit", Some(DEFAULT_MAX_RESULTS), false, 1)?
-            .unwrap_or(DEFAULT_MAX_RESULTS),
-    )
-}
-
 fn cleanup_fuzzy_query(input: &str) -> String {
     let mut output = String::with_capacity(input.len().min(MAX_FFF_FUZZY_QUERY_BYTES));
     for ch in input.chars() {
@@ -1236,30 +1101,88 @@ fn make_grep_options(
     )
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ErrorFlags {
+    timed_out: bool,
+    cancelled: bool,
+}
+
+fn grep_output_value(output: GrepOutput) -> Value {
+    serde_json::to_value(output).unwrap_or_else(|err| {
+        json!({
+            "query": "",
+            "query_used": "",
+            "broadened_from": null,
+            "regex_fallback_error": null,
+            "matches": [],
+            "files": [],
+            "count": 0,
+            "shown": 0,
+            "files_with_matches": 0,
+            "truncated": false,
+            "cursor": null,
+            "suggested_path": null,
+            "approximate": false,
+            "timed_out": false,
+            "cancelled": false,
+            "error": {
+                "kind": "serialization",
+                "message": format!("failed to serialize grep output: {err}"),
+                "stage": "output",
+            },
+        })
+    })
+}
+
+fn grep_error_output(
+    query: &str,
+    query_used: &str,
+    kind: impl Into<String>,
+    message: impl Into<String>,
+    stage: impl Into<String>,
+    flags: ErrorFlags,
+    extra: BTreeMap<String, Value>,
+) -> GrepOutput {
+    GrepOutput {
+        query: query.to_string(),
+        query_used: query_used.to_string(),
+        broadened_from: None,
+        regex_fallback_error: None,
+        matches: Vec::new(),
+        files: Vec::new(),
+        count: 0,
+        shown: 0,
+        files_with_matches: 0,
+        truncated: false,
+        cursor: None,
+        suggested_path: None,
+        approximate: false,
+        timed_out: flags.timed_out,
+        cancelled: flags.cancelled,
+        error: Some(GrepErrorOutput {
+            kind: kind.into(),
+            message: message.into(),
+            stage: stage.into(),
+            extra,
+        }),
+    }
+}
+
 fn timeout_grep_result(query: &str, stage: &str, budget: Duration, message: &str) -> ToolResult {
-    let raw = json!({
-        "query": query,
-        "query_used": query,
-        "broadened_from": null,
-        "regex_fallback_error": null,
-        "matches": [],
-        "files": [],
-        "count": 0,
-        "shown": 0,
-        "files_with_matches": 0,
-        "truncated": false,
-        "cursor": null,
-        "suggested_path": null,
-        "approximate": false,
-        "timed_out": true,
-        "cancelled": false,
-        "error": {
-            "kind": "timeout",
-            "message": message,
-            "stage": stage,
-            "budget_ms": budget.as_millis() as u64,
+    let mut extra = BTreeMap::new();
+    extra.insert("budget_ms".to_string(), json!(budget.as_millis() as u64));
+    let raw = grep_output_value(grep_error_output(
+        query,
+        query,
+        "timeout",
+        message,
+        stage,
+        ErrorFlags {
+            timed_out: true,
+            cancelled: false,
         },
-    });
+        extra,
+    ));
     let mut failure = lash_core::ToolFailure::safe_retry(
         ToolFailureClass::Timeout,
         "grep_timeout",
@@ -1273,28 +1196,18 @@ fn timeout_grep_result(query: &str, stage: &str, budget: Duration, message: &str
 fn cancelled_grep_result(query: &str) -> ToolResult {
     ToolResult::cancelled_with_raw(
         "grep cancelled",
-        json!({
-            "query": query,
-            "query_used": query,
-            "broadened_from": null,
-            "regex_fallback_error": null,
-            "matches": [],
-            "files": [],
-            "count": 0,
-            "shown": 0,
-            "files_with_matches": 0,
-            "truncated": false,
-            "cursor": null,
-            "suggested_path": null,
-            "approximate": false,
-            "timed_out": false,
-            "cancelled": true,
-            "error": {
-                "kind": "cancelled",
-                "message": "grep cancelled",
-                "stage": "grep",
+        grep_output_value(grep_error_output(
+            query,
+            query,
+            "cancelled",
+            "grep cancelled",
+            "grep",
+            ErrorFlags {
+                timed_out: false,
+                cancelled: true,
             },
-        }),
+            BTreeMap::new(),
+        )),
     )
 }
 
@@ -1404,7 +1317,7 @@ struct StructuredGrepInput<'a> {
 fn structured_grep_result(
     input: StructuredGrepInput<'_>,
     cursor_store: &mut CursorStore,
-) -> serde_json::Value {
+) -> GrepOutput {
     let mut indices = (0..input.matches.len()).collect::<Vec<_>>();
     if input.auto_expand_defs {
         indices.sort_unstable_by_key(|&index| {
@@ -1440,27 +1353,25 @@ fn structured_grep_result(
             let ranges = matched
                 .match_byte_offsets
                 .iter()
-                .map(|(start, end)| {
-                    json!({
-                        "start": start,
-                        "end": end,
-                    })
+                .map(|(start, end)| GrepMatchRangeOutput {
+                    start: *start,
+                    end: *end,
                 })
                 .collect::<Vec<_>>();
-            json!({
-                "path": path,
-                "line": matched.line_number,
-                "column": matched.col.saturating_add(1),
-                "byte_column": matched.col,
-                "excerpt": truncate_line_for_ai(
+            GrepMatchOutput {
+                path,
+                line: matched.line_number,
+                column: matched.col.saturating_add(1) as u32,
+                byte_column: matched.col as u32,
+                excerpt: truncate_line_for_ai(
                     &matched.line_content,
                     Some(matched.match_byte_offsets.as_ref()),
-                    MAX_LINE_LEN
+                    MAX_LINE_LEN,
                 ),
-                "match": first_match_text(matched),
-                "ranges": ranges,
-                "is_definition": matched.is_definition,
-            })
+                match_text: first_match_text(matched),
+                ranges,
+                is_definition: matched.is_definition,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1472,55 +1383,55 @@ fn structured_grep_result(
                 .iter()
                 .find(|file| file.relative_path(input.picker) == path)
                 .expect("file_order only contains known files");
-            json!({
-                "path": path,
-                "count": per_file[&path],
-                "size_bytes": file.size,
-                "is_binary": file.is_binary(),
-                "git_status": format_git_status_opt(file.git_status),
-            })
+            GrepFileOutput {
+                path: path.clone(),
+                count: per_file[&path],
+                size_bytes: file.size,
+                is_binary: file.is_binary(),
+                git_status: format_git_status_opt(file.git_status).map(str::to_string),
+            }
         })
         .collect::<Vec<_>>();
 
-    json!({
-        "query": input.query,
-        "query_used": input.query_used,
-        "broadened_from": input.broadened_from,
-        "approximate": input.approximate,
-        "matches": matches,
-        "files": files,
-        "count": input.total_matched,
-        "shown": indices.len(),
-        "files_with_matches": input.files_with_matches,
-        "truncated": input.total_matched > indices.len() || input.next_file_offset > 0,
-        "cursor": cursor,
-        "suggested_path": suggested_path,
-        "regex_fallback_error": input.regex_fallback_error,
-        "timed_out": false,
-        "cancelled": false,
-        "error": null,
-    })
+    GrepOutput {
+        query: input.query.to_string(),
+        query_used: input.query_used.to_string(),
+        broadened_from: input.broadened_from.map(str::to_string),
+        regex_fallback_error: input.regex_fallback_error.map(str::to_string),
+        matches,
+        files,
+        count: input.total_matched,
+        shown: indices.len(),
+        files_with_matches: input.files_with_matches,
+        truncated: input.total_matched > indices.len() || input.next_file_offset > 0,
+        cursor,
+        suggested_path,
+        approximate: input.approximate,
+        timed_out: false,
+        cancelled: false,
+        error: None,
+    }
 }
 
-fn empty_grep_result(query: &str) -> serde_json::Value {
-    json!({
-        "query": query,
-        "query_used": query,
-        "broadened_from": null,
-        "regex_fallback_error": null,
-        "matches": [],
-        "files": [],
-        "count": 0,
-        "shown": 0,
-        "files_with_matches": 0,
-        "truncated": false,
-        "cursor": null,
-        "suggested_path": null,
-        "approximate": false,
-        "timed_out": false,
-        "cancelled": false,
-        "error": null,
-    })
+fn empty_grep_result(query: &str) -> GrepOutput {
+    GrepOutput {
+        query: query.to_string(),
+        query_used: query.to_string(),
+        broadened_from: None,
+        regex_fallback_error: None,
+        matches: Vec::new(),
+        files: Vec::new(),
+        count: 0,
+        shown: 0,
+        files_with_matches: 0,
+        truncated: false,
+        cursor: None,
+        suggested_path: None,
+        approximate: false,
+        timed_out: false,
+        cancelled: false,
+        error: None,
+    }
 }
 
 fn first_match_text(matched: &GrepMatch) -> String {

@@ -68,7 +68,8 @@ impl LashRuntime {
         }
         let services = services
             .with_attachment_store(Arc::clone(&host.core.durability.attachment_store))
-            .with_process_env_store(Arc::clone(&host.core.durability.process_env_store));
+            .with_process_env_store(Arc::clone(&host.core.durability.process_env_store))
+            .with_clock(Arc::clone(&host.core.clock));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone() {
             // Cold rebuild restores the exact persisted tool catalog, adopting
@@ -274,10 +275,10 @@ impl LashRuntime {
             env.residency,
         )
         .await?;
-        // Thread the host's process-work poke onto this session's host so the
-        // process admin seam can wake the runner after a successful start.
-        runtime.host.process_work_poke = env.process_work_poke.clone();
-        runtime.host.queued_work_poke = env.queued_work_poke.clone();
+        // Thread the host-owned work drivers onto this session's host so
+        // process starts and queued turns can drive ready work directly.
+        runtime.host.process_work_driver = env.process_work_driver.clone();
+        runtime.host.queued_work_driver = env.queued_work_driver.clone();
         Ok(runtime)
     }
 

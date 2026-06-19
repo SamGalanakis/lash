@@ -20,17 +20,8 @@ mod stats;
 mod tree;
 mod view_model;
 
-use lash_rlm_types::RlmTrajectoryEntry;
-
 pub use session::render;
 pub use tree::render_tree;
-
-fn chronological_rlm_step(event: &lash_core::ProtocolEvent) -> Option<RlmTrajectoryEntry> {
-    match lash_protocol_rlm::decode_rlm_protocol_event(event)? {
-        lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step) => Some(step),
-        _ => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -40,6 +31,7 @@ mod tests {
     use crate::trace::{LlmCallUsage, LlmPromptSnapshot, RequestMessage};
     use lash_core::session_model::{Part, PartKind, PruneState, shared_parts};
     use lash_core::{ChronologicalEntry, ChronologicalPayload};
+    use lash_rlm_types::RlmTrajectoryEntry;
     use std::path::PathBuf;
 
     fn prompt_snapshot(protocol_iteration: u64, text: &str) -> LlmPromptSnapshot {

@@ -9,23 +9,28 @@ use crate::{
     ModelToolReturn, SessionEvent, ToolCallOutput, ToolCallRecord, ToolCancellation, ToolFailure,
     ToolFailureClass, ToolResult, TurnActivityId, TurnEvent,
 };
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct ToolInvocation {
     pub id: String,
-    pub name: String,
+    pub tool_id: crate::ToolId,
     pub args: serde_json::Value,
     pub child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
 }
 
 impl ToolInvocation {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, args: serde_json::Value) -> Self {
+    pub fn new(id: impl Into<String>, tool_id: crate::ToolId, args: serde_json::Value) -> Self {
         Self {
             id: id.into(),
-            name: name.into(),
+            tool_id,
             args,
             child_execution_trace_hook: None,
         }
+    }
+
+    pub fn label(&self) -> String {
+        self.tool_id.to_string()
     }
 
     pub fn with_child_execution_trace_hook(
@@ -41,7 +46,7 @@ impl std::fmt::Debug for ToolInvocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolInvocation")
             .field("id", &self.id)
-            .field("name", &self.name)
+            .field("tool_id", &self.tool_id)
             .field("args", &self.args)
             .field(
                 "child_execution_trace_hook",
@@ -111,6 +116,57 @@ pub(crate) enum ProtocolToolCallLaunch {
     Pending(crate::tool_dispatch::PendingToolDispatchOutcome),
 }
 
+fn cancelled_runtime_tool_call_launch(
+    call_id: String,
+    tool_name: String,
+    args: serde_json::Value,
+    replay: Option<crate::llm::types::ProviderReplayMeta>,
+) -> crate::runtime::ToolCallLaunch {
+    crate::runtime::ToolCallLaunch::Done {
+        result: cancelled_completed_tool_call(call_id, tool_name, args, replay),
+    }
+}
+
+fn cancelled_completed_tool_call(
+    call_id: String,
+    tool_name: String,
+    args: serde_json::Value,
+    replay: Option<crate::llm::types::ProviderReplayMeta>,
+) -> crate::sansio::CompletedToolCall {
+    let output = ToolCallOutput::cancelled(ToolCancellation::runtime("tool call cancelled"));
+    crate::sansio::CompletedToolCall {
+        call_id: call_id.clone(),
+        tool_name: tool_name.clone(),
+        args,
+        model_return: ModelToolReturn {
+            call_id,
+            tool_name,
+            parts: vec![crate::ModelToolReturnPart::text(
+                "[Tool execution cancelled]\ntool call cancelled".to_string(),
+            )],
+        },
+        output,
+        duration_ms: 0,
+        replay,
+    }
+}
+
+fn deterministic_tool_invocation_batch_id(calls: &[ToolInvocation]) -> String {
+    let identity = calls
+        .iter()
+        .map(|call| {
+            serde_json::json!({
+                "id": call.id.clone(),
+                "tool_id": call.tool_id.to_string(),
+                "args": call.args.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let digest = crate::stable_hash::stable_json_sha256_hex(&identity)
+        .unwrap_or_else(|_| format!("len-{}", calls.len()));
+    format!("tool-batch:{digest}")
+}
+
 #[derive(Clone)]
 pub(crate) struct PreparedToolRun {
     pub prepared: crate::PreparedToolCall,
@@ -120,6 +176,111 @@ pub(crate) struct PreparedToolRun {
 }
 
 impl RuntimeExecutionContext<'_> {
+    fn tool_batch_invocation(&self, batch_id: &str) -> crate::RuntimeInvocation {
+        let suffix = format!("tool-batch:{batch_id}");
+        if let Some(parent) = self.parent_invocation.as_ref() {
+            let parent_effect_id = parent.effect_id().unwrap_or("effect");
+            return crate::runtime::causal::child_effect_invocation(
+                parent,
+                format!("{parent_effect_id}:{suffix}"),
+                crate::RuntimeEffectKind::ToolBatch,
+                suffix,
+            );
+        }
+        let replay_key = format!("{}:{suffix}", self.execution_scope_id());
+        crate::RuntimeInvocation::effect(
+            crate::RuntimeScope::new(self.session_id.clone()),
+            suffix,
+            crate::RuntimeEffectKind::ToolBatch,
+            replay_key,
+        )
+    }
+
+    fn should_execute_child_tool_batch_locally(&self) -> bool {
+        self.parent_invocation
+            .as_ref()
+            .and_then(crate::RuntimeInvocation::effect_kind)
+            == Some(crate::RuntimeEffectKind::ToolBatch)
+            && self
+                .dispatch
+                .effect_controller
+                .controller()
+                .durability_tier()
+                == crate::DurabilityTier::Durable
+    }
+
+    pub(crate) async fn execute_prepared_tool_batch_launches(
+        &self,
+        batch: crate::PreparedToolBatch,
+        parent_invocation: crate::RuntimeInvocation,
+        child_trace_hooks: HashMap<String, crate::ToolChildExecutionTraceHook>,
+    ) -> Result<crate::ToolBatchEffectOutcome, crate::RuntimeEffectControllerError> {
+        let indexed_tools = batch.calls.into_iter().enumerate().collect::<Vec<_>>();
+        let cancellation = self.cancellation_token.clone().unwrap_or_default();
+        let tool_cancel = cancellation.child_token();
+        let child_trace_hooks = std::sync::Arc::new(child_trace_hooks);
+        let outcomes = schedule_tool_batch(
+            indexed_tools,
+            |(index, _)| *index,
+            |(_, child)| self.tool_scheduling(&child.call.tool_name),
+            {
+                let context = self.clone();
+                let cancellation = cancellation.clone();
+                let tool_cancel = tool_cancel.clone();
+                let child_trace_hooks = std::sync::Arc::clone(&child_trace_hooks);
+                move |(index, child)| {
+                    let context = context.clone().with_cancellation_token(tool_cancel.clone());
+                    let cancellation = cancellation.clone();
+                    let tool_cancel = tool_cancel.clone();
+                    let parent_invocation = parent_invocation.clone();
+                    let cancelled_tool = child.call.clone();
+                    let child_execution_trace_hook =
+                        child_trace_hooks.get(&child.call.call_id).cloned();
+                    async move {
+                        let tool_call = context.execute_prepared_tool_call_launch(
+                            child.call,
+                            index,
+                            Some(parent_invocation),
+                            child_execution_trace_hook,
+                        );
+                        tokio::pin!(tool_call);
+                        tokio::select! {
+                            biased;
+                            _ = cancellation.cancelled() => {
+                                tool_cancel.cancel();
+                                let grace = context
+                                    .dispatch
+                                    .clock
+                                    .sleep(std::time::Duration::from_millis(50));
+                                tokio::pin!(grace);
+                                tokio::select! {
+                                    biased;
+                                    outcome = &mut tool_call => outcome,
+                                    _ = &mut grace => cancelled_runtime_tool_call_launch(
+                                        cancelled_tool.call_id,
+                                        cancelled_tool.tool_name,
+                                        cancelled_tool.args,
+                                        cancelled_tool.replay,
+                                    ),
+                                }
+                            }
+                            outcome = &mut tool_call => outcome,
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        let triggers = self.drain_tool_trigger_outcomes().map_err(|err| {
+            crate::RuntimeEffectControllerError::new("tool_trigger_outcome_drain", err.to_string())
+        })?;
+        Ok(crate::ToolBatchEffectOutcome {
+            launches: outcomes,
+            triggers,
+        })
+    }
+
     fn prepared_tool_run(
         &self,
         prepared: crate::PreparedToolCall,
@@ -178,37 +339,44 @@ impl RuntimeExecutionContext<'_> {
             args,
             replay: replay.clone(),
         };
-        let launch =
-            match prepare_tool_call_with_context(&dispatch, pending, Some(call_id.clone())).await {
-                ToolPreparationOutcome::Prepared(prepared) => {
-                    let dispatch_context = std::sync::Arc::new(dispatch.clone());
-                    let mut tool_context =
-                        crate::ToolContext::from_dispatch(std::sync::Arc::clone(&dispatch_context))
-                            .prepared_call(&prepared)
-                            .cancellation_token(self.cancellation_token.clone())
-                            .runtime_process_id(self.runtime_process_id.clone())
-                            .parent_invocation(parent_invocation.clone())
-                            .child_execution_trace_hook(child_execution_trace_hook.clone());
-                    if let Some(process_events) = self.process_event_context.as_ref() {
-                        tool_context = tool_context.process_events(
-                            process_events.process_id.clone(),
-                            std::sync::Arc::clone(&process_events.registry),
-                            process_events.store.clone(),
-                            process_events.session_store_factory.clone(),
-                            process_events.queued_work_poke.clone(),
-                        );
-                    }
-                    let tool_context = tool_context.build();
-                    dispatch_prepared_tool_call_launch_with_execution_context(
-                        dispatch_context.as_ref(),
-                        prepared,
-                        None,
-                        tool_context,
-                    )
-                    .await
+        let launch = match prepare_tool_call_with_context(&dispatch, pending, Some(call_id.clone()))
+            .await
+        {
+            ToolPreparationOutcome::Prepared(prepared) => {
+                let dispatch_context = std::sync::Arc::new(dispatch.clone());
+                let runtime_context = if let Some(parent_invocation) = parent_invocation.clone() {
+                    self.clone().with_parent_invocation(parent_invocation)
+                } else {
+                    self.clone()
+                };
+                let mut tool_context =
+                    crate::ToolContext::from_dispatch(std::sync::Arc::clone(&dispatch_context))
+                        .runtime_execution_context(runtime_context)
+                        .prepared_call(&prepared)
+                        .cancellation_token(self.cancellation_token.clone())
+                        .runtime_process_id(self.runtime_process_id.clone())
+                        .parent_invocation(parent_invocation.clone())
+                        .child_execution_trace_hook(child_execution_trace_hook.clone());
+                if let Some(process_events) = self.process_event_context.as_ref() {
+                    tool_context = tool_context.process_events(
+                        process_events.process_id.clone(),
+                        std::sync::Arc::clone(&process_events.registry),
+                        process_events.store.clone(),
+                        process_events.session_store_factory.clone(),
+                        process_events.queued_work_driver.clone(),
+                    );
                 }
-                ToolPreparationOutcome::Completed(outcome) => ToolCallLaunch::Done(*outcome),
-            };
+                let tool_context = tool_context.build();
+                dispatch_prepared_tool_call_launch_with_execution_context(
+                    dispatch_context.as_ref(),
+                    prepared,
+                    None,
+                    tool_context,
+                )
+                .await
+            }
+            ToolPreparationOutcome::Completed(outcome) => ToolCallLaunch::Done(*outcome),
+        };
         let mut outcome = match launch {
             ToolCallLaunch::Done(outcome) => outcome,
             ToolCallLaunch::Pending(pending) => {
@@ -227,6 +395,53 @@ impl RuntimeExecutionContext<'_> {
             .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "tool execution carries explicit runtime call metadata"
+    )]
+    pub(crate) async fn execute_tool_call_by_id(
+        &self,
+        call_id: String,
+        tool_id: crate::ToolId,
+        args: serde_json::Value,
+        index: usize,
+        replay: Option<crate::llm::types::ProviderReplayMeta>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
+        child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
+    ) -> CompletedProtocolToolCall {
+        let Some(manifest) =
+            crate::tool_dispatch::resolve_callable_manifest_by_id(self.dispatch.as_ref(), &tool_id)
+        else {
+            let outcome = ToolDispatchOutcome {
+                record: ToolCallRecord {
+                    call_id: Some(call_id.clone()),
+                    tool: tool_id.to_string(),
+                    args,
+                    output: ToolCallOutput::failure(ToolFailure::runtime(
+                        ToolFailureClass::Unavailable,
+                        "tool_unavailable",
+                        format!("Tool id `{tool_id}` is unavailable in this session"),
+                    )),
+                    duration_ms: 0,
+                },
+            };
+            let activity_id = TurnActivityId::new(format!("tool:{call_id}"));
+            return self
+                .complete_tool_call(index, call_id, replay, outcome, activity_id)
+                .await;
+        };
+        self.execute_tool_call(
+            call_id,
+            manifest.name,
+            args,
+            index,
+            replay,
+            parent_invocation,
+            child_execution_trace_hook,
+        )
+        .await
+    }
+
     pub(crate) async fn prepare_tool_call(
         &self,
         pending: crate::sansio::PendingToolCall,
@@ -240,11 +455,13 @@ impl RuntimeExecutionContext<'_> {
         prepared: crate::PreparedToolCall,
         index: usize,
         parent_invocation: Option<crate::RuntimeInvocation>,
+        child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
     ) -> crate::runtime::ToolCallLaunch {
         match Box::pin(self.execute_prepared_tool_call_launch_inner(
             prepared,
             index,
             parent_invocation,
+            child_execution_trace_hook,
         ))
         .await
         {
@@ -264,6 +481,7 @@ impl RuntimeExecutionContext<'_> {
         prepared: crate::PreparedToolCall,
         index: usize,
         parent_invocation: Option<crate::RuntimeInvocation>,
+        child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
     ) -> ProtocolToolCallLaunch {
         let call_id = prepared.call_id.clone();
         let name = prepared.tool_name.clone();
@@ -292,19 +510,26 @@ impl RuntimeExecutionContext<'_> {
         )
         .await;
 
+        let runtime_context = if let Some(parent_invocation) = run.parent_invocation.clone() {
+            self.clone().with_parent_invocation(parent_invocation)
+        } else {
+            self.clone()
+        };
         let mut tool_context =
             crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
+                .runtime_execution_context(runtime_context)
                 .prepared_call(&prepared)
                 .cancellation_token(self.cancellation_token.clone())
                 .runtime_process_id(self.runtime_process_id.clone())
-                .parent_invocation(run.parent_invocation.clone());
+                .parent_invocation(run.parent_invocation.clone())
+                .child_execution_trace_hook(child_execution_trace_hook);
         if let Some(process_events) = self.process_event_context.as_ref() {
             tool_context = tool_context.process_events(
                 process_events.process_id.clone(),
                 std::sync::Arc::clone(&process_events.registry),
                 process_events.store.clone(),
                 process_events.session_store_factory.clone(),
-                process_events.queued_work_poke.clone(),
+                process_events.queued_work_driver.clone(),
             );
         }
         let tool_context = tool_context.build();
@@ -491,7 +716,7 @@ impl RuntimeExecutionContext<'_> {
         let deadline = pending
             .pending
             .deadline
-            .map(|duration| std::time::Instant::now() + duration);
+            .map(|duration| self.dispatch.clock.now() + duration);
         let outcome = self
             .dispatch
             .effect_controller
@@ -501,7 +726,11 @@ impl RuntimeExecutionContext<'_> {
                     invocation,
                     crate::RuntimeEffectCommand::AwaitEvent { key: pending.key },
                 ),
-                crate::RuntimeEffectLocalExecutor::await_event(cancellation, deadline),
+                crate::RuntimeEffectLocalExecutor::await_event_with_clock(
+                    cancellation,
+                    deadline,
+                    std::sync::Arc::clone(&self.dispatch.clock),
+                ),
             )
             .await;
         let resolution = match outcome.and_then(crate::RuntimeEffectOutcome::into_await_event) {
@@ -531,61 +760,218 @@ impl RuntimeExecutionContext<'_> {
         .await
     }
 
-    pub async fn call_tool(
+    pub async fn call_tool_by_id(
         &self,
         call_id: String,
-        name: String,
+        tool_id: crate::ToolId,
         args: serde_json::Value,
         index: usize,
     ) -> ToolInvocationReply {
         let executed = self
-            .execute_tool_call(call_id, name, args, index, None, None, None)
+            .execute_tool_call_by_id(call_id, tool_id, args, index, None, None, None)
             .await;
         let reply = ToolInvocationReply::from_output(executed.completed.output);
         reply.with_record(executed.record)
     }
 
-    pub async fn call_tool_with_child_execution_trace_hook(
+    pub async fn call_tool_by_id_with_child_execution_trace_hook(
         &self,
         call_id: String,
-        name: String,
+        tool_id: crate::ToolId,
         args: serde_json::Value,
         index: usize,
         trace_hook: crate::ToolChildExecutionTraceHook,
     ) -> ToolInvocationReply {
         let executed = self
-            .execute_tool_call(call_id, name, args, index, None, None, Some(trace_hook))
+            .execute_tool_call_by_id(call_id, tool_id, args, index, None, None, Some(trace_hook))
             .await;
         let reply = ToolInvocationReply::from_output(executed.completed.output);
         reply.with_record(executed.record)
     }
 
     pub async fn call_tool_batch(&self, calls: Vec<ToolInvocation>) -> Vec<ToolInvocationReply> {
-        let indexed_calls = calls.into_iter().enumerate().collect::<Vec<_>>();
-        schedule_tool_batch(
-            indexed_calls,
-            |(index, _)| *index,
-            |(_, call)| self.tool_scheduling(&call.name),
-            |(index, call)| {
-                let ctx = self.clone();
-                async move {
-                    let executed = ctx
-                        .execute_tool_call(
-                            call.id,
-                            call.name,
-                            call.args,
+        if calls.is_empty() {
+            return Vec::new();
+        }
+
+        let batch_id = deterministic_tool_invocation_batch_id(&calls);
+        let mut replies = vec![None; calls.len()];
+        let mut prepared_entries = Vec::new();
+
+        for (index, call) in calls.into_iter().enumerate() {
+            let Some(manifest) = crate::tool_dispatch::resolve_callable_manifest_by_id(
+                self.dispatch.as_ref(),
+                &call.tool_id,
+            ) else {
+                let outcome = ToolDispatchOutcome {
+                    record: ToolCallRecord {
+                        call_id: Some(call.id.clone()),
+                        tool: call.tool_id.to_string(),
+                        args: call.args,
+                        output: ToolCallOutput::failure(ToolFailure::runtime(
+                            ToolFailureClass::Unavailable,
+                            "tool_unavailable",
+                            format!("Tool id `{}` is unavailable in this session", call.tool_id),
+                        )),
+                        duration_ms: 0,
+                    },
+                };
+                let completed = self
+                    .complete_tool_call(
+                        index,
+                        call.id,
+                        None,
+                        outcome,
+                        TurnActivityId::new(format!("tool:{}", batch_id)),
+                    )
+                    .await;
+                replies[index] = Some(
+                    ToolInvocationReply::from_output(completed.completed.output)
+                        .with_record(completed.record),
+                );
+                continue;
+            };
+
+            let pending = crate::sansio::PendingToolCall {
+                call_id: call.id.clone(),
+                tool_name: manifest.name,
+                args: call.args,
+                replay: None,
+            };
+            match self.prepare_tool_call(pending).await {
+                ToolPreparationOutcome::Prepared(prepared) => {
+                    prepared_entries.push((index, prepared, call.child_execution_trace_hook));
+                }
+                ToolPreparationOutcome::Completed(outcome) => {
+                    let completed = self
+                        .complete_tool_call(
                             index,
+                            call.id,
                             None,
-                            None,
-                            call.child_execution_trace_hook,
+                            *outcome,
+                            TurnActivityId::new(format!("tool:{}", batch_id)),
                         )
                         .await;
-                    ToolInvocationReply::from_output(executed.completed.output)
-                        .with_record(executed.record)
+                    replies[index] = Some(
+                        ToolInvocationReply::from_output(completed.completed.output)
+                            .with_record(completed.record),
+                    );
                 }
-            },
-        )
-        .await
+            }
+        }
+
+        if !prepared_entries.is_empty() {
+            let invocation = self.tool_batch_invocation(&batch_id);
+            let batch = crate::PreparedToolBatch::new(
+                batch_id.clone(),
+                prepared_entries
+                    .iter()
+                    .map(|(_, prepared, _)| prepared.clone())
+                    .collect(),
+            );
+            let child_trace_hooks = prepared_entries
+                .iter()
+                .filter_map(|(_, prepared, hook)| {
+                    hook.clone().map(|hook| (prepared.call_id.clone(), hook))
+                })
+                .collect();
+            let envelope = crate::RuntimeEffectEnvelope::new(
+                invocation.clone(),
+                crate::RuntimeEffectCommand::ToolBatch { batch },
+            );
+            let local_executor =
+                crate::RuntimeEffectLocalExecutor::tool_batch(self.clone(), child_trace_hooks);
+            let raw_outcome = if self.should_execute_child_tool_batch_locally() {
+                local_executor.execute(envelope).await
+            } else {
+                self.dispatch
+                    .effect_controller
+                    .controller()
+                    .execute_effect(envelope, local_executor)
+                    .await
+            };
+            let outcome =
+                match raw_outcome.and_then(crate::RuntimeEffectOutcome::into_tool_batch_effect) {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        for (index, prepared, _) in prepared_entries {
+                            replies[index] = Some(ToolInvocationReply::error(serde_json::json!(
+                                format!("tool batch failed: {err}")
+                            )));
+                            let _ = prepared;
+                        }
+                        return replies
+                            .into_iter()
+                            .map(|reply| reply.expect("every batch reply slot should be filled"))
+                            .collect();
+                    }
+                };
+            if outcome.launches.len() != prepared_entries.len() {
+                let message = format!(
+                    "tool batch returned {} launches for {} prepared calls",
+                    outcome.launches.len(),
+                    prepared_entries.len()
+                );
+                for (index, _, _) in prepared_entries {
+                    replies[index] = Some(ToolInvocationReply::error(serde_json::json!(message)));
+                }
+            } else {
+                for ((index, prepared, _), launch) in
+                    prepared_entries.into_iter().zip(outcome.launches)
+                {
+                    let call_id = prepared.call_id.clone();
+                    let reply = match launch {
+                        crate::runtime::ToolCallLaunch::Done { result } => {
+                            let record = ToolCallRecord {
+                                call_id: Some(result.call_id.clone()),
+                                tool: result.tool_name.clone(),
+                                args: result.args.clone(),
+                                output: result.output.clone(),
+                                duration_ms: result.duration_ms,
+                            };
+                            ToolInvocationReply::from_output(result.output).with_record(record)
+                        }
+                        crate::runtime::ToolCallLaunch::Pending {
+                            key,
+                            pending,
+                            duration_ms,
+                        } => {
+                            let dispatch_outcome = self
+                                .await_pending_tool_dispatch_outcome(
+                                    &call_id,
+                                    Some(invocation.clone()),
+                                    crate::tool_dispatch::PendingToolDispatchOutcome {
+                                        tool_name: prepared.tool_name.clone(),
+                                        args: prepared.args.clone(),
+                                        key,
+                                        pending,
+                                        duration_ms,
+                                    },
+                                    self.cancellation_token.clone(),
+                                )
+                                .await;
+                            let completed = self
+                                .complete_tool_call(
+                                    index,
+                                    call_id.clone(),
+                                    prepared.replay.clone(),
+                                    dispatch_outcome,
+                                    TurnActivityId::new(format!("tool:{call_id}")),
+                                )
+                                .await;
+                            ToolInvocationReply::from_output(completed.completed.output)
+                                .with_record(completed.record)
+                        }
+                    };
+                    replies[index] = Some(reply);
+                }
+            }
+        }
+
+        replies
+            .into_iter()
+            .map(|reply| reply.expect("every batch reply slot should be filled"))
+            .collect()
     }
 
     pub async fn start_tool_call(

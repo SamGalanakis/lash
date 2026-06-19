@@ -55,7 +55,7 @@ async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
 
     let state = session.admin().tools().state().await?;
 
-    assert!(state.contains("app_lookup"));
+    assert!(state.contains(&lash_core::ToolId::from("tool:app_lookup")));
     Ok(())
 }
 
@@ -71,14 +71,17 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     let generation = session
         .admin()
         .tools()
-        .set_availability_many(&[("app_lookup", ToolAvailability::Showcased)])
+        .set_availability_many(&[(
+            lash_core::ToolId::from("tool:app_lookup"),
+            ToolAvailability::Showcased,
+        )])
         .await?;
     let showcased = session.admin().tools().state().await?;
 
     assert_eq!(showcased.generation(), generation);
     assert_eq!(
         showcased
-            .get("app_lookup")
+            .get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Showcased)
     );
@@ -86,14 +89,14 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     let generation = session
         .admin()
         .tools()
-        .clear_availability_override("app_lookup")
+        .clear_availability_override("tool:app_lookup")
         .await?;
     let cleared = session.admin().tools().state().await?;
 
     assert_eq!(cleared.generation(), generation);
     assert_eq!(
         cleared
-            .get("app_lookup")
+            .get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         None
     );
@@ -101,20 +104,23 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     let generation = session
         .admin()
         .tools()
-        .set_availability("app_lookup", ToolAvailability::Off)
+        .set_availability("tool:app_lookup", ToolAvailability::Off)
         .await?;
     let off = session.admin().tools().state().await?;
 
     assert_eq!(off.generation(), generation);
     assert_eq!(
-        off.get("app_lookup")
+        off.get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );
 
     let mut callable = off;
     callable
-        .set_availability("app_lookup", Some(ToolAvailability::Callable))
+        .set_availability(
+            &lash_core::ToolId::from("tool:app_lookup"),
+            Some(ToolAvailability::Callable),
+        )
         .expect("app tool");
     let generation = session
         .admin()
@@ -127,7 +133,7 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     assert_eq!(callable.generation(), generation);
     assert_eq!(
         callable
-            .get("app_lookup")
+            .get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Callable)
     );
@@ -145,7 +151,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     session
         .admin()
         .tools()
-        .set_availability("app_lookup", ToolAvailability::Off)
+        .set_availability("tool:app_lookup", ToolAvailability::Off)
         .await?;
     let persisted_tool_state = session.admin().tools().state().await?.with_generation(9);
     let state = RuntimeSessionState {
@@ -173,7 +179,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
 
     assert_eq!(
         state
-            .get("app_lookup")
+            .get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );

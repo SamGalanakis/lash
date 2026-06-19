@@ -492,14 +492,8 @@ impl OpenAiCompatibleProvider {
                 }
             }
             if let Some(finish_reason) = choice.finish_reason {
-                state.terminal_reason = match finish_reason {
-                    "stop" => LlmTerminalReason::Stop,
-                    "tool_calls" | "function_call" => LlmTerminalReason::ToolUse,
-                    "length" | "max_tokens" => LlmTerminalReason::OutputLimit,
-                    "content_filter" | "safety" => LlmTerminalReason::ContentFilter,
-                    "" => state.terminal_reason,
-                    _ => LlmTerminalReason::ProviderError,
-                };
+                state.terminal_reason =
+                    terminal_reason_from_chat_finish_reason(finish_reason, state.terminal_reason);
             }
             if let Some(details) = delta.reasoning_details.as_ref() {
                 state.apply_reasoning_details(details);
@@ -512,29 +506,9 @@ impl OpenAiCompatibleProvider {
         payload: &str,
         state: &mut ChatStreamState,
     ) -> Result<(), LlmTransportError> {
-        let mut event_lines = Vec::new();
-        for mut line in payload.lines().map(str::to_string) {
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            if let Some(data) = line.strip_prefix("data:") {
-                event_lines.push(data.trim().to_string());
-                continue;
-            }
-            if line.starts_with("event:") {
-                continue;
-            }
-            if line.trim().is_empty() && !event_lines.is_empty() {
-                let raw = event_lines.join("\n");
-                Self::process_chat_sse_event(&raw, state)?;
-                event_lines.clear();
-            }
-        }
-        if !event_lines.is_empty() {
-            let raw = event_lines.join("\n");
-            Self::process_chat_sse_event(&raw, state)?;
-        }
-        Ok(())
+        lash_llm_transport::frame_sse_payload(payload, |raw| {
+            Self::process_chat_sse_event(raw, state)
+        })
     }
 }
 

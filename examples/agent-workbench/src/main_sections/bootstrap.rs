@@ -109,14 +109,13 @@ async fn async_main() -> AnyhowResult<()> {
     let restate_http = reqwest::Client::new();
     let process_deployment =
         lash_restate::RestateProcessDeployment::new(restate_ingress_url.clone(), process_registry);
-    let queued_work_runner =
-        lash::runtime::QueuedWorkRunner::new(Arc::new(WorkbenchQueuedWorkSubmitter {
+    let queued_work_driver =
+        lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
             session_ids: session_ids.clone(),
             store_factory: Arc::clone(&core_store_factory),
             restate_ingress_url: restate_ingress_url.clone(),
             restate_http: restate_http.clone(),
         }));
-    let queued_work_poke = queued_work_runner.poke_handle();
 
     let runtime_host_config = lash::durability::RuntimeHostConfig::new(
         Arc::new(lash_restate::RestateEffectHost::with_ingress_url(
@@ -157,7 +156,7 @@ async fn async_main() -> AnyhowResult<()> {
             ));
         })
         .process_work_driver(process_deployment.process_work_driver())
-        .queued_work_poke(queued_work_poke.clone())
+        .queued_work_driver(queued_work_driver.clone())
         .runtime_host_config(runtime_host_config)
         .build()
         .context("build Lash core")?;
@@ -184,7 +183,7 @@ async fn async_main() -> AnyhowResult<()> {
         trace_sink: Some(Arc::clone(&trace_sink)),
         lashlang_execution,
         event_tx,
-        queued_work_poke,
+        queued_work_driver,
         restate_ingress_url,
         restate_http,
         restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
@@ -197,7 +196,6 @@ async fn async_main() -> AnyhowResult<()> {
         process_deployment,
         process_worker,
     );
-    queued_work_runner.spawn();
     emit_workbench_trace(
         &state.trace_sink,
         None,

@@ -816,7 +816,7 @@ fn remote_tool_registry_reopen_conformance_compares_call_paths() {
 fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
     RemoteToolGrant {
         protocol_version: REMOTE_PROTOCOL_VERSION,
-        id: None,
+        id: format!("remote-tool:{name}"),
         name: name.to_string(),
         description: "demo".to_string(),
         input_schema: default_input_schema(),

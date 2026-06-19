@@ -25,6 +25,8 @@ lash-tool-support = { workspace = true }
 async-trait = { workspace = true }
 fff-search = { version = "=0.6.2-nightly.a677d64", default-features = false }
 regex = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }

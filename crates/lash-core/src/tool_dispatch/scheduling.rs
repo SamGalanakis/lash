@@ -1,30 +1,35 @@
 use std::future::Future;
+#[cfg(test)]
 use std::sync::Arc;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
-use crate::{ProgressSender, ToolCallRecord, ToolScheduling};
+use crate::ToolScheduling;
 
 use super::context::ToolDispatchContext;
+#[cfg(test)]
 use super::preparation::dispatch_tool_call;
 
 #[derive(Clone)]
-pub struct ParallelToolCallSpec {
-    pub index: usize,
-    pub tool_name: String,
-    pub args: serde_json::Value,
+#[cfg(test)]
+pub(crate) struct ParallelToolCallSpec {
+    pub(crate) index: usize,
+    pub(crate) tool_name: String,
+    pub(crate) args: serde_json::Value,
 }
 
 #[derive(Clone)]
-pub struct ParallelToolCallOutcome {
-    pub index: usize,
-    pub record: ToolCallRecord,
+#[cfg(test)]
+pub(crate) struct ParallelToolCallOutcome {
+    pub(crate) index: usize,
+    pub(crate) record: crate::ToolCallRecord,
 }
 
+#[cfg(test)]
 pub(crate) async fn dispatch_parallel_tool_call(
     context: Arc<ToolDispatchContext<'_>>,
     spec: ParallelToolCallSpec,
-    progress: Option<ProgressSender>,
+    progress: Option<crate::ProgressSender>,
 ) -> ParallelToolCallOutcome {
     let outcome = dispatch_tool_call(&context, spec.tool_name, spec.args, progress.as_ref()).await;
     ParallelToolCallOutcome {
@@ -99,10 +104,11 @@ where
 }
 
 /// Dispatch a batch of tool calls produced by one model response.
-pub async fn dispatch_parallel_tool_calls(
+#[cfg(test)]
+pub(crate) async fn dispatch_parallel_tool_calls(
     context: Arc<ToolDispatchContext<'_>>,
     specs: Vec<ParallelToolCallSpec>,
-    progress: Option<&ProgressSender>,
+    progress: Option<&crate::ProgressSender>,
 ) -> Vec<ParallelToolCallOutcome> {
     let progress = progress.cloned();
     schedule_tool_batch(

@@ -9,9 +9,10 @@ use lash_postgres_store::PostgresStorage;
 use lash_restate::{RestateEffectHost, RestateProcessDeployment};
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
-    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME,
-    TurnRequest, TurnResponse, TurnScenario, build_e2e_core, ensure_e2e_schema, env,
-    expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
+    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_TOOL_BATCH_TEXT,
+    ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
+    build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
+    process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -203,7 +204,29 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &durable_input_request.workflow_id).await?;
     assert_durable_input_response(&durable_response)?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 10).await?;
+    let tool_batch_request = TurnRequest {
+        workflow_id: "e2e-tool-batch".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::ToolBatch,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &tool_batch_request).await?;
+    let tool_batch_response =
+        wait_for_terminal_result(storage.pool(), &tool_batch_request.workflow_id).await?;
+    assert_tool_batch_response(&tool_batch_response)?;
+
+    let tool_batch_failover_request = TurnRequest {
+        workflow_id: "e2e-tool-batch-failover".to_string(),
+        fail_once: true,
+        scenario: TurnScenario::ToolBatch,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &tool_batch_failover_request).await?;
+    let tool_batch_failover_response =
+        wait_for_terminal_result(storage.pool(), &tool_batch_failover_request.workflow_id).await?;
+    assert_tool_batch_response(&tool_batch_failover_response)?;
+
+    let responses = wait_for_terminal_results(storage.pool(), 12).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -211,6 +234,7 @@ async fn async_main() -> Result<()> {
     assert_failover(storage.pool()).await?;
     assert_provider_calls(storage.pool()).await?;
     assert_tool_and_turn_telemetry(storage.pool()).await?;
+    assert_tool_batch_side_effects(storage.pool()).await?;
     assert_durable_input_steps(storage.pool()).await?;
     assert_trigger_delivery(storage.pool(), &trigger_process_id).await?;
     assert_attachments_round_trip(storage.pool(), &attachment_store, &responses).await?;
@@ -698,6 +722,44 @@ fn assert_durable_input_response(response: &TurnResponse) -> Result<()> {
     Ok(())
 }
 
+fn assert_tool_batch_response(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == EXPECTED_TOOL_BATCH_TEXT,
+        "workflow `{}` tool-batch final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    let batch = response
+        .submitted_value
+        .get("batch")
+        .context("tool-batch response missing batch result")?;
+    anyhow::ensure!(
+        batch.pointer("/slow/value").and_then(Value::as_str) == Some("batch:slow"),
+        "tool-batch slow result mismatch: {}",
+        response.submitted_value
+    );
+    anyhow::ensure!(
+        batch.pointer("/fast/value").and_then(Value::as_str) == Some("batch:fast"),
+        "tool-batch fast result mismatch: {}",
+        response.submitted_value
+    );
+    anyhow::ensure!(
+        batch.pointer("/literal").and_then(Value::as_str) == Some("kept"),
+        "tool-batch literal result missing: {}",
+        response.submitted_value
+    );
+    let keys = [
+        batch.pointer("/slow/key").and_then(Value::as_str),
+        batch.pointer("/fast/key").and_then(Value::as_str),
+    ];
+    anyhow::ensure!(
+        keys == [Some("slow"), Some("fast")],
+        "tool-batch result order was not source order: {}",
+        response.submitted_value
+    );
+    Ok(())
+}
+
 async fn wait_for_durable_input_key(
     pool: &sqlx::PgPool,
     workflow_id: &str,
@@ -807,7 +869,6 @@ async fn emit_button_event(
     let registry = process_registry_from_storage(storage);
     let deployment = RestateProcessDeployment::new(ingress_url.to_string(), registry);
     let process_work_driver = deployment.process_work_driver();
-    let _poke = deployment.spawn();
     let core = build_e2e_core(lash_restate_postgres_workers_e2e::E2eCoreConfig {
         worker_id: "runner".to_string(),
         storage: storage.clone(),
@@ -1045,40 +1106,45 @@ async fn assert_worker_distribution(pool: &sqlx::PgPool) -> Result<()> {
 }
 
 async fn assert_failover(pool: &sqlx::PgPool) -> Result<()> {
-    let exit_worker: String = sqlx::query_scalar(
-        "SELECT worker_id
-         FROM lash_e2e_failover_markers
-         WHERE workflow_id = 'e2e-failover'",
-    )
-    .fetch_one(pool)
-    .await
-    .context("load failover exit marker")?;
-    let completed_by: Vec<String> = sqlx::query_scalar(
-        "SELECT worker_id
-         FROM lash_e2e_worker_events
-         WHERE workflow_id = 'e2e-failover'
-           AND event_type = 'turn_completed'
-         ORDER BY worker_id",
-    )
-    .fetch_all(pool)
-    .await
-    .context("load failover completion worker")?;
-    anyhow::ensure!(
-        completed_by.iter().any(|worker| worker != &exit_worker),
-        "expected a peer to complete failover after {exit_worker} exited, got {completed_by:?}"
-    );
-    let final_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)
-         FROM lash_e2e_terminal_results
-         WHERE workflow_id = 'e2e-failover'",
-    )
-    .fetch_one(pool)
-    .await
-    .context("count failover final rows")?;
-    anyhow::ensure!(
-        final_rows == 1,
-        "failover workflow recorded {final_rows} final rows"
-    );
+    for workflow_id in ["e2e-failover", "e2e-tool-batch-failover"] {
+        let exit_worker: String = sqlx::query_scalar(
+            "SELECT worker_id
+             FROM lash_e2e_failover_markers
+             WHERE workflow_id = $1",
+        )
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("load failover exit marker for `{workflow_id}`"))?;
+        let completed_by: Vec<String> = sqlx::query_scalar(
+            "SELECT worker_id
+             FROM lash_e2e_worker_events
+             WHERE workflow_id = $1
+               AND event_type = 'turn_completed'
+             ORDER BY worker_id",
+        )
+        .bind(workflow_id)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("load failover completion worker for `{workflow_id}`"))?;
+        anyhow::ensure!(
+            completed_by.iter().any(|worker| worker != &exit_worker),
+            "expected a peer to complete `{workflow_id}` after {exit_worker} exited, got {completed_by:?}"
+        );
+        let final_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM lash_e2e_terminal_results
+             WHERE workflow_id = $1",
+        )
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("count failover final rows for `{workflow_id}`"))?;
+        anyhow::ensure!(
+            final_rows == 1,
+            "failover workflow `{workflow_id}` recorded {final_rows} final rows"
+        );
+    }
     Ok(())
 }
 
@@ -1101,6 +1167,17 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
         failover_calls == 1,
         "expected one durable failover provider completion, got {failover_calls}"
     );
+    let tool_batch_failover_calls: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM lash_e2e_provider_calls
+         WHERE workflow_id = 'e2e-tool-batch-failover' AND scenario = 'tool_batch'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("count tool-batch failover provider calls")?;
+    anyhow::ensure!(
+        tool_batch_failover_calls == 1,
+        "expected one durable tool-batch failover provider completion, got {tool_batch_failover_calls}"
+    );
     let scenarios: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT scenario FROM lash_e2e_provider_calls ORDER BY scenario",
     )
@@ -1114,6 +1191,7 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
         "queued_wake",
         "trigger_setup",
         "signal_suspend",
+        "tool_batch",
     ] {
         anyhow::ensure!(
             scenarios.iter().any(|scenario| scenario == expected),
@@ -1127,6 +1205,7 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
     for tool in [
         "app_lookup",
         "async_lookup",
+        "batch_side_effect",
         "make_attachment",
         "crash_once",
         "durable_input_request",
@@ -1205,6 +1284,44 @@ async fn assert_durable_input_steps(pool: &sqlx::PgPool) -> Result<()> {
         anyhow::ensure!(
             count == 1,
             "durable input step `{step_id}` ran {count} times; counts={counts:?}"
+        );
+    }
+    Ok(())
+}
+
+async fn assert_tool_batch_side_effects(pool: &sqlx::PgPool) -> Result<()> {
+    for workflow_id in ["e2e-tool-batch", "e2e-tool-batch-failover"] {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT args_json::jsonb ->> 'key' AS key,
+                    COUNT(*) AS count,
+                    COUNT(DISTINCT call_id) AS distinct_call_ids
+             FROM lash_e2e_tool_events
+             WHERE workflow_id = $1 AND tool_name = 'batch_side_effect'
+             GROUP BY args_json::jsonb ->> 'key'
+             ORDER BY key",
+        )
+        .bind(workflow_id)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("load tool-batch side effects for `{workflow_id}`"))?;
+        let counts = rows
+            .into_iter()
+            .map(|(key, count, distinct_call_ids)| (key, (count, distinct_call_ids)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for key in ["fast", "slow"] {
+            let (count, distinct_call_ids) = counts.get(key).copied().unwrap_or_default();
+            anyhow::ensure!(
+                count == 1,
+                "workflow `{workflow_id}` recorded {count} side effects for `{key}`; counts={counts:?}"
+            );
+            anyhow::ensure!(
+                distinct_call_ids == 1,
+                "workflow `{workflow_id}` recorded {distinct_call_ids} call ids for `{key}`; counts={counts:?}"
+            );
+        }
+        anyhow::ensure!(
+            counts.len() == 2,
+            "workflow `{workflow_id}` recorded unexpected tool-batch side-effect keys: {counts:?}"
         );
     }
     Ok(())
@@ -1302,7 +1419,6 @@ async fn assert_reopened_session_agrees(
     let registry = process_registry_from_storage(storage);
     let deployment = RestateProcessDeployment::new(ingress_url.to_string(), registry);
     let process_work_driver = deployment.process_work_driver();
-    let _poke = deployment.spawn();
     let core = build_e2e_core(lash_restate_postgres_workers_e2e::E2eCoreConfig {
         worker_id: "runner-reopen".to_string(),
         storage: storage.clone(),

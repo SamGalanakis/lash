@@ -28,12 +28,20 @@ fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), Reconfigu
     Ok(())
 }
 
+fn manifest_with_restored_override(
+    mut live: ToolManifest,
+    stored: &ToolManifest,
+) -> ToolManifest {
+    live.availability_override = stored.availability_override.or(live.availability_override);
+    live
+}
+
 fn manifest_with_compact_contract(
     source: &dyn ToolSourceExecutor,
     mut manifest: ToolManifest,
 ) -> ToolManifest {
     if manifest.compact_contract.is_none()
-        && let Some(contract) = source.resolve_contract(&manifest.name)
+        && let Some(contract) = source.resolve_contract_by_id(&manifest.id)
     {
         manifest.compact_contract = Some(contract.compact_contract(&manifest));
     }
@@ -41,16 +49,16 @@ fn manifest_with_compact_contract(
 }
 
 fn export_tool_state_entries(
-    entries: &BTreeMap<String, ToolRegistryEntry>,
-) -> BTreeMap<String, ToolStateEntry> {
+    entries: &BTreeMap<ToolId, ToolRegistryEntry>,
+) -> BTreeMap<ToolId, ToolStateEntry> {
     entries
         .iter()
-        .map(|(name, entry)| (name.clone(), entry.export()))
+        .map(|(id, entry)| (id.clone(), entry.export()))
         .collect()
 }
 
 /// How [`rebind_tool_state_entries`] treats a persisted tool that no
-/// registered source resolves by name.
+/// registered source resolves by id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RebindMode {
     /// Restore/fork: keep the entry as an orphan instead of failing. Sessions
@@ -63,75 +71,65 @@ enum RebindMode {
 }
 
 struct ReboundTools {
-    tools: BTreeMap<String, ToolRegistryEntry>,
-    orphaned: Vec<String>,
+    tools: BTreeMap<ToolId, ToolRegistryEntry>,
+    orphaned: Vec<ToolId>,
 }
 
 fn rebind_tool_state_entries(
-    entries: &BTreeMap<String, ToolStateEntry>,
+    entries: &BTreeMap<ToolId, ToolStateEntry>,
     sources: &BTreeMap<String, Arc<dyn ToolSourceExecutor>>,
     mode: RebindMode,
 ) -> Result<ReboundTools, ReconfigureError> {
     let mut rebound = BTreeMap::new();
     let mut orphaned = Vec::new();
-    for (name, entry) in entries {
-        if name != &entry.manifest.name {
+    for (id, entry) in entries {
+        if id != &entry.manifest.id {
             return Err(ReconfigureError::Validation(format!(
-                "tool state key `{}` does not match manifest name `{}`",
-                name, entry.manifest.name
+                "tool state key `{}` does not match manifest id `{}`",
+                id, entry.manifest.id
             )));
         }
 
-        let mut name_matches = Vec::new();
+        let mut id_matches = Vec::new();
         for (source_id, source) in sources {
-            let Some(manifest) = source.resolve_manifest(name) else {
+            let Some(manifest) = source.resolve_manifest_by_id(id) else {
                 continue;
             };
-            name_matches.push((
+            id_matches.push((
                 source_id.clone(),
                 manifest_with_compact_contract(source.as_ref(), manifest),
             ));
         }
 
-        if name_matches.is_empty() {
+        if id_matches.is_empty() {
             if mode == RebindMode::RejectUnresolved && !entry.orphaned {
                 return Err(ReconfigureError::Validation(format!(
-                    "no registered tool source resolves tool `{name}`"
+                    "no registered tool source resolves tool id `{id}`"
                 )));
             }
-            orphaned.push(name.clone());
+            orphaned.push(id.clone());
             rebound.insert(
-                name.clone(),
+                id.clone(),
                 ToolRegistryEntry::orphaned(entry.manifest.clone()),
             );
             continue;
         }
 
-        let matching_id = name_matches
-            .iter()
-            .filter(|(_, manifest)| manifest.id == entry.manifest.id)
-            .collect::<Vec<_>>();
-
-        if matching_id.len() == 1 {
-            let source_id = matching_id[0].0.clone();
+        if id_matches.len() == 1 {
+            let (source_id, manifest) = id_matches
+                .into_iter()
+                .next()
+                .expect("len checked above");
             rebound.insert(
-                name.clone(),
-                ToolRegistryEntry::new(entry.manifest.clone(), source_id),
+                id.clone(),
+                ToolRegistryEntry::new(
+                    manifest_with_restored_override(manifest, &entry.manifest),
+                    source_id,
+                ),
             );
-        } else if matching_id.is_empty() {
-            let resolved_ids = name_matches
-                .iter()
-                .map(|(_, manifest)| manifest.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(ReconfigureError::Validation(format!(
-                "tool `{name}` resolved with id(s) `{resolved_ids}`, expected `{}`",
-                entry.manifest.id
-            )));
         } else {
             return Err(ReconfigureError::Validation(format!(
-                "tool `{name}` with id `{}` is resolved by multiple registered sources",
-                entry.manifest.id
+                "tool id `{id}` is resolved by multiple registered sources"
             )));
         }
     }

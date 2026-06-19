@@ -148,6 +148,7 @@ impl RuntimeTurnDriver<'_> {
                         chars: Some(prompt_chars),
                     }],
                 },
+                self.host.core.clock.as_ref(),
             );
         }
         self.policy = session_policy;

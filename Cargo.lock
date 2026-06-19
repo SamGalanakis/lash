@@ -2808,6 +2808,7 @@ dependencies = [
  "lash-tools",
  "serde_json",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2998,6 +2999,8 @@ dependencies = [
  "lash-lashlang-runtime",
  "lash-tool-support",
  "regex",
+ "schemars",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3067,6 +3070,7 @@ dependencies = [
  "ignore",
  "lash-core",
  "lash-lashlang-runtime",
+ "schemars",
  "serde",
  "serde_json",
  "similar",
@@ -3087,6 +3091,8 @@ dependencies = [
  "portable-pty",
  "regex",
  "reqwest 0.13.3",
+ "schemars",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

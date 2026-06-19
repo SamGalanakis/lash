@@ -6,7 +6,6 @@ use crate::plugin::{ProtocolDriverPlugin, ProtocolSessionPlugin};
 struct EffectControllerRecord {
     kind: RuntimeEffectKind,
     turn_id: Option<String>,
-    effect_id: String,
     replay_key: String,
 }
 
@@ -40,7 +39,6 @@ impl RecordingEffectController {
             .push(EffectControllerRecord {
                 kind: invocation.effect_kind().expect("effect kind"),
                 turn_id: invocation.scope.turn_id.clone(),
-                effect_id: invocation.effect_id().expect("effect id").to_string(),
                 replay_key: invocation.replay_key().expect("replay key").to_string(),
             });
     }
@@ -176,6 +174,14 @@ impl RuntimeEffectController for RecordingEffectController {
                     },
                     triggers: Vec::new(),
                 })
+            }
+            RuntimeEffectCommand::ToolBatch { batch } => {
+                local_executor
+                    .execute(RuntimeEffectEnvelope::new(
+                        envelope.invocation,
+                        RuntimeEffectCommand::ToolBatch { batch },
+                    ))
+                    .await
             }
             RuntimeEffectCommand::Process { .. } => Err(RuntimeEffectControllerError::new(
                 "process_unexpected",
@@ -903,11 +909,15 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
         .expect("turn");
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
-    assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::ToolCall), 1);
+    assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::ToolBatch), 1);
+    assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::Direct), 1);
     assert_eq!(default_recorder.count_kind(RuntimeEffectKind::Direct), 0);
-    assert!(scoped_recorder.records().iter().any(|record| {
-        record.kind == RuntimeEffectKind::ToolCall && record.replay_key.contains("direct-call-1")
-    }));
+    assert!(
+        scoped_recorder
+            .envelopes()
+            .iter()
+            .any(|envelope| envelope.contains("direct-call-1"))
+    );
 }
 
 #[tokio::test]
@@ -931,7 +941,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
             envelope: RuntimeEffectEnvelope,
             local_executor: crate::RuntimeEffectLocalExecutor<'_>,
         ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-            if matches!(&envelope.command, RuntimeEffectCommand::ToolCall { .. }) {
+            if matches!(&envelope.command, RuntimeEffectCommand::ToolBatch { .. }) {
                 let outcome = local_executor.execute(envelope).await?;
                 self.tool_outcomes
                     .lock()
@@ -1076,7 +1086,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     let tool_outcomes = controller.tool_outcomes();
     assert_eq!(tool_outcomes.len(), 1);
-    assert_eq!(tool_outcomes[0]["type"], "tool_call");
+    assert_eq!(tool_outcomes[0]["type"], "tool_batch");
     assert_eq!(
         tool_outcomes[0]["triggers"][0]["source_type"],
         serde_json::json!("ui.button.pressed")
@@ -1206,14 +1216,19 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
     let tool_records = recorder
         .records()
         .into_iter()
-        .filter(|record| record.kind == RuntimeEffectKind::ToolCall)
+        .filter(|record| record.kind == RuntimeEffectKind::ToolBatch)
         .collect::<Vec<_>>();
     assert_eq!(tool_records.len(), 1);
     let tool = &tool_records[0];
     assert_eq!(tool.turn_id.as_deref(), Some("scoped-retry-sleep"));
-    assert!(tool.effect_id.contains("retry-call-1"));
     assert!(tool.replay_key.contains("scoped-retry-sleep"));
-    assert!(tool.replay_key.contains("retry-call-1"));
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::Sleep), 1);
+    assert!(
+        recorder
+            .envelopes()
+            .iter()
+            .any(|envelope| envelope.contains("retry-call-1"))
+    );
 }
 
 #[tokio::test]
@@ -1280,15 +1295,20 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
         .expect("turn");
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
-    assert_eq!(recorder.count_kind(RuntimeEffectKind::ToolCall), 2);
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::ToolBatch), 1);
     let tool_keys = recorder
         .records()
         .into_iter()
-        .filter(|record| record.kind == RuntimeEffectKind::ToolCall)
+        .filter(|record| record.kind == RuntimeEffectKind::ToolBatch)
         .map(|record| record.replay_key)
         .collect::<Vec<_>>();
-    assert!(tool_keys.iter().any(|key| key.ends_with(":call-1")));
-    assert!(tool_keys.iter().any(|key| key.ends_with(":call-2")));
+    assert_eq!(tool_keys.len(), 1);
+    assert!(
+        recorder
+            .envelopes()
+            .iter()
+            .any(|envelope| envelope.contains("call-1") && envelope.contains("call-2"))
+    );
     assert!(
         turn.tool_calls
             .iter()

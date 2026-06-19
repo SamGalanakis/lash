@@ -3,6 +3,7 @@ use super::support::*;
 #[derive(Debug)]
 pub struct ProviderRateLimiter {
     state: Mutex<ProviderRateLimiterState>,
+    clock: Arc<dyn crate::Clock>,
 }
 
 #[derive(Debug)]
@@ -16,15 +17,12 @@ struct ProviderRateLimiterState {
 #[derive(Clone, Debug)]
 struct WindowBucket {
     used: u32,
-    reset_at: Instant,
+    reset_at: std::time::Instant,
 }
 
-impl Default for WindowBucket {
-    fn default() -> Self {
-        Self {
-            used: 0,
-            reset_at: Instant::now(),
-        }
+impl WindowBucket {
+    fn new(reset_at: std::time::Instant) -> Self {
+        Self { used: 0, reset_at }
     }
 }
 
@@ -35,18 +33,24 @@ pub struct ProviderRateLimitPermit {
 
 impl ProviderRateLimiter {
     pub fn new(policy: ProviderRateLimitPolicy) -> Self {
+        Self::with_clock(policy, Arc::new(crate::SystemClock))
+    }
+
+    pub fn with_clock(policy: ProviderRateLimitPolicy, clock: Arc<dyn crate::Clock>) -> Self {
         let semaphore = policy
             .max_concurrency
             .filter(|limit| *limit > 0)
             .map(tokio::sync::Semaphore::new)
             .map(Arc::new);
+        let now = clock.now();
         Self {
             state: Mutex::new(ProviderRateLimiterState {
                 policy,
                 semaphore,
-                request_bucket: WindowBucket::default(),
-                token_bucket: WindowBucket::default(),
+                request_bucket: WindowBucket::new(now),
+                token_bucket: WindowBucket::new(now),
             }),
+            clock,
         }
     }
 
@@ -60,6 +64,10 @@ impl ProviderRateLimiter {
                 .map(Arc::new);
         }
         state.policy = policy;
+    }
+
+    pub fn clock(&self) -> Arc<dyn crate::Clock> {
+        Arc::clone(&self.clock)
     }
 
     pub async fn admit(&self, request: &LlmRequest) -> ProviderRateLimitPermit {
@@ -84,7 +92,7 @@ impl ProviderRateLimiter {
         loop {
             let wait = {
                 let mut state = self.state.lock().expect("provider rate limiter lock");
-                let now = Instant::now();
+                let now = self.clock.now();
                 let policy = state.policy.clone();
                 let request_wait = bucket_wait(
                     &mut state.request_bucket,
@@ -107,7 +115,7 @@ impl ProviderRateLimiter {
                 }
             };
             if let Some(wait) = wait {
-                tokio::time::sleep(wait).await;
+                self.clock.sleep(wait).await;
             }
         }
     }
@@ -115,7 +123,7 @@ impl ProviderRateLimiter {
 
 fn bucket_wait(
     bucket: &mut WindowBucket,
-    now: Instant,
+    now: std::time::Instant,
     limit: Option<u32>,
     window_ms: Option<u64>,
     cost: u32,

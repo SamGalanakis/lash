@@ -169,7 +169,7 @@ impl PluginHost {
         if let Some(snapshot) = &mut tool_snapshot {
             let hidden_tools = &authority.tool_access.hidden_tools;
             if !hidden_tools.is_empty() {
-                snapshot.retain(|name, _| !hidden_tools.contains(name));
+                snapshot.retain(|_, entry| !hidden_tools.contains(&entry.manifest().name));
             }
         }
         let mut plugins = Vec::new();

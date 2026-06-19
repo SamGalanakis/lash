@@ -24,6 +24,7 @@ impl RuntimeTurnDriver<'_> {
             &self.host.core.tracing.trace_context,
             self.trace_context(protocol_iteration),
             event,
+            self.host.core.clock.as_ref(),
         );
     }
 

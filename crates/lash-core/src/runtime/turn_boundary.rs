@@ -30,6 +30,7 @@ struct ProgressBoundarySnapshot<'a> {
 
 pub(super) struct TurnBoundary {
     stage: TurnCommitStage,
+    clock: Arc<dyn crate::Clock>,
 }
 
 /// Explicit two-phase lifecycle for a turn commit.
@@ -98,9 +99,22 @@ impl PersistedGraphMark {
 }
 
 impl TurnBoundary {
+    #[cfg(test)]
     pub(super) fn from_state(state: RuntimeSessionState) -> Self {
+        Self::from_state_with_clock(state, Arc::new(crate::SystemClock))
+    }
+
+    pub(super) fn from_state_with_clock(
+        state: RuntimeSessionState,
+        clock: Arc<dyn crate::Clock>,
+    ) -> Self {
+        let draft_clock = Arc::clone(&clock);
         Self {
-            stage: TurnCommitStage::Drafting(Box::new(TurnCommitDraft::from_state(state))),
+            stage: TurnCommitStage::Drafting(Box::new(TurnCommitDraft::from_state_with_clock(
+                state,
+                draft_clock,
+            ))),
+            clock,
         }
     }
 
@@ -423,6 +437,7 @@ impl TurnBoundary {
             completed_queue_claims,
             pending_attachment_ids,
         } = input;
+        let clock = Arc::clone(&self.clock);
         let state = self.final_state_mut();
         state.apply_snapshot(returned_state);
         for entry in usage_deltas.iter().cloned() {
@@ -434,8 +449,8 @@ impl TurnBoundary {
         if let Some(execution_state_snapshot) = execution_state_snapshot {
             state.set_execution_state_snapshot(execution_state_snapshot);
         }
-        materialize_terminal_output(state, outcome);
-        materialize_agent_frame_switch(state, outcome, tool_calls);
+        materialize_terminal_output(state, outcome, clock.as_ref());
+        materialize_agent_frame_switch(state, outcome, tool_calls, clock.as_ref());
         let progress_graph = match &self.stage {
             TurnCommitStage::Drafting(draft) => {
                 Some(draft.graph_commit(draft.state().graph_replace_required))
@@ -569,7 +584,11 @@ fn committed_attachment_ids(
     attachment_ids.into_iter().collect()
 }
 
-fn materialize_terminal_output(state: &mut RuntimeSessionState, outcome: &TurnOutcome) {
+fn materialize_terminal_output(
+    state: &mut RuntimeSessionState,
+    outcome: &TurnOutcome,
+    clock: &dyn crate::Clock,
+) {
     let TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) = outcome else {
         return;
     };
@@ -586,23 +605,26 @@ fn materialize_terminal_output(state: &mut RuntimeSessionState, outcome: &TurnOu
     }
 
     let id = fresh_message_id();
-    state.append_active_conversation_messages(&[Message {
-        id: id.clone(),
-        role: MessageRole::Assistant,
-        parts: shared_parts(vec![Part {
-            id: format!("{id}.p0"),
-            kind: PartKind::Prose,
-            content: text.clone(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_replay: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-            response_meta: None,
-        }]),
-        origin: None,
-    }]);
+    state.append_active_conversation_messages_with_clock(
+        &[Message {
+            id: id.clone(),
+            role: MessageRole::Assistant,
+            parts: shared_parts(vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Prose,
+                content: text.clone(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            origin: None,
+        }],
+        clock,
+    );
     state.graph_replace_required = true;
 }
 
@@ -610,6 +632,7 @@ fn materialize_agent_frame_switch(
     state: &mut RuntimeSessionState,
     outcome: &TurnOutcome,
     tool_calls: &[ToolCallRecord],
+    clock: &dyn crate::Clock,
 ) {
     let TurnOutcome::AgentFrameSwitch { frame_id, .. } = outcome else {
         return;
@@ -642,10 +665,11 @@ fn materialize_agent_frame_switch(
             }
         })
         .collect::<Vec<_>>();
-    super::open_agent_frame_in_state(
+    super::open_agent_frame_in_state_with_clock(
         state,
         crate::OpenAgentFrameRequest::new(frame_id.clone(), crate::AgentFrameReason::continue_as())
             .with_initial_nodes(nodes),
+        clock,
     );
 }
 
@@ -760,6 +784,7 @@ mod tests {
                 task: "next task".to_string(),
             },
             &tool_calls,
+            &crate::SystemClock,
         );
 
         assert_eq!(state.session_id, "session-1");
@@ -812,13 +837,14 @@ mod tests {
                 }),
         );
 
-        let opened = super::super::open_agent_frame_in_state(
+        let opened = super::super::open_agent_frame_in_state_with_clock(
             &mut state,
             crate::OpenAgentFrameRequest::new(
                 frame_id.clone(),
                 crate::AgentFrameReason::compaction(),
             )
             .with_initial_nodes(vec![seed_node.clone()]),
+            &crate::SystemClock,
         );
 
         assert!(opened.opened);
@@ -860,13 +886,14 @@ mod tests {
             "old durable frame"
         );
 
-        let replay = super::super::open_agent_frame_in_state(
+        let replay = super::super::open_agent_frame_in_state_with_clock(
             &mut state,
             crate::OpenAgentFrameRequest::new(
                 frame_id.clone(),
                 crate::AgentFrameReason::compaction(),
             )
             .with_initial_nodes(vec![seed_node]),
+            &crate::SystemClock,
         );
         assert!(!replay.opened);
         let replay_read = state

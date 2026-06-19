@@ -92,6 +92,7 @@ impl RlmSubagentToolsProvider {
         &self,
         args: &Value,
         context: &lash_core::ToolPrepareContext,
+        tool_id: lash_core::ToolId,
         call: lash_core::sansio::PendingToolCall,
     ) -> Result<PreparedToolCall, ToolResult> {
         let task =
@@ -146,6 +147,7 @@ impl RlmSubagentToolsProvider {
         .map_err(|err| ToolResult::err(serde_json::json!(err.to_string())))?;
         Ok(PreparedToolCall::from_parts(
             call.call_id,
+            tool_id,
             call.tool_name,
             call.args,
             call.replay,
@@ -188,14 +190,16 @@ fn child_task_result(output: lash_core::ProcessAwaitOutput) -> Result<Value, Str
 impl StaticToolExecute for RlmSubagentToolsProvider {
     async fn prepare_tool_call(
         &self,
+        tool_id: &lash_core::ToolId,
         pending: PendingToolCall,
         context: &ToolPrepareContext,
     ) -> Result<PreparedToolCall, ToolResult> {
         if pending.tool_name == "spawn_agent" {
             let args = pending.args.clone();
-            self.prepare_spawn_agent(&args, context, pending).await
+            self.prepare_spawn_agent(&args, context, tool_id.clone(), pending)
+                .await
         } else {
-            Ok(PreparedToolCall::identity(pending))
+            Ok(PreparedToolCall::identity(tool_id.clone(), pending))
         }
     }
 

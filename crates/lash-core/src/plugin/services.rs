@@ -21,6 +21,7 @@ pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
+    pub clock: Arc<dyn crate::Clock>,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
@@ -46,8 +47,14 @@ impl RuntimeServices {
             plugins,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
+            clock: Arc::new(crate::SystemClock),
             store: None,
         }
+    }
+
+    pub(crate) fn with_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub(crate) fn with_attachment_store(
@@ -76,6 +83,7 @@ impl PersistentRuntimeServices {
             plugins,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
+            clock: Arc::new(crate::SystemClock),
             store: Some(store),
         })
     }

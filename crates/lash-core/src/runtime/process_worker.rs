@@ -5,7 +5,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::effect::ProcessRunner;
 use super::session_manager::RuntimeSessionServices;
-use super::{EmbeddedRuntimeBuilder, RUNTIME_TURN_LEASE_TTL_MS, RuntimeHostConfig};
+use super::{
+    EmbeddedRuntimeBuilder, ProcessWorkDriver, QueuedWorkDriver, RUNTIME_TURN_LEASE_TTL_MS,
+    RuntimeHostConfig,
+};
 use crate::{
     InMemorySessionStore, LashRuntime, PluginError, PluginFactory, PluginHost, PluginStack,
     ProcessAwaitOutput, ProcessExecutionContext, ProcessInput, ProcessLease,
@@ -26,6 +29,8 @@ pub struct DurableProcessWorkerConfig {
     pub session_store_factory: Arc<dyn SessionStoreFactory>,
     pub process_registry: Arc<dyn ProcessRegistry>,
     pub trigger_store: Arc<dyn crate::TriggerStore>,
+    pub process_work_driver: Option<ProcessWorkDriver>,
+    pub queued_work_driver: Option<QueuedWorkDriver>,
     #[doc(hidden)]
     pub turn_phase_probe_slot: crate::runtime::RuntimeTurnPhaseProbeSlot,
     /// Residency for sessions the worker rebuilds to run a process. Defaults to
@@ -43,13 +48,16 @@ impl DurableProcessWorkerConfig {
         session_store_factory: Arc<dyn SessionStoreFactory>,
         process_registry: Arc<dyn ProcessRegistry>,
     ) -> Self {
+        let clock = Arc::clone(&runtime_host.clock);
         Self {
             plugin_host,
             runtime_host,
             session_policy: crate::SessionPolicy::default(),
             session_store_factory,
             process_registry,
-            trigger_store: Arc::new(crate::InMemoryTriggerStore::default()),
+            trigger_store: Arc::new(crate::InMemoryTriggerStore::with_clock(clock)),
+            process_work_driver: None,
+            queued_work_driver: None,
             turn_phase_probe_slot: crate::runtime::RuntimeTurnPhaseProbeSlot::default(),
             residency: crate::Residency::default(),
         }
@@ -67,6 +75,16 @@ impl DurableProcessWorkerConfig {
 
     pub fn with_residency(mut self, residency: crate::Residency) -> Self {
         self.residency = residency;
+        self
+    }
+
+    pub fn with_process_work_driver(mut self, driver: ProcessWorkDriver) -> Self {
+        self.process_work_driver = Some(driver);
+        self
+    }
+
+    pub fn with_queued_work_driver(mut self, driver: QueuedWorkDriver) -> Self {
+        self.queued_work_driver = Some(driver);
         self
     }
 
@@ -243,7 +261,7 @@ impl DurableProcessWorker {
             // that blocks awaiting a nested child (`start child` then `await`, or a
             // subagent fan-out): the one drive task would park inside the parent's
             // await and never claim the child. Spawning frees the loop so a
-            // subsequent drive (poke or poll) claims and runs the child, and the
+            // subsequent host-driven pass claims and runs the child, and the
             // per-process `ProcessLease` fences concurrent owners — so spawning a
             // task per pending row on every drive is idempotent (a row already
             // running is skipped on claim conflict) and one failing row never
@@ -417,7 +435,7 @@ impl DurableProcessWorker {
                     cancel_watcher.abort();
                     return outcome.map_err(RecoverFailure::Run);
                 }
-                _ = tokio::time::sleep(process_lease_renew_interval()) => {
+                _ = self.config.runtime_host.clock.sleep(process_lease_renew_interval()) => {
                     match self
                         .config
                         .process_registry
@@ -531,7 +549,10 @@ impl DurableProcessWorker {
         source_label: &str,
     ) -> Result<LashRuntime, PluginError> {
         let store = Arc::new(InMemorySessionStore::default());
-        EmbeddedRuntimeBuilder::new()
+        let process_work_driver = self.config.process_work_driver.clone().unwrap_or_else(|| {
+            ProcessWorkDriver::inline(Arc::clone(&self.config.process_registry), self.clone())
+        });
+        let mut builder = EmbeddedRuntimeBuilder::new()
             .with_session_id(session_id.to_string())
             .with_plugin_host(self.config.plugin_host.as_ref().clone())
             .with_runtime_host(self.config.runtime_host.clone())
@@ -540,15 +561,17 @@ impl DurableProcessWorker {
             .with_session_store_factory(Arc::clone(&self.config.session_store_factory))
             .with_trigger_store(Arc::clone(&self.config.trigger_store))
             .with_process_registry(Arc::clone(&self.config.process_registry))
+            .with_process_work_driver(process_work_driver)
             .with_residency(self.config.residency)
-            .with_store(store)
-            .build()
-            .await
-            .map_err(|err| {
-                PluginError::Session(format!(
-                    "failed to build process worker runtime for {source_label}: {err}"
-                ))
-            })
+            .with_store(store);
+        if let Some(driver) = self.config.queued_work_driver.clone() {
+            builder = builder.with_queued_work_driver(driver);
+        }
+        builder.build().await.map_err(|err| {
+            PluginError::Session(format!(
+                "failed to build process worker runtime for {source_label}: {err}"
+            ))
+        })
     }
 
     /// Enforce the durable-first wiring invariant at the worker process-run

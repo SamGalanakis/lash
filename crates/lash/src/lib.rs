@@ -243,7 +243,7 @@ pub mod process {
         ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
         ProcessStatusFilter, ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey,
         ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver,
-        ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+        ProcessWorkSnapshot, SessionScope, SessionScopeId,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
@@ -264,10 +264,10 @@ pub mod runtime {
     pub use lash_core::runtime::{
         AssembledTurn, DirectCompletionClient, EmbeddedRuntimeHost, EventSink, ExecutionScope,
         InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-        NoopEventSink, NoopTurnActivitySink, ProcessCommand, ProcessEffectOutcome, QueuedWorkPoke,
-        QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest, QueuedWorkRunner,
-        RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-        RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+        NoopEventSink, NoopTurnActivitySink, ProcessCommand, ProcessEffectOutcome,
+        QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest, RuntimeEffectCommand,
+        RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+        RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
         RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
         RuntimeTurnPhaseProbe, ScopedEffectController, TurnContext,

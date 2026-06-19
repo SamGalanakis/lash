@@ -1124,7 +1124,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     opened
         .admin()
         .tools()
-        .set_availability("app_lookup", ToolAvailability::Off)
+        .set_availability("tool:app_lookup", ToolAvailability::Off)
         .await?;
     let mut persisted = opened.admin().state().persist_current().await?;
     let expected_generation = opened
@@ -1154,7 +1154,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     assert_eq!(state.generation(), expected_generation);
     assert_eq!(
         state
-            .get("app_lookup")
+            .get(&lash_core::ToolId::from("tool:app_lookup"))
             .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );
@@ -1691,8 +1691,8 @@ async fn process_work_driver_configures_external_runner_without_inline_store_fac
 {
     let registry =
         Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
-    let runner = lash_core::ProcessWorkRunner::new(Arc::new(NoopProcessRunHandle));
-    let driver = lash_core::ProcessWorkDriver::new(Arc::clone(&registry), runner.poke_handle());
+    let driver =
+        lash_core::ProcessWorkDriver::new(Arc::clone(&registry), Arc::new(NoopProcessRunHandle));
     let core = explicit_ephemeral_facets(peer_coherence_builder())
         .process_work_driver(driver)
         .build()?;
@@ -1702,19 +1702,18 @@ async fn process_work_driver_configures_external_runner_without_inline_store_fac
         .expect("external driver configures the core registry");
     assert!(Arc::ptr_eq(&configured, &registry));
     assert!(core.processes().observer().is_ok());
-    assert!(core.process_work_runner.poke().await.is_some());
+    assert!(core.work_driver.drivers().await.process.is_some());
     Ok(())
 }
 
 #[tokio::test]
-async fn default_process_work_runner_spawns_when_registry_and_store_factory_present() -> Result<()>
+async fn default_process_work_driver_resolves_when_registry_and_store_factory_present() -> Result<()>
 {
     // Zero-ceremony path: a registry + a store factory (so the inline worker can
-    // rebuild session runtimes) and no explicit runner spawns the default inline
-    // `ProcessWorkRunner` on first `session().open()`. The runner's actual
+    // rebuild session runtimes) and no explicit driver constructs the default
+    // inline process work driver on first `session().open()`. The driver's actual
     // lease-protected execution of out-of-turn processes is covered in lash-core
-    // (`process_work_runner_drives_directly_registered_process_to_terminal_on_poke`
-    // and `concurrent_workers_run_a_directly_registered_process_exactly_once`).
+    // (`concurrent_workers_run_a_directly_registered_process_exactly_once`).
     let state = RuntimeSessionState {
         session_id: "main".to_string(),
         policy: lash_core::SessionPolicy {
@@ -1731,8 +1730,8 @@ async fn default_process_work_runner_spawns_when_registry_and_store_factory_pres
         .build()?;
     core.session("main").open().await?;
     assert!(
-        core.process_work_runner.poke().await.is_some(),
-        "the default inline runner must spawn when a registry + store factory are wired"
+        core.work_driver.drivers().await.process.is_some(),
+        "the default inline process driver must resolve when a registry + store factory are wired"
     );
     Ok(())
 }

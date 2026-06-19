@@ -7,7 +7,7 @@ pub(crate) async fn enqueue_wake_delivery(
     session_store_factory: Option<&std::sync::Arc<dyn crate::SessionStoreFactory>>,
     wake_delivery: Option<crate::ProcessWakeDelivery>,
     trace_host: Option<&dyn crate::plugin::SessionGraphService>,
-    queued_work_poke: Option<&crate::QueuedWorkPoke>,
+    queued_work_driver: Option<&crate::QueuedWorkDriver>,
 ) -> Result<(), PluginError> {
     let Some(wake_delivery) = wake_delivery else {
         return Ok(());
@@ -58,8 +58,18 @@ pub(crate) async fn enqueue_wake_delivery(
     {
         tracing::warn!("failed to emit process wake queue trace: {err}");
     }
-    if let Some(poke) = queued_work_poke {
-        poke.poke_session(target_session_id, "process_wake");
+    if let Some(driver) = queued_work_driver {
+        let driver = driver.clone();
+        let target_session_id = target_session_id.clone();
+        tokio::spawn(async move {
+            driver
+                .claim_and_run_pending(Some(&target_session_id), "process_wake")
+                .await
+        })
+        .await
+        .map_err(|err| {
+            PluginError::Session(format!("process wake queued drive failed: {err}"))
+        })??;
     }
     Ok(())
 }
@@ -113,7 +123,7 @@ impl ToolProcessEventClient {
             process.session_store_factory.as_ref(),
             result.wake_delivery,
             Some(process.session_graph.as_ref()),
-            process.queued_work_poke.as_ref(),
+            process.queued_work_driver.as_ref(),
         )
         .await?;
         Ok(result.event)

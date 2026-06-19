@@ -205,11 +205,12 @@ impl RuntimeTurnDriver<'_> {
                 crate::trace::trace_context_from_invocation(&invocation)
                     .for_llm_call(llm_call_id.clone()),
                 &request,
+                self.host.core.clock.as_ref(),
             );
         }
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
-        let mut debug = LlmStreamDebugState::new();
+        let mut debug = LlmStreamDebugState::new(self.host.core.clock.now());
         let provider_trace =
             self.provider_trace_sender(protocol_iteration, llm_call_id.clone(), &debug);
         let llm_request = LlmRequest {
@@ -280,6 +281,7 @@ impl RuntimeTurnDriver<'_> {
                             &mut llm_task,
                             &mut llm_stream_rx,
                             streamed_usage.clone(),
+                            self.host.core.clock.as_ref(),
                         )
                         .await;
 
@@ -381,8 +383,9 @@ impl RuntimeTurnDriver<'_> {
                         crate::trace::trace_context_from_invocation(&invocation)
                             .for_llm_call(llm_call_id),
                         response,
-                        debug.elapsed_ms(),
+                        debug.elapsed_ms(self.host.core.clock.as_ref()),
                         Some(stream_summary.clone()),
+                        self.host.core.clock.as_ref(),
                     );
                 }
                 Err(error) => {
@@ -393,6 +396,7 @@ impl RuntimeTurnDriver<'_> {
                             .for_llm_call(llm_call_id),
                         crate::runtime::effect::LlmTraceFailure::from(error),
                         Some(stream_summary.clone()),
+                        self.host.core.clock.as_ref(),
                     );
                 }
             }
@@ -440,6 +444,7 @@ impl RuntimeTurnDriver<'_> {
                         provider_usage,
                         stream_summary: stream_summary.map(|summary| summary.to_json()),
                     },
+                    self.host.core.clock.as_ref(),
                 );
             }
             crate::sansio::LogEvent::LlmError {
@@ -472,6 +477,7 @@ impl RuntimeTurnDriver<'_> {
                         },
                         stream_summary: stream_summary.map(|summary| summary.to_json()),
                     },
+                    self.host.core.clock.as_ref(),
                 );
             }
         }
@@ -482,7 +488,7 @@ impl RuntimeTurnDriver<'_> {
             return;
         }
 
-        let elapsed_ms = debug.elapsed_ms();
+        let elapsed_ms = debug.elapsed_ms(self.host.core.clock.as_ref());
         if matches!(log.event_type, "delta" | "text_part") {
             debug
                 .summary
@@ -522,6 +528,7 @@ impl RuntimeTurnDriver<'_> {
             &self.host.core.tracing.trace_context,
             self.trace_context(log.protocol_iteration),
             TraceEvent::RuntimeStreamEvent { event },
+            self.host.core.clock.as_ref(),
         );
     }
 
@@ -541,6 +548,7 @@ impl RuntimeTurnDriver<'_> {
         let sink = self.host.core.tracing.trace_sink.clone();
         let base_context = self.host.core.tracing.trace_context.clone();
         let context = self.trace_context(protocol_iteration);
+        let clock = Arc::clone(&self.host.core.clock);
         let created_at = debug.created_at;
         let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -553,7 +561,10 @@ impl RuntimeTurnDriver<'_> {
                 let event = TraceProviderStreamEvent {
                     provider: provider_event.provider.to_string(),
                     sequence,
-                    elapsed_ms: created_at.elapsed().as_millis() as u64,
+                    elapsed_ms: clock
+                        .now()
+                        .saturating_duration_since(created_at)
+                        .as_millis() as u64,
                     event_name: provider_event.event_name,
                     item_id,
                     output_index,
@@ -566,6 +577,7 @@ impl RuntimeTurnDriver<'_> {
                     &base_context,
                     context.clone().for_llm_call(llm_call_id.clone()),
                     TraceEvent::ProviderStreamEvent { event },
+                    clock.as_ref(),
                 );
             },
         ))
@@ -899,17 +911,21 @@ async fn collect_trailing_usage_before_abort<T>(
     llm_task: &mut tokio::task::JoinHandle<T>,
     llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
     initial_usage: LlmUsage,
+    clock: &dyn crate::Clock,
 ) -> LlmUsage {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2_000);
+    let deadline = clock.now() + std::time::Duration::from_millis(2_000);
     let mut latest = initial_usage;
     loop {
-        match tokio::time::timeout_at(deadline, llm_stream_rx.recv()).await {
-            Err(_) | Ok(None) => break,
-            Ok(Some(LlmStreamEvent::Usage(usage))) => {
-                latest = usage;
-                break;
-            }
-            Ok(Some(_)) => continue,
+        tokio::select! {
+            _ = clock.sleep_until(deadline) => break,
+            event = llm_stream_rx.recv() => match event {
+                None => break,
+                Some(LlmStreamEvent::Usage(usage)) => {
+                    latest = usage;
+                    break;
+                }
+                Some(_) => continue,
+            },
         }
     }
     llm_task.abort();

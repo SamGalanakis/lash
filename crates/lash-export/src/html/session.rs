@@ -6,10 +6,8 @@ use super::assets::{CSS, JS};
 use super::entries::{pick_display_title, render_entries};
 use super::escaping::{escape, escape_attr};
 use super::stats::{SessionStats, compute_stats};
-use super::view_model::{
-    RenderCtx, context_percent, format_count, format_duration, format_tokens, percent_of,
-    usage_title,
-};
+use super::view_model::{RenderCtx, context_percent, format_duration, percent_of, usage_title};
+use crate::transcript::{format_count, format_tokens};
 
 pub fn render(session: &LoadedSession) -> String {
     let stats = compute_stats(session);

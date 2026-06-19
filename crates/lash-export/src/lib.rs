@@ -15,6 +15,7 @@ pub mod html;
 pub mod json;
 pub mod markdown;
 pub mod trace;
+pub mod transcript;
 pub mod tree;
 
 pub use trace::LlmPromptSnapshot;

@@ -26,6 +26,7 @@ pub enum RuntimeEffectKind {
     LlmCall,
     Direct,
     ToolCall,
+    ToolBatch,
     Process,
     ExecCode,
     Checkpoint,
@@ -41,6 +42,7 @@ impl RuntimeEffectKind {
             Self::LlmCall => "llm_call",
             Self::Direct => "direct",
             Self::ToolCall => "tool_call",
+            Self::ToolBatch => "tool_batch",
             Self::Process => "process",
             Self::ExecCode => "exec_code",
             Self::Checkpoint => "checkpoint",
@@ -285,6 +287,34 @@ fn validate_effect_command(
             "runtime effect durable step id must be non-empty",
         ));
     }
+    if let RuntimeEffectCommand::ToolBatch { batch } = command {
+        if batch.batch_id.trim().is_empty() {
+            return Err(RuntimeEffectControllerError::new(
+                "runtime_effect_tool_batch_id",
+                "runtime effect tool batch id must be non-empty",
+            ));
+        }
+        if batch.calls.is_empty() {
+            return Err(RuntimeEffectControllerError::new(
+                "runtime_effect_tool_batch_empty",
+                "runtime effect tool batch must contain at least one prepared call",
+            ));
+        }
+        for (index, child) in batch.calls.iter().enumerate() {
+            if child.call.call_id.trim().is_empty() {
+                return Err(RuntimeEffectControllerError::new(
+                    "runtime_effect_tool_batch_child_call_id",
+                    format!("runtime effect tool batch child {index} has an empty call id"),
+                ));
+            }
+            if child.replay_suffix.trim().is_empty() {
+                return Err(RuntimeEffectControllerError::new(
+                    "runtime_effect_tool_batch_child_replay",
+                    format!("runtime effect tool batch child {index} has an empty replay suffix"),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -301,6 +331,9 @@ pub enum RuntimeEffectCommand {
     },
     ToolCall {
         call: crate::PreparedToolCall,
+    },
+    ToolBatch {
+        batch: crate::PreparedToolBatch,
     },
     Process {
         command: Box<ProcessCommand>,
@@ -339,6 +372,7 @@ impl RuntimeEffectCommand {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
             Self::Direct { .. } => RuntimeEffectKind::Direct,
             Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
+            Self::ToolBatch { .. } => RuntimeEffectKind::ToolBatch,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
@@ -469,6 +503,13 @@ pub struct ToolCallEffectOutcome {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolBatchEffectOutcome {
+    pub launches: Vec<ToolCallLaunch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<ToolTriggerEffectOutcome>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolCallLaunch {
     Done {
@@ -494,6 +535,11 @@ pub enum RuntimeEffectOutcome {
     },
     ToolCall {
         launch: ToolCallLaunch,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        triggers: Vec<ToolTriggerEffectOutcome>,
+    },
+    ToolBatch {
+        launches: Vec<ToolCallLaunch>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         triggers: Vec<ToolTriggerEffectOutcome>,
     },
@@ -709,6 +755,20 @@ impl RuntimeEffectOutcome {
         }
     }
 
+    pub fn into_tool_batch_effect(
+        self,
+    ) -> Result<ToolBatchEffectOutcome, RuntimeEffectControllerError> {
+        match self {
+            Self::ToolBatch { launches, triggers } => {
+                Ok(ToolBatchEffectOutcome { launches, triggers })
+            }
+            other => Err(RuntimeEffectControllerError::wrong_outcome(
+                RuntimeEffectKind::ToolBatch,
+                other.kind(),
+            )),
+        }
+    }
+
     pub fn into_process(self) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
         match self {
             Self::Process { result } => Ok(result),
@@ -779,6 +839,7 @@ impl RuntimeEffectOutcome {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
             Self::Direct { .. } => RuntimeEffectKind::Direct,
             Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
+            Self::ToolBatch { .. } => RuntimeEffectKind::ToolBatch,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,

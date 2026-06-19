@@ -175,9 +175,9 @@ async fn account_inbox(
 
 /// Enqueue a durable tool-catalog refresh for the chat session.
 ///
-/// The enqueue pokes the queued-work runner, which submits a Restate workflow
-/// for the batch; that workflow drains it with a durable handler context and
-/// the runtime commits the refreshed surface to the SQLite session store.
+/// The enqueue asks the host-owned queued-work driver to submit a Restate
+/// workflow for the batch; that workflow drains it with a durable handler
+/// context and the runtime commits the refreshed surface to the SQLite session store.
 /// Nothing here executes effects in the foreground — the workbench runs
 /// Restate + SQLite only.
 async fn enqueue_tool_catalog_refresh(

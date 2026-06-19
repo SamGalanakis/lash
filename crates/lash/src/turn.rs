@@ -548,6 +548,10 @@ impl QueuedTurnBuilder {
             .await
     }
 
+    pub fn advanced(self) -> AdvancedQueuedTurn {
+        AdvancedQueuedTurn { builder: self }
+    }
+
     fn resolved_drain_id(&self) -> String {
         self.drain_id
             .clone()
@@ -641,6 +645,22 @@ impl<'run> ScopedQueuedTurnBuilder<'run> {
     pub async fn stream_to(self, events: &dyn TurnActivitySink) -> Result<Option<TurnResult>> {
         self.builder
             .stream_to_with_effect_controller(events, self.controller)
+            .await
+    }
+}
+
+pub struct AdvancedQueuedTurn {
+    builder: QueuedTurnBuilder,
+}
+
+impl AdvancedQueuedTurn {
+    pub async fn stream_to_with_scope(
+        self,
+        events: &dyn TurnActivitySink,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<Option<TurnResult>> {
+        self.builder
+            .stream_to_with_scope(events, scoped_effect_controller)
             .await
     }
 }

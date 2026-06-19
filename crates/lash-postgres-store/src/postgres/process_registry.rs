@@ -339,59 +339,67 @@ impl ProcessRegistry for PostgresProcessRegistry {
             replay_lookup,
             occurred_at_ms,
         )?;
-        if prepared.replayed {
-            let repaired = if let Some(status) = prepared.status_update.clone() {
-                record.status = status;
-                if record.status.is_terminal() {
-                    record.wait = None;
+        match prepared {
+            lash_core::ProcessEventAppendPlan::Replay {
+                event,
+                repair_status,
+                wake_delivery,
+                occurred_at_ms,
+            } => {
+                let repaired = if let Some(status) = repair_status {
+                    lash_core::apply_process_status_projection(&mut record, status, occurred_at_ms);
+                    save_process_tx(&mut tx, &record).await?;
+                    true
+                } else {
+                    false
+                };
+                tx.commit().await.map_err(plugin_sqlx_error)?;
+                if repaired {
+                    self.notify.notify_waiters();
                 }
-                record.updated_at_ms = prepared.occurred_at_ms;
+                Ok(ProcessEventAppendResult {
+                    event,
+                    wake_delivery,
+                })
+            }
+            lash_core::ProcessEventAppendPlan::Insert {
+                event,
+                payload_hash,
+                status_update,
+                wake_delivery,
+                occurred_at_ms,
+            } => {
+                sqlx::query(
+                    "INSERT INTO lash_process_events (
+                        process_id, sequence, event_type, payload_hash, idempotency_key,
+                        occurred_at_ms, event_json
+                     )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(process_id)
+                .bind(sequence)
+                .bind(event.event_type.as_str())
+                .bind(&payload_hash)
+                .bind(event.invocation.replay_key())
+                .bind(occurred_at_ms as i64)
+                .bind(serde_json::to_string(&event).map_err(process_decode_error)?)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+                if let Some(status) = status_update {
+                    lash_core::apply_process_status_projection(&mut record, status, occurred_at_ms);
+                } else {
+                    record.updated_at_ms = occurred_at_ms;
+                }
                 save_process_tx(&mut tx, &record).await?;
-                true
-            } else {
-                false
-            };
-            tx.commit().await.map_err(plugin_sqlx_error)?;
-            if repaired {
+                tx.commit().await.map_err(plugin_sqlx_error)?;
                 self.notify.notify_waiters();
-            }
-            return Ok(ProcessEventAppendResult {
-                event: prepared.event,
-                wake_delivery: prepared.wake_delivery,
-            });
-        }
-        let event = prepared.event;
-        sqlx::query(
-            "INSERT INTO lash_process_events (
-                process_id, sequence, event_type, payload_hash, idempotency_key,
-                occurred_at_ms, event_json
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(process_id)
-        .bind(sequence)
-        .bind(event.event_type.as_str())
-        .bind(&prepared.payload_hash)
-        .bind(event.invocation.replay_key())
-        .bind(prepared.occurred_at_ms as i64)
-        .bind(serde_json::to_string(&event).map_err(process_decode_error)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
-        if let Some(status) = prepared.status_update.clone() {
-            record.status = status;
-            if record.status.is_terminal() {
-                record.wait = None;
+                Ok(ProcessEventAppendResult {
+                    event,
+                    wake_delivery,
+                })
             }
         }
-        record.updated_at_ms = prepared.occurred_at_ms;
-        save_process_tx(&mut tx, &record).await?;
-        tx.commit().await.map_err(plugin_sqlx_error)?;
-        self.notify.notify_waiters();
-        Ok(ProcessEventAppendResult {
-            event,
-            wake_delivery: prepared.wake_delivery,
-        })
     }
 
     async fn events_after(

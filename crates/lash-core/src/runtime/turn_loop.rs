@@ -330,6 +330,7 @@ impl LashRuntime {
                     name: "queued_work.completed".to_string(),
                     payload: queued_work_completion_trace_payload(&queued_work_completion_trace),
                 },
+                self.host.core.clock.as_ref(),
             );
         }
         self.mark_phase_begin(RuntimeTurnPhase::PostPersistHooks);
@@ -369,6 +370,7 @@ impl LashRuntime {
                 done_reason: done_reason.to_string(),
                 agent_frame_switch,
             },
+            self.host.core.clock.as_ref(),
         );
     }
 
@@ -518,6 +520,7 @@ impl LashRuntime {
                     &causes,
                 ),
             },
+            self.host.core.clock.as_ref(),
         );
         let cancel = opts.cancel.clone();
         let scoped_effect_controller = opts.scoped_effect_controller();
@@ -835,6 +838,7 @@ impl LashRuntime {
                 lash_trace::TraceEvent::TurnStarted {
                     metadata: trace_metadata,
                 },
+                self.host.core.clock.as_ref(),
             );
         }
 
@@ -1121,7 +1125,10 @@ impl LashRuntime {
         if let Some(abort) = prepared.abort {
             drop(event_tx);
 
-            let mut turn_pipeline = TurnBoundary::from_state(self.state.clone());
+            let mut turn_pipeline = TurnBoundary::from_state_with_clock(
+                self.state.clone(),
+                Arc::clone(&self.host.core.clock),
+            );
             turn_pipeline.apply_prepared_messages(&prepared.messages);
             let state = turn_pipeline.into_final_state();
             let issue = TurnIssue {
@@ -1164,7 +1171,10 @@ impl LashRuntime {
                 &self.host.core.control.termination,
             ));
         }
-        let mut turn_pipeline = TurnBoundary::from_state(self.state.clone());
+        let mut turn_pipeline = TurnBoundary::from_state_with_clock(
+            self.state.clone(),
+            Arc::clone(&self.host.core.clock),
+        );
         let store = self
             .session
             .as_ref()
@@ -1192,8 +1202,11 @@ impl LashRuntime {
                 RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
             })?;
         let resolved_turn_policy = if let Some(provider) = turn_provider_override {
-            RuntimeSessionPolicy::from_provider(turn_policy.clone(), provider)
-                .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?
+            RuntimeSessionPolicy::from_provider(
+                turn_policy.clone(),
+                provider.with_clock(Arc::clone(&self.host.core.clock)),
+            )
+            .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?
         } else {
             self.host
                 .resolve_session_policy(&self.state.session_id, turn_policy.clone())

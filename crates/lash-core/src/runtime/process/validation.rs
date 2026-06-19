@@ -12,13 +12,32 @@ use super::time::{epoch_ms_from_system_time, system_time_from_epoch_ms};
 use super::wake::{ProcessWakeDeliveryRequest, process_wake_delivery};
 
 #[derive(Clone, Debug)]
-pub struct PreparedProcessEventAppend {
-    pub event: ProcessEvent,
-    pub payload_hash: String,
-    pub status_update: Option<ProcessStatus>,
-    pub wake_delivery: Option<ProcessWakeDelivery>,
-    pub occurred_at_ms: u64,
-    pub replayed: bool,
+pub enum ProcessEventAppendPlan {
+    Insert {
+        event: ProcessEvent,
+        payload_hash: String,
+        status_update: Option<ProcessStatus>,
+        wake_delivery: Option<ProcessWakeDelivery>,
+        occurred_at_ms: u64,
+    },
+    Replay {
+        event: ProcessEvent,
+        repair_status: Option<ProcessStatus>,
+        wake_delivery: Option<ProcessWakeDelivery>,
+        occurred_at_ms: u64,
+    },
+}
+
+pub fn apply_process_status_projection(
+    record: &mut ProcessRecord,
+    status: ProcessStatus,
+    updated_at_ms: u64,
+) {
+    record.status = status;
+    if record.status.is_terminal() {
+        record.wait = None;
+    }
+    record.updated_at_ms = updated_at_ms;
 }
 
 pub fn prepare_process_event_append(
@@ -27,14 +46,14 @@ pub fn prepare_process_event_append(
     sequence: u64,
     replay_lookup: Option<(String, ProcessEvent)>,
     occurred_at_ms: u64,
-) -> Result<PreparedProcessEventAppend, PluginError> {
+) -> Result<ProcessEventAppendPlan, PluginError> {
     let process_id = record.id.as_str();
     let payload_hash = process_event_payload_hash(&request.event_type, &request.payload)?;
     if let Some(replay_key) = request.replay.as_ref().map(|replay| replay.key.as_str())
         && let Some((existing_hash, existing)) = replay_lookup
     {
         if existing_hash == payload_hash {
-            let status_update = existing.semantics.terminal.clone().and_then(|terminal| {
+            let repair_status = existing.semantics.terminal.clone().and_then(|terminal| {
                 (!record.is_terminal()).then(|| ProcessStatus::from_terminal(terminal))
             });
             let occurred_at_ms = epoch_ms_from_system_time(existing.occurred_at);
@@ -51,13 +70,11 @@ pub fn prepare_process_event_append(
                     .clone()
                     .or_else(|| record.wake_target.clone()),
             )?;
-            return Ok(PreparedProcessEventAppend {
+            return Ok(ProcessEventAppendPlan::Replay {
                 event: existing,
-                payload_hash,
-                status_update,
+                repair_status,
                 wake_delivery,
                 occurred_at_ms,
-                replayed: true,
             });
         }
         return Err(PluginError::Session(format!(
@@ -119,13 +136,12 @@ pub fn prepare_process_event_append(
             .wake_target_scope
             .or_else(|| record.wake_target.clone()),
     )?;
-    Ok(PreparedProcessEventAppend {
+    Ok(ProcessEventAppendPlan::Insert {
         event,
         payload_hash,
         status_update: semantics.terminal.map(ProcessStatus::from_terminal),
         wake_delivery,
         occurred_at_ms,
-        replayed: false,
     })
 }
 

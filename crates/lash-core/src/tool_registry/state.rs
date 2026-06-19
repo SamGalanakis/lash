@@ -22,7 +22,7 @@ pub struct ToolStateEntry {
     /// True when this tool was not resolvable from any registered source at
     /// export time (e.g. a detached MCP server). Orphaned entries keep their
     /// last-known manifest, surface as [`crate::ToolAvailability::Off`], and
-    /// rebind automatically when a source re-advertises the same (name, id).
+    /// rebind automatically when a source re-advertises the same tool id.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     orphaned: bool,
 }
@@ -59,11 +59,11 @@ impl ToolStateEntry {
 #[derive(Clone, Debug, Default)]
 pub struct ToolState {
     generation: u64,
-    tools: Arc<BTreeMap<String, ToolStateEntry>>,
+    tools: Arc<BTreeMap<ToolId, ToolStateEntry>>,
 }
 
 impl ToolState {
-    pub(crate) fn new(generation: u64, tools: BTreeMap<String, ToolStateEntry>) -> Self {
+    pub(crate) fn new(generation: u64, tools: BTreeMap<ToolId, ToolStateEntry>) -> Self {
         Self {
             generation,
             tools: Arc::new(tools),
@@ -83,18 +83,18 @@ impl ToolState {
         self.tools.values().map(ToolStateEntry::manifest).collect()
     }
 
-    pub fn get(&self, name: &str) -> Option<&ToolStateEntry> {
-        self.tools.get(name)
+    pub fn get(&self, id: &ToolId) -> Option<&ToolStateEntry> {
+        self.tools.get(id)
     }
 
-    pub fn manifest_mut(&mut self, name: &str) -> Option<&mut ToolManifest> {
+    pub fn manifest_mut(&mut self, id: &ToolId) -> Option<&mut ToolManifest> {
         Arc::make_mut(&mut self.tools)
-            .get_mut(name)
+            .get_mut(id)
             .map(|entry| &mut entry.manifest)
     }
 
-    pub fn contains(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+    pub fn contains(&self, id: &ToolId) -> bool {
+        self.tools.contains_key(id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -105,35 +105,33 @@ impl ToolState {
         self.tools.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &ToolStateEntry)> {
-        self.tools
-            .iter()
-            .map(|(name, entry)| (name.as_str(), entry))
+    pub fn iter(&self) -> impl Iterator<Item = (&ToolId, &ToolStateEntry)> {
+        self.tools.iter()
     }
 
     pub fn set_availability(
         &mut self,
-        name: &str,
+        id: &ToolId,
         availability: Option<crate::ToolAvailability>,
     ) -> Result<(), ReconfigureError> {
-        let Some(entry) = Arc::make_mut(&mut self.tools).get_mut(name) else {
+        let Some(entry) = Arc::make_mut(&mut self.tools).get_mut(id) else {
             return Err(ReconfigureError::Validation(format!(
-                "unknown tool `{name}`"
+                "unknown tool id `{id}`"
             )));
         };
         entry.manifest.availability_override = availability;
         Ok(())
     }
 
-    pub fn retain(&mut self, mut keep: impl FnMut(&str, &ToolStateEntry) -> bool) {
-        Arc::make_mut(&mut self.tools).retain(|name, entry| keep(name, entry));
+    pub fn retain(&mut self, mut keep: impl FnMut(&ToolId, &ToolStateEntry) -> bool) {
+        Arc::make_mut(&mut self.tools).retain(|id, entry| keep(id, entry));
     }
 
-    pub fn remove(&mut self, name: &str) -> Option<ToolStateEntry> {
-        Arc::make_mut(&mut self.tools).remove(name)
+    pub fn remove(&mut self, id: &ToolId) -> Option<ToolStateEntry> {
+        Arc::make_mut(&mut self.tools).remove(id)
     }
 
-    pub(crate) fn entries(&self) -> &BTreeMap<String, ToolStateEntry> {
+    pub(crate) fn entries(&self) -> &BTreeMap<ToolId, ToolStateEntry> {
         self.tools.as_ref()
     }
 }
@@ -146,7 +144,7 @@ impl Serialize for ToolState {
         #[derive(Serialize)]
         struct ToolStateRef<'a> {
             generation: u64,
-            tools: &'a BTreeMap<String, ToolStateEntry>,
+            tools: &'a BTreeMap<ToolId, ToolStateEntry>,
         }
 
         ToolStateRef {
@@ -165,7 +163,7 @@ impl<'de> Deserialize<'de> for ToolState {
         #[derive(Deserialize)]
         struct ToolStateOwned {
             generation: u64,
-            tools: BTreeMap<String, ToolStateEntry>,
+            tools: BTreeMap<ToolId, ToolStateEntry>,
         }
 
         let owned = ToolStateOwned::deserialize(deserializer)?;
@@ -185,12 +183,21 @@ pub(crate) trait ToolSourceExecutor: Send + Sync + 'static {
             .into_iter()
             .find(|manifest| manifest.name == name)
     }
+    fn resolve_manifest_by_id(&self, id: &ToolId) -> Option<ToolManifest> {
+        self.advertised_tools()
+            .into_iter()
+            .find(|manifest| manifest.id == *id)
+    }
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
+    fn resolve_contract_by_id(&self, id: &ToolId) -> Option<Arc<ToolContract>> {
+        let manifest = self.resolve_manifest_by_id(id)?;
+        self.resolve_contract(&manifest.name)
+    }
     async fn prepare_tool_call(
         &self,
         call: ToolPrepareCall<'_>,
     ) -> Result<PreparedToolCall, ToolResult> {
-        Ok(PreparedToolCall::identity(call.pending))
+        Ok(PreparedToolCall::identity(call.tool_id, call.pending))
     }
     async fn execute(
         &self,

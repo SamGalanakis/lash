@@ -23,6 +23,8 @@ pub struct EmbeddedRuntimeBuilder {
     trigger_store: Option<Arc<dyn crate::TriggerStore>>,
     store: Option<Arc<dyn RuntimePersistence>>,
     process_registry: Option<Arc<dyn ProcessRegistry>>,
+    process_work_driver: Option<crate::ProcessWorkDriver>,
+    queued_work_driver: Option<crate::QueuedWorkDriver>,
     residency: Residency,
 }
 
@@ -42,6 +44,8 @@ impl Default for EmbeddedRuntimeBuilder {
             trigger_store: Some(Arc::new(crate::InMemoryTriggerStore::default())),
             store: None,
             process_registry: None,
+            process_work_driver: None,
+            queued_work_driver: None,
             residency: Residency::default(),
         }
     }
@@ -198,6 +202,16 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_process_work_driver(mut self, driver: crate::ProcessWorkDriver) -> Self {
+        self.process_work_driver = Some(driver);
+        self
+    }
+
+    pub fn with_queued_work_driver(mut self, driver: crate::QueuedWorkDriver) -> Self {
+        self.queued_work_driver = Some(driver);
+        self
+    }
+
     /// Trim a rebuilt session's resident graph to match the host's residency.
     ///
     /// Defaults to [`Residency::KeepAll`]. Setting [`Residency::ActivePathOnly`]
@@ -300,7 +314,7 @@ impl EmbeddedRuntimeBuilder {
             .with_trigger_store_option(self.trigger_store.clone());
         // `assemble_runtime` owns the (store, registry) wiring + residency so the
         // worker rebuild cannot drift from the live open path.
-        LashRuntime::assemble_runtime(
+        let mut runtime = LashRuntime::assemble_runtime(
             state.policy.clone(),
             embedded_host,
             plugins,
@@ -309,7 +323,10 @@ impl EmbeddedRuntimeBuilder {
             state,
             self.residency,
         )
-        .await
+        .await?;
+        runtime.host.process_work_driver = self.process_work_driver;
+        runtime.host.queued_work_driver = self.queued_work_driver;
+        Ok(runtime)
     }
 
     pub async fn build_ephemeral(mut self) -> Result<LashRuntime, SessionError> {

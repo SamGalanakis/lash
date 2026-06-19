@@ -242,6 +242,7 @@ impl StandardShell {
         let args = start_command_process_args(params);
         let call = PreparedToolCall::from_parts(
             process_id.clone(),
+            "tool:start_command",
             "start_command",
             args,
             None,

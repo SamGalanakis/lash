@@ -33,11 +33,14 @@ use crate::schema::{
 use lash_core::SchemaProjectionOverride;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
 use lash_core::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole,
-    LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
-    ResponseTextMeta,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole, LlmToolChoice,
+    LlmUsage, ProviderReasoningReplay, ProviderReplayMeta, ResponseTextMeta,
 };
-use lash_llm_transport::util::parse_i64;
+use lash_llm_transport::{
+    frame_sse_payload, merge_usage,
+    openai_terminal_reason_from_response_value as terminal_reason_from_response_value,
+    openai_usage_from_response_value as usage_from_response_value, terminal_reason_from_parts,
+};
 
 // ---------------------------------------------------------------------------
 // Request-building primitives
@@ -544,56 +547,6 @@ fn collect_tool_result_image_folds(
 // Terminal reason + response assembly
 // ---------------------------------------------------------------------------
 
-/// Map a final Responses object to a terminal reason. Honours both
-/// `incomplete_details` and the camelCase `incompleteDetails` some gateways
-/// emit. Falls back to ToolUse/Stop based on the assembled parts.
-pub fn terminal_reason_from_response_value(
-    value: &Value,
-    parts: &[LlmOutputPart],
-) -> LlmTerminalReason {
-    let incomplete_details = value
-        .get("incomplete_details")
-        .or_else(|| value.get("incompleteDetails"))
-        .filter(|details| !details.is_null());
-    let incomplete_reason =
-        incomplete_details.and_then(|details| details.get("reason").and_then(Value::as_str));
-    // Switch on the documented `incomplete_details.reason` rather than treating
-    // every `incomplete` status as an output-token cap: only the token-limit
-    // reasons are an OutputLimit, safety reasons are a ContentFilter, and any
-    // other reason is a genuine provider failure.
-    match incomplete_reason {
-        Some("max_output_tokens" | "max_tokens") => return LlmTerminalReason::OutputLimit,
-        Some("content_filter" | "safety") => return LlmTerminalReason::ContentFilter,
-        Some(_) => return LlmTerminalReason::ProviderError,
-        None => {}
-    }
-    if value.get("status").and_then(Value::as_str) == Some("cancelled") {
-        return LlmTerminalReason::Cancelled;
-    }
-    if value.get("status").and_then(Value::as_str) == Some("failed") {
-        return LlmTerminalReason::ProviderError;
-    }
-    // An `incomplete` status with no recognizable reason: prefer the assembled
-    // parts (ToolUse/Stop) when present, otherwise surface a provider error.
-    if value.get("status").and_then(Value::as_str) == Some("incomplete") && parts.is_empty() {
-        return LlmTerminalReason::ProviderError;
-    }
-    terminal_reason_from_parts(parts)
-}
-
-/// Terminal reason from assembled parts alone: ToolUse when any tool call is
-/// present, otherwise Stop.
-pub fn terminal_reason_from_parts(parts: &[LlmOutputPart]) -> LlmTerminalReason {
-    if parts
-        .iter()
-        .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
-    {
-        LlmTerminalReason::ToolUse
-    } else {
-        LlmTerminalReason::Stop
-    }
-}
-
 /// Collapse a finished [`ResponsesStreamState`] into an [`LlmResponse`]. Used
 /// by Codex; the direct OpenAI driver inlines an equivalent assembly with its
 /// own provider-usage/streaming plumbing.
@@ -778,89 +731,6 @@ pub fn response_parts_from_value(value: &Value) -> Vec<LlmOutputPart> {
         });
     }
     parts
-}
-
-// ---------------------------------------------------------------------------
-// Usage
-// ---------------------------------------------------------------------------
-
-pub fn usage_from_response_value(value: &Value) -> LlmUsage {
-    usage_from_usage_value(value.get("usage").unwrap_or(&Value::Null))
-}
-
-pub fn usage_from_usage_value(usage: &Value) -> LlmUsage {
-    let cached_tokens = parse_i64(
-        usage
-            .get("input_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .or_else(|| {
-                usage
-                    .get("prompt_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-            })
-            .or_else(|| usage.get("cached_input_tokens"))
-            .or_else(|| usage.get("cached_tokens"))
-            .or_else(|| usage.get("prompt_cache_hit_tokens")),
-    );
-    let cache_write_tokens = parse_i64(
-        usage
-            .get("input_tokens_details")
-            .and_then(|d| d.get("cache_write_tokens"))
-            .or_else(|| {
-                usage
-                    .get("prompt_tokens_details")
-                    .and_then(|d| d.get("cache_write_tokens"))
-            }),
-    );
-    LlmUsage {
-        input_tokens: parse_i64(
-            usage
-                .get("input_tokens")
-                .or_else(|| usage.get("prompt_tokens")),
-        ),
-        output_tokens: parse_i64(
-            usage
-                .get("output_tokens")
-                .or_else(|| usage.get("completion_tokens")),
-        ),
-        cached_input_tokens: if cache_write_tokens > 0 {
-            cached_tokens.saturating_sub(cache_write_tokens).max(0)
-        } else {
-            cached_tokens
-        },
-        reasoning_tokens: parse_i64(
-            usage
-                .get("reasoning_tokens")
-                .or_else(|| {
-                    usage
-                        .get("output_tokens_details")
-                        .and_then(|d| d.get("reasoning_tokens"))
-                })
-                .or_else(|| {
-                    usage
-                        .get("completion_tokens_details")
-                        .and_then(|d| d.get("reasoning_tokens"))
-                }),
-        ),
-    }
-}
-
-/// Overwrite `dst` with `next` field-by-field, keeping prior non-zero values
-/// when the incoming field is zero. Streaming usage arrives incrementally and
-/// later events may report only a subset of counters.
-pub fn merge_usage(dst: &mut LlmUsage, next: &LlmUsage) {
-    if next.input_tokens > 0 {
-        dst.input_tokens = next.input_tokens;
-    }
-    if next.output_tokens > 0 {
-        dst.output_tokens = next.output_tokens;
-    }
-    if next.cached_input_tokens > 0 {
-        dst.cached_input_tokens = next.cached_input_tokens;
-    }
-    if next.reasoning_tokens > 0 {
-        dst.reasoning_tokens = next.reasoning_tokens;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1475,27 +1345,5 @@ pub fn parse_sse_payload(
     payload: &str,
     state: &mut ResponsesStreamState,
 ) -> Result<(), LlmTransportError> {
-    let mut event_lines: Vec<String> = Vec::new();
-    for mut line in payload.lines().map(str::to_string) {
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        if let Some(data) = line.strip_prefix("data:") {
-            event_lines.push(data.trim().to_string());
-            continue;
-        }
-        if line.starts_with("event:") {
-            continue;
-        }
-        if line.trim().is_empty() && !event_lines.is_empty() {
-            let raw = event_lines.join("\n");
-            process_sse_event(provider, &raw, state, None)?;
-            event_lines.clear();
-        }
-    }
-    if !event_lines.is_empty() {
-        let raw = event_lines.join("\n");
-        process_sse_event(provider, &raw, state, None)?;
-    }
-    Ok(())
+    frame_sse_payload(payload, |raw| process_sse_event(provider, raw, state, None))
 }

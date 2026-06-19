@@ -1,4 +1,8 @@
-use lash_core::{ToolDefinition, ToolResult};
+use lash_core::{ToolDefinition, ToolFailure, ToolFailureClass, ToolResult};
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::future::Future;
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -139,7 +143,7 @@ pub fn display_relative(base: &Path, path: &Path) -> String {
 pub const FS_DEFAULTS_PREAMBLE: &str =
     "By default this includes hidden files and respects `.gitignore` only inside Git repos.";
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct PathEntry {
     pub path: String,
     pub kind: String,
@@ -148,11 +152,156 @@ pub struct PathEntry {
     pub modified_at: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct TruncationMeta {
     pub shown: usize,
     pub total: usize,
     pub omitted: usize,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FilesystemEntriesOutput {
+    pub items: Vec<PathEntry>,
+    pub truncated: Option<TruncationMeta>,
+}
+
+pub fn invalid_tool_args(message: impl Into<String>) -> ToolResult {
+    ToolResult::failure(ToolFailure::tool(
+        ToolFailureClass::InvalidRequest,
+        "invalid_tool_args",
+        message.into(),
+    ))
+}
+
+pub fn typed_tool_args<Args>(args: &serde_json::Value) -> Result<Args, ToolResult>
+where
+    Args: DeserializeOwned + JsonSchema,
+{
+    serde_json::from_value(args.clone())
+        .map_err(|err| invalid_tool_args(format!("Invalid tool arguments: {err}")))
+}
+
+pub fn typed_tool_ok<Output>(output: Output) -> ToolResult
+where
+    Output: Serialize + JsonSchema,
+{
+    match serde_json::to_value(output) {
+        Ok(value) => ToolResult::ok(value),
+        Err(err) => ToolResult::err_fmt(format_args!("Failed to serialize tool result: {err}")),
+    }
+}
+
+pub async fn execute_typed_tool<Args, Output, F, Fut>(
+    args: &serde_json::Value,
+    execute: F,
+) -> ToolResult
+where
+    Args: DeserializeOwned + JsonSchema,
+    Output: Serialize + JsonSchema,
+    F: FnOnce(Args) -> Fut,
+    Fut: Future<Output = Result<Output, ToolResult>>,
+{
+    let args = match typed_tool_args::<Args>(args) {
+        Ok(args) => args,
+        Err(err) => return err,
+    };
+    match execute(args).await {
+        Ok(output) => typed_tool_ok(output),
+        Err(err) => err,
+    }
+}
+
+pub async fn execute_typed_tool_result<Args, F, Fut>(
+    args: &serde_json::Value,
+    execute: F,
+) -> ToolResult
+where
+    Args: DeserializeOwned + JsonSchema,
+    F: FnOnce(Args) -> Fut,
+    Fut: Future<Output = ToolResult>,
+{
+    let args = match typed_tool_args::<Args>(args) {
+        Ok(args) => args,
+        Err(err) => return err,
+    };
+    execute(args).await
+}
+
+pub fn non_empty_string(value: &str, key: &str) -> Result<(), ToolResult> {
+    if value.is_empty() {
+        Err(invalid_tool_args(format!(
+            "Missing required parameter: {key}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn default_true() -> bool {
+    true
+}
+
+pub fn default_path_dot() -> String {
+    ".".to_string()
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum OptionalUsizeArg {
+    Value(usize),
+    NoneString(String),
+    Null(()),
+}
+
+impl OptionalUsizeArg {
+    pub fn into_option(self, key: &str, min: usize) -> Result<Option<usize>, ToolResult> {
+        match self {
+            Self::Value(value) if value >= min => Ok(Some(value)),
+            Self::Value(_) => Err(invalid_tool_args(format!(
+                "Invalid {key}: must be >= {min}, or use null/\"none\" for no cap"
+            ))),
+            Self::NoneString(value) if value.eq_ignore_ascii_case("none") => Ok(None),
+            Self::NoneString(_) => Err(invalid_tool_args(format!(
+                "Invalid {key}: expected int, null, or \"none\""
+            ))),
+            Self::Null(()) => Ok(None),
+        }
+    }
+}
+
+pub fn deserialize_optional_usize_none<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OptionalUsize {
+        Int(usize),
+        String(String),
+        Null,
+    }
+
+    match Option::<OptionalUsize>::deserialize(deserializer)? {
+        None | Some(OptionalUsize::Null) => Ok(None),
+        Some(OptionalUsize::Int(value)) => Ok(Some(value)),
+        Some(OptionalUsize::String(value)) if value.eq_ignore_ascii_case("none") => Ok(None),
+        Some(OptionalUsize::String(_)) => Err(serde::de::Error::custom(
+            "expected integer, null, or \"none\"",
+        )),
+    }
+}
+
+pub fn default_ls_depth() -> OptionalUsizeArg {
+    OptionalUsizeArg::Value(3)
+}
+
+pub fn default_ls_limit() -> OptionalUsizeArg {
+    OptionalUsizeArg::Value(500)
+}
+
+pub fn default_glob_limit() -> OptionalUsizeArg {
+    OptionalUsizeArg::Value(100)
 }
 
 /// Extract a required non-empty string arg, or return ToolResult::err.
@@ -432,7 +581,10 @@ pub fn rg_file_list(
 }
 
 /// Build the standard result envelope returned by filesystem listing tools.
-pub fn filesystem_entries_result(items: Vec<PathEntry>, total_count: usize) -> serde_json::Value {
+pub fn filesystem_entries_output(
+    items: Vec<PathEntry>,
+    total_count: usize,
+) -> FilesystemEntriesOutput {
     let shown = items.len();
     let truncated = if total_count > shown {
         Some(TruncationMeta {
@@ -443,10 +595,12 @@ pub fn filesystem_entries_result(items: Vec<PathEntry>, total_count: usize) -> s
     } else {
         None
     };
-    serde_json::json!({
-        "items": items,
-        "truncated": truncated,
-    })
+    FilesystemEntriesOutput { items, truncated }
+}
+
+pub fn filesystem_entries_result(items: Vec<PathEntry>, total_count: usize) -> serde_json::Value {
+    serde_json::to_value(filesystem_entries_output(items, total_count))
+        .unwrap_or_else(|_| serde_json::json!({ "items": [], "truncated": null }))
 }
 
 fn count_text_lines(path: &Path) -> Option<u64> {

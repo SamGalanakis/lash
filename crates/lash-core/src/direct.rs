@@ -125,6 +125,7 @@ pub struct DirectLlmClient {
     provider: ProviderHandle,
     trace_sink: Option<Arc<dyn TraceSink>>,
     trace_context: TraceContext,
+    clock: Arc<dyn crate::Clock>,
 }
 
 impl DirectLlmClient {
@@ -133,6 +134,7 @@ impl DirectLlmClient {
             provider,
             trace_sink: None,
             trace_context: TraceContext::default(),
+            clock: Arc::new(crate::SystemClock),
         }
     }
 
@@ -143,6 +145,11 @@ impl DirectLlmClient {
 
     pub fn with_trace_context(mut self, context: TraceContext) -> Self {
         self.trace_context = context;
+        self
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -175,6 +182,7 @@ impl DirectLlmClient {
                 TraceEvent::LlmCallStarted {
                     request: crate::trace::trace_llm_request(&llm_request),
                 },
+                self.clock.as_ref(),
             );
             Some(id)
         } else {
@@ -198,6 +206,7 @@ impl DirectLlmClient {
                             provider_usage: response.provider_usage.clone(),
                             stream_summary: None,
                         },
+                        self.clock.as_ref(),
                     );
                 }
                 Ok(response)
@@ -218,6 +227,7 @@ impl DirectLlmClient {
                             },
                             stream_summary: None,
                         },
+                        self.clock.as_ref(),
                     );
                 }
                 Err(DirectLlmError::from(error))

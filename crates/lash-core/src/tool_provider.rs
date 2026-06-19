@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::plugin::{
     PluginError, SessionGraphService, SessionLifecycleService, SessionSnapshot, SessionStateService,
 };
-use crate::{AttachmentStore, ToolContract, ToolManifest, ToolResult};
+use crate::{AttachmentStore, ToolContract, ToolId, ToolManifest, ToolResult};
 
 mod attachments;
 mod direct_completion;
@@ -111,6 +111,7 @@ pub struct ToolContext<'run> {
     pub(crate) process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
+    pub(crate) runtime_execution_context: Option<crate::RuntimeExecutionContext<'run>>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_process_id: Option<String>,
     pub(crate) runtime_process_id: Option<String>,
@@ -162,7 +163,7 @@ pub(crate) struct ToolProcessEventContext {
     store: Option<Arc<dyn crate::RuntimePersistence>>,
     session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
     session_graph: Arc<dyn SessionGraphService>,
-    queued_work_poke: Option<crate::QueuedWorkPoke>,
+    queued_work_driver: Option<crate::QueuedWorkDriver>,
 }
 
 pub(crate) struct ToolContextBuilder<'run> {
@@ -175,6 +176,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
+    runtime_execution_context: Option<crate::RuntimeExecutionContext<'run>>,
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
     async_process_id: Option<String>,
     runtime_process_id: Option<String>,
@@ -204,6 +206,7 @@ impl<'run> ToolContextBuilder<'run> {
             process_cancel_ability: Arc::clone(&dispatch.process_cancel_ability),
             effect_controller: dispatch.effect_controller.clone(),
             runtime_dispatch: Some(Arc::clone(&dispatch)),
+            runtime_execution_context: None,
             cancellation_token: None,
             async_process_id: None,
             runtime_process_id: None,
@@ -240,6 +243,14 @@ impl<'run> ToolContextBuilder<'run> {
         self
     }
 
+    pub(crate) fn runtime_execution_context(
+        mut self,
+        context: crate::RuntimeExecutionContext<'run>,
+    ) -> Self {
+        self.runtime_execution_context = Some(context);
+        self
+    }
+
     pub(crate) fn runtime_process_id(mut self, process_id: Option<String>) -> Self {
         self.runtime_process_id = process_id;
         self
@@ -261,7 +272,7 @@ impl<'run> ToolContextBuilder<'run> {
         registry: Arc<dyn crate::ProcessRegistry>,
         store: Option<Arc<dyn crate::RuntimePersistence>>,
         session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
-        queued_work_poke: Option<crate::QueuedWorkPoke>,
+        queued_work_driver: Option<crate::QueuedWorkDriver>,
     ) -> Self {
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
@@ -269,7 +280,7 @@ impl<'run> ToolContextBuilder<'run> {
             store,
             session_store_factory,
             session_graph: Arc::clone(&self.session_graph),
-            queued_work_poke,
+            queued_work_driver,
         });
         self
     }
@@ -297,6 +308,7 @@ impl<'run> ToolContextBuilder<'run> {
             process_cancel_ability: self.process_cancel_ability,
             effect_controller: self.effect_controller,
             runtime_dispatch: self.runtime_dispatch,
+            runtime_execution_context: self.runtime_execution_context,
             cancellation_token: self.cancellation_token,
             async_process_id: self.async_process_id,
             runtime_process_id: self.runtime_process_id,
@@ -344,6 +356,7 @@ impl<'run> ToolContext<'run> {
             process_cancel_ability,
             effect_controller,
             runtime_dispatch: None,
+            runtime_execution_context: None,
             cancellation_token: None,
             async_process_id: None,
             runtime_process_id: None,
@@ -430,6 +443,14 @@ impl<'run> ToolContext<'run> {
             session_id: self.session_id.clone(),
             tool_call_id: self.tool_call_id.clone(),
             direct_completions: self.direct_completions.clone(),
+            parent_invocation: self.parent_invocation.clone(),
+            parent_tool_batch_is_durable: self.parent_invocation.as_ref().is_some_and(
+                |invocation| invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolBatch),
+            ) && self
+                .effect_controller
+                .controller()
+                .durability_tier()
+                == crate::DurabilityTier::Durable,
         }
     }
 
@@ -469,6 +490,15 @@ impl<'run> ToolContext<'run> {
             return Err(crate::RuntimeError::new(
                 "durable_effects_unavailable",
                 "this effect controller does not support durable tool effects",
+            ));
+        }
+        if self.parent_invocation.as_ref().is_some_and(|invocation| {
+            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolBatch)
+        }) && scoped.controller().durability_tier() == crate::DurabilityTier::Durable
+        {
+            return Err(crate::RuntimeError::new(
+                "durable_effects_unavailable_in_tool_batch",
+                "durable tool sub-effects are not available inside a tool batch child",
             ));
         }
         Ok(ToolDurableEffects { context: self })
@@ -581,7 +611,7 @@ impl<'run> ToolContext<'run> {
             store: None,
             session_store_factory: None,
             session_graph: Arc::new(crate::plugin::NoopSessionManager),
-            queued_work_poke: None,
+            queued_work_driver: None,
         });
         self
     }
@@ -764,6 +794,12 @@ impl<'ctx, 'run> ToolDurableEffects<'ctx, 'run> {
             format!("await-event:{}", key.key_id),
         )?;
         let cancellation = self.context.cancellation_token.clone().unwrap_or_default();
+        let clock = self
+            .context
+            .runtime_dispatch
+            .as_ref()
+            .map(|dispatch| Arc::clone(&dispatch.clock))
+            .unwrap_or_else(|| Arc::new(crate::SystemClock));
         let outcome = self
             .context
             .effect_controller
@@ -773,7 +809,11 @@ impl<'ctx, 'run> ToolDurableEffects<'ctx, 'run> {
                     invocation,
                     crate::RuntimeEffectCommand::AwaitEvent { key },
                 ),
-                crate::RuntimeEffectLocalExecutor::await_event(cancellation, None),
+                crate::RuntimeEffectLocalExecutor::await_event_with_clock(
+                    cancellation,
+                    None,
+                    clock,
+                ),
             )
             .await
             .map_err(crate::RuntimeEffectControllerError::into_runtime_error)?;
@@ -888,6 +928,7 @@ impl<'ctx, 'run> ToolDurableEffects<'ctx, 'run> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedToolCall {
     pub call_id: String,
+    pub tool_id: ToolId,
     pub tool_name: String,
     pub args: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -897,9 +938,10 @@ pub struct PreparedToolCall {
 }
 
 impl PreparedToolCall {
-    pub fn identity(call: crate::sansio::PendingToolCall) -> Self {
+    pub fn identity(tool_id: ToolId, call: crate::sansio::PendingToolCall) -> Self {
         Self {
             call_id: call.call_id,
+            tool_id,
             tool_name: call.tool_name,
             args: call.args,
             replay: call.replay,
@@ -909,6 +951,7 @@ impl PreparedToolCall {
 
     pub fn from_parts(
         call_id: impl Into<String>,
+        tool_id: impl Into<ToolId>,
         tool_name: impl Into<String>,
         args: serde_json::Value,
         replay: Option<ProviderReplayMeta>,
@@ -916,11 +959,57 @@ impl PreparedToolCall {
     ) -> Self {
         Self {
             call_id: call_id.into(),
+            tool_id: tool_id.into(),
             tool_name: tool_name.into(),
             args,
             replay,
             prepared_payload,
         }
+    }
+}
+
+/// One ordered child inside a runtime-prepared tool batch.
+///
+/// The call itself carries the executable provider payload. `replay_suffix`
+/// is the deterministic suffix used for child effects such as retry sleeps or
+/// pending completion awaits when the batch is the durable parent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreparedToolBatchCall {
+    pub call: PreparedToolCall,
+    pub replay_suffix: String,
+}
+
+/// Runtime-prepared executable tool batch.
+///
+/// The vector order is source order. Scheduling may run parallel-safe tools
+/// concurrently, but launches and pending completion consumption are projected
+/// back through this order.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreparedToolBatch {
+    pub batch_id: String,
+    pub calls: Vec<PreparedToolBatchCall>,
+}
+
+impl PreparedToolBatch {
+    pub fn new(batch_id: impl Into<String>, calls: Vec<PreparedToolCall>) -> Self {
+        let batch_id = batch_id.into();
+        let calls = calls
+            .into_iter()
+            .enumerate()
+            .map(|(index, call)| PreparedToolBatchCall {
+                replay_suffix: format!("child:{index}:{}", call.call_id),
+                call,
+            })
+            .collect();
+        Self { batch_id, calls }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.calls.len()
     }
 }
 
@@ -983,6 +1072,7 @@ impl ToolPrepareContext {
 
 /// Inputs handed to [`ToolProvider::prepare_tool_call`].
 pub struct ToolPrepareCall<'a> {
+    pub tool_id: ToolId,
     pub pending: crate::sansio::PendingToolCall,
     pub context: &'a ToolPrepareContext,
 }
@@ -1015,14 +1105,41 @@ pub trait ToolProvider: Send + Sync + 'static {
             .into_iter()
             .find(|manifest| manifest.name == name)
     }
+    fn resolve_manifest_by_id(&self, id: &ToolId) -> Option<ToolManifest> {
+        self.tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.id == *id)
+    }
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
+    fn resolve_contract_by_id(&self, id: &ToolId) -> Option<Arc<ToolContract>> {
+        let manifest = self.resolve_manifest_by_id(id)?;
+        self.resolve_contract(&manifest.name)
+    }
     async fn prepare_tool_call(
         &self,
         call: ToolPrepareCall<'_>,
     ) -> Result<PreparedToolCall, ToolResult> {
-        Ok(PreparedToolCall::identity(call.pending))
+        Ok(PreparedToolCall::identity(call.tool_id, call.pending))
     }
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult;
+    async fn execute_by_id(
+        &self,
+        tool_id: &ToolId,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let Some(manifest) = self.resolve_manifest_by_id(tool_id) else {
+            return ToolResult::err_fmt(format!("Unknown tool id: {tool_id}"));
+        };
+        self.execute(ToolCall {
+            name: &manifest.name,
+            args,
+            context,
+            progress,
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -1074,6 +1191,7 @@ mod tests {
         let cancellation = tokio_util::sync::CancellationToken::new();
         let prepared = PreparedToolCall::from_parts(
             "call-1",
+            "tool:demo_tool",
             "demo_tool",
             serde_json::json!({ "input": true }),
             None,

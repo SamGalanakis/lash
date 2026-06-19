@@ -112,19 +112,27 @@ impl RuntimeExecutionContext<'_> {
         ToolInvocationReply::success(handle_value).with_record(record)
     }
 
+    fn elapsed_ms(&self, started: std::time::Instant) -> u64 {
+        self.dispatch
+            .clock
+            .now()
+            .duration_since(started)
+            .as_millis() as u64
+    }
+
     fn recorded_process_reply(
         call_id: String,
         tool: impl Into<String>,
         args: serde_json::Value,
         output: ToolCallOutput,
-        started: std::time::Instant,
+        duration_ms: u64,
     ) -> ToolInvocationReply {
         let record = ToolCallRecord {
             call_id: Some(call_id),
             tool: tool.into(),
             args,
             output: output.clone(),
-            duration_ms: started.elapsed().as_millis() as u64,
+            duration_ms,
         };
         ToolInvocationReply::from_output(output).with_record(record)
     }
@@ -134,10 +142,10 @@ impl RuntimeExecutionContext<'_> {
         tool: &'static str,
         args: serde_json::Value,
         message: impl Into<String>,
-        started: std::time::Instant,
+        duration_ms: u64,
     ) -> ToolInvocationReply {
         let output = ToolInvocationReply::error(json!(message.into())).output;
-        Self::recorded_process_reply(call_id, tool, args, output, started)
+        Self::recorded_process_reply(call_id, tool, args, output, duration_ms)
     }
 
     pub(super) async fn await_process_handle(
@@ -145,12 +153,18 @@ impl RuntimeExecutionContext<'_> {
         call_id: String,
         handle: serde_json::Value,
     ) -> ToolInvocationReply {
-        let started = std::time::Instant::now();
+        let started = self.dispatch.clock.now();
         let args = json!({ "handle": handle.clone() });
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => {
-                return Self::recorded_process_error(call_id, "await_process", args, err, started);
+                return Self::recorded_process_error(
+                    call_id,
+                    "await_process",
+                    args,
+                    err,
+                    self.elapsed_ms(started),
+                );
             }
         };
         // Possession of a handle this run created is sufficient capability;
@@ -172,7 +186,7 @@ impl RuntimeExecutionContext<'_> {
                 "await_process",
                 args,
                 err.to_string(),
-                started,
+                self.elapsed_ms(started),
             );
         }
         let output = self
@@ -186,7 +200,13 @@ impl RuntimeExecutionContext<'_> {
             Ok(output) => output.into_tool_output(),
             Err(err) => ToolInvocationReply::error(json!(err.to_string())).output,
         };
-        Self::recorded_process_reply(call_id, "await_process", args, output, started)
+        Self::recorded_process_reply(
+            call_id,
+            "await_process",
+            args,
+            output,
+            self.elapsed_ms(started),
+        )
     }
 
     pub(super) async fn signal_process_handle(
@@ -196,7 +216,7 @@ impl RuntimeExecutionContext<'_> {
         signal_name: String,
         payload: serde_json::Value,
     ) -> ToolInvocationReply {
-        let started = std::time::Instant::now();
+        let started = self.dispatch.clock.now();
         let args = json!({
             "handle": handle.clone(),
             "signal_name": signal_name.clone(),
@@ -205,7 +225,13 @@ impl RuntimeExecutionContext<'_> {
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => {
-                return Self::recorded_process_error(call_id, "signal_process", args, err, started);
+                return Self::recorded_process_error(
+                    call_id,
+                    "signal_process",
+                    args,
+                    err,
+                    self.elapsed_ms(started),
+                );
             }
         };
         let signal_id = format!("process-{call_id}");
@@ -228,7 +254,13 @@ impl RuntimeExecutionContext<'_> {
             })),
             Err(err) => ToolInvocationReply::error(json!(format!("signal failed: {err}"))).output,
         };
-        Self::recorded_process_reply(call_id, "signal_process", args, output, started)
+        Self::recorded_process_reply(
+            call_id,
+            "signal_process",
+            args,
+            output,
+            self.elapsed_ms(started),
+        )
     }
 
     pub(super) async fn cancel_process_handle(
@@ -236,12 +268,18 @@ impl RuntimeExecutionContext<'_> {
         call_id: String,
         handle: serde_json::Value,
     ) -> ToolInvocationReply {
-        let started = std::time::Instant::now();
+        let started = self.dispatch.clock.now();
         let args = json!({ "handle": handle.clone() });
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => {
-                return Self::recorded_process_error(call_id, "cancel_process", args, err, started);
+                return Self::recorded_process_error(
+                    call_id,
+                    "cancel_process",
+                    args,
+                    err,
+                    self.elapsed_ms(started),
+                );
             }
         };
         // Run-local children bypass the grant-validating cancel ability:
@@ -276,7 +314,13 @@ impl RuntimeExecutionContext<'_> {
             Ok(status) => ToolCallOutput::success(Self::process_status_value(&status)),
             Err(err) => ToolInvocationReply::error(json!(format!("cancel failed: {err}"))).output,
         };
-        Self::recorded_process_reply(call_id, "cancel_process", args, output, started)
+        Self::recorded_process_reply(
+            call_id,
+            "cancel_process",
+            args,
+            output,
+            self.elapsed_ms(started),
+        )
     }
 }
 
@@ -358,6 +402,7 @@ mod tests {
             self.prepares.fetch_add(1, Ordering::SeqCst);
             Ok(PreparedToolCall::from_parts(
                 call.pending.call_id,
+                call.tool_id,
                 call.pending.tool_name,
                 call.pending.args,
                 call.pending.replay,
@@ -416,6 +461,7 @@ mod tests {
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
+            clock: std::sync::Arc::new(crate::SystemClock),
         });
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
@@ -533,6 +579,7 @@ mod tests {
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
+            clock: std::sync::Arc::new(crate::SystemClock),
         });
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
@@ -626,6 +673,7 @@ mod tests {
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
+            clock: std::sync::Arc::new(crate::SystemClock),
         });
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
@@ -709,6 +757,7 @@ mod tests {
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
+            clock: std::sync::Arc::new(crate::SystemClock),
         });
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
