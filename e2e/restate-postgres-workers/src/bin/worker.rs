@@ -360,7 +360,7 @@ impl AppState {
 fn prompt_for_request(request: &TurnRequest) -> String {
     match request.scenario {
         TurnScenario::KitchenSink => format!(
-            "Run the canonical Lash Restate/Postgres/S3 kitchen sink workflow. workflow_id={} fail_once={}",
+            "Run the canonical Lash Restate/Postgres/S3 kitchen sink workflow. workflow_id={} kitchen_sink=true fail_once={}",
             request.workflow_id, request.fail_once
         ),
         TurnScenario::TriggerSetup => format!(

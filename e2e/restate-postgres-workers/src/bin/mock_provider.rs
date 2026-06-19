@@ -56,6 +56,9 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
     let scenario = latest_scenario_marker(&latest_user)
         .or_else(|| latest_scenario_marker(&full_text))
         .unwrap_or(MockScenario::KitchenSink);
+    let fail_once = latest_fail_once_marker(&latest_user)
+        .or_else(|| latest_fail_once_marker(&full_text))
+        .unwrap_or(false);
     let (scenario, content) = match scenario {
         MockScenario::TriggerSetup => ("trigger_setup", trigger_setup_script()),
         MockScenario::QueuedWake => ("queued_wake", queued_wake_script()),
@@ -67,14 +70,8 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
             "durable_input_request",
             durable_input_request_script(&workflow_id),
         ),
-        MockScenario::ToolBatch => (
-            "tool_batch",
-            tool_batch_script(&workflow_id, full_text.contains("fail_once=true")),
-        ),
-        MockScenario::KitchenSink => (
-            "kitchen_sink",
-            kitchen_sink_script(&workflow_id, full_text.contains("fail_once=true")),
-        ),
+        MockScenario::ToolBatch => ("tool_batch", tool_batch_script(&workflow_id, fail_once)),
+        MockScenario::KitchenSink => ("kitchen_sink", kitchen_sink_script(&workflow_id, fail_once)),
     };
     let response = json!({
         "id": request_id,
@@ -187,7 +184,7 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
         ("trigger_setup=true", MockScenario::TriggerSetup),
         ("signal_suspend=true", MockScenario::SignalSuspend),
         ("Background process wake", MockScenario::QueuedWake),
-        ("fail_once=", MockScenario::KitchenSink),
+        ("kitchen_sink=true", MockScenario::KitchenSink),
     ]
     .into_iter()
     .filter_map(|(marker, scenario)| text.rfind(marker).map(|idx| (idx, scenario)))
@@ -203,6 +200,15 @@ fn extract_latest_marker(text: &str, marker: &str) -> Option<String> {
         .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
         .collect();
     (!value.is_empty()).then_some(value)
+}
+
+fn latest_fail_once_marker(text: &str) -> Option<bool> {
+    let value = extract_latest_marker(text, "fail_once=")?;
+    match value.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 fn kitchen_sink_script(workflow_id: &str, fail_once: bool) -> String {
@@ -406,6 +412,7 @@ crash = await tools.crash_once({{ workflow_id: "{workflow_id}" }})?
 Exercise direct aggregate resource batching.
 
 ```lashlang
+{crash}
 batch = await {{
   slow: tools.batch_side_effect({{
     workflow_id: "{workflow_id}",
@@ -419,7 +426,6 @@ batch = await {{
   }})?,
   literal: "kept"
 }}
-{crash}
 submit {{
   workflow_id: "{workflow_id}",
   batch: batch,
@@ -428,4 +434,31 @@ submit {{
 ```
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latest_fail_once_marker_uses_last_prompt_marker() {
+        let text = "workflow_id=e2e-failover fail_once=true\n\
+            workflow_id=e2e-tool-batch tool_batch=true fail_once=false";
+
+        assert_eq!(latest_fail_once_marker(text), Some(false));
+    }
+
+    #[test]
+    fn latest_fail_once_marker_accepts_true_marker() {
+        let text = "workflow_id=e2e-tool-batch-failover tool_batch=true fail_once=true";
+
+        assert_eq!(latest_fail_once_marker(text), Some(true));
+    }
+
+    #[test]
+    fn scenario_marker_does_not_treat_fail_once_as_kitchen_sink() {
+        let text = "workflow_id=e2e-tool-batch tool_batch=true fail_once=false";
+
+        assert_eq!(latest_scenario_marker(text), Some(MockScenario::ToolBatch));
+    }
 }
