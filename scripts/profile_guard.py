@@ -345,6 +345,21 @@ def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
                     "reported_worker_stack_bytes": sample.get("reported_worker_stack_bytes"),
                 }
             )
+        summary_scenarios = sample.get("summary_scenarios")
+        scenario = sample.get("scenario")
+        if (
+            sample.get("status") == "ok"
+            and isinstance(scenario, str)
+            and (not isinstance(summary_scenarios, list) or scenario not in summary_scenarios)
+        ):
+            findings.append(
+                {
+                    "kind": "stack_scenario_not_reported",
+                    "section": "runtime_stack",
+                    "scenario": scenario,
+                    "stack_bytes": sample.get("stack_bytes"),
+                }
+            )
 
     return {
         "passed": not findings,
