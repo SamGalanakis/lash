@@ -5,7 +5,6 @@ pub use file_store::FileAttachmentStore;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef};
 use sha2::{Digest, Sha256};
@@ -244,10 +243,7 @@ impl AttachmentStore for SessionScopedAttachmentStore {
 }
 
 fn now_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    <crate::SystemClock as crate::Clock>::timestamp_ms(&crate::SystemClock)
 }
 
 /// Adapter that exposes the [`AttachmentManifest`] supertrait of an

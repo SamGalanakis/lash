@@ -6,7 +6,7 @@ use super::process::{
     ProcessRegistry,
 };
 use super::{
-    EffectHost, InlineEffectHost, ProcessWorkPoke, QueuedWorkPoke, SessionStoreFactory,
+    EffectHost, InlineEffectHost, ProcessWorkDriver, QueuedWorkDriver, SessionStoreFactory,
     TerminationPolicy,
 };
 
@@ -147,10 +147,11 @@ pub struct EmbeddedRuntimeHost {
 
 impl EmbeddedRuntimeHost {
     pub fn new(core: RuntimeHostConfig) -> Self {
+        let clock = Arc::clone(&core.clock);
         Self {
             core,
             session_store_factory: None,
-            trigger_store: Some(Arc::new(crate::InMemoryTriggerStore::default())),
+            trigger_store: Some(Arc::new(crate::InMemoryTriggerStore::with_clock(clock))),
         }
     }
 
@@ -173,6 +174,8 @@ impl EmbeddedRuntimeHost {
 pub struct ProcessRuntimeHost {
     pub embedded: EmbeddedRuntimeHost,
     pub process_registry: Arc<dyn ProcessRegistry>,
+    pub process_work_driver: Option<ProcessWorkDriver>,
+    pub queued_work_driver: Option<QueuedWorkDriver>,
 }
 
 impl ProcessRuntimeHost {
@@ -180,7 +183,19 @@ impl ProcessRuntimeHost {
         Self {
             embedded,
             process_registry,
+            process_work_driver: None,
+            queued_work_driver: None,
         }
+    }
+
+    pub fn with_process_work_driver(mut self, driver: ProcessWorkDriver) -> Self {
+        self.process_work_driver = Some(driver);
+        self
+    }
+
+    pub fn with_queued_work_driver(mut self, driver: QueuedWorkDriver) -> Self {
+        self.queued_work_driver = Some(driver);
+        self
     }
 }
 
@@ -190,13 +205,11 @@ pub(crate) struct RuntimeHost {
     pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     pub trigger_store: Option<Arc<dyn crate::TriggerStore>>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
-    /// Wakes the host's [`ProcessWorkRunner`](super::ProcessWorkRunner) so a
-    /// successful process start is consumed promptly. Absent when no work runner
-    /// is wired (e.g. a registry-less host); poking is then a no-op.
-    pub process_work_poke: Option<ProcessWorkPoke>,
-    /// Wakes the host's [`QueuedWorkRunner`](super::QueuedWorkRunner) so queued
-    /// turn work drains promptly after queue ingress.
-    pub queued_work_poke: Option<QueuedWorkPoke>,
+    /// Host-owned process work driver. Absent when no process registry is wired.
+    pub process_work_driver: Option<ProcessWorkDriver>,
+    /// Host-owned queued work driver. Absent when queued work is delegated to an
+    /// external host or no session store exists.
+    pub queued_work_driver: Option<QueuedWorkDriver>,
 }
 
 impl RuntimeHost {
@@ -206,7 +219,7 @@ impl RuntimeHost {
         policy: crate::SessionPolicy,
     ) -> Result<crate::RuntimeSessionPolicy, crate::SessionError> {
         let provider_id = policy.recorded_provider_id();
-        let binding = self
+        let mut binding = self
             .core
             .providers
             .provider_resolver
@@ -231,6 +244,7 @@ impl RuntimeHost {
                     }
                 }
             })?;
+        binding.provider = binding.provider.with_clock(Arc::clone(&self.core.clock));
         Ok(crate::RuntimeSessionPolicy::new(policy, binding))
     }
 }
@@ -242,8 +256,8 @@ impl From<EmbeddedRuntimeHost> for RuntimeHost {
             session_store_factory: value.session_store_factory,
             trigger_store: value.trigger_store,
             process_registry: None,
-            process_work_poke: None,
-            queued_work_poke: None,
+            process_work_driver: None,
+            queued_work_driver: None,
         }
     }
 }
@@ -255,8 +269,8 @@ impl From<ProcessRuntimeHost> for RuntimeHost {
             session_store_factory: value.embedded.session_store_factory,
             trigger_store: value.embedded.trigger_store,
             process_registry: Some(value.process_registry),
-            process_work_poke: None,
-            queued_work_poke: None,
+            process_work_driver: value.process_work_driver,
+            queued_work_driver: value.queued_work_driver,
         }
     }
 }

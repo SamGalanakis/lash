@@ -1376,7 +1376,7 @@ async fn idempotent_retry_policy_requires_stable_key() {
 }
 
 #[tokio::test]
-async fn batch_executes_nested_calls_and_preserves_partial_failures() {
+async fn batch_returns_explicit_errors_without_runtime_execution_context() {
     let outcome = dispatch_tool_call(
         &dispatch_context(),
         "batch".to_string(),
@@ -1402,16 +1402,17 @@ async fn batch_executes_nested_calls_and_preserves_partial_failures() {
     assert_eq!(
         results
             .iter()
-            .filter(|item| item.get("success").and_then(|value| value.as_bool()) == Some(true))
+            .filter(|item| item.get("success").and_then(|value| value.as_bool()) == Some(false))
             .count(),
-        2
+        3
     );
-    assert_eq!(results[0].get("tool"), Some(&json!("alpha")));
+    assert_eq!(results[0].get("tool"), Some(&json!("tool:alpha")));
     assert_eq!(
-        results[2]
+        results[0]
             .get("error")
-            .and_then(|value| value.get("message")),
-        Some(&json!("beta failed"))
+            .and_then(|value| value.get("message"))
+            .and_then(|value| value.as_str()),
+        Some("tool batch dispatch is unavailable outside runtime execution")
     );
 }
 
@@ -1469,7 +1470,7 @@ async fn batch_marks_overflow_calls_as_failures() {
 }
 
 #[tokio::test]
-async fn batch_calls_make_progress_concurrently() {
+async fn batch_does_not_run_child_tools_without_runtime_execution_context() {
     let barrier = Arc::new(Barrier::new(2));
     let started = Arc::new(AtomicUsize::new(0));
     let outcome = dispatch_tool_call(
@@ -1486,7 +1487,7 @@ async fn batch_calls_make_progress_concurrently() {
     .await;
 
     assert!(outcome.record.output.is_success());
-    assert_eq!(started.load(Ordering::SeqCst), 2);
+    assert_eq!(started.load(Ordering::SeqCst), 0);
     let value = outcome.record.output.value_for_projection();
     let results = value
         .get("results")
@@ -1496,7 +1497,7 @@ async fn batch_calls_make_progress_concurrently() {
     assert!(
         results
             .iter()
-            .all(|item| item.get("success").and_then(|value| value.as_bool()) == Some(true))
+            .all(|item| item.get("success").and_then(|value| value.as_bool()) == Some(false))
     );
 }
 

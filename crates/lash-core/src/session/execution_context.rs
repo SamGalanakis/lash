@@ -38,7 +38,7 @@ pub(super) struct RuntimeExecutionProcessEventContext {
     pub registry: Arc<dyn crate::ProcessRegistry>,
     pub store: Option<Arc<dyn crate::RuntimePersistence>>,
     pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
-    pub queued_work_poke: Option<crate::QueuedWorkPoke>,
+    pub queued_work_driver: Option<crate::QueuedWorkDriver>,
 }
 
 impl<'run> RuntimeExecutionContext<'run> {
@@ -218,14 +218,14 @@ impl<'run> RuntimeExecutionContext<'run> {
         registry: Arc<dyn crate::ProcessRegistry>,
         store: Option<Arc<dyn crate::RuntimePersistence>>,
         session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
-        queued_work_poke: Option<crate::QueuedWorkPoke>,
+        queued_work_driver: Option<crate::QueuedWorkDriver>,
     ) -> Self {
         self.process_event_context = Some(RuntimeExecutionProcessEventContext {
             process_id: process_id.into(),
             registry,
             store,
             session_store_factory,
-            queued_work_poke,
+            queued_work_driver,
         });
         self
     }
@@ -391,7 +391,10 @@ impl<'run> RuntimeExecutionContext<'run> {
                     invocation,
                     crate::RuntimeEffectCommand::Sleep { duration_ms },
                 ),
-                crate::RuntimeEffectLocalExecutor::sleep(cancellation),
+                crate::RuntimeEffectLocalExecutor::sleep_with_clock(
+                    cancellation,
+                    std::sync::Arc::clone(&self.dispatch.clock),
+                ),
             )
             .await?;
         match outcome {
@@ -439,7 +442,11 @@ impl<'run> RuntimeExecutionContext<'run> {
                     invocation,
                     crate::RuntimeEffectCommand::AwaitEvent { key },
                 ),
-                crate::RuntimeEffectLocalExecutor::await_event(cancellation, None),
+                crate::RuntimeEffectLocalExecutor::await_event_with_clock(
+                    cancellation,
+                    None,
+                    std::sync::Arc::clone(&self.dispatch.clock),
+                ),
             )
             .await?;
         match outcome.into_await_event()? {
@@ -567,7 +574,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 context.session_store_factory.as_ref(),
                 result.wake_delivery,
                 Some(self.session_graph_service()),
-                context.queued_work_poke.as_ref(),
+                context.queued_work_driver.as_ref(),
             )
             .await?;
         }

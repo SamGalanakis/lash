@@ -256,11 +256,16 @@ impl LashlangProcessHost<'_> {
         &self,
         host_operation: &str,
         call_site: &lashlang::LashlangExecutionCallSite,
+        batch_index: Option<usize>,
     ) -> String {
-        format!(
+        let mut call_id = format!(
             "lashlang:{}:resource:{}:{}:{}",
             self.process_id, host_operation, call_site.site.node_id, call_site.occurrence
-        )
+        );
+        if let Some(batch_index) = batch_index {
+            call_id.push_str(&format!(":child:{batch_index}"));
+        }
+        call_id
     }
 
     fn prepare_resource_invocation(
@@ -269,6 +274,7 @@ impl LashlangProcessHost<'_> {
         receiver: lashlang::Value,
         args: Vec<lashlang::Value>,
         call_site: Option<lashlang::LashlangExecutionCallSite>,
+        batch_index: Option<usize>,
     ) -> Result<(String, lash_core::ToolInvocation), ExecutionHostError> {
         let receiver = match &receiver {
             lashlang::Value::Resource(receiver) => receiver,
@@ -293,7 +299,7 @@ impl LashlangProcessHost<'_> {
                 "module operation `{operation}` resolved to host operation `{host_operation}` but has no deterministic lashlang execution call site"
             ))
         })?;
-        let call_id = self.resource_tool_call_id(&host_operation, &call_site);
+        let call_id = self.resource_tool_call_id(&host_operation, &call_site, batch_index);
         let mut invocation = lash_core::ToolInvocation::new(call_id, manifest.id.clone(), payload);
         if let Some(hook) = self
             .lashlang_execution_trace
@@ -312,7 +318,7 @@ impl LashlangProcessHost<'_> {
         call_site: Option<lashlang::LashlangExecutionCallSite>,
     ) -> Result<lashlang::Value, ExecutionHostError> {
         let (_, invocation) =
-            self.prepare_resource_invocation(operation, receiver, args, call_site)?;
+            self.prepare_resource_invocation(operation, receiver, args, call_site, None)?;
         let lash_core::ToolInvocation {
             id,
             tool_id,
@@ -342,6 +348,7 @@ impl LashlangProcessHost<'_> {
                 operation.receiver,
                 operation.args,
                 operation.call_site,
+                Some(index),
             ) {
                 Ok((_, invocation)) => {
                     positions.push(index);

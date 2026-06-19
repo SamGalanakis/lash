@@ -187,6 +187,19 @@ impl RuntimeSessionState {
             );
     }
 
+    pub(crate) fn append_active_conversation_messages_with_clock(
+        &mut self,
+        messages: &[Message],
+        clock: &dyn crate::Clock,
+    ) {
+        self.session_graph
+            .append_active_conversation_messages_for_agent_frame_at(
+                &self.current_agent_frame_id,
+                messages,
+                clock.timestamp_rfc3339(),
+            );
+    }
+
     pub fn read_view(&self) -> crate::SessionReadView {
         crate::SessionReadView::from_persisted_state(self)
     }
@@ -349,6 +362,10 @@ impl RuntimeSessionState {
     }
 
     pub fn ensure_agent_frame_initialized(&mut self) {
+        self.ensure_agent_frame_initialized_with_clock(&crate::SystemClock);
+    }
+
+    pub fn ensure_agent_frame_initialized_with_clock(&mut self, clock: &dyn crate::Clock) {
         if self.current_agent_frame_id.is_empty() {
             self.current_agent_frame_id = default_agent_frame_id(&self.session_id);
         }
@@ -359,7 +376,7 @@ impl RuntimeSessionState {
         {
             return;
         }
-        let mut frame = default_agent_frame(&self.session_id, &self.policy);
+        let mut frame = default_agent_frame_with_clock(&self.session_id, &self.policy, clock);
         frame.frame_id = self.current_agent_frame_id.clone();
         frame.protocol_turn_options = self.protocol_turn_options.clone();
         frame.execution_state_ref = self.execution_state_ref.clone();
@@ -372,11 +389,24 @@ impl RuntimeSessionState {
         assignment: crate::AgentFrameAssignment,
         protocol_turn_options: crate::ProtocolTurnOptions,
     ) {
+        self.reset_initial_agent_frame_with_clock(
+            assignment,
+            protocol_turn_options,
+            &crate::SystemClock,
+        );
+    }
+
+    pub fn reset_initial_agent_frame_with_clock(
+        &mut self,
+        assignment: crate::AgentFrameAssignment,
+        protocol_turn_options: crate::ProtocolTurnOptions,
+        clock: &dyn crate::Clock,
+    ) {
         let frame_id = default_agent_frame_id(&self.session_id);
         self.policy = assignment.policy.clone();
         self.protocol_turn_options = protocol_turn_options.clone();
         self.current_agent_frame_id = frame_id.clone();
-        self.agent_frames = vec![crate::AgentFrameRecord::new(
+        self.agent_frames = vec![crate::AgentFrameRecord::new_at(
             frame_id,
             self.session_id.clone(),
             None,
@@ -384,6 +414,7 @@ impl RuntimeSessionState {
             None,
             assignment,
             protocol_turn_options,
+            clock.timestamp_rfc3339(),
         )];
     }
 
@@ -575,27 +606,31 @@ pub(super) fn apply_session_head(
     apply_persisted_session_config(&mut state.policy, &head.config);
 }
 
-pub(super) fn append_session_nodes_to_state(
+pub(super) fn append_session_nodes_to_state_with_clock(
     state: &mut RuntimeSessionState,
     nodes: &[crate::SessionAppendNode],
+    clock: &dyn crate::Clock,
 ) -> Vec<String> {
     let drafts = nodes
         .iter()
         .map(session_append_node_draft)
         .collect::<Vec<_>>();
-    state.ensure_agent_frame_initialized();
-    let node_ids = state
-        .session_graph
-        .append_node_drafts_for_agent_frame(&state.current_agent_frame_id, drafts);
+    state.ensure_agent_frame_initialized_with_clock(clock);
+    let node_ids = state.session_graph.append_node_drafts_for_agent_frame_at(
+        &state.current_agent_frame_id,
+        drafts,
+        clock.timestamp_rfc3339(),
+    );
     normalize_session_graph(state);
     node_ids
 }
 
-pub(super) fn open_agent_frame_in_state(
+pub(super) fn open_agent_frame_in_state_with_clock(
     state: &mut RuntimeSessionState,
     request: crate::OpenAgentFrameRequest,
+    clock: &dyn crate::Clock,
 ) -> crate::OpenAgentFrameResult {
-    state.ensure_agent_frame_initialized();
+    state.ensure_agent_frame_initialized_with_clock(clock);
     if request.frame_id.trim().is_empty() || state.current_agent_frame_id == request.frame_id {
         return crate::OpenAgentFrameResult {
             frame_id: state.current_agent_frame_id.clone(),
@@ -614,7 +649,7 @@ pub(super) fn open_agent_frame_in_state(
         .map(|frame| frame.protocol_turn_options.clone())
         .unwrap_or_else(|| state.protocol_turn_options.clone());
     let previous_frame_id = previous.map(|frame| frame.frame_id);
-    state.append_agent_frame(crate::AgentFrameRecord::new(
+    state.append_agent_frame(crate::AgentFrameRecord::new_at(
         request.frame_id.clone(),
         state.session_id.clone(),
         previous_frame_id,
@@ -622,9 +657,11 @@ pub(super) fn open_agent_frame_in_state(
         request.caused_by,
         assignment,
         protocol_turn_options,
+        clock.timestamp_rfc3339(),
     ));
 
-    let initial_node_ids = append_session_nodes_to_state(state, &request.initial_nodes);
+    let initial_node_ids =
+        append_session_nodes_to_state_with_clock(state, &request.initial_nodes, clock);
     if !initial_node_ids.is_empty() {
         state.graph_replace_required = true;
     }
@@ -665,7 +702,15 @@ fn default_agent_frames(session_id: &str, policy: &SessionPolicy) -> Vec<crate::
 }
 
 fn default_agent_frame(session_id: &str, policy: &SessionPolicy) -> crate::AgentFrameRecord {
-    crate::AgentFrameRecord::new(
+    default_agent_frame_with_clock(session_id, policy, &crate::SystemClock)
+}
+
+fn default_agent_frame_with_clock(
+    session_id: &str,
+    policy: &SessionPolicy,
+    clock: &dyn crate::Clock,
+) -> crate::AgentFrameRecord {
+    crate::AgentFrameRecord::new_at(
         default_agent_frame_id(session_id),
         session_id.to_string(),
         None,
@@ -673,6 +718,7 @@ fn default_agent_frame(session_id: &str, policy: &SessionPolicy) -> crate::Agent
         None,
         crate::AgentFrameAssignment::from_policy(policy.clone()),
         crate::ProtocolTurnOptions::default(),
+        clock.timestamp_rfc3339(),
     )
 }
 

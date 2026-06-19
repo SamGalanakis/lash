@@ -18,29 +18,25 @@ pub struct LashCore {
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) live_replay_store: Arc<dyn LiveReplayStore>,
     pub(crate) runtime_host_installer: Option<RuntimeHostInstaller>,
-    /// Shared resolution of the process work runner. The poke it yields is
-    /// threaded onto every session's host so the process admin seam can wake
-    /// the runner after a successful start. Shared across `LashCore` clones so
-    /// the default inline runner is spawned at most once (Decision 3).
-    pub(crate) process_work_runner: Arc<ProcessWorkRunnerSlot>,
+    /// Shared resolution of host-owned work drivers. Shared across `LashCore`
+    /// clones so inline process and queued drivers are constructed at most once.
+    pub(crate) work_driver: Arc<InlineWorkDriverSlot>,
 }
 
-/// How a [`LashCore`] resolves its process work runner, decided at `build()`
+/// How a [`LashCore`] resolves its process work driver, decided at `build()`
 /// and shared across clones.
-pub(crate) enum ProcessWorkRunnerSetup {
-    /// No process registry is wired; there is nothing to run and no poke.
+pub(crate) enum ProcessWorkDriverSetup {
+    /// No process registry is wired; there is nothing to run.
     None,
-    /// Lazily spawn the default inline [`ProcessWorkRunner`] on first
-    /// `session().open()` (Decision 3: the runtime is guaranteed by then, and
-    /// `build()` is sync — some tests call it outside a tokio runtime). A store
-    /// factory is required to build the config (the worker rebuilds a session
-    /// runtime per process); a registry with no store factory is rejected at
-    /// build with [`EmbedError::ProcessRegistryRequiresStoreFactory`].
+    /// Lazily construct the default inline process driver on first
+    /// `session().open()`. A store factory is required to build the config (the
+    /// worker rebuilds a session runtime per process); a registry with no store
+    /// factory is rejected at build with
+    /// [`EmbedError::ProcessRegistryRequiresStoreFactory`].
     LazyDefault {
         config: Box<DurableProcessWorkerConfig>,
     },
-    /// The host wired an external runner (e.g. the Restate ingress-client
-    /// runner) and handed its driver to the core.
+    /// The host wired an external driver.
     External { driver: ProcessWorkDriver },
 }
 
@@ -69,45 +65,96 @@ impl ProcessWorkSource {
     }
 }
 
-/// Shared, lazily-initialized process-work-runner state for a [`LashCore`].
+#[derive(Clone)]
+pub(crate) enum QueuedWorkSource {
+    None,
+    LazyDefault,
+    External(QueuedWorkDriver),
+}
+
+impl Default for QueuedWorkSource {
+    fn default() -> Self {
+        Self::LazyDefault
+    }
+}
+
+pub(crate) enum QueuedWorkDriverSetup {
+    None,
+    LazyDefault {
+        config: Arc<InlineQueuedWorkRunConfig>,
+    },
+    External {
+        driver: QueuedWorkDriver,
+    },
+}
+
+pub(crate) struct InlineWorkDriverSetup {
+    process: ProcessWorkDriverSetup,
+    queued: QueuedWorkDriverSetup,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ResolvedWorkDrivers {
+    pub(crate) process: Option<ProcessWorkDriver>,
+    pub(crate) queued: Option<QueuedWorkDriver>,
+    pub(crate) drive_process_on_open: bool,
+}
+
+/// Shared, lazily-initialized host-work state for a [`LashCore`].
 ///
-/// The once-guard ([`tokio::sync::OnceCell`]) makes the default inline runner
-/// spawn exactly once across `LashCore` clones, on the first `session().open()`
-/// that needs it. The resolved [`ProcessWorkPoke`] (if any) is then reused for
-/// every session host.
-pub(crate) struct ProcessWorkRunnerSlot {
-    setup: ProcessWorkRunnerSetup,
-    poke: tokio::sync::OnceCell<Option<ProcessWorkPoke>>,
+/// The once-guard ([`tokio::sync::OnceCell`]) constructs inline drivers exactly
+/// once across `LashCore` clones, on the first `session().open()` or admin path
+/// that needs them.
+pub(crate) struct InlineWorkDriverSlot {
+    setup: InlineWorkDriverSetup,
+    drivers: tokio::sync::OnceCell<ResolvedWorkDrivers>,
     phase_probe_slot: Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot>,
 }
 
-impl ProcessWorkRunnerSlot {
-    fn new(setup: ProcessWorkRunnerSetup) -> Self {
-        let phase_probe_slot = match &setup {
-            ProcessWorkRunnerSetup::LazyDefault { config } => {
+impl InlineWorkDriverSlot {
+    fn new(setup: InlineWorkDriverSetup) -> Self {
+        let phase_probe_slot = match &setup.process {
+            ProcessWorkDriverSetup::LazyDefault { config } => {
                 Some(config.turn_phase_probe_slot.clone())
             }
-            ProcessWorkRunnerSetup::None | ProcessWorkRunnerSetup::External { .. } => None,
+            ProcessWorkDriverSetup::None | ProcessWorkDriverSetup::External { .. } => None,
         };
         Self {
             setup,
-            poke: tokio::sync::OnceCell::new(),
+            drivers: tokio::sync::OnceCell::new(),
             phase_probe_slot,
         }
     }
 
-    /// Resolve the poke for a session host, spawning the default inline runner
-    /// on first use. Idempotent: the once-guard ensures a single spawn.
-    pub(crate) async fn poke(&self) -> Option<ProcessWorkPoke> {
-        self.poke
+    /// Resolve host work drivers for a session host. Idempotent: the once-guard
+    /// ensures inline drivers are constructed once.
+    pub(crate) async fn drivers(&self) -> ResolvedWorkDrivers {
+        self.drivers
             .get_or_init(|| async {
-                match &self.setup {
-                    ProcessWorkRunnerSetup::None => None,
-                    ProcessWorkRunnerSetup::External { driver } => Some(driver.poke_handle()),
-                    ProcessWorkRunnerSetup::LazyDefault { config } => {
-                        let worker = DurableProcessWorker::new((**config).clone());
-                        Some(ProcessWorkRunner::inline(worker).spawn())
+                let queued = match &self.setup.queued {
+                    QueuedWorkDriverSetup::None => None,
+                    QueuedWorkDriverSetup::External { driver } => Some(driver.clone()),
+                    QueuedWorkDriverSetup::LazyDefault { config } => Some(QueuedWorkDriver::new(
+                        Arc::new(InlineQueuedWorkRunHandle::new(Arc::clone(config))),
+                    )),
+                };
+                let (process, drive_process_on_open) = match &self.setup.process {
+                    ProcessWorkDriverSetup::None => (None, false),
+                    ProcessWorkDriverSetup::External { driver } => (Some(driver.clone()), false),
+                    ProcessWorkDriverSetup::LazyDefault { config } => {
+                        let mut config = (**config).clone();
+                        if let Some(driver) = queued.clone() {
+                            config = config.with_queued_work_driver(driver);
+                        }
+                        let registry = Arc::clone(&config.process_registry);
+                        let worker = DurableProcessWorker::new(config);
+                        (Some(ProcessWorkDriver::inline(registry, worker)), true)
                     }
+                };
+                ResolvedWorkDrivers {
+                    process,
+                    queued,
+                    drive_process_on_open,
                 }
             })
             .await
@@ -116,6 +163,130 @@ impl ProcessWorkRunnerSlot {
 
     pub(crate) fn phase_probe_slot(&self) -> Option<lash_core::runtime::RuntimeTurnPhaseProbeSlot> {
         self.phase_probe_slot.clone()
+    }
+
+    fn configured_process_work_driver(&self) -> Option<ProcessWorkDriver> {
+        match &self.setup.process {
+            ProcessWorkDriverSetup::External { driver } => Some(driver.clone()),
+            ProcessWorkDriverSetup::None | ProcessWorkDriverSetup::LazyDefault { .. } => None,
+        }
+    }
+
+    fn configured_queued_work_driver(&self) -> Option<QueuedWorkDriver> {
+        match &self.setup.queued {
+            QueuedWorkDriverSetup::External { driver } => Some(driver.clone()),
+            QueuedWorkDriverSetup::None | QueuedWorkDriverSetup::LazyDefault { .. } => None,
+        }
+    }
+}
+
+pub(crate) struct InlineQueuedWorkRunConfig {
+    env: RuntimeEnvironment,
+    policy: SessionPolicy,
+    protocol_factory: Option<Arc<dyn PluginFactory>>,
+    plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
+    store_factory: Arc<dyn SessionStoreFactory>,
+    live_replay_store: Arc<dyn LiveReplayStore>,
+    runtime_host_installer: Option<RuntimeHostInstaller>,
+}
+
+impl InlineQueuedWorkRunConfig {
+    fn new(
+        env: RuntimeEnvironment,
+        policy: SessionPolicy,
+        protocol_factory: Option<Arc<dyn PluginFactory>>,
+        plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
+        store_factory: Arc<dyn SessionStoreFactory>,
+        live_replay_store: Arc<dyn LiveReplayStore>,
+        runtime_host_installer: Option<RuntimeHostInstaller>,
+    ) -> Self {
+        Self {
+            env,
+            policy,
+            protocol_factory,
+            plugin_factories,
+            store_factory,
+            live_replay_store,
+            runtime_host_installer,
+        }
+    }
+}
+
+struct InlineQueuedWorkRunHandle {
+    config: Arc<InlineQueuedWorkRunConfig>,
+}
+
+impl InlineQueuedWorkRunHandle {
+    fn new(config: Arc<InlineQueuedWorkRunConfig>) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait]
+impl QueuedWorkRunHandle for InlineQueuedWorkRunHandle {
+    async fn run_queued_work(
+        &self,
+        request: QueuedWorkRunRequest,
+    ) -> std::result::Result<(), lash_core::PluginError> {
+        let Some(session_id) = request.session_id else {
+            return Ok(());
+        };
+        let reason = request.reason;
+        let mut policy = self.config.policy.clone();
+        policy.session_id = Some(session_id.clone());
+        let store = self
+            .config
+            .store_factory
+            .create_store(&SessionStoreCreateRequest {
+                session_id: session_id.clone(),
+                relation: SessionRelation::default(),
+                policy: policy.clone(),
+            })
+            .await
+            .map_err(lash_core::PluginError::Session)?;
+        let state = crate::session::load_state_for_residency(
+            self.config.env.residency,
+            &session_id,
+            &policy,
+            store.as_ref(),
+        )
+        .await
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
+        let plugin_host = build_plugin_host(
+            self.config.protocol_factory.as_ref(),
+            self.config.plugin_factories.as_ref(),
+            Vec::new(),
+        )
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
+        let mut env = self.config.env.clone();
+        env.core = match &self.config.runtime_host_installer {
+            Some(install) => install(env.core.clone(), &plugin_host)
+                .map_err(|err| lash_core::PluginError::Session(err.to_string()))?,
+            None => env.core.clone(),
+        };
+        env.plugin_host = Some(Arc::new(plugin_host));
+        let effect_host = Arc::clone(&env.core.control.effect_host);
+        let runtime = LashRuntime::from_environment(&env, policy, state, Some(store))
+            .await
+            .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
+        let handle = RuntimeHandle::with_live_replay_store(
+            runtime,
+            Arc::clone(&self.config.live_replay_store),
+        );
+        let scope = lash_core::ExecutionScope::queue_drain(session_id, reason);
+        let scoped = effect_host
+            .scoped(scope)
+            .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
+        crate::turn::stream_next_queued_prepared_turn(
+            &handle,
+            crate::turn::TurnSinks::default(),
+            scoped,
+            CancellationToken::new(),
+            &[],
+        )
+        .await
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
+        Ok(())
     }
 }
 
@@ -275,6 +446,12 @@ impl LashCore {
         .with_residency(self.env.residency);
         if let Some(trigger_store) = self.env.trigger_store.as_ref() {
             config = config.with_trigger_store(Arc::clone(trigger_store));
+        }
+        if let Some(driver) = self.work_driver.configured_process_work_driver() {
+            config = config.with_process_work_driver(driver);
+        }
+        if let Some(driver) = self.work_driver.configured_queued_work_driver() {
+            config = config.with_queued_work_driver(driver);
         }
         Ok(config)
     }
@@ -686,8 +863,13 @@ macro_rules! forward_core_builder_methods {
                 self
             }
 
-            pub fn queued_work_poke(mut self, poke: QueuedWorkPoke) -> Self {
-                self.inner = self.inner.queued_work_poke(poke);
+            pub fn queued_work_driver(mut self, driver: QueuedWorkDriver) -> Self {
+                self.inner = self.inner.queued_work_driver(driver);
+                self
+            }
+
+            pub fn disable_queued_work_driver(mut self) -> Self {
+                self.inner = self.inner.disable_queued_work_driver();
                 self
             }
 
@@ -732,7 +914,7 @@ pub struct LashCoreBuilder {
     // Single source of truth for process lifecycle support and process-work
     // consumption.
     process_work_source: ProcessWorkSource,
-    queued_work_poke: Option<QueuedWorkPoke>,
+    queued_work_source: QueuedWorkSource,
     live_replay_store: Option<Arc<dyn LiveReplayStore>>,
     runtime_host_installer: Option<RuntimeHostInstaller>,
 }
@@ -1117,12 +1299,12 @@ impl LashCoreBuilder {
 
         let process_registry = self.process_work_source.process_registry();
 
-        // Resolve the process work runner before the process source is moved
-        // into the environment. The default inline runner's config is built
+        // Resolve process work before the process source is moved into the
+        // environment. The default inline driver's config is built
         // eagerly so a missing store factory fails loudly at build, not at
         // first open. It is built from the same single-protocol plugin host the
         // live runtime uses, so the worker can rebuild a runtime for a process.
-        let process_work_runner = Self::resolve_process_work_runner(
+        let process_work_driver = Self::resolve_process_work_driver(
             &self.process_work_source,
             &default_plugin_host,
             &core,
@@ -1136,6 +1318,7 @@ impl LashCoreBuilder {
             self.trigger_store.as_ref(),
         )?;
 
+        let live_replay_clock = Arc::clone(&core.clock);
         let mut env_builder = RuntimeEnvironment::builder()
             .with_plugin_host(Arc::new(default_plugin_host))
             .with_runtime_host_config(core);
@@ -1155,17 +1338,32 @@ impl LashCoreBuilder {
         if let Some(trigger_store) = self.trigger_store.as_ref() {
             env_builder = env_builder.with_trigger_store(Arc::clone(trigger_store));
         }
-        if let Some(queued_work_poke) = self.queued_work_poke.clone() {
-            env_builder = env_builder.with_queued_work_poke(queued_work_poke);
-        }
-
-        let live_replay_store = self
-            .live_replay_store
-            .take()
-            .unwrap_or_else(|| Arc::new(InMemoryLiveReplayStore::default()));
+        let live_replay_store = self.live_replay_store.take().unwrap_or_else(|| {
+            Arc::new(InMemoryLiveReplayStore::with_clock(
+                lash_core::InMemoryLiveReplayStoreConfig::default(),
+                live_replay_clock,
+            ))
+        });
+        let env = env_builder.build();
+        let queued_work_driver = Self::resolve_queued_work_driver(
+            &self.queued_work_source,
+            env.clone(),
+            policy.clone(),
+            protocol_factory.clone(),
+            Arc::new(plugin_factories.clone()),
+            self.child_store_factory
+                .as_ref()
+                .or(self.store_factory.as_ref()),
+            Arc::clone(&live_replay_store),
+            self.runtime_host_installer.clone(),
+        );
+        let work_driver = InlineWorkDriverSetup {
+            process: process_work_driver,
+            queued: queued_work_driver,
+        };
 
         Ok(LashCore {
-            env: env_builder.build(),
+            env,
             policy,
             store_factory: self.store_factory,
             plugin_factories: Arc::new(plugin_factories),
@@ -1173,18 +1371,18 @@ impl LashCoreBuilder {
             live_replay_store,
             protocol_factory,
             runtime_host_installer: self.runtime_host_installer,
-            process_work_runner: Arc::new(ProcessWorkRunnerSlot::new(process_work_runner)),
+            work_driver: Arc::new(InlineWorkDriverSlot::new(work_driver)),
         })
     }
 
-    /// Decide how a built [`LashCore`] sources its process work runner.
+    /// Decide how a built [`LashCore`] sources its process work driver.
     ///
-    /// - no registry => nothing to run ([`ProcessWorkRunnerSetup::None`]);
-    /// - external driver wired => use it ([`ProcessWorkRunnerSetup::External`]);
-    /// - inline registry wired => lazily spawn the default inline runner on first open. Its
+    /// - no registry => nothing to run ([`ProcessWorkDriverSetup::None`]);
+    /// - external driver wired => use it ([`ProcessWorkDriverSetup::External`]);
+    /// - inline registry wired => lazily construct the default inline driver on first open. Its
     ///   [`DurableProcessWorkerConfig`] is built eagerly when a store factory is
     ///   present; without one the inline worker cannot rebuild session runtimes.
-    fn resolve_process_work_runner(
+    fn resolve_process_work_driver(
         process_work_source: &ProcessWorkSource,
         worker_plugin_host: &PluginHost,
         core: &RuntimeHostConfig,
@@ -1192,11 +1390,11 @@ impl LashCoreBuilder {
         policy: &SessionPolicy,
         residency: lash_core::Residency,
         trigger_store: Option<&Arc<dyn lash_core::TriggerStore>>,
-    ) -> Result<ProcessWorkRunnerSetup> {
+    ) -> Result<ProcessWorkDriverSetup> {
         let process_registry = match process_work_source {
-            ProcessWorkSource::None => return Ok(ProcessWorkRunnerSetup::None),
+            ProcessWorkSource::None => return Ok(ProcessWorkDriverSetup::None),
             ProcessWorkSource::External(driver) => {
-                return Ok(ProcessWorkRunnerSetup::External {
+                return Ok(ProcessWorkDriverSetup::External {
                     driver: driver.clone(),
                 });
             }
@@ -1220,15 +1418,47 @@ impl LashCoreBuilder {
                 process_registry,
             )
             .with_session_policy(policy.clone())
-            .with_trigger_store(
-                trigger_store
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(lash_core::InMemoryTriggerStore::default())),
-            )
+            .with_trigger_store(trigger_store.cloned().unwrap_or_else(|| {
+                Arc::new(lash_core::InMemoryTriggerStore::with_clock(Arc::clone(
+                    &core.clock,
+                )))
+            }))
             .with_residency(residency)
             .with_turn_phase_probe_slot(phase_probe_slot),
         );
-        Ok(ProcessWorkRunnerSetup::LazyDefault { config })
+        Ok(ProcessWorkDriverSetup::LazyDefault { config })
+    }
+
+    fn resolve_queued_work_driver(
+        queued_work_source: &QueuedWorkSource,
+        env: RuntimeEnvironment,
+        policy: SessionPolicy,
+        protocol_factory: Option<Arc<dyn PluginFactory>>,
+        plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
+        store_factory: Option<&Arc<dyn SessionStoreFactory>>,
+        live_replay_store: Arc<dyn LiveReplayStore>,
+        runtime_host_installer: Option<RuntimeHostInstaller>,
+    ) -> QueuedWorkDriverSetup {
+        match queued_work_source {
+            QueuedWorkSource::None => QueuedWorkDriverSetup::None,
+            QueuedWorkSource::External(driver) => QueuedWorkDriverSetup::External {
+                driver: driver.clone(),
+            },
+            QueuedWorkSource::LazyDefault => match store_factory {
+                Some(store_factory) => QueuedWorkDriverSetup::LazyDefault {
+                    config: Arc::new(InlineQueuedWorkRunConfig::new(
+                        env,
+                        policy,
+                        protocol_factory,
+                        plugin_factories,
+                        Arc::clone(store_factory),
+                        live_replay_store,
+                        runtime_host_installer,
+                    )),
+                },
+                None => QueuedWorkDriverSetup::None,
+            },
+        }
     }
 
     pub fn advanced(self) -> AdvancedLashCoreBuilder {
@@ -1258,10 +1488,14 @@ impl LashCoreBuilder {
         self
     }
 
-    /// Wire the wake handle of an externally owned queued-work runner. The
-    /// runtime pokes it whenever new queued work lands for a session.
-    pub fn queued_work_poke(mut self, poke: QueuedWorkPoke) -> Self {
-        self.queued_work_poke = Some(poke);
+    /// Configure an externally owned queued-work driver.
+    pub fn queued_work_driver(mut self, driver: QueuedWorkDriver) -> Self {
+        self.queued_work_source = QueuedWorkSource::External(driver);
+        self
+    }
+
+    pub fn disable_queued_work_driver(mut self) -> Self {
+        self.queued_work_source = QueuedWorkSource::None;
         self
     }
 }

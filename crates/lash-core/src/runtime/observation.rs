@@ -28,7 +28,7 @@ pub struct RuntimeObservation {
     pub tool_catalog_error: Option<String>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
     pub queue_store: Option<Arc<dyn crate::RuntimePersistence>>,
-    pub queued_work_poke: Option<super::QueuedWorkPoke>,
+    pub queued_work_driver: Option<super::QueuedWorkDriver>,
 }
 
 impl RuntimeObservation {
@@ -82,7 +82,7 @@ impl RuntimeObservation {
                 .session
                 .as_ref()
                 .and_then(|session| session.history_store()),
-            queued_work_poke: runtime.host.queued_work_poke.clone(),
+            queued_work_driver: runtime.host.queued_work_driver.clone(),
         }
     }
 
@@ -369,7 +369,7 @@ impl RuntimeHandle {
         super::session_api::enqueue_turn_input_to_store(
             observation.session_id.as_ref().to_string(),
             store,
-            observation.queued_work_poke.clone(),
+            observation.queued_work_driver.clone(),
             input,
             delivery_policy,
             slot_policy,

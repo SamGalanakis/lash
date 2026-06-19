@@ -158,7 +158,13 @@ impl RuntimeExecutionContext<'_> {
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => {
-                return Self::recorded_process_error(call_id, "await_process", args, err, self.elapsed_ms(started));
+                return Self::recorded_process_error(
+                    call_id,
+                    "await_process",
+                    args,
+                    err,
+                    self.elapsed_ms(started),
+                );
             }
         };
         // Possession of a handle this run created is sufficient capability;
@@ -194,7 +200,13 @@ impl RuntimeExecutionContext<'_> {
             Ok(output) => output.into_tool_output(),
             Err(err) => ToolInvocationReply::error(json!(err.to_string())).output,
         };
-        Self::recorded_process_reply(call_id, "await_process", args, output, self.elapsed_ms(started))
+        Self::recorded_process_reply(
+            call_id,
+            "await_process",
+            args,
+            output,
+            self.elapsed_ms(started),
+        )
     }
 
     pub(super) async fn signal_process_handle(
@@ -213,7 +225,13 @@ impl RuntimeExecutionContext<'_> {
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => {
-                return Self::recorded_process_error(call_id, "signal_process", args, err, self.elapsed_ms(started));
+                return Self::recorded_process_error(
+                    call_id,
+                    "signal_process",
+                    args,
+                    err,
+                    self.elapsed_ms(started),
+                );
             }
         };
         let signal_id = format!("process-{call_id}");
@@ -236,7 +254,13 @@ impl RuntimeExecutionContext<'_> {
             })),
             Err(err) => ToolInvocationReply::error(json!(format!("signal failed: {err}"))).output,
         };
-        Self::recorded_process_reply(call_id, "signal_process", args, output, self.elapsed_ms(started))
+        Self::recorded_process_reply(
+            call_id,
+            "signal_process",
+            args,
+            output,
+            self.elapsed_ms(started),
+        )
     }
 
     pub(super) async fn cancel_process_handle(
@@ -249,7 +273,13 @@ impl RuntimeExecutionContext<'_> {
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => {
-                return Self::recorded_process_error(call_id, "cancel_process", args, err, self.elapsed_ms(started));
+                return Self::recorded_process_error(
+                    call_id,
+                    "cancel_process",
+                    args,
+                    err,
+                    self.elapsed_ms(started),
+                );
             }
         };
         // Run-local children bypass the grant-validating cancel ability:
@@ -284,7 +314,13 @@ impl RuntimeExecutionContext<'_> {
             Ok(status) => ToolCallOutput::success(Self::process_status_value(&status)),
             Err(err) => ToolInvocationReply::error(json!(format!("cancel failed: {err}"))).output,
         };
-        Self::recorded_process_reply(call_id, "cancel_process", args, output, self.elapsed_ms(started))
+        Self::recorded_process_reply(
+            call_id,
+            "cancel_process",
+            args,
+            output,
+            self.elapsed_ms(started),
+        )
     }
 }
 

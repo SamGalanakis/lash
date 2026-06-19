@@ -26,6 +26,7 @@ pub(crate) fn emit_llm_trace_started(
     base_context: &lash_trace::TraceContext,
     context: lash_trace::TraceContext,
     request: &CoreLlmRequest,
+    clock: &dyn crate::Clock,
 ) {
     crate::trace::emit_trace(
         trace_sink,
@@ -34,6 +35,7 @@ pub(crate) fn emit_llm_trace_started(
         lash_trace::TraceEvent::LlmCallStarted {
             request: crate::trace::trace_llm_request(request),
         },
+        clock,
     );
 }
 
@@ -44,6 +46,7 @@ pub(crate) fn emit_llm_trace_completed(
     response: &LlmResponse,
     duration_ms: u64,
     stream_summary: Option<serde_json::Value>,
+    clock: &dyn crate::Clock,
 ) {
     crate::trace::emit_trace(
         trace_sink,
@@ -60,6 +63,7 @@ pub(crate) fn emit_llm_trace_completed(
             provider_usage: response.provider_usage.clone(),
             stream_summary,
         },
+        clock,
     );
 }
 
@@ -101,6 +105,7 @@ pub(crate) fn emit_llm_trace_failed(
     context: lash_trace::TraceContext,
     failure: LlmTraceFailure,
     stream_summary: Option<serde_json::Value>,
+    clock: &dyn crate::Clock,
 ) {
     crate::trace::emit_trace(
         trace_sink,
@@ -116,6 +121,7 @@ pub(crate) fn emit_llm_trace_failed(
             },
             stream_summary,
         },
+        clock,
     );
 }
 
@@ -208,6 +214,7 @@ fn emit_direct_llm_trace_started(
         &current.host.core.tracing.trace_context,
         direct_trace_context(&current.session_id, Some(&llm_call_id), caused_by),
         request,
+        current.host.core.clock.as_ref(),
     );
     Some(llm_call_id)
 }
@@ -228,6 +235,7 @@ fn emit_direct_llm_trace_completed(
         response,
         0,
         None,
+        current.host.core.clock.as_ref(),
     );
 }
 
@@ -246,6 +254,7 @@ fn emit_direct_llm_trace_failed(
         direct_trace_context(&current.session_id, Some(llm_call_id), caused_by),
         LlmTraceFailure::from(err),
         None,
+        current.host.core.clock.as_ref(),
     );
 }
 

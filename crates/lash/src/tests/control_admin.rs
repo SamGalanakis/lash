@@ -256,6 +256,7 @@ async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
         .build()?;
     let session = core.session("command-idempotency").open().await?;
 
@@ -288,6 +289,7 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
         .build()?;
     let session = core.session("queue-observation-events").open().await?;
     let cursor = session.observe().current_observation().cursor;
@@ -540,8 +542,8 @@ async fn processes_cancel_all_uses_host_cancel_ability() -> Result<()> {
     let runtime_host = RuntimeHostConfig::in_memory().with_process_cancel_ability(ability.clone());
     let registry =
         Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
-    let runner = lash_core::ProcessWorkRunner::new(Arc::new(NoopProcessRunHandle));
-    let driver = lash_core::ProcessWorkDriver::new(Arc::clone(&registry), runner.poke_handle());
+    let driver =
+        lash_core::ProcessWorkDriver::new(Arc::clone(&registry), Arc::new(NoopProcessRunHandle));
     let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())

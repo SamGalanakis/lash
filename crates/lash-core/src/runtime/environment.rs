@@ -85,15 +85,14 @@ pub struct RuntimeEnvironment {
     // built with this environment.
     pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
 
-    // Wakes the host's `ProcessWorkRunner` so a successful process start is
-    // consumed promptly. Threaded onto every `RuntimeHost` built from this
-    // environment (see `LashRuntime::from_environment`); `None` when no work
-    // runner is wired, in which case poking is a no-op.
-    pub process_work_poke: Option<super::ProcessWorkPoke>,
+    // Host-owned process work driver. Threaded onto every `RuntimeHost` built
+    // from this environment (see `LashRuntime::from_environment`).
+    pub process_work_driver: Option<super::ProcessWorkDriver>,
 
-    // Wakes the host's `QueuedWorkRunner` so queued turn work, including
-    // process wakes, drains promptly through the host-selected queue runner.
-    pub queued_work_poke: Option<super::QueuedWorkPoke>,
+    // Host-owned queued work driver. Queue ingress sites call it directly so
+    // queued turn work, including process wakes, drains through the selected
+    // host without a core-owned poller.
+    pub queued_work_driver: Option<super::QueuedWorkDriver>,
 
     pub core: RuntimeHostConfig,
 }
@@ -138,8 +137,8 @@ impl Default for RuntimeEnvironmentBuilder {
                 process_registry: None,
                 trigger_store: Some(Arc::new(crate::InMemoryTriggerStore::default())),
                 session_store_factory: None,
-                process_work_poke: None,
-                queued_work_poke: None,
+                process_work_driver: None,
+                queued_work_driver: None,
                 core: RuntimeHostConfig::in_memory(),
             },
         }
@@ -175,16 +174,15 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    /// Set the poke handle that wakes the host's `ProcessWorkRunner`. Every
-    /// `RuntimeHost` built from this environment carries the poke, so the
-    /// process admin seam can make consumption prompt after a start.
-    pub fn with_process_work_poke(mut self, poke: super::ProcessWorkPoke) -> Self {
-        self.env.process_work_poke = Some(poke);
+    /// Set the host's process work driver. Every `RuntimeHost` built from this
+    /// environment carries it, so process starts can directly drive pending work.
+    pub fn with_process_work_driver(mut self, driver: super::ProcessWorkDriver) -> Self {
+        self.env.process_work_driver = Some(driver);
         self
     }
 
-    pub fn with_queued_work_poke(mut self, poke: super::QueuedWorkPoke) -> Self {
-        self.env.queued_work_poke = Some(poke);
+    pub fn with_queued_work_driver(mut self, driver: super::QueuedWorkDriver) -> Self {
+        self.env.queued_work_driver = Some(driver);
         self
     }
 

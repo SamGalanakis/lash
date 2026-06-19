@@ -67,19 +67,6 @@ pub(crate) fn child_effect_invocation(
     }
 }
 
-pub(crate) fn child_tool_effect_invocation(
-    parent: &RuntimeInvocation,
-    parent_effect_id: EffectId,
-    call_id: &str,
-) -> RuntimeInvocation {
-    child_effect_invocation(
-        parent,
-        format!("{}:{call_id}", parent_effect_id.0),
-        RuntimeEffectKind::ToolCall,
-        call_id,
-    )
-}
-
 pub(crate) fn tool_retry_sleep_invocation(
     parent: &RuntimeInvocation,
     tool_name: &str,

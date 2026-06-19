@@ -26,8 +26,8 @@ struct InMemoryQueuedBatch {
     claim_expires_at_ms: u64,
 }
 
-#[derive(Default)]
 pub struct InMemorySessionStore {
+    clock: Arc<dyn crate::Clock>,
     pub(crate) session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
     pub(crate) session_meta: Mutex<Option<crate::SessionMeta>>,
     pub(crate) session_graph: Mutex<crate::SessionGraph>,
@@ -40,6 +40,34 @@ pub struct InMemorySessionStore {
     >,
     queued_work: Mutex<Vec<InMemoryQueuedBatch>>,
     queued_work_next_seq: Mutex<u64>,
+}
+
+impl InMemorySessionStore {
+    pub fn new() -> Self {
+        Self::with_clock(Arc::new(crate::SystemClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn crate::Clock>) -> Self {
+        Self {
+            clock,
+            session_head_meta: Mutex::new(None),
+            session_meta: Mutex::new(None),
+            session_graph: Mutex::new(crate::SessionGraph::default()),
+            tombstoned_node_ids: Mutex::new(HashSet::new()),
+            checkpoint: Mutex::new(None),
+            usage_deltas: Mutex::new(Vec::new()),
+            runtime_commit_count: Mutex::new(0),
+            runtime_turn_commits: Mutex::new(std::collections::HashMap::new()),
+            queued_work: Mutex::new(Vec::new()),
+            queued_work_next_seq: Mutex::new(0),
+        }
+    }
+}
+
+impl Default for InMemorySessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 crate::impl_noop_attachment_manifest!(InMemorySessionStore);
@@ -276,7 +304,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             .expect("lock queued work seq");
         *next_seq = next_seq.saturating_add(1);
         let batch_id = format!("recording-qwb-{next_seq}");
-        let enqueued_at_ms = current_epoch_ms();
+        let enqueued_at_ms = self.clock.timestamp_ms();
         let payloads = batch.payloads;
         let stored = crate::QueuedWorkBatch {
             batch_id: batch_id.clone(),
@@ -320,7 +348,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         if max_batches == 0 {
             return Ok(None);
         }
-        let now = current_epoch_ms();
+        let now = self.clock.timestamp_ms();
         let mut queued = self.queued_work.lock().expect("lock queued work");
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);
         let first_index = queued.iter().position(|entry| {
@@ -387,7 +415,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         lease_ttl_ms: u64,
     ) -> Result<crate::QueuedWorkClaim, crate::store::StoreError> {
         let mut queued = self.queued_work.lock().expect("lock queued work");
-        let expires_at = current_epoch_ms().saturating_add(lease_ttl_ms);
+        let expires_at = self.clock.timestamp_ms().saturating_add(lease_ttl_ms);
         let mut changed = 0;
         for entry in queued.iter_mut() {
             if entry.batch.session_id == claim.session_id
@@ -434,7 +462,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         session_id: &str,
         batch_id: &str,
     ) -> Result<Option<crate::QueuedWorkBatch>, crate::store::StoreError> {
-        let now = current_epoch_ms();
+        let now = self.clock.timestamp_ms();
         let mut queued = self.queued_work.lock().expect("lock queued work");
         let Some(index) = queued.iter().position(|entry| {
             entry.batch.session_id == session_id && entry.batch.batch_id == batch_id
@@ -468,7 +496,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::QueuedWorkBatch>, crate::store::StoreError> {
-        let now = crate::current_epoch_ms();
+        let now = self.clock.timestamp_ms();
         let mut batches = self
             .queued_work
             .lock()
@@ -539,13 +567,6 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
     }
 }
 
-fn current_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
-}
-
 /// Test-only introspection: call counters and a head-meta seeder used by the
 /// lash-core runtime tests. Compiled only under `cfg(test)`, so the shipped
 /// embedding surface carries none of it.
@@ -559,14 +580,28 @@ impl InMemorySessionStore {
 /// Session-id-keyed factory: the same in-memory store is returned for a given
 /// session across opens (so a worker rebuild sees the session's state), and a
 /// fresh store is created on first use. Inline durability tier.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InMemorySessionStoreFactory {
+    clock: Arc<dyn crate::Clock>,
     stores: Arc<Mutex<HashMap<String, Arc<InMemorySessionStore>>>>,
 }
 
 impl InMemorySessionStoreFactory {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_clock(Arc::new(crate::SystemClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn crate::Clock>) -> Self {
+        Self {
+            clock,
+            stores: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl Default for InMemorySessionStoreFactory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -584,7 +619,7 @@ impl SessionStoreFactory for InMemorySessionStoreFactory {
         let store = stores
             .entry(request.session_id.clone())
             .or_insert_with(|| {
-                let store = Arc::new(InMemorySessionStore::default());
+                let store = Arc::new(InMemorySessionStore::with_clock(Arc::clone(&self.clock)));
                 *store.session_meta.lock().expect("lock session meta") = Some(crate::SessionMeta {
                     session_id: request.session_id.clone(),
                     session_name: request.session_id.clone(),

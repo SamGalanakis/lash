@@ -539,6 +539,7 @@ async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Resul
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
         .build()?;
     let session = core.session("queued-turn-run").open().await?;
     let receipt = session
@@ -566,6 +567,7 @@ async fn queued_turn_explicit_effects_create_queue_drain_scope_internally() -> R
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
         .build()?;
     let session = core.session("queued-explicit-effects").open().await?;
     let receipt = session
@@ -1035,6 +1037,7 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
         .provider(provider)
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
         .build()
         .expect("core");
     let session = core.session("cancel-queued-drain").open().await?;
@@ -1071,6 +1074,7 @@ async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
         .build()
         .expect("core");
     let session = core.session("await-queued").open().await?;

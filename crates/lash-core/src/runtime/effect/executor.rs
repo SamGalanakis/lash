@@ -378,6 +378,7 @@ impl AwaitEventRegistry {
         key: &AwaitEventKey,
         cancel: CancellationToken,
         deadline: Option<Instant>,
+        clock: &dyn crate::Clock,
     ) -> Result<Resolution, RuntimeError> {
         if !self.verify(key)? {
             return Err(RuntimeError::new(
@@ -420,7 +421,7 @@ impl AwaitEventRegistry {
                     _ = cancel.cancelled() => {
                         let _ = self.resolve(key, Resolution::Cancelled)?;
                     }
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    _ = clock.sleep_until(deadline) => {
                         let _ = self.resolve(key, Resolution::Timeout)?;
                     }
                     _ = notify.notified() => {}
@@ -753,6 +754,7 @@ pub(crate) trait ProcessRunner: Send + Sync {
 
 pub struct ProcessLocalExecution {
     pub registry: Arc<dyn ProcessRegistry>,
+    pub process_work_driver: Option<crate::ProcessWorkDriver>,
 }
 
 pub(super) struct LocalTurnEffectRunner<'a, 'run> {
@@ -765,6 +767,11 @@ pub(super) struct LocalTurnEffectRunner<'a, 'run> {
 pub(super) struct LocalDirectEffectRunner {
     provider: ProviderHandle,
     attachment_store: Arc<dyn AttachmentStore>,
+}
+
+struct LocalToolBatchEffectRunner<'run> {
+    context: crate::RuntimeExecutionContext<'run>,
+    child_trace_hooks: HashMap<String, crate::ToolChildExecutionTraceHook>,
 }
 
 #[async_trait::async_trait]
@@ -811,10 +818,12 @@ enum RuntimeEffectLocalExecutorState<'run> {
     Unavailable,
     SleepOnly {
         cancellation: CancellationToken,
+        clock: Arc<dyn crate::Clock>,
     },
     ExternalWaitOptions {
         cancellation: CancellationToken,
         deadline: Option<Instant>,
+        clock: Arc<dyn crate::Clock>,
     },
     Process(ProcessLocalExecution),
     Runner(Box<dyn RuntimeEffectLocalRunner + Send + 'run>),
@@ -837,23 +846,49 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
     }
 
     pub fn sleep(cancellation: CancellationToken) -> Self {
+        Self::sleep_with_clock(cancellation, Arc::new(crate::SystemClock))
+    }
+
+    pub fn sleep_with_clock(cancellation: CancellationToken, clock: Arc<dyn crate::Clock>) -> Self {
         Self {
-            state: RuntimeEffectLocalExecutorState::SleepOnly { cancellation },
+            state: RuntimeEffectLocalExecutorState::SleepOnly {
+                cancellation,
+                clock,
+            },
         }
     }
 
     pub fn await_event(cancellation: CancellationToken, deadline: Option<Instant>) -> Self {
+        Self::await_event_with_clock(cancellation, deadline, Arc::new(crate::SystemClock))
+    }
+
+    pub fn await_event_with_clock(
+        cancellation: CancellationToken,
+        deadline: Option<Instant>,
+        clock: Arc<dyn crate::Clock>,
+    ) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::ExternalWaitOptions {
                 cancellation,
                 deadline,
+                clock,
             },
         }
     }
 
     pub fn processes(registry: Arc<dyn ProcessRegistry>) -> Self {
+        Self::processes_with_driver(registry, None)
+    }
+
+    pub fn processes_with_driver(
+        registry: Arc<dyn ProcessRegistry>,
+        process_work_driver: Option<crate::ProcessWorkDriver>,
+    ) -> Self {
         Self {
-            state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution { registry }),
+            state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution {
+                registry,
+                process_work_driver,
+            }),
         }
     }
 
@@ -919,15 +954,28 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
+    pub(crate) fn tool_batch(
+        context: crate::RuntimeExecutionContext<'run>,
+        child_trace_hooks: HashMap<String, crate::ToolChildExecutionTraceHook>,
+    ) -> Self {
+        Self {
+            state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalToolBatchEffectRunner {
+                context,
+                child_trace_hooks,
+            })),
+        }
+    }
+
     pub async fn execute(
         self,
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match self.state {
             RuntimeEffectLocalExecutorState::Runner(runner) => runner.execute(envelope).await,
-            RuntimeEffectLocalExecutorState::SleepOnly { cancellation } => {
-                execute_local_sleep(envelope, cancellation).await
-            }
+            RuntimeEffectLocalExecutorState::SleepOnly {
+                cancellation,
+                clock,
+            } => execute_local_sleep(envelope, cancellation, clock.as_ref()).await,
             RuntimeEffectLocalExecutorState::ExternalWaitOptions { .. } => {
                 Err(RuntimeEffectControllerError::new(
                     "runtime_effect_local_executor_mismatch",
@@ -966,13 +1014,17 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
 
     fn into_await_event_options(
         self,
-    ) -> Result<(CancellationToken, Option<Instant>), RuntimeEffectControllerError> {
+    ) -> Result<
+        (CancellationToken, Option<Instant>, Arc<dyn crate::Clock>),
+        RuntimeEffectControllerError,
+    > {
         match self.state {
             RuntimeEffectLocalExecutorState::ExternalWaitOptions {
                 cancellation,
                 deadline,
-            } => Ok((cancellation, deadline)),
-            _ => Ok((CancellationToken::new(), None)),
+                clock,
+            } => Ok((cancellation, deadline, clock)),
+            _ => Ok((CancellationToken::new(), None, Arc::new(crate::SystemClock))),
         }
     }
 }
@@ -1003,6 +1055,38 @@ impl RuntimeEffectLocalRunner for DurableStepLocalRunner<'_> {
                 "runtime_effect_local_executor_mismatch",
                 format!(
                     "local durable step executor cannot execute {} command",
+                    command.kind().as_str()
+                ),
+            )),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
+    async fn execute(
+        self: Box<Self>,
+        envelope: RuntimeEffectEnvelope,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        match envelope.command {
+            RuntimeEffectCommand::ToolBatch { batch } => {
+                let outcome = self
+                    .context
+                    .execute_prepared_tool_batch_launches(
+                        batch,
+                        envelope.invocation,
+                        self.child_trace_hooks,
+                    )
+                    .await?;
+                Ok(RuntimeEffectOutcome::ToolBatch {
+                    launches: outcome.launches,
+                    triggers: outcome.triggers,
+                })
+            }
+            command => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_local_executor_mismatch",
+                format!(
+                    "local tool-batch executor cannot execute {} command",
                     command.kind().as_str()
                 ),
             )),
@@ -1056,6 +1140,21 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                     triggers: outcome.triggers,
                 })
             }
+            RuntimeEffectCommand::ToolBatch { batch } => {
+                let outcome = runner
+                    .driver
+                    .run_tool_batch(
+                        batch,
+                        envelope.invocation,
+                        &runner.event_tx,
+                        &runner.cancellation,
+                    )
+                    .await?;
+                Ok(RuntimeEffectOutcome::ToolBatch {
+                    launches: outcome.launches,
+                    triggers: outcome.triggers,
+                })
+            }
             RuntimeEffectCommand::ExecCode { language, code } => {
                 let protocol_iteration = runner.machine.protocol_iteration();
                 let messages = runner.machine.message_sequence();
@@ -1092,7 +1191,12 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                     .map_err(|err| err.to_string()),
             }),
             RuntimeEffectCommand::Sleep { duration_ms } => {
-                sleep_with_cancellation(duration_ms, &runner.cancellation).await?;
+                sleep_with_cancellation(
+                    duration_ms,
+                    &runner.cancellation,
+                    runner.driver.host.core.clock.as_ref(),
+                )
+                .await?;
                 Ok(RuntimeEffectOutcome::Sleep)
             }
             command => Err(RuntimeEffectControllerError::new(
@@ -1122,7 +1226,12 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
                     .await,
             }),
             RuntimeEffectCommand::Sleep { duration_ms } => {
-                sleep_with_cancellation(duration_ms, &CancellationToken::new()).await?;
+                sleep_with_cancellation(
+                    duration_ms,
+                    &CancellationToken::new(),
+                    &crate::SystemClock,
+                )
+                .await?;
                 Ok(RuntimeEffectOutcome::Sleep)
             }
             command => Err(RuntimeEffectControllerError::new(
@@ -1164,10 +1273,11 @@ impl LocalDirectEffectRunner {
 async fn execute_local_sleep(
     envelope: RuntimeEffectEnvelope,
     cancellation: CancellationToken,
+    clock: &dyn crate::Clock,
 ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
     match envelope.command {
         RuntimeEffectCommand::Sleep { duration_ms } => {
-            sleep_with_cancellation(duration_ms, &cancellation).await?;
+            sleep_with_cancellation(duration_ms, &cancellation, clock).await?;
             Ok(RuntimeEffectOutcome::Sleep)
         }
         command => Err(RuntimeEffectControllerError::new(
@@ -1183,8 +1293,9 @@ async fn execute_local_sleep(
 async fn sleep_with_cancellation(
     duration_ms: u64,
     cancellation: &CancellationToken,
+    clock: &dyn crate::Clock,
 ) -> Result<(), RuntimeEffectControllerError> {
-    let sleep = tokio::time::sleep(std::time::Duration::from_millis(duration_ms));
+    let sleep = clock.sleep(std::time::Duration::from_millis(duration_ms));
     tokio::pin!(sleep);
     tokio::select! {
         _ = cancellation.cancelled() => Err(RuntimeEffectControllerError::new(
@@ -1221,9 +1332,9 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match envelope.command {
             RuntimeEffectCommand::AwaitEvent { key } => {
-                let (cancellation, deadline) = local_executor.into_await_event_options()?;
-                let resolution = self
-                    .await_await_event(&key, cancellation, deadline)
+                let (cancellation, deadline, clock) = local_executor.into_await_event_options()?;
+                let resolution = inline_await_events()
+                    .await_resolution(&key, cancellation, deadline, clock.as_ref())
                     .await
                     .map_err(RuntimeEffectControllerError::from)?;
                 Ok(RuntimeEffectOutcome::AwaitEvent { resolution })
@@ -1231,8 +1342,9 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
             RuntimeEffectCommand::Process { command } => {
                 let execution = local_executor.into_process()?;
                 let registry = execution.registry;
+                let process_work_driver = execution.process_work_driver;
                 let result = tokio::task::spawn(async move {
-                    Self::execute_process_command(registry, *command).await
+                    Self::execute_process_command(registry, process_work_driver, *command).await
                 })
                 .await
                 .map_err(|err| {
@@ -1270,7 +1382,7 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
         deadline: Option<Instant>,
     ) -> Result<Resolution, RuntimeError> {
         inline_await_events()
-            .await_resolution(key, cancel, deadline)
+            .await_resolution(key, cancel, deadline, &crate::SystemClock)
             .await
     }
 
@@ -1366,10 +1478,10 @@ impl InlineRuntimeEffectController {
     /// Register the process (and any handle grant) into the durable registry.
     ///
     /// The inline controller no longer runs the process here: the registry's
-    /// non-terminal row *is* the durable work queue, and the lease-protected
-    /// [`ProcessWorkRunner`](crate::ProcessWorkRunner) is the sole executor. The
-    /// control seam pokes that runner after a successful start, so registering
-    /// the row is all this path does.
+    /// non-terminal row *is* the durable work queue, and the host-owned
+    /// [`ProcessWorkDriver`](crate::ProcessWorkDriver) is the sole executor.
+    /// Registering the row is all this path does; the control seam drives the
+    /// host driver after a successful start.
     pub(crate) async fn start_process(
         registry: Arc<dyn crate::ProcessRegistry>,
         registration: crate::ProcessRegistration,
@@ -1408,6 +1520,7 @@ impl InlineRuntimeEffectController {
 
     async fn execute_process_command(
         registry: Arc<dyn crate::ProcessRegistry>,
+        process_work_driver: Option<crate::ProcessWorkDriver>,
         command: ProcessCommand,
     ) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
         match command {
@@ -1417,6 +1530,9 @@ impl InlineRuntimeEffectController {
                 execution_context: _,
             } => {
                 let record = Self::start_process(registry, registration, grant).await?;
+                if let Some(driver) = process_work_driver.as_ref() {
+                    driver.claim_and_run_pending("process_start").await?;
+                }
                 Ok(ProcessEffectOutcome::Start { record })
             }
             ProcessCommand::List {

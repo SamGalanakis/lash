@@ -85,9 +85,9 @@ pub(super) struct LlmStreamSummary {
 }
 
 impl LlmStreamDebugState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(created_at: Instant) -> Self {
         Self {
-            created_at: Instant::now(),
+            created_at,
             sequence: 0,
             summary: LlmStreamSummary::default(),
         }
@@ -99,8 +99,11 @@ impl LlmStreamDebugState {
         sequence
     }
 
-    pub(super) fn elapsed_ms(&self) -> u64 {
-        self.created_at.elapsed().as_millis() as u64
+    pub(super) fn elapsed_ms(&self, clock: &dyn crate::Clock) -> u64 {
+        clock
+            .now()
+            .saturating_duration_since(self.created_at)
+            .as_millis() as u64
     }
 }
 

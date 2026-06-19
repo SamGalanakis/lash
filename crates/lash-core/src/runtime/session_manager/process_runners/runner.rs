@@ -79,7 +79,7 @@ impl RuntimeSessionServices {
         let plugins = Arc::clone(&self.current.plugins);
         let store = self.current.store.clone();
         let session_store_factory = self.current.host.session_store_factory.clone();
-        let queued_work_poke = self.current.host.queued_work_poke.clone();
+        let queued_work_driver = self.current.host.queued_work_driver.clone();
         let process_registry_available = self.current.host.process_registry.is_some();
         let services = self.clone();
         let registration_for_runtime = registration.clone();
@@ -109,7 +109,7 @@ impl RuntimeSessionServices {
                 Arc::clone(&registry_for_runtime),
                 services.current.store.clone(),
                 services.current.host.session_store_factory.clone(),
-                services.current.host.queued_work_poke.clone(),
+                services.current.host.queued_work_driver.clone(),
             )
             .with_cancellation_token(cancellation_for_runtime.clone());
             if let Some(invocation) = execution_context_for_runtime.causal_invocation.clone() {
@@ -130,7 +130,7 @@ impl RuntimeSessionServices {
             plugins,
             store,
             session_store_factory,
-            queued_work_poke,
+            queued_work_driver,
             process_registry_available,
             cancellation,
             self.current.turn_phase_probe.clone(),

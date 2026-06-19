@@ -1,58 +1,8 @@
 use super::*;
-use crate::tool_dispatch::schedule_tool_batch;
 
 pub(in crate::runtime) struct ToolBatchRunOutcome {
     pub launches: Vec<crate::runtime::ToolCallLaunch>,
     pub triggers: Vec<crate::tool_dispatch::ToolTriggerEffectOutcome>,
-}
-
-/// Run a single pending tool call through launch. Projection and completion
-/// events happen only for immediately completed calls; pending launches are
-/// finalized after their separate `AwaitEvent` resolves.
-async fn run_one_tool_call(
-    index: usize,
-    prepared_tool: crate::PreparedToolCall,
-    invocation: crate::RuntimeInvocation,
-    context: crate::RuntimeExecutionContext<'_>,
-) -> crate::runtime::ToolCallLaunch {
-    Box::pin(context.execute_prepared_tool_call_launch(prepared_tool, index, Some(invocation)))
-        .await
-}
-
-fn cancelled_tool_call_launch(
-    call_id: String,
-    tool_name: String,
-    args: serde_json::Value,
-    replay: Option<crate::llm::types::ProviderReplayMeta>,
-) -> crate::runtime::ToolCallLaunch {
-    crate::runtime::ToolCallLaunch::Done {
-        result: cancelled_completed_tool_call(call_id, tool_name, args, replay),
-    }
-}
-
-fn cancelled_completed_tool_call(
-    call_id: String,
-    tool_name: String,
-    args: serde_json::Value,
-    replay: Option<crate::llm::types::ProviderReplayMeta>,
-) -> crate::sansio::CompletedToolCall {
-    let output =
-        crate::ToolCallOutput::cancelled(crate::ToolCancellation::runtime("tool call cancelled"));
-    crate::sansio::CompletedToolCall {
-        call_id: call_id.clone(),
-        tool_name: tool_name.clone(),
-        args,
-        model_return: crate::ModelToolReturn {
-            call_id,
-            tool_name,
-            parts: vec![crate::ModelToolReturnPart::text(
-                "[Tool execution cancelled]\ntool call cancelled".to_string(),
-            )],
-        },
-        output,
-        duration_ms: 0,
-        replay,
-    }
 }
 
 impl RuntimeTurnDriver<'_> {
@@ -79,12 +29,16 @@ impl RuntimeTurnDriver<'_> {
             .map_err(|err| {
                 RuntimeEffectControllerError::new("tool_catalog_resolution_failed", err.to_string())
             })?;
-        let mut results = Vec::with_capacity(calls.len());
+        let call_count = calls.len();
+        let mut results = vec![None; call_count];
+        let mut prepared_entries = Vec::new();
         for (index, call) in calls.into_iter().enumerate() {
             let call_id = call.call_id.clone();
             let replay = call.replay.clone();
-            let prepared = match prepare_context.prepare_tool_call(call).await {
-                crate::tool_dispatch::ToolPreparationOutcome::Prepared(prepared) => prepared,
+            match prepare_context.prepare_tool_call(call).await {
+                crate::tool_dispatch::ToolPreparationOutcome::Prepared(prepared) => {
+                    prepared_entries.push((index, prepared));
+                }
                 crate::tool_dispatch::ToolPreparationOutcome::Completed(outcome) => {
                     let completed = prepare_context
                         .complete_tool_call(
@@ -96,91 +50,137 @@ impl RuntimeTurnDriver<'_> {
                         )
                         .await
                         .completed;
-                    results.push(completed);
-                    continue;
+                    results[index] = Some(completed);
                 }
-            };
+            }
+        }
+
+        if !prepared_entries.is_empty() {
             let parent_invocation =
-                self.turn_effect_invocation(machine, id, RuntimeEffectKind::ToolCall)?;
-            let invocation = crate::runtime::causal::child_tool_effect_invocation(
-                &parent_invocation,
-                id,
-                &prepared.call_id,
+                self.turn_effect_invocation(machine, id, RuntimeEffectKind::ToolBatch)?;
+            let batch = crate::PreparedToolBatch::new(
+                id.0.to_string(),
+                prepared_entries
+                    .iter()
+                    .map(|(_, prepared)| prepared.clone())
+                    .collect(),
             );
-            let prepared_for_completion = prepared.clone();
             let outcome = self
                 .execute_typed_turn_effect(
                     machine,
                     event_tx,
                     cancel,
                     RuntimeEffectEnvelope::new(
-                        invocation,
-                        RuntimeEffectCommand::ToolCall { call: prepared },
+                        parent_invocation,
+                        RuntimeEffectCommand::ToolBatch { batch },
                     ),
-                    RuntimeEffectOutcome::into_tool_call_effect,
+                    RuntimeEffectOutcome::into_tool_batch_effect,
                 )
                 .await?;
-            match outcome.launch {
-                crate::runtime::ToolCallLaunch::Done { result } => results.push(result),
-                crate::runtime::ToolCallLaunch::Pending {
-                    key,
-                    pending,
-                    duration_ms,
-                } => {
-                    let resolution = self
-                        .await_pending_tool_completion(
-                            machine,
-                            id,
-                            &prepared_for_completion.call_id,
-                            key,
-                            &pending,
+            if outcome.launches.len() != prepared_entries.len() {
+                return Err(RuntimeEffectControllerError::new(
+                    "tool_batch_result_count_mismatch",
+                    format!(
+                        "tool batch returned {} launches for {} prepared calls",
+                        outcome.launches.len(),
+                        prepared_entries.len()
+                    ),
+                ));
+            }
+            for ((source_index, prepared), launch) in
+                prepared_entries.into_iter().zip(outcome.launches)
+            {
+                let call_id = prepared.call_id.clone();
+                let replay = prepared.replay.clone();
+                match launch {
+                    crate::runtime::ToolCallLaunch::Done { result } => {
+                        results[source_index] = Some(result);
+                    }
+                    crate::runtime::ToolCallLaunch::Pending {
+                        key,
+                        pending,
+                        duration_ms,
+                    } => {
+                        let resolution = self
+                            .await_pending_tool_completion(
+                                machine, id, &call_id, key, &pending, event_tx, cancel,
+                            )
+                            .await?;
+                        let dispatch_outcome = prepare_context
+                            .pending_completion_dispatch_outcome(
+                                prepared.tool_name.clone(),
+                                prepared.args.clone(),
+                                resolution,
+                                duration_ms,
+                            )
+                            .await;
+                        let completed = prepare_context
+                            .complete_tool_call(
+                                source_index,
+                                call_id.clone(),
+                                replay,
+                                dispatch_outcome,
+                                crate::TurnActivityId::new(format!("tool:{call_id}")),
+                            )
+                            .await
+                            .completed;
+                        send_turn_activity(
                             event_tx,
-                            cancel,
-                        )
-                        .await?;
-                    let dispatch_outcome = prepare_context
-                        .pending_completion_dispatch_outcome(
-                            prepared_for_completion.tool_name.clone(),
-                            prepared_for_completion.args.clone(),
-                            resolution,
-                            duration_ms,
+                            crate::TurnActivityId::new(format!("tool:{call_id}")),
+                            crate::TurnEvent::ToolCallCompleted {
+                                call_id: Some(call_id.clone()),
+                                name: completed.tool_name.clone(),
+                                args: completed.args.clone(),
+                                output: completed.output.clone(),
+                                duration_ms: completed.duration_ms,
+                            },
                         )
                         .await;
-                    let completed = prepare_context
-                        .complete_tool_call(
-                            index,
-                            call_id.clone(),
-                            replay,
-                            dispatch_outcome,
-                            crate::TurnActivityId::new(format!("tool:{call_id}")),
-                        )
-                        .await
-                        .completed;
-                    send_turn_activity(
-                        event_tx,
-                        crate::TurnActivityId::new(format!("tool:{call_id}")),
-                        crate::TurnEvent::ToolCallCompleted {
-                            call_id: Some(call_id.clone()),
-                            name: completed.tool_name.clone(),
-                            args: completed.args.clone(),
-                            output: completed.output.clone(),
-                            duration_ms: completed.duration_ms,
-                        },
-                    )
-                    .await;
-                    results.push(completed);
+                        results[source_index] = Some(completed);
+                    }
                 }
             }
         }
         drop(prepare_context);
         drop(tool_event_tx);
         let _ = tool_event_forwarder.await;
-        Ok(results)
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(index, result)| {
+                result.ok_or_else(|| {
+                    RuntimeEffectControllerError::new(
+                        "tool_batch_missing_result",
+                        format!("tool batch did not fill result slot {index}"),
+                    )
+                })
+            })
+            .collect()
     }
 
     pub(in crate::runtime) async fn run_tool_calls(
         &mut self,
         pending_tools: Vec<(crate::PreparedToolCall, crate::RuntimeInvocation)>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<ToolBatchRunOutcome, crate::RuntimeEffectControllerError> {
+        let mut launches = Vec::with_capacity(pending_tools.len());
+        let mut triggers = Vec::new();
+        for (prepared, invocation) in pending_tools {
+            let batch = crate::PreparedToolBatch::new(prepared.call_id.clone(), vec![prepared]);
+            let mut outcome = self
+                .run_tool_batch(batch, invocation, event_tx, cancel)
+                .await?;
+            launches.append(&mut outcome.launches);
+            triggers.append(&mut outcome.triggers);
+        }
+        Ok(ToolBatchRunOutcome { launches, triggers })
+    }
+
+    pub(in crate::runtime) async fn run_tool_batch(
+        &mut self,
+        batch: crate::PreparedToolBatch,
+        invocation: crate::RuntimeInvocation,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<ToolBatchRunOutcome, crate::RuntimeEffectControllerError> {
@@ -202,7 +202,9 @@ impl RuntimeTurnDriver<'_> {
             tool_event_tx.clone(),
             Arc::new(crate::ChronologicalProjection::default()),
         ) {
-            Ok(context) => context.with_turn_event_sender(turn_event_tx.clone()),
+            Ok(context) => context
+                .with_turn_event_sender(turn_event_tx.clone())
+                .with_cancellation_token(cancel.clone()),
             Err(err) => {
                 drop(tool_event_tx);
                 drop(turn_event_tx);
@@ -214,61 +216,21 @@ impl RuntimeTurnDriver<'_> {
                 ));
             }
         };
-        let indexed_tools = pending_tools.into_iter().enumerate().collect::<Vec<_>>();
-        let tool_cancel = cancel.child_token();
-        let outcomes = schedule_tool_batch(
-            indexed_tools,
-            |(index, _)| *index,
-            |(_, (pending_tool, _))| context.tool_scheduling(&pending_tool.tool_name),
-            {
-                let context = context.clone();
-                let cancel = cancel.clone();
-                let tool_cancel = tool_cancel.clone();
-                move |(index, (pending_tool, parent_invocation))| {
-                    let context = context.clone().with_cancellation_token(tool_cancel.clone());
-                    let cancel = cancel.clone();
-                    let tool_cancel = tool_cancel.clone();
-                    let cancelled_tool = pending_tool.clone();
-                    async move {
-                        let tool_call =
-                            run_one_tool_call(index, pending_tool, parent_invocation, context);
-                        tokio::pin!(tool_call);
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => {
-                                tool_cancel.cancel();
-                                let grace = tokio::time::sleep(std::time::Duration::from_millis(50));
-                                tokio::pin!(grace);
-                                tokio::select! {
-                                    biased;
-                                    outcome = &mut tool_call => outcome,
-	                                    _ = &mut grace => cancelled_tool_call_launch(
-	                                        cancelled_tool.call_id,
-	                                        cancelled_tool.tool_name,
-	                                        cancelled_tool.args,
-                                        cancelled_tool.replay,
-                                    ),
-                                }
-                            }
-                            outcome = &mut tool_call => outcome,
-                        }
-                    }
-                }
-            },
-        )
-        .await;
-
-        let triggers = context.drain_tool_trigger_outcomes().map_err(|err| {
-            crate::RuntimeEffectControllerError::new("tool_trigger_outcome_drain", err.to_string())
-        })?;
+        let outcome = context
+            .execute_prepared_tool_batch_launches(
+                batch,
+                invocation,
+                std::collections::HashMap::new(),
+            )
+            .await?;
         drop(context);
         drop(tool_event_tx);
         drop(turn_event_tx);
         let _ = tool_event_forwarder.await;
         let _ = turn_event_forwarder.await;
         Ok(ToolBatchRunOutcome {
-            launches: outcomes,
-            triggers,
+            launches: outcome.launches,
+            triggers: outcome.triggers,
         })
     }
 
@@ -283,7 +245,7 @@ impl RuntimeTurnDriver<'_> {
         cancel: &CancellationToken,
     ) -> Result<crate::Resolution, RuntimeEffectControllerError> {
         let parent =
-            self.turn_effect_invocation(machine, parent_effect_id, RuntimeEffectKind::ToolCall)?;
+            self.turn_effect_invocation(machine, parent_effect_id, RuntimeEffectKind::ToolBatch)?;
         let invocation = crate::runtime::causal::child_effect_invocation(
             &parent,
             format!("{}:{call_id}:await", parent_effect_id.0),
@@ -294,12 +256,16 @@ impl RuntimeTurnDriver<'_> {
         let scoped_effect_controller = self.scoped_effect_controller.clone();
         let deadline = _pending
             .deadline
-            .map(|duration| std::time::Instant::now() + duration);
+            .map(|duration| self.host.core.clock.now() + duration);
         let outcome = scoped_effect_controller
             .controller()
             .execute_effect(
                 RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::AwaitEvent { key }),
-                crate::RuntimeEffectLocalExecutor::await_event(cancel.clone(), deadline),
+                crate::RuntimeEffectLocalExecutor::await_event_with_clock(
+                    cancel.clone(),
+                    deadline,
+                    Arc::clone(&self.host.core.clock),
+                ),
             )
             .await?;
         RuntimeEffectOutcome::into_await_event(outcome)

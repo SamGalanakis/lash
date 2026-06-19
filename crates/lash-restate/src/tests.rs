@@ -110,6 +110,34 @@ fn prepared_tool_call() -> lash_core::PreparedToolCall {
     )
 }
 
+fn prepared_tool_call_with(call_id: &str, tool_name: &str) -> lash_core::PreparedToolCall {
+    lash_core::PreparedToolCall::from_parts(
+        call_id,
+        format!("tool:{tool_name}"),
+        tool_name,
+        serde_json::json!({ "call": call_id }),
+        None,
+        serde_json::Value::Null,
+    )
+}
+
+fn completed_tool_call(call_id: &str, tool_name: &str) -> lash_core::sansio::CompletedToolCall {
+    let output = lash_core::ToolCallOutput::success(serde_json::json!({ "call": call_id }));
+    lash_core::sansio::CompletedToolCall {
+        call_id: call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        args: serde_json::json!({ "call": call_id }),
+        model_return: lash_core::ModelToolReturn::from_output(
+            call_id.to_string(),
+            tool_name.to_string(),
+            &output,
+        ),
+        output,
+        duration_ms: 1,
+        replay: None,
+    }
+}
+
 fn external_registration(id: &str) -> ProcessRegistration {
     ProcessRegistration::new(
         id,
@@ -458,6 +486,12 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
             RestateEffectExecution::JournaledRun,
         ),
         (
+            RuntimeEffectCommand::ToolBatch {
+                batch: lash_core::PreparedToolBatch::new("batch", vec![prepared_tool_call()]),
+            },
+            RestateEffectExecution::JournaledRun,
+        ),
+        (
             RuntimeEffectCommand::ExecCode {
                 language: "code".to_string(),
                 code: "1 + 1".to_string(),
@@ -499,6 +533,7 @@ struct RecordingContext {
     started_execution_contexts: Mutex<Vec<ProcessExecutionContext>>,
     cancelled: Mutex<Vec<(String, Option<String>)>>,
     resolved_events: Mutex<Vec<RestateProcessEventResolveRequest>>,
+    awaited_events: Mutex<HashMap<String, Resolution>>,
 }
 
 impl RecordingContext {
@@ -507,6 +542,16 @@ impl RecordingContext {
             endpoint: Some(endpoint),
             ..Default::default()
         }
+    }
+
+    fn resolve_process_terminal(&self, process_id: &str, output: &ProcessAwaitOutput) {
+        let key = restate_process_terminal_await_key(process_id).expect("terminal await key");
+        let resolution =
+            restate_process_terminal_resolution(output).expect("terminal await resolution");
+        self.awaited_events
+            .lock()
+            .expect("awaited events lock")
+            .insert(key.promise_key(), resolution);
     }
 }
 
@@ -599,12 +644,21 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
 
     fn await_event<'run>(
         &'run self,
-        _key: String,
+        key: String,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
+        let resolution = self
+            .awaited_events
+            .lock()
+            .expect("awaited events lock")
+            .get(&key)
+            .cloned();
+        Box::pin(async move {
+            resolution
+                .ok_or_else(|| TerminalError::new(format!("event await is unresolved: {key}")))
+        })
     }
 
     fn resolve_event<'run>(
@@ -617,7 +671,11 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
         self.resolved_events
             .lock()
             .expect("resolved events lock")
-            .push(request);
+            .push(request.clone());
+        self.awaited_events
+            .lock()
+            .expect("awaited events lock")
+            .insert(request.key, request.resolution);
         Box::pin(async { Ok(()) })
     }
 }
@@ -637,6 +695,138 @@ impl ReplayableRecordingContext {
 
     fn runs(&self) -> Vec<String> {
         self.runs.lock().expect("runs lock").clone()
+    }
+}
+
+#[derive(Default)]
+struct PositionalReplayContext {
+    sleeps: Mutex<Vec<u64>>,
+    runs: Mutex<Vec<String>>,
+    records: Mutex<Vec<(String, Vec<u8>)>>,
+    replaying: AtomicBool,
+    replay_cursor: AtomicUsize,
+}
+
+impl PositionalReplayContext {
+    fn start_replay(&self) {
+        self.replaying.store(true, Ordering::SeqCst);
+        self.replay_cursor.store(0, Ordering::SeqCst);
+    }
+
+    fn runs(&self) -> Vec<String> {
+        self.runs.lock().expect("runs lock").clone()
+    }
+
+    fn record_count(&self) -> usize {
+        self.records.lock().expect("records lock").len()
+    }
+}
+
+impl<'ctx> RestateControllerContext<'ctx> for Arc<PositionalReplayContext> {
+    fn sleep_send<'run>(
+        &'run self,
+        duration: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        self.sleeps
+            .lock()
+            .expect("sleeps lock")
+            .push(duration.as_millis() as u64);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn run_json_send<'run, T, Fut>(
+        &'run self,
+        effect_name: String,
+        _retry_policy: Option<RunRetryPolicy>,
+        future: Fut,
+    ) -> Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+        T: Serialize + DeserializeOwned + Send + 'static,
+        Fut: Future<Output = T> + Send + 'run,
+    {
+        self.runs
+            .lock()
+            .expect("runs lock")
+            .push(effect_name.clone());
+        if self.replaying.load(Ordering::SeqCst) {
+            let position = self.replay_cursor.fetch_add(1, Ordering::SeqCst);
+            let recorded = self
+                .records
+                .lock()
+                .expect("records lock")
+                .get(position)
+                .cloned();
+            return Box::pin(async move {
+                let (recorded_effect_name, bytes) = recorded.ok_or_else(|| {
+                    TerminalError::new(format!("missing recorded effect at position {position}"))
+                })?;
+                if recorded_effect_name != effect_name {
+                    return Err(TerminalError::new(format!(
+                        "recorded effect at position {position} was `{recorded_effect_name}`, got `{effect_name}`"
+                    )));
+                }
+                serde_json::from_slice(&bytes)
+                    .map(Json)
+                    .map_err(TerminalError::from_error)
+            });
+        }
+
+        let context = Arc::clone(self);
+        Box::pin(async move {
+            let value = future.await;
+            let bytes = serde_json::to_vec(&value).map_err(TerminalError::from_error)?;
+            context
+                .records
+                .lock()
+                .expect("records lock")
+                .push((effect_name, bytes));
+            Ok(Json(value))
+        })
+    }
+
+    fn start_process_workflow<'run>(
+        &'run self,
+        _registration: ProcessRegistration,
+        _execution_context: ProcessExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("process workflow start is unsupported")) })
+    }
+
+    fn request_process_workflow_cancel<'run>(
+        &'run self,
+        _request: RestateProcessCancelRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("process workflow cancel is unsupported")) })
+    }
+
+    fn await_event<'run>(
+        &'run self,
+        _key: String,
+    ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
+    }
+
+    fn resolve_event<'run>(
+        &'run self,
+        _request: RestateProcessEventResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("event resolve is unsupported")) })
     }
 }
 
@@ -776,6 +966,96 @@ async fn restate_controller_executes_non_sleep_effect_inside_run() {
         &["lash:session:turn:1:0:exec_code:exec".to_string()]
     );
     assert!(context.sleeps.lock().expect("sleeps lock").is_empty());
+}
+
+#[tokio::test]
+async fn restate_positional_replay_records_tool_batch_as_one_command() {
+    let context = Arc::new(PositionalReplayContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let batch = lash_core::PreparedToolBatch::new(
+        "batch-fast-slow",
+        vec![
+            prepared_tool_call_with("call-slow", "slow_tool"),
+            prepared_tool_call_with("call-fast", "fast_tool"),
+        ],
+    );
+    let envelope = RuntimeEffectEnvelope::new(
+        runtime_invocation(RuntimeEffectKind::ToolBatch, "tool-batch"),
+        RuntimeEffectCommand::ToolBatch { batch },
+    );
+    let local_runs = Arc::new(AtomicUsize::new(0));
+
+    let first = host
+        .execute_effect(
+            envelope.clone(),
+            RuntimeEffectLocalExecutor::testing({
+                let local_runs = Arc::clone(&local_runs);
+                |_envelope| async move {
+                    local_runs.fetch_add(1, Ordering::SeqCst);
+                    let slow = async {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        completed_tool_call("call-slow", "slow_tool")
+                    };
+                    let fast = async {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        completed_tool_call("call-fast", "fast_tool")
+                    };
+                    let (slow, fast) = tokio::join!(slow, fast);
+                    Ok(RuntimeEffectOutcome::ToolBatch {
+                        launches: vec![
+                            lash_core::ToolCallLaunch::Done { result: slow },
+                            lash_core::ToolCallLaunch::Done { result: fast },
+                        ],
+                        triggers: Vec::new(),
+                    })
+                }
+            }),
+        )
+        .await
+        .expect("first batch run");
+
+    let RuntimeEffectOutcome::ToolBatch { launches, .. } = first else {
+        panic!("expected tool batch outcome");
+    };
+    assert_eq!(launches.len(), 2);
+    assert!(matches!(
+        &launches[0],
+        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-slow"
+    ));
+    assert!(matches!(
+        &launches[1],
+        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-fast"
+    ));
+    assert_eq!(context.record_count(), 1);
+    assert_eq!(context.runs().len(), 1);
+    assert_eq!(local_runs.load(Ordering::SeqCst), 1);
+
+    context.start_replay();
+    let replayed = host
+        .execute_effect(
+            envelope,
+            RuntimeEffectLocalExecutor::testing(|_| async {
+                panic!("positional replay should not rerun the ToolBatch executor")
+            }),
+        )
+        .await
+        .expect("replayed batch run");
+
+    let RuntimeEffectOutcome::ToolBatch { launches, .. } = replayed else {
+        panic!("expected replayed tool batch outcome");
+    };
+    assert_eq!(launches.len(), 2);
+    assert!(matches!(
+        &launches[0],
+        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-slow"
+    ));
+    assert!(matches!(
+        &launches[1],
+        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-fast"
+    ));
+    assert_eq!(context.record_count(), 1);
+    assert_eq!(context.runs().len(), 2);
+    assert_eq!(local_runs.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1302,16 +1582,15 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
         )
         .await
         .expect("register signal target");
+    let awaited_output = ProcessAwaitOutput::Success {
+        value: serde_json::json!({ "done": true }),
+        control: None,
+    };
     registry
-        .complete_process(
-            "task-await-signal",
-            ProcessAwaitOutput::Success {
-                value: serde_json::json!({ "done": true }),
-                control: None,
-            },
-        )
+        .complete_process("task-await-signal", awaited_output.clone())
         .await
         .expect("complete");
+    context.resolve_process_terminal("task-await-signal", &awaited_output);
 
     let outcome = host
         .execute_effect(
@@ -2246,9 +2525,7 @@ fn assert_lashlang_engine_record(
 ///
 /// Mirrors `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
 /// but the process is started by a trigger occurrence (a `lashlang` engine row
-/// with trigger provenance), not by a live turn's tool call. It also pins
-/// the lease single-owner / fencing contract: an active lease fences a
-/// competing owner and a superseded (stale) writer is rejected (invariant 4).
+/// with trigger provenance), not by a live turn's tool call.
 #[tokio::test]
 async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2280,9 +2557,9 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
     drop(registry_a);
 
     // Reopen the registry and stand up a fresh worker over it: the crash
-    // recovery counterpart. The recovery sweep claims the non-terminal lease,
-    // runs the process on the worker's wired controller, and writes its
-    // terminal outcome — idempotent by process_id.
+    // recovery counterpart. The recovery sweep submits the non-terminal process
+    // by workflow key; Restate coalesces duplicates and the workflow writes the
+    // terminal outcome.
     let registry_b = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
             .await
@@ -2350,50 +2627,6 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
             value: serde_json::json!({ "triggered": "issue-42" }),
             control: None,
         }
-    );
-
-    // Lease single-owner / fencing: a non-terminal process is re-run by
-    // exactly one owner. An active lease fences a competing owner, and a
-    // superseded (stale) writer cannot renew once a new owner has claimed.
-    registry_b
-        .register_process(trigger_lashlang_registration("trigger-lease", "issue-7").await)
-        .await
-        .expect("register lease-probe process");
-    let owner_a = registry_b
-        .claim_process_lease("trigger-lease", "owner-a", 60_000)
-        .await
-        .expect("owner-a claims the non-terminal lease");
-    let fenced = registry_b
-        .claim_process_lease("trigger-lease", "owner-b", 60_000)
-        .await;
-    assert!(
-        fenced
-            .as_ref()
-            .err()
-            .is_some_and(|err| err.to_string().contains("already leased")),
-        "an active lease must fence a competing owner, got {fenced:?}"
-    );
-
-    // Expire owner-a's lease (ttl 0) so owner-b can take over; owner-a is now
-    // the stale writer and its renewal must be rejected (fencing).
-    let stale = registry_b
-        .renew_process_lease(&owner_a, 0)
-        .await
-        .expect("owner-a renews to a zero TTL, expiring its own lease");
-    let owner_b = registry_b
-        .claim_process_lease("trigger-lease", "owner-b", 60_000)
-        .await
-        .expect("owner-b reclaims the expired lease");
-    assert!(
-        owner_b.fencing_token > owner_a.fencing_token,
-        "a re-claim must bump the fencing token (was {}, now {})",
-        owner_a.fencing_token,
-        owner_b.fencing_token
-    );
-    let stale_renew = registry_b.renew_process_lease(&stale, 60_000).await;
-    assert!(
-        stale_renew.is_err(),
-        "a superseded (stale) writer must not renew the live lease, got {stale_renew:?}"
     );
 }
 
@@ -2598,7 +2831,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
 }
 
 #[tokio::test]
-async fn ingress_runner_submits_non_terminal_process_under_fenced_lease() {
+async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -2654,43 +2887,5 @@ async fn ingress_runner_submits_non_terminal_process_under_fenced_lease() {
         record.external_ref.as_ref().map(|e| e.backend.as_str()),
         Some("restate"),
         "the durable external_ref must be recorded after a successful submit"
-    );
-    // The fence lease is released after the submit, so a fresh owner can
-    // claim it again.
-    assert!(
-        registry
-            .claim_process_lease("task-1", "probe", 1_000)
-            .await
-            .is_ok(),
-        "the submit fence lease must be released after the ingress POST"
-    );
-}
-
-#[tokio::test]
-async fn ingress_runner_skips_process_fenced_by_another_owner() {
-    // A live lease held by a different owner means another runner is already
-    // submitting this process; the ingress runner must skip it (no submit) so
-    // a process is submitted exactly once. The unreachable ingress URL makes a
-    // stray submit fail loudly rather than pass silently.
-    let registry = process_registry();
-    registry
-        .register_process(external_registration("task-1"))
-        .await
-        .expect("register");
-    registry
-        .claim_process_lease("task-1", "other-owner", 30_000)
-        .await
-        .expect("pre-claim by another owner");
-
-    let runner = RestateProcessIngressRunner::new("http://127.0.0.1:9", registry.clone());
-    runner
-        .claim_and_run_pending()
-        .await
-        .expect("drive skips the fenced record without error");
-
-    let record = registry.get_process("task-1").await.expect("get process");
-    assert!(
-        record.external_ref.is_none(),
-        "a record fenced by another owner must not be submitted"
     );
 }

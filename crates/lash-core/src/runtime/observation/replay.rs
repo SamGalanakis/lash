@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
@@ -344,13 +344,19 @@ impl Default for InMemoryLiveReplayStoreConfig {
 #[derive(Debug)]
 pub struct InMemoryLiveReplayStore {
     config: InMemoryLiveReplayStoreConfig,
+    clock: Arc<dyn crate::Clock>,
     sessions: StdMutex<HashMap<String, LiveReplaySessionBuffer>>,
 }
 
 impl InMemoryLiveReplayStore {
     pub fn new(config: InMemoryLiveReplayStoreConfig) -> Self {
+        Self::with_clock(config, Arc::new(crate::SystemClock))
+    }
+
+    pub fn with_clock(config: InMemoryLiveReplayStoreConfig, clock: Arc<dyn crate::Clock>) -> Self {
         Self {
             config,
+            clock,
             sessions: StdMutex::new(HashMap::new()),
         }
     }
@@ -417,8 +423,11 @@ struct StoredObservationEvent {
 }
 
 impl InMemoryLiveReplayStore {
-    fn trim_locked(config: &InMemoryLiveReplayStoreConfig, buffer: &mut LiveReplaySessionBuffer) {
-        let now = Instant::now();
+    fn trim_locked(
+        config: &InMemoryLiveReplayStoreConfig,
+        buffer: &mut LiveReplaySessionBuffer,
+        now: Instant,
+    ) {
         while buffer.events.len() > config.max_events_per_session {
             buffer.events.pop_front();
         }
@@ -460,6 +469,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
         revision: SessionRevision,
         payload: SessionObservationEventPayload,
     ) -> Result<SessionObservationEvent, LiveReplayStoreError> {
+        let now = self.clock.now();
         let mut sessions = self
             .sessions
             .lock()
@@ -477,10 +487,10 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
         };
         buffer.events.push_back(StoredObservationEvent {
             position: buffer.tail_position,
-            appended_at: Instant::now(),
+            appended_at: now,
             event: event.clone(),
         });
-        Self::trim_locked(&self.config, buffer);
+        Self::trim_locked(&self.config, buffer, now);
         buffer.publish(event.clone());
         Ok(event)
     }
@@ -491,12 +501,13 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
     ) -> Result<LiveReplayResult, LiveReplayStoreError> {
         let parsed = cursor.parse()?;
         let _cursor_revision = parsed.revision;
+        let now = self.clock.now();
         let mut sessions = self
             .sessions
             .lock()
             .map_err(|_| LiveReplayStoreError::Store("live replay mutex poisoned".to_string()))?;
         if let Some(buffer) = sessions.get_mut(&parsed.session_id) {
-            Self::trim_locked(&self.config, buffer);
+            Self::trim_locked(&self.config, buffer, now);
         }
         let buffer = sessions.get(&parsed.session_id);
         if let Some(reason) = Self::gap_reason_for_cursor(buffer, parsed.live_position) {
@@ -521,6 +532,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
     ) -> Result<LiveReplaySubscribeResult, LiveReplayStoreError> {
         let parsed = cursor.parse()?;
         let _cursor_revision = parsed.revision;
+        let now = self.clock.now();
         let mut sessions = self
             .sessions
             .lock()
@@ -528,7 +540,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
         let buffer = sessions
             .entry(parsed.session_id.clone())
             .or_insert_with(LiveReplaySessionBuffer::new);
-        Self::trim_locked(&self.config, buffer);
+        Self::trim_locked(&self.config, buffer, now);
         if let Some(reason) = Self::gap_reason_for_cursor(Some(buffer), parsed.live_position) {
             return Ok(LiveReplaySubscribeResult::Gap(reason));
         }
@@ -555,12 +567,13 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
     }
 
     fn trim_session(&self, session_id: &str) -> Result<(), LiveReplayStoreError> {
+        let now = self.clock.now();
         let mut sessions = self
             .sessions
             .lock()
             .map_err(|_| LiveReplayStoreError::Store("live replay mutex poisoned".to_string()))?;
         if let Some(buffer) = sessions.get_mut(session_id) {
-            Self::trim_locked(&self.config, buffer);
+            Self::trim_locked(&self.config, buffer, now);
         }
         Ok(())
     }

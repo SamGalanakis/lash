@@ -35,8 +35,13 @@ pub(in crate::runtime::session_manager) async fn resolve_session_create_plan(
     let start_state = resolve_start_state(managed, current, &request, &session_id).await?;
     let policy = resolve_session_policy(current, &request, &start_state, &session_id);
     request.policy = Some(policy.clone());
-    let initial_runtime_state =
-        build_runtime_state(session_id.clone(), &request, start_state, &policy);
+    let initial_runtime_state = build_runtime_state(
+        session_id.clone(),
+        &request,
+        start_state,
+        &policy,
+        current.host.core.clock.as_ref(),
+    );
     let plugin_authority = crate::plugin::SessionAuthorityContext {
         tool_access: request.tool_access.clone(),
         subagent: request.subagent.clone(),
@@ -103,15 +108,17 @@ fn build_runtime_state(
     request: &SessionCreateRequest,
     mut base: RuntimeSessionState,
     policy: &SessionPolicy,
+    clock: &dyn crate::Clock,
 ) -> RuntimeSessionState {
     normalize_session_graph(&mut base);
     base.session_id = session_id;
     base.policy = policy.clone();
-    base.reset_initial_agent_frame(
+    base.reset_initial_agent_frame_with_clock(
         crate::AgentFrameAssignment::from_session_request(request, policy.clone()),
         base.protocol_turn_options.clone(),
+        clock,
     );
-    append_session_nodes_to_state(&mut base, &request.initial_nodes);
+    append_session_nodes_to_state_with_clock(&mut base, &request.initial_nodes, clock);
     normalize_session_graph(&mut base);
     base
 }

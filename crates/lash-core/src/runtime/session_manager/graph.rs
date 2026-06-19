@@ -54,7 +54,11 @@ impl CurrentSessionCapability {
                 current_leaf_node_id: state.session_graph.leaf_node_id.clone(),
             });
         }
-        let node_ids = append_session_nodes_to_state(&mut state, &request.nodes);
+        let node_ids = append_session_nodes_to_state_with_clock(
+            &mut state,
+            &request.nodes,
+            self.host.core.clock.as_ref(),
+        );
         let leaf_node_id = state.session_graph.leaf_node_id.clone().unwrap_or_default();
         let graph = crate::store::GraphCommitDelta::Append {
             nodes: node_ids

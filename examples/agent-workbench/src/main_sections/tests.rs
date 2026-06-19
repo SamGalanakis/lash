@@ -402,7 +402,7 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx,
-            queued_work_poke: inert_queued_work_poke(),
+            queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
@@ -558,7 +558,7 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx: broadcast::channel(1024).0,
-            queued_work_poke: inert_queued_work_poke(),
+            queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
@@ -775,7 +775,7 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx: broadcast::channel(1024).0,
-            queued_work_poke: inert_queued_work_poke(),
+            queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
@@ -910,7 +910,7 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx,
-            queued_work_poke: inert_queued_work_poke(),
+            queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
@@ -1079,7 +1079,7 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx: broadcast::channel(1024).0,
-            queued_work_poke: inert_queued_work_poke(),
+            queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
@@ -1237,8 +1237,6 @@ mod tests {
         );
         wait_for_endpoint_socket(endpoint_bind).await;
         register_restate_deployment(&admin_url, &endpoint_url).await;
-        harness.queued_work_runner.spawn();
-
         run_workbench_turn_via_restate(
             &harness.state,
             "Register a cron trigger that runs every two seconds and reports the tick.",
@@ -1319,7 +1317,6 @@ mod tests {
         state: AppState,
         process_worker: lash::durability::DurableProcessWorker,
         process_deployment: lash_restate::RestateProcessDeployment,
-        queued_work_runner: lash::runtime::QueuedWorkRunner,
         trace_path: PathBuf,
     }
 
@@ -1391,14 +1388,13 @@ mod tests {
         );
         let session_ids = WorkbenchSessionIds::fresh();
         let restate_http = reqwest::Client::new();
-        let queued_work_runner =
-            lash::runtime::QueuedWorkRunner::new(Arc::new(WorkbenchQueuedWorkSubmitter {
+        let queued_work_driver =
+            lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
                 session_ids: session_ids.clone(),
                 store_factory: Arc::clone(&core_store_factory),
                 restate_ingress_url: restate_ingress_url.clone(),
                 restate_http: restate_http.clone(),
             }));
-        let queued_work_poke = queued_work_runner.poke_handle();
         let core = RlmCore::builder()
             .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
                     .with_lashlang_abilities(workbench_lashlang_abilities()))
@@ -1417,7 +1413,7 @@ mod tests {
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .process_work_driver(process_deployment.process_work_driver())
-            .queued_work_poke(queued_work_poke.clone())
+            .queued_work_driver(queued_work_driver.clone())
             .build()
             .expect("build core");
         let process_worker = lash::durability::DurableProcessWorker::new(
@@ -1443,7 +1439,7 @@ mod tests {
             trace_sink: Some(trace_sink),
             lashlang_execution,
             event_tx,
-            queued_work_poke,
+            queued_work_driver: queued_work_driver.clone(),
             restate_ingress_url,
             restate_http,
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
@@ -1454,7 +1450,6 @@ mod tests {
             state,
             process_worker,
             process_deployment,
-            queued_work_runner,
             trace_path,
         }
     }

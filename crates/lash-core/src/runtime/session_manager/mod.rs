@@ -260,7 +260,7 @@ impl RuntimeSessionServices {
             crate::TriggerRouter::new(
                 Arc::clone(store),
                 self.current.host.process_registry.clone(),
-                self.current.host.process_work_poke.clone(),
+                self.current.host.process_work_driver.clone(),
             )
         })
     }

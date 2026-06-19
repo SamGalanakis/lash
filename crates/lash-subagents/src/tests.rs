@@ -850,7 +850,11 @@ async fn run_seed_probe_inner(
         )
         .with_session_policy(policy.clone()),
     );
-    let _poke = lash_core::ProcessWorkRunner::inline(worker).spawn();
+    let process_driver = lash_core::ProcessWorkDriver::inline(
+        Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
+        worker,
+    );
+    let host = host.with_process_work_driver(process_driver);
     let mut runtime = LashRuntime::from_background_state(
         policy.clone(),
         host,

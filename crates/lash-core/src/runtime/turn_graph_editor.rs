@@ -16,6 +16,7 @@ pub(super) struct TurnGraphEditor {
     appended_nodes: Vec<SessionNodeRecord>,
     appended_node_indices: HashMap<String, usize>,
     committed_node_ids: HashSet<String>,
+    clock: Arc<dyn crate::Clock>,
 }
 
 impl TurnGraphEditor {
@@ -23,6 +24,7 @@ impl TurnGraphEditor {
         base_graph: Arc<SessionGraph>,
         base_read_model: SessionReadModel,
         agent_frame_id: crate::AgentFrameId,
+        clock: Arc<dyn crate::Clock>,
     ) -> Self {
         let append_builder = base_graph
             .append_builder()
@@ -40,6 +42,7 @@ impl TurnGraphEditor {
             append_builder,
             appended_nodes: Vec::new(),
             appended_node_indices: HashMap::new(),
+            clock,
         }
     }
 
@@ -67,7 +70,9 @@ impl TurnGraphEditor {
         if events.is_empty() {
             return;
         }
-        let nodes = self.append_builder.append_protocol_events(events);
+        let nodes = self
+            .append_builder
+            .append_protocol_events_at(events, self.clock.timestamp_rfc3339());
         Arc::make_mut(&mut self.active_events).extend(nodes.iter().filter_map(|node| {
             if let Some(SessionEventRecord::Protocol(event)) = node.event() {
                 Some(SessionEventRecord::Protocol(event.clone()))
@@ -108,7 +113,7 @@ impl TurnGraphEditor {
 
         let nodes = self
             .append_builder
-            .append_messages(appendable_messages.clone());
+            .append_messages_at(appendable_messages.clone(), self.clock.timestamp_rfc3339());
         Arc::make_mut(&mut self.active_events)
             .extend(nodes.iter().filter_map(|node| node.event().cloned()));
         self.append_appended_nodes(nodes);
@@ -122,6 +127,7 @@ impl TurnGraphEditor {
             self.append_builder.existing_node_ids(),
             self.append_builder.agent_frame_id(),
             messages,
+            self.clock.timestamp_rfc3339(),
         );
         self.append_builder.register_existing_node_ids(
             replacement

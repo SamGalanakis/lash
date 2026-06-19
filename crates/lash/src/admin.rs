@@ -40,11 +40,11 @@ impl CoreTriggerAdmin {
                 "trigger store is unavailable in this runtime".to_string(),
             ))
         })?;
-        let process_work_poke = self.core.process_work_runner.poke().await;
+        let drivers = self.core.work_driver.drivers().await;
         let router = lash_core::TriggerRouter::new(
             Arc::clone(store),
             self.core.env.process_registry.clone(),
-            process_work_poke,
+            drivers.process,
         );
         router
             .emit(request, scoped_effect_controller.controller())
@@ -158,8 +158,8 @@ impl Processes {
                 "process start returned the wrong outcome".to_string(),
             )));
         };
-        if let Some(poke) = self.core.process_work_runner.poke().await {
-            poke.poke();
+        if let Some(driver) = self.core.work_driver.drivers().await.process {
+            driver.claim_and_run_pending("admin_process_start").await?;
         }
         Ok(record)
     }

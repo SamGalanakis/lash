@@ -66,12 +66,11 @@ use std::time::Duration;
 use lash_core::{
     AwaitEventKey, AwaitEventWaitIdentity, DurabilityTier, DurableProcessWorker, EffectHost,
     ExecutionScope, PluginError, ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome,
-    ProcessExecutionContext, ProcessExternalRef, ProcessLease, ProcessLeaseCompletion,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessWorkDriver,
-    ProcessWorkPoke, ProcessWorkRunner, Resolution, ResolveOutcome, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    RuntimeInvocation, ScopedEffectController,
+    ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, Resolution, ResolveOutcome,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeError, RuntimeInvocation, ScopedEffectController,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -109,6 +108,57 @@ fn restate_await_event_process_id(key: &AwaitEventKey) -> Option<&str> {
     match &key.scope {
         ExecutionScope::Process { process_id } => Some(process_id.as_str()),
         _ => None,
+    }
+}
+
+fn restate_process_terminal_await_key(process_id: &str) -> Result<AwaitEventKey, RuntimeError> {
+    restate_await_event_key(
+        &ExecutionScope::process(process_id.to_string()),
+        AwaitEventWaitIdentity::Custom {
+            key: "process_terminal".to_string(),
+        },
+    )
+}
+
+fn restate_process_terminal_resolution(
+    output: &ProcessAwaitOutput,
+) -> Result<Resolution, RuntimeError> {
+    serde_json::to_value(output)
+        .map(Resolution::Ok)
+        .map_err(|err| RuntimeError::new("restate_process_terminal_encode", err.to_string()))
+}
+
+fn restate_process_terminal_output(
+    process_id: &str,
+    resolution: Resolution,
+) -> Result<ProcessAwaitOutput, PluginError> {
+    match resolution {
+        Resolution::Ok(value) => serde_json::from_value(value).map_err(|err| {
+            PluginError::Session(format!(
+                "invalid terminal output for process `{process_id}`: {err}"
+            ))
+        }),
+        Resolution::Err(err) => Ok(ProcessAwaitOutput::Failure {
+            class: lash_core::ToolFailureClass::Execution,
+            code: err.code,
+            message: err.message,
+            raw: None,
+            control: None,
+        }),
+        Resolution::Timeout => Ok(ProcessAwaitOutput::Failure {
+            class: lash_core::ToolFailureClass::Execution,
+            code: "process_await_timeout".to_string(),
+            message: format!("awaiting process `{process_id}` timed out"),
+            raw: None,
+            control: None,
+        }),
+        Resolution::Cancelled => Ok(ProcessAwaitOutput::Failure {
+            class: lash_core::ToolFailureClass::Execution,
+            code: "process_await_cancelled".to_string(),
+            message: format!("awaiting process `{process_id}` was cancelled"),
+            raw: None,
+            control: None,
+        }),
     }
 }
 
@@ -409,29 +459,15 @@ impl RuntimeEffectController for RestateEffectHostController {
     }
 }
 
-/// Short TTL for the fence lease the ingress runner holds across a single
-/// `LashProcessWorkflow` submit.
-///
-/// The lease only fences *the submit* — Restate owns the durable execution once
-/// the workflow is keyed and accepted — so it is released immediately after the
-/// ingress POST. A short window keeps a runner that crashed mid-submit from
-/// fencing the record for long.
-const INGRESS_SUBMIT_FENCE_TTL_MS: u64 = 30_000;
-
 /// [`ProcessRunHandle`] that drives pending processes by submitting their
 /// `LashProcessWorkflow` through the Restate ingress instead of running them
 /// in-process.
 ///
-/// This is the durable tier's run handle: a [`ProcessWorkRunner`](lash_core::ProcessWorkRunner)
-/// over this handle pokes/polls the registry's non-terminal rows and, per row,
-/// claims a short single-owner [`ProcessLease`] to fence the submit, POSTs
-/// `LashProcessWorkflow/{process_id}/run/send` to the ingress (idempotent by the
-/// `lash-process:{process_id}:run` key, mirroring the in-handler
-/// [`schedule_restate_process`] submit), records the durable `external_ref`, and
-/// releases the lease. The submitted workflow runs on the Restate-bound
-/// [`RestateCoreProcessRunner`], which claims the run-time lease and writes the
-/// terminal outcome — so the single coordination point stays the
-/// [`ProcessLease`] and a process runs exactly once.
+/// This is the durable tier's process work handle: a host-owned
+/// [`ProcessWorkDriver`] calls it on ingress-relevant events. Per row, it POSTs
+/// `LashProcessWorkflow/{process_id}/run/send` to the ingress. Restate
+/// coalesces by workflow key, so duplicate submits are idempotent and no Lash
+/// registry lease is needed at the Restate tier.
 pub struct RestateProcessIngressRunner {
     http: reqwest::Client,
     ingress_url: String,
@@ -449,35 +485,10 @@ impl RestateProcessIngressRunner {
         }
     }
 
-    async fn submit_record(
-        &self,
-        owner_id: &str,
-        record: ProcessRecord,
-    ) -> Result<(), PluginError> {
+    async fn submit_record(&self, record: ProcessRecord) -> Result<(), PluginError> {
         let process_id = record.id.clone();
-        // Fence the submit: a claim conflict means another runner is already
-        // submitting this process, so skip it. Treat any claim failure as
-        // "fenced elsewhere" — the keyed-idempotent submit makes a missed one a
-        // no-op on the next poll tick anyway.
-        let Ok(lease) = self
-            .registry
-            .claim_process_lease(&process_id, owner_id, INGRESS_SUBMIT_FENCE_TTL_MS)
-            .await
-        else {
-            return Ok(());
-        };
-        let outcome = self.submit_under_lease(record).await;
-        // Release the fence lease before propagating any submit error so a
-        // transient ingress failure does not pin the record until the lease
-        // expires; the next poll/poke re-submits (keyed-idempotent).
-        self.release_lease(&lease).await?;
-        outcome
-    }
-
-    async fn submit_under_lease(&self, record: ProcessRecord) -> Result<(), PluginError> {
-        let process_id = record.id.clone();
-        // The record may have reached a terminal state between the list and the
-        // claim. Idempotent by process_id: never re-submit a finished process.
+        // The record may have reached a terminal state between the list and the submit.
+        // Idempotent by process_id: never re-submit a finished process.
         if self
             .registry
             .get_process(&process_id)
@@ -538,20 +549,13 @@ impl RestateProcessIngressRunner {
             .await
             .map(|_| ())
     }
-
-    async fn release_lease(&self, lease: &ProcessLease) -> Result<(), PluginError> {
-        self.registry
-            .complete_process_lease(&ProcessLeaseCompletion::from_lease(lease))
-            .await
-    }
 }
 
 #[async_trait::async_trait]
 impl ProcessRunHandle for RestateProcessIngressRunner {
     async fn claim_and_run_pending(&self) -> Result<(), PluginError> {
-        let owner_id = format!("restate-ingress-{}", uuid::Uuid::new_v4());
         for record in self.registry.list_non_terminal().await? {
-            self.submit_record(&owner_id, record).await?;
+            self.submit_record(record).await?;
         }
         Ok(())
     }
@@ -560,23 +564,17 @@ impl ProcessRunHandle for RestateProcessIngressRunner {
 /// Bundled Restate process deployment wiring for a Lash core.
 ///
 /// Construct this once per deployment, pass [`process_work_driver`](Self::process_work_driver)
-/// into `LashCoreBuilder::process_work_driver`, bind
-/// [`workflow`](Self::workflow) on the Restate endpoint, then call
-/// [`spawn`](Self::spawn) after the endpoint is listening.
+/// into `LashCoreBuilder::process_work_driver`, and bind
+/// [`workflow`](Self::workflow) on the Restate endpoint.
 pub struct RestateProcessDeployment {
-    process_work_runner: ProcessWorkRunner,
     driver: ProcessWorkDriver,
 }
 
 impl RestateProcessDeployment {
     pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
         let ingress_runner = RestateProcessIngressRunner::new(ingress_url, Arc::clone(&registry));
-        let process_work_runner = ProcessWorkRunner::new(Arc::new(ingress_runner));
-        let driver = ProcessWorkDriver::new(registry, process_work_runner.poke_handle());
-        Self {
-            process_work_runner,
-            driver,
-        }
+        let driver = ProcessWorkDriver::new(registry, Arc::new(ingress_runner));
+        Self { driver }
     }
 
     pub fn process_work_driver(&self) -> ProcessWorkDriver {
@@ -591,10 +589,6 @@ impl RestateProcessDeployment {
             Arc::new(RestateCoreProcessRunner::new(worker)),
             self.driver.process_registry(),
         )
-    }
-
-    pub fn spawn(self) -> ProcessWorkPoke {
-        self.process_work_runner.spawn()
     }
 }
 
@@ -668,8 +662,16 @@ where
                     raw: None,
                     control: None,
                 };
-                let _ = self.registry.complete_process(&process_id, output).await;
-                Err(err)
+                let _ = self
+                    .registry
+                    .complete_process(&process_id, output.clone())
+                    .await;
+                tracing::warn!(
+                    process_id = %process_id,
+                    error = %err,
+                    "Restate process runner failed; completed process with failure output",
+                );
+                Ok(output)
             }
         }
     }
@@ -703,16 +705,25 @@ where
         let process_id = input.registration.id.clone();
         let controller = RestateRuntimeEffectController::new(ctx);
         let scoped_effect_controller = controller
-            .scoped_effect_controller(ExecutionScope::process(process_id))
+            .scoped_effect_controller(ExecutionScope::process(process_id.clone()))
             .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
-        self.run_registration(
-            input.registration,
-            input.execution_context,
-            scoped_effect_controller,
-        )
-        .await
-        .map(Json)
-        .map_err(|err| TerminalError::from_error(err).into())
+        let output = self
+            .run_registration(
+                input.registration,
+                input.execution_context,
+                scoped_effect_controller,
+            )
+            .await
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        let key = restate_process_terminal_await_key(&process_id)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        let resolution = restate_process_terminal_resolution(&output)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        let payload = serde_json::to_string(&resolution)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        let promise_key = key.promise_key();
+        controller.context().resolve_promise(&promise_key, payload);
+        Ok(Json(output))
     }
 
     async fn cancel(
@@ -1317,7 +1328,18 @@ where
             Ok(ProcessEffectOutcome::DeleteSession { report })
         }
         ProcessCommand::Await { process_id } => {
-            let output = registry.await_process(&process_id).await?;
+            if registry.get_process(&process_id).await.is_none() {
+                return Err(PluginError::Session(format!("unknown process `{process_id}`")).into());
+            }
+            let key = restate_process_terminal_await_key(&process_id)
+                .map_err(RuntimeEffectControllerError::from)?;
+            let resolution = context
+                .await_event(key.promise_key())
+                .await
+                .map_err(|err| {
+                    RuntimeEffectControllerError::new("restate_process_await", err.to_string())
+                })?;
+            let output = restate_process_terminal_output(&process_id, resolution)?;
             Ok(ProcessEffectOutcome::Await { output })
         }
         ProcessCommand::Cancel { process_id, reason } => {
@@ -1441,6 +1463,7 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::Direct { .. }
         | RuntimeEffectCommand::ToolCall { .. }
+        | RuntimeEffectCommand::ToolBatch { .. }
         | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
         | RuntimeEffectCommand::SyncExecutionEnvironment { .. }

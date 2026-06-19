@@ -232,7 +232,7 @@ impl LashRuntime {
         enqueue_turn_input_to_store(
             self.state.session_id.clone(),
             store,
-            self.host.queued_work_poke.clone(),
+            self.host.queued_work_driver.clone(),
             input,
             delivery_policy,
             slot_policy,
@@ -266,7 +266,11 @@ impl LashRuntime {
         &mut self,
         request: crate::OpenAgentFrameRequest,
     ) -> crate::OpenAgentFrameResult {
-        open_agent_frame_in_state(&mut self.state, request)
+        open_agent_frame_in_state_with_clock(
+            &mut self.state,
+            request,
+            self.host.core.clock.as_ref(),
+        )
     }
 
     /// Run the registered compaction provider and commit the resulting
@@ -370,7 +374,7 @@ impl LashRuntime {
 pub(in crate::runtime) async fn enqueue_turn_input_to_store(
     session_id: String,
     store: Arc<dyn crate::RuntimePersistence>,
-    queued_work_poke: Option<crate::QueuedWorkPoke>,
+    queued_work_driver: Option<crate::QueuedWorkDriver>,
     input: crate::TurnInput,
     delivery_policy: crate::DeliveryPolicy,
     slot_policy: crate::SlotPolicy,
@@ -388,8 +392,18 @@ pub(in crate::runtime) async fn enqueue_turn_input_to_store(
         .enqueue_queued_work(draft)
         .await
         .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
-    if let Some(poke) = queued_work_poke.as_ref() {
-        poke.poke_session(enqueued.session_id.clone(), "queued_turn_input");
+    if enqueued.delivery_policy == crate::DeliveryPolicy::AfterCurrentTurnCommit
+        && let Some(driver) = queued_work_driver.as_ref()
+    {
+        driver
+            .claim_and_run_pending(Some(&enqueued.session_id), "queued_turn_input")
+            .await
+            .map_err(|err| {
+                RuntimeError::new(
+                    RuntimeErrorCode::Other("queued_work".to_string()),
+                    err.to_string(),
+                )
+            })?;
     }
     Ok(enqueued)
 }
@@ -432,8 +446,16 @@ impl LashRuntime {
         let enqueued = store.enqueue_queued_work(draft).await.map_err(|err| {
             RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
         })?;
-        if let Some(poke) = self.host.queued_work_poke.as_ref() {
-            poke.poke_session(session_id.clone(), "session_command");
+        if let Some(driver) = self.host.queued_work_driver.as_ref() {
+            driver
+                .claim_and_run_pending(Some(&session_id), "session_command")
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::Other("queued_work".to_string()),
+                        err.to_string(),
+                    )
+                })?;
         }
         Ok(crate::SessionCommandReceipt {
             session_id,

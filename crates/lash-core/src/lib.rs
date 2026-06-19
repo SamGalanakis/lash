@@ -262,12 +262,11 @@ pub use runtime::{
     ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
     ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
     ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
-    ProcessWorkObserver, ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, PromptUsage,
-    ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
-    ProtocolTurnExtensionHandle, QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome,
-    QueuedWorkRunRequest, QueuedWorkRunner, Residency, Resolution, ResolveOutcome,
-    RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
-    RuntimeHostConfig, RuntimeObservation, ScopedEffectController, SessionCommand,
+    ProcessWorkObserver, ProcessWorkSnapshot, PromptUsage, ProtocolSessionExtension,
+    ProtocolSessionExtensionHandle, ProtocolTurnExtension, ProtocolTurnExtensionHandle,
+    QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest, Residency, Resolution,
+    ResolveOutcome, RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
+    RuntimeHandle, RuntimeHostConfig, RuntimeObservation, ScopedEffectController, SessionCommand,
     SessionCommandReceipt, SessionCursor, SessionCursorError, SessionObservation,
     SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
     SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision, SessionScope,
@@ -299,7 +298,7 @@ pub use runtime::{
     LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimeSessionState,
+    RuntimeInvocation, RuntimeSessionState, ToolBatchEffectOutcome,
 };
 pub use schemars::JsonSchema;
 pub use session::{
@@ -328,9 +327,10 @@ pub use store::{
     refresh_persisted_session_state,
 };
 pub use tool_provider::{
-    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolChildExecutionTraceHook,
-    ToolChildProcessStarted, ToolContext, ToolDurableEffects, ToolPrepareCall, ToolPrepareContext,
-    ToolProvider, ToolSessionAdmin, ToolSessionModel, ToolTriggerClient,
+    PreparedToolBatch, PreparedToolBatchCall, PreparedToolCall, ProgressSender, SandboxMessage,
+    ToolCall, ToolChildExecutionTraceHook, ToolChildProcessStarted, ToolContext,
+    ToolDurableEffects, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolSessionAdmin,
+    ToolSessionModel, ToolTriggerClient,
 };
 
 #[cfg(test)]

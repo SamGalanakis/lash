@@ -12,9 +12,9 @@ mod io;
 mod lifecycle;
 mod observation;
 mod process;
-mod process_work_runner;
+mod process_work_driver;
 mod process_worker;
-mod queued_work_runner;
+mod queued_work_driver;
 mod session_api;
 mod session_manager;
 mod session_ops;
@@ -79,8 +79,8 @@ use assembly::{
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use causal::process_event_invocation;
-pub use clock::{Clock, SystemClock};
 pub(crate) use causal::tool_retry_sleep_invocation;
+pub use clock::{Clock, SystemClock};
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
     AwaitEventKey, AwaitEventWaitIdentity, CausalRef, EffectHost, ExecutionScope,
@@ -89,7 +89,7 @@ pub use effect::{
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
-    ToolCallLaunch,
+    ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
@@ -132,19 +132,14 @@ pub use process::{
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
     validate_process_signal_name,
 };
-pub use process_work_runner::{
-    InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner,
-};
+pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
-pub use queued_work_runner::{
-    QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest,
-    QueuedWorkRunner,
-};
+pub use queued_work_driver::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest};
 pub use session_manager::DirectCompletionClient;
 pub use state::RuntimeSessionState;
 use state::{
-    append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
-    apply_session_head, normalize_session_graph, open_agent_frame_in_state,
+    append_session_nodes_to_state_with_clock, apply_residency_on_load, apply_session_checkpoint,
+    apply_session_head, normalize_session_graph, open_agent_frame_in_state_with_clock,
 };
 pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{

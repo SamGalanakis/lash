@@ -2,18 +2,20 @@ use std::sync::Arc;
 
 use crate::plugin::ToolCallHookContext;
 use crate::validate_tool_input;
-use crate::{
-    ProgressSender, ToolContext, ToolFailureClass, ToolManifest, ToolPrepareCall,
-    ToolPrepareContext,
-};
+#[cfg(test)]
+use crate::{ProgressSender, ToolContext};
+use crate::{ToolFailureClass, ToolManifest, ToolPrepareCall, ToolPrepareContext};
 
+#[cfg(test)]
+use super::context::ToolDispatchOutcome;
 use super::context::{
-    ToolDispatchContext, ToolDispatchOutcome, ToolPreparationOutcome, completed_preparation,
-    outcome, runtime_failure,
+    ToolDispatchContext, ToolPreparationOutcome, completed_preparation, outcome, runtime_failure,
 };
 use super::directives::apply_before_tool_directives;
+#[cfg(test)]
 use super::execution::dispatch_prepared_tool_call_with_execution_context;
 
+#[cfg(test)]
 pub(crate) async fn dispatch_tool_call(
     context: &ToolDispatchContext<'_>,
     tool_name: String,
@@ -25,6 +27,7 @@ pub(crate) async fn dispatch_tool_call(
         .await
 }
 
+#[cfg(test)]
 pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     tool_name: String,

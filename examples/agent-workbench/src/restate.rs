@@ -151,8 +151,11 @@ impl WorkbenchTurnWorkflow for WorkbenchTurnWorkflowImpl {
             .map_err(terminal_handler_error)?;
         sync_cron_jobs_with_context(&self.state, controller.context(), "user_turn").await?;
         self.state
-            .queued_work_poke
-            .poke_session(session_id, "user_turn_completed");
+            .queued_work_driver
+            .claim_and_run_pending(Some(&session_id), "user_turn_completed")
+            .await
+            .map_err(AppError::internal)
+            .map_err(terminal_handler_error)?;
         Ok(Json(()))
     }
 }
@@ -183,10 +186,13 @@ impl WorkbenchQueuedTurnWorkflow for WorkbenchQueuedTurnWorkflowImpl {
         let outcome = run_queued_turn(self.state.clone(), request, &controller)
             .await
             .map_err(terminal_handler_error);
-        self.state
-            .queued_work_poke
-            .complete_session(session_id.clone(), "queued_turn_completed");
         outcome?;
+        self.state
+            .queued_work_driver
+            .claim_and_run_pending(Some(&session_id), "queued_turn_completed")
+            .await
+            .map_err(AppError::internal)
+            .map_err(terminal_handler_error)?;
         sync_cron_jobs_with_context(&self.state, controller.context(), "queued_turn").await?;
         Ok(Json(()))
     }
@@ -219,8 +225,11 @@ impl WorkbenchButtonTriggerWorkflow for WorkbenchButtonTriggerWorkflowImpl {
             .await
             .map_err(terminal_handler_error)?;
         self.state
-            .queued_work_poke
-            .poke_session(session_id, "button_trigger");
+            .queued_work_driver
+            .claim_and_run_pending(Some(&session_id), "button_trigger")
+            .await
+            .map_err(AppError::internal)
+            .map_err(terminal_handler_error)?;
         Ok(Json(()))
     }
 }
@@ -252,8 +261,11 @@ impl WorkbenchMailReceivedWorkflow for WorkbenchMailReceivedWorkflowImpl {
             .await
             .map_err(terminal_handler_error)?;
         self.state
-            .queued_work_poke
-            .poke_session(session_id, "mail_received");
+            .queued_work_driver
+            .claim_and_run_pending(Some(&session_id), "mail_received")
+            .await
+            .map_err(AppError::internal)
+            .map_err(terminal_handler_error)?;
         Ok(Json(()))
     }
 }
@@ -380,8 +392,11 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
             }),
         );
         self.state
-            .queued_work_poke
-            .poke_session(state.request.session_id.clone(), "cron_tick");
+            .queued_work_driver
+            .claim_and_run_pending(Some(&state.request.session_id), "cron_tick")
+            .await
+            .map_err(AppError::internal)
+            .map_err(terminal_handler_error)?;
         Ok(Json(()))
     }
 
@@ -424,7 +439,6 @@ pub(crate) fn spawn_restate_endpoint(
             .listen_and_serve(addr)
             .await;
     });
-    process_deployment.spawn();
 }
 
 pub(crate) async fn submit_user_turn(

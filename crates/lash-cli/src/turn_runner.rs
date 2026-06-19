@@ -3,7 +3,8 @@ use lash::LashSession;
 use lash::{TurnActivitySink, TurnInput};
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
-    AssistantOutput, ExecutionSummary, OutputState, TokenUsage, TurnIssue, TurnOutcome, TurnStop,
+    AssistantOutput, ExecutionScope, ExecutionSummary, OutputState, TokenUsage, TurnIssue,
+    TurnOutcome, TurnStop,
 };
 #[cfg(test)]
 use lash_sqlite_store::Store;
@@ -42,12 +43,22 @@ where
 
     let task = tokio::spawn(async move {
         tracing::debug!(stream_id, "runtime turn task spawned");
-        let result = match task_session
-            .turn(turn_input)
-            .turn_id(format!("cli-turn:{stream_id}"))
-            .cancel(task_cancel)
-            .stream_to(&sink)
-            .await
+        let result = match async {
+            let turn_id = format!("cli-turn:{stream_id}");
+            let effect_host = task_session.effect_host();
+            let scoped = effect_host.scoped(ExecutionScope::turn(
+                task_session.session_id(),
+                turn_id.clone(),
+            ))?;
+            task_session
+                .turn(turn_input)
+                .turn_id(turn_id)
+                .cancel(task_cancel)
+                .advanced()
+                .stream_to_with_scope(&sink, scoped)
+                .await
+        }
+        .await
         {
             Ok(turn) => turn,
             Err(err) => runtime_error_turn_result(&task_session, err.to_string()).await,
@@ -87,13 +98,22 @@ where
             .first()
             .cloned()
             .unwrap_or_else(|| format!("cli-queue-drain:{stream_id}"));
-        let result = match task_session
-            .queued_turn()
-            .batch_ids(batch_ids)
-            .drain_id(drain_id)
-            .cancel(task_cancel)
-            .stream_to(&sink)
-            .await
+        let result = match async {
+            let effect_host = task_session.effect_host();
+            let scoped = effect_host.scoped(ExecutionScope::queue_drain(
+                task_session.session_id(),
+                drain_id.clone(),
+            ))?;
+            task_session
+                .queued_turn()
+                .batch_ids(batch_ids)
+                .drain_id(drain_id)
+                .cancel(task_cancel)
+                .advanced()
+                .stream_to_with_scope(&sink, scoped)
+                .await
+        }
+        .await
         {
             Ok(Some(turn)) => turn,
             Ok(None) => {

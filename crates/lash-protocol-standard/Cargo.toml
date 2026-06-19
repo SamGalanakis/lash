@@ -23,3 +23,4 @@ lash-sqlite-store = { workspace = true }
 lash-tools = { workspace = true }
 lash-plugin-process-controls = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }

@@ -36,6 +36,15 @@ impl ProviderComponents {
         self.failure_classifier = classifier;
         self
     }
+
+    pub fn with_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
+        let options = self.provider.options();
+        self.rate_limiter = Arc::new(ProviderRateLimiter::with_clock(
+            options.reliability.rate_limits,
+            clock,
+        ));
+        self
+    }
 }
 
 impl Clone for ProviderComponents {
@@ -66,6 +75,11 @@ impl ProviderHandle {
 
     pub fn components_mut(&mut self) -> &mut ProviderComponents {
         &mut self.components
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
+        self.components = self.components.with_clock(clock);
+        self
     }
 
     pub fn kind(&self) -> &'static str {
@@ -155,7 +169,7 @@ impl ProviderHandle {
                             reason: failure.message.clone(),
                         });
                     }
-                    tokio::time::sleep(delay).await;
+                    self.components.rate_limiter.clock().sleep(delay).await;
                     attempt += 1;
                 }
             }

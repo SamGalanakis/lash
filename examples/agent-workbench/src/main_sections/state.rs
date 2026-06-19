@@ -10,7 +10,7 @@ struct AppState {
     trace_sink: Option<Arc<dyn TraceSink>>,
     lashlang_execution: Arc<TraceLashlangGraphStore>,
     event_tx: broadcast::Sender<StreamItem>,
-    queued_work_poke: lash::runtime::QueuedWorkPoke,
+    queued_work_driver: lash::runtime::QueuedWorkDriver,
     restate_ingress_url: String,
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
@@ -158,12 +158,12 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
     async fn run_queued_work(
         &self,
         request: lash::runtime::QueuedWorkRunRequest,
-    ) -> std::result::Result<lash::runtime::QueuedWorkRunOutcome, PluginError> {
+    ) -> std::result::Result<(), PluginError> {
         let session_id = request
             .session_id
             .unwrap_or_else(|| self.session_ids.current());
         if !self.has_queued_work(&session_id).await? {
-            return Ok(lash::runtime::QueuedWorkRunOutcome::Idle);
+            return Ok(());
         }
         let workflow_request = restate::WorkbenchQueuedTurnWorkflowRequest {
             turn_id: format!("workbench-queued-{}", uuid::Uuid::new_v4()),
@@ -177,7 +177,7 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
         )
         .await
         .map_err(|err| PluginError::Session(err.to_string()))?;
-        Ok(lash::runtime::QueuedWorkRunOutcome::Submitted { session_id })
+        Ok(())
     }
 }
 
@@ -209,14 +209,14 @@ impl lash::runtime::QueuedWorkRunHandle for NoopQueuedWorkRunHandle {
     async fn run_queued_work(
         &self,
         _request: lash::runtime::QueuedWorkRunRequest,
-    ) -> std::result::Result<lash::runtime::QueuedWorkRunOutcome, PluginError> {
-        Ok(lash::runtime::QueuedWorkRunOutcome::Idle)
+    ) -> std::result::Result<(), PluginError> {
+        Ok(())
     }
 }
 
 #[cfg(test)]
-fn inert_queued_work_poke() -> lash::runtime::QueuedWorkPoke {
-    lash::runtime::QueuedWorkRunner::new(Arc::new(NoopQueuedWorkRunHandle)).poke_handle()
+fn inert_queued_work_driver() -> lash::runtime::QueuedWorkDriver {
+    lash::runtime::QueuedWorkDriver::new(Arc::new(NoopQueuedWorkRunHandle))
 }
 
 #[derive(Debug, Serialize)]

@@ -1,16 +1,18 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::plugin::ToolResultHookContext;
 use crate::{PreparedToolCall, ProgressSender, ToolContext, ToolFailureClass, ToolResult};
 
+#[cfg(test)]
+use super::context::ToolDispatchOutcome;
 use super::context::{
-    PendingToolDispatchOutcome, ToolCallLaunch, ToolDispatchContext, ToolDispatchOutcome,
-    launch_done, outcome, runtime_failure,
+    PendingToolDispatchOutcome, ToolCallLaunch, ToolDispatchContext, launch_done, outcome,
+    runtime_failure,
 };
 use super::directives::apply_after_tool_directives;
 use super::retry::execute_tool_call;
 
+#[cfg(test)]
 pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: PreparedToolCall,
@@ -144,10 +146,12 @@ pub(crate) async fn finalize_tool_result_with_execution_context(
     }
 }
 
+#[cfg(test)]
 trait ToolCallLaunchExt {
     fn into_done_or_runtime_failure(self) -> ToolDispatchOutcome;
 }
 
+#[cfg(test)]
 impl ToolCallLaunchExt for ToolCallLaunch {
     fn into_done_or_runtime_failure(self) -> ToolDispatchOutcome {
         match self {

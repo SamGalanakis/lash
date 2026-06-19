@@ -29,6 +29,9 @@ pub trait Clock: Send + Sync + std::fmt::Debug {
     /// Wall-clock time as an RFC 3339 string, for durable records.
     fn timestamp_rfc3339(&self) -> String;
 
+    /// Wall-clock time as a UTC datetime, for trace records.
+    fn timestamp_datetime(&self) -> chrono::DateTime<chrono::Utc>;
+
     /// Sleep for `duration`. Replaces `tokio::time::sleep`.
     async fn sleep(&self, duration: Duration);
 
@@ -56,7 +59,11 @@ impl Clock for SystemClock {
     }
 
     fn timestamp_rfc3339(&self) -> String {
-        chrono::Utc::now().to_rfc3339()
+        self.timestamp_datetime().to_rfc3339()
+    }
+
+    fn timestamp_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
     }
 
     async fn sleep(&self, duration: Duration) {

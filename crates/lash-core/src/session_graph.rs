@@ -2,10 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
-use chrono::Utc;
-
 use crate::session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
-use crate::{BaseRenderCache, Message, MessageRole, PromptUsage, TokenUsage};
+use crate::{BaseRenderCache, Clock, Message, MessageRole, PromptUsage, TokenUsage};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionGraphData {
@@ -263,21 +261,39 @@ impl SessionGraphAppendBuilder {
         &self.existing_ids
     }
 
-    pub(crate) fn append_messages<I>(&mut self, messages: I) -> Vec<SessionNodeRecord>
+    pub(crate) fn append_messages_at<I>(
+        &mut self,
+        messages: I,
+        timestamp: String,
+    ) -> Vec<SessionNodeRecord>
     where
         I: IntoIterator<Item = Message>,
     {
-        self.append_drafts(messages.into_iter().map(SessionNodeDraft::message))
+        self.append_drafts_at(
+            messages.into_iter().map(SessionNodeDraft::message),
+            timestamp,
+        )
     }
 
-    pub(crate) fn append_protocol_events<I>(&mut self, events: I) -> Vec<SessionNodeRecord>
+    pub(crate) fn append_protocol_events_at<I>(
+        &mut self,
+        events: I,
+        timestamp: String,
+    ) -> Vec<SessionNodeRecord>
     where
         I: IntoIterator<Item = ProtocolEvent>,
     {
-        self.append_drafts(events.into_iter().map(SessionNodeDraft::protocol_event))
+        self.append_drafts_at(
+            events.into_iter().map(SessionNodeDraft::protocol_event),
+            timestamp,
+        )
     }
 
-    pub(crate) fn append_drafts<I>(&mut self, drafts: I) -> Vec<SessionNodeRecord>
+    pub(crate) fn append_drafts_at<I>(
+        &mut self,
+        drafts: I,
+        timestamp: String,
+    ) -> Vec<SessionNodeRecord>
     where
         I: IntoIterator<Item = SessionNodeDraft>,
     {
@@ -332,7 +348,7 @@ impl SessionGraphAppendBuilder {
                 parent_node_id,
                 caused_by,
                 agent_frame_id: self.agent_frame_id.clone(),
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: timestamp.clone(),
                 payload,
             });
         }
@@ -570,13 +586,39 @@ impl SessionGraph {
         agent_frame_id: Option<&str>,
         messages: &[Message],
     ) {
+        self.append_active_conversation_messages_scoped_at(
+            agent_frame_id,
+            messages,
+            crate::SystemClock.timestamp_rfc3339(),
+        );
+    }
+
+    pub(crate) fn append_active_conversation_messages_for_agent_frame_at(
+        &mut self,
+        agent_frame_id: &str,
+        messages: &[Message],
+        timestamp: String,
+    ) {
+        self.append_active_conversation_messages_scoped_at(
+            Some(agent_frame_id),
+            messages,
+            timestamp,
+        );
+    }
+
+    fn append_active_conversation_messages_scoped_at(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        messages: &[Message],
+        timestamp: String,
+    ) {
         let appendable_messages = messages
             .iter()
             .filter(|message| !message.is_transient())
             .cloned()
             .collect::<Vec<_>>();
         self.reserve_append_capacity(appendable_messages.len(), appendable_messages.len());
-        self.append_message_batch_scoped(agent_frame_id, appendable_messages);
+        self.append_message_batch_scoped_at(agent_frame_id, appendable_messages, timestamp);
     }
 
     pub fn from_nodes(nodes: Vec<SessionNodeRecord>, leaf_node_id: Option<String>) -> Self {
@@ -643,12 +685,26 @@ impl SessionGraph {
         agent_frame_id: Option<&str>,
         messages: Vec<Message>,
     ) {
+        self.append_message_batch_scoped_at(
+            agent_frame_id,
+            messages,
+            crate::SystemClock.timestamp_rfc3339(),
+        );
+    }
+
+    fn append_message_batch_scoped_at(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        messages: Vec<Message>,
+        timestamp: String,
+    ) {
         if messages.is_empty() {
             return;
         }
-        self.append_node_drafts_scoped(
+        self.append_node_drafts_scoped_at(
             agent_frame_id,
             messages.into_iter().map(SessionNodeDraft::message),
+            timestamp,
         );
     }
 
@@ -739,24 +795,26 @@ impl SessionGraph {
     where
         I: IntoIterator<Item = SessionNodeDraft>,
     {
-        self.append_node_drafts_scoped(None, drafts)
+        self.append_node_drafts_scoped_at(None, drafts, crate::SystemClock.timestamp_rfc3339())
     }
 
-    pub(crate) fn append_node_drafts_for_agent_frame<I>(
+    pub(crate) fn append_node_drafts_for_agent_frame_at<I>(
         &mut self,
         agent_frame_id: &str,
         drafts: I,
+        timestamp: String,
     ) -> Vec<String>
     where
         I: IntoIterator<Item = SessionNodeDraft>,
     {
-        self.append_node_drafts_scoped(Some(agent_frame_id), drafts)
+        self.append_node_drafts_scoped_at(Some(agent_frame_id), drafts, timestamp)
     }
 
-    fn append_node_drafts_scoped<I>(
+    fn append_node_drafts_scoped_at<I>(
         &mut self,
         agent_frame_id: Option<&str>,
         drafts: I,
+        timestamp: String,
     ) -> Vec<String>
     where
         I: IntoIterator<Item = SessionNodeDraft>,
@@ -765,7 +823,7 @@ impl SessionGraph {
         if let Some(agent_frame_id) = agent_frame_id {
             builder = builder.with_agent_frame_id(agent_frame_id.to_string());
         }
-        let nodes = builder.append_drafts(drafts);
+        let nodes = builder.append_drafts_at(drafts, timestamp);
         let node_ids = nodes
             .iter()
             .map(|node| node.node_id.clone())
@@ -892,8 +950,13 @@ impl SessionGraph {
             .iter()
             .map(|node| node.node_id.clone())
             .collect::<HashSet<_>>();
-        let replacement =
-            build_active_read_replacement(current_nodes, &existing_ids, agent_frame_id, messages);
+        let replacement = build_active_read_replacement(
+            current_nodes,
+            &existing_ids,
+            agent_frame_id,
+            messages,
+            crate::SystemClock.timestamp_rfc3339(),
+        );
         let data = self.data_mut();
         data.leaf_node_id = replacement.leaf_node_id;
         data.nodes.extend(replacement.new_tail_nodes);
@@ -1000,6 +1063,7 @@ pub(crate) fn build_active_read_replacement<'a>(
     existing_node_ids: &HashSet<String>,
     agent_frame_id: Option<&str>,
     messages: &[Message],
+    timestamp: String,
 ) -> ActiveReadReplacement {
     let target = messages
         .iter()
@@ -1061,7 +1125,7 @@ pub(crate) fn build_active_read_replacement<'a>(
             parent_node_id,
             caused_by: causal_ref_from_message_origin(&message.origin),
             agent_frame_id: agent_frame_id.map(ToOwned::to_owned),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: timestamp.clone(),
             payload: SessionNodePayload::Event {
                 event: SessionEventRecord::Conversation(ConversationRecord::from_message(
                     message.clone(),

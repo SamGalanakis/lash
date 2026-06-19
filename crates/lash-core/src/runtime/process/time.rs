@@ -1,10 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn current_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    <crate::SystemClock as crate::Clock>::timestamp_ms(&crate::SystemClock)
 }
 
 pub fn system_time_from_epoch_ms(epoch_ms: u64) -> SystemTime {

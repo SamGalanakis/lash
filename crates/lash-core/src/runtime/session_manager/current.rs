@@ -182,6 +182,7 @@ impl CurrentSessionCapability {
             &self.host.core.tracing.trace_context,
             context.for_session(self.session_id.clone()),
             event,
+            self.host.core.clock.as_ref(),
         );
         Ok(())
     }

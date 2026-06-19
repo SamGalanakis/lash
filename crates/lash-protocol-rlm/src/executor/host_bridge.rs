@@ -114,6 +114,34 @@ impl<'run> HostBridge<'run> {
             tool_images: self.tool_images.into_inner().unwrap_or_default(),
         }
     }
+
+    fn resource_tool_call_id(
+        &self,
+        host_operation: &str,
+        call_site: Option<&lashlang::LashlangExecutionCallSite>,
+        index: Option<usize>,
+    ) -> String {
+        if let Some(call_site) = call_site {
+            let scope = self
+                .lashlang_execution_trace
+                .as_ref()
+                .map(|trace| trace.identity().graph_key())
+                .unwrap_or_else(|| self.ctx.session_id().to_string());
+            let mut call_id = format!(
+                "lashlang:{scope}:resource:{host_operation}:{}:{}",
+                call_site.site.node_id, call_site.occurrence
+            );
+            if let Some(index) = index {
+                call_id.push_str(&format!(":child:{index}"));
+            }
+            return call_id;
+        }
+        let index = index.unwrap_or(0);
+        format!(
+            "lashlang:{}:resource:{host_operation}:index:{index}",
+            self.ctx.session_id()
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -228,7 +256,11 @@ impl HostBridge<'_> {
             return self.trigger_operation(trigger_operation, payload).await;
         }
         let index = self.next_index();
-        let call_id = uuid::Uuid::new_v4().to_string();
+        let call_id = self.resource_tool_call_id(
+            &host_operation,
+            call_site.as_ref(),
+            call_site.is_none().then_some(index),
+        );
         let tool_id = lash_core::ToolId::from(host_operation.as_str());
         let call_site = call_site.and_then(|call_site| {
             self.lashlang_execution_trace
@@ -305,7 +337,8 @@ impl HostBridge<'_> {
                 continue;
             }
 
-            let call_id = uuid::Uuid::new_v4().to_string();
+            let call_id =
+                self.resource_tool_call_id(&host_operation, call_site.as_ref(), Some(source_index));
             let mut invocation = ToolInvocation::new(
                 call_id,
                 lash_core::ToolId::from(host_operation.as_str()),

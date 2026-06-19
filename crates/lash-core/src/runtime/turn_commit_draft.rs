@@ -13,7 +13,10 @@ pub(super) struct TurnCommitDraft {
 }
 
 impl TurnCommitDraft {
-    pub(super) fn from_state(mut state: RuntimeSessionState) -> Self {
+    pub(super) fn from_state_with_clock(
+        mut state: RuntimeSessionState,
+        clock: Arc<dyn crate::Clock>,
+    ) -> Self {
         let base_graph = Arc::new(std::mem::take(&mut state.session_graph));
         let base_read_model = base_graph.read_model_for_agent_frame(
             &state.current_agent_frame_id,
@@ -26,6 +29,7 @@ impl TurnCommitDraft {
             base_graph,
             base_read_model,
             state.current_agent_frame_id.clone(),
+            clock,
         );
         Self { graph, state }
     }

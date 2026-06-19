@@ -5,7 +5,7 @@ mod outcome;
 pub use envelope::{
     LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, ToolCallLaunch,
+    RuntimeReplay, RuntimeScope, RuntimeSubject, ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use executor::{
     AwaitEventKey, AwaitEventWaitIdentity, EffectHost, ExecutionScope, ExternalCompletionError,
@@ -152,6 +152,93 @@ mod tests {
             call.prepared_payload,
             serde_json::json!({"context": "prepared"})
         );
+    }
+
+    fn prepared_tool_call(call_id: &str, tool_name: &str) -> crate::PreparedToolCall {
+        crate::PreparedToolCall {
+            call_id: call_id.to_string(),
+            tool_id: crate::ToolId::from(format!("tool:{tool_name}")),
+            tool_name: tool_name.to_string(),
+            args: serde_json::json!({"value": call_id}),
+            replay: None,
+            prepared_payload: serde_json::json!({"prepared": true}),
+        }
+    }
+
+    fn completed_tool_call(call_id: &str, tool_name: &str) -> crate::sansio::CompletedToolCall {
+        let output = crate::ToolCallOutput::success(serde_json::json!({"done": call_id}));
+        crate::sansio::CompletedToolCall {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            args: serde_json::json!({"value": call_id}),
+            model_return: crate::ModelToolReturn::from_output(
+                call_id.to_string(),
+                tool_name.to_string(),
+                &output,
+            ),
+            output,
+            duration_ms: 7,
+            replay: None,
+        }
+    }
+
+    #[test]
+    fn tool_batch_effect_envelope_round_trips_and_hashes_stably() {
+        let batch = crate::PreparedToolBatch::new(
+            "batch-123",
+            vec![
+                prepared_tool_call("call-1", "echo"),
+                prepared_tool_call("call-2", "lookup"),
+            ],
+        );
+        let invocation = RuntimeInvocation::effect(
+            RuntimeScope::for_turn("session", "turn", 0, 0),
+            "tool-batch:batch-123",
+            RuntimeEffectKind::ToolBatch,
+            "session:turn:tool-batch:batch-123",
+        );
+        let envelope = RuntimeEffectEnvelope::new(
+            invocation,
+            RuntimeEffectCommand::ToolBatch {
+                batch: batch.clone(),
+            },
+        );
+
+        let hash = envelope.stable_hash().expect("hash");
+        let decoded: RuntimeEffectEnvelope =
+            serde_json::from_str(&serde_json::to_string(&envelope).expect("serialize"))
+                .expect("decode");
+
+        assert_eq!(decoded.command.kind(), RuntimeEffectKind::ToolBatch);
+        assert_eq!(decoded.stable_hash().expect("decoded hash"), hash);
+        let RuntimeEffectCommand::ToolBatch {
+            batch: decoded_batch,
+        } = decoded.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(decoded_batch.batch_id, batch.batch_id);
+        assert_eq!(decoded_batch.calls.len(), 2);
+        assert_eq!(decoded_batch.calls[0].call.call_id, "call-1");
+        assert_eq!(decoded_batch.calls[0].replay_suffix, "child:0:call-1");
+        assert_eq!(decoded_batch.calls[1].call.call_id, "call-2");
+        assert_eq!(decoded_batch.calls[1].replay_suffix, "child:1:call-2");
+    }
+
+    #[test]
+    fn tool_batch_outcome_rejects_wrong_effect_kind() {
+        let error = RuntimeEffectOutcome::ToolCall {
+            launch: ToolCallLaunch::Done {
+                result: completed_tool_call("call-1", "echo"),
+            },
+            triggers: Vec::new(),
+        }
+        .into_tool_batch_effect()
+        .expect_err("tool call is not a tool batch outcome");
+
+        assert_eq!(error.code, "runtime_effect_wrong_outcome");
+        assert!(error.message.contains("expected tool_batch outcome"));
+        assert!(error.message.contains("got tool_call"));
     }
 
     #[tokio::test]

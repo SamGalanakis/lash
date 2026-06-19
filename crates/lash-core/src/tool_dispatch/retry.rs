@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     PreparedToolCall, ProgressSender, ToolCallOutcome, ToolContext, ToolFailure, ToolFailureClass,
     ToolManifest, ToolResult, ToolRetryDisposition, ToolRetryPolicy,
@@ -84,6 +86,20 @@ async fn sleep_before_retry(
     attempt: u32,
     retry_after_ms: u64,
 ) -> Result<(), crate::RuntimeEffectControllerError> {
+    if tool_context
+        .parent_invocation
+        .as_ref()
+        .is_some_and(|invocation| {
+            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolBatch)
+        })
+        && context.effect_controller.controller().durability_tier()
+            == crate::DurabilityTier::Durable
+    {
+        return Err(crate::RuntimeEffectControllerError::new(
+            "tool_batch_retry_sleep_unavailable",
+            "retry sleeps are not available inside a tool batch child",
+        ));
+    }
     let duration = std::time::Duration::from_millis(retry_after_ms);
     let cancellation = tool_context
         .cancellation_token()
@@ -116,7 +132,10 @@ async fn sleep_before_retry(
                     duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
                 },
             ),
-            crate::RuntimeEffectLocalExecutor::sleep(cancellation),
+            crate::RuntimeEffectLocalExecutor::sleep_with_clock(
+                cancellation,
+                Arc::clone(&context.clock),
+            ),
         )
         .await?;
     match outcome {
