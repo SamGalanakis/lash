@@ -44,7 +44,7 @@
         <dt><code>AGENT_WORKBENCH_DATA_DIR</code></dt>
         <dd>Persistence, plus the JSONL turn and Lashlang-execution traces. Defaults to <code>.agent-workbench</code>.</dd>
       </dl>
-      <p>The entrypoint also manages the workbench's Restate endpoint bind (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, default <code>127.0.0.1:9081</code>), the Restate container ports (ingress <code>8080</code>, admin <code>19070</code>, node <code>19071</code>), and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 2&nbsp;MiB; override only when diagnosing stack regressions). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
+      <p>The entrypoint also manages the workbench's Restate endpoint bind (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, default <code>127.0.0.1:9081</code>), the Restate container ports (ingress <code>8080</code>, admin <code>19070</code>, node <code>19071</code>), and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 8&nbsp;MiB / <code>8388608</code> bytes; override only when diagnosing stack regressions). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
     </div>
 
     <div class="section" id="demonstrates">
@@ -59,6 +59,7 @@
         <article class="panel"><h3>Trigger buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences; a registered trigger wakes a process with the validated event payload.</p></article>
         <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang host environment as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
         <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
+        <article class="panel"><h3>Restate turn control</h3><p>User turns, queued catalog refreshes, button triggers, inbox deliveries, session deletion, and cron jobs submit through Restate ingress. The host stores returned invocation ids, and <code>stop turn</code> cancels the active invocation through Restate Admin.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>SessionProcessAdmin</code> facade.</p></article>
       </div>
     </div>
@@ -212,10 +213,10 @@ fn declare_button_event(reg: &amp;mut PluginRegistrar) -&gt; Result&lt;(), Plugi
     <div class="section" id="live-smoke">
       <div class="section-header">
         <h2>Live Smoke</h2>
-        <p>A model-free live check that starts Restate, registers the endpoint through Admin, schedules a fast cron, waits for a tick, and checks the JSONL trace.</p>
+        <p>A model-free live check that starts Restate, registers the endpoint through Admin, submits a turn through Restate <code>/send</code>, waits for that invocation to complete successfully, schedules a fast cron, waits for a tick, and checks the JSONL trace.</p>
       </div>
       <pre data-lang="console"><code>just agent-workbench-restate-e2e</code></pre>
-      <p>The recipe schedules <code>cron.Schedule({ expr: "*/2 * * * * *", tz: "UTC" })</code>, waits for the Restate virtual object to fire a <code>cron.Tick</code>, asserts the queued turn ran, and removes the container on exit.</p>
+      <p>The recipe schedules <code>cron.Schedule({ expr: "*/2 * * * * *", tz: "UTC" })</code>, waits for the Restate virtual object to fire a <code>cron.Tick</code>, asserts the queued turn ran, verifies the submitted invocation completed successfully, asserts no <code>Workbench*</code> or <code>LashProcessWorkflow</code> invocation remains active, and removes the container on exit.</p>
     </div>
   </main>
 
