@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,138 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import profile_guard  # noqa: E402
 import profile_lashlang  # noqa: E402
 import profile_runtime_stack  # noqa: E402
+
+
+class RuntimeStackProfilerTests(unittest.TestCase):
+    def run_fake_sample(
+        self,
+        mode: str,
+        *,
+        scenario: str = "standard",
+        stack_bytes: int = 128 * 1024,
+    ) -> dict[str, object]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "fake_lash_perf"
+            binary.write_text(
+                f"""#!{sys.executable}
+import json
+import sys
+from pathlib import Path
+
+mode = {mode!r}
+args = sys.argv[1:]
+
+def arg_value(prefix):
+    for arg in args:
+        if arg.startswith(prefix):
+            return arg.split("=", 1)[1]
+    raise SystemExit(f"missing {{prefix}}")
+
+scenario_index = args.index("--runtime-perf-scenario")
+scenario = args[scenario_index + 1]
+stack_bytes = int(arg_value("--runtime-perf-worker-stack-bytes="))
+out = Path(arg_value("--runtime-perf-out="))
+out.parent.mkdir(parents=True, exist_ok=True)
+print(f"fake mode {{mode}}", file=sys.stderr)
+
+if mode == "missing_report":
+    raise SystemExit(0)
+if mode == "malformed_report":
+    out.write_text("{{not json")
+    raise SystemExit(0)
+
+reported_stack = stack_bytes + 1 if mode == "wrong_stack" else stack_bytes
+reported_scenario = f"{{scenario}}_other" if mode == "missing_scenario" else scenario
+out.write_text(json.dumps({{
+    "worker_stack_bytes": reported_stack,
+    "summary": [{{"scenario": reported_scenario}}],
+}}))
+"""
+            )
+            binary.chmod(0o755)
+            return profile_runtime_stack.run_sample(
+                root=root,
+                binary=binary,
+                scenario=scenario,
+                stack_bytes=stack_bytes,
+                out=root / "matrix.json",
+                runs=1,
+                warmups=0,
+                turns=1,
+                timeout_seconds=5,
+            )
+
+    def test_parse_stack_sizes_accepts_common_suffixes(self) -> None:
+        self.assertEqual(profile_runtime_stack.parse_size("64k"), 64 * 1024)
+        self.assertEqual(profile_runtime_stack.parse_size("2m"), 2 * 1024 * 1024)
+        self.assertEqual(profile_runtime_stack.parse_size("1_024"), 1024)
+
+    def test_first_success_requires_accounted_reported_scenario(self) -> None:
+        samples = [
+            {
+                "scenario": "standard",
+                "stack_bytes": 64 * 1024,
+                "status": "ok",
+                "stack_accounted": False,
+                "summary_scenarios": ["standard"],
+            },
+            {
+                "scenario": "standard",
+                "stack_bytes": 96 * 1024,
+                "status": "ok",
+                "stack_accounted": True,
+                "summary_scenarios": ["other"],
+            },
+            {
+                "scenario": "standard",
+                "stack_bytes": 128 * 1024,
+                "status": "ok",
+                "stack_accounted": True,
+                "summary_scenarios": ["standard"],
+            },
+        ]
+
+        self.assertEqual(
+            profile_runtime_stack.first_success(samples, "standard"),
+            128 * 1024,
+        )
+
+    def test_run_sample_rejects_success_without_report(self) -> None:
+        sample = self.run_fake_sample("missing_report")
+
+        self.assertEqual(sample["status"], "failed")
+        self.assertEqual(sample["failure_reason"], "missing_runtime_perf_report")
+        self.assertIn("fake mode missing_report", sample["stderr_tail"])
+
+    def test_run_sample_rejects_success_with_malformed_report(self) -> None:
+        sample = self.run_fake_sample("malformed_report")
+
+        self.assertEqual(sample["status"], "failed")
+        self.assertEqual(sample["failure_reason"], "malformed_runtime_perf_report")
+        self.assertIn("json_error", sample)
+
+    def test_run_sample_rejects_unaccounted_stack_report(self) -> None:
+        sample = self.run_fake_sample("wrong_stack")
+
+        self.assertEqual(sample["status"], "failed")
+        self.assertIn("stack_size_not_accounted", sample["failure_reasons"])
+        self.assertIs(sample["stack_accounted"], False)
+
+    def test_run_sample_rejects_missing_scenario_report(self) -> None:
+        sample = self.run_fake_sample("missing_scenario")
+
+        self.assertEqual(sample["status"], "failed")
+        self.assertIn("missing_runtime_perf_scenario", sample["failure_reasons"])
+
+    def test_run_sample_accepts_accounted_scenario_report(self) -> None:
+        sample = self.run_fake_sample("ok")
+
+        self.assertEqual(sample["status"], "ok")
+        self.assertEqual(sample["reported_worker_stack_bytes"], 128 * 1024)
+        self.assertIs(sample["stack_accounted"], True)
+        self.assertEqual(sample["summary_scenarios"], ["standard"])
+        self.assertEqual(sample["stderr_tail"], "")
 
 
 class ProfileGuardCoverageTests(unittest.TestCase):

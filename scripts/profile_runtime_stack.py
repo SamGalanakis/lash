@@ -200,6 +200,71 @@ def result_path(out: Path, scenario: str, stack_bytes: int) -> Path:
     return out.with_name(f"{out.stem}-{safe_scenario}-{stack_bytes}.runtime-perf.json")
 
 
+def report_metadata(
+    sample_out: Path,
+    *,
+    scenario: str,
+    stack_bytes: int,
+) -> dict[str, object]:
+    if not sample_out.exists():
+        return {
+            "status": "failed",
+            "failure_reason": "missing_runtime_perf_report",
+            "reported_worker_stack_bytes": None,
+            "stack_accounted": False,
+            "summary_scenarios": [],
+        }
+
+    try:
+        payload = json.loads(sample_out.read_text())
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "failed",
+            "failure_reason": "malformed_runtime_perf_report",
+            "json_error": str(exc),
+            "reported_worker_stack_bytes": None,
+            "stack_accounted": False,
+            "summary_scenarios": [],
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "status": "failed",
+            "failure_reason": "non_object_runtime_perf_report",
+            "reported_worker_stack_bytes": None,
+            "stack_accounted": False,
+            "summary_scenarios": [],
+        }
+
+    reported_stack_bytes = payload.get("worker_stack_bytes")
+    summaries = payload.get("summary")
+    summary_scenarios: list[str] = []
+    if isinstance(summaries, list):
+        summary_scenarios = [
+            item.get("scenario")
+            for item in summaries
+            if isinstance(item, dict) and isinstance(item.get("scenario"), str)
+        ]
+    stack_accounted = reported_stack_bytes == stack_bytes
+    scenario_reported = scenario in summary_scenarios
+    failure_reasons = []
+    if not stack_accounted:
+        failure_reasons.append("stack_size_not_accounted")
+    if not scenario_reported:
+        failure_reasons.append("missing_runtime_perf_scenario")
+
+    metadata: dict[str, object] = {
+        "status": "ok" if not failure_reasons else "failed",
+        "reported_worker_stack_bytes": reported_stack_bytes,
+        "stack_accounted": stack_accounted,
+        "summary_scenarios": summary_scenarios,
+    }
+    if failure_reasons:
+        metadata["failure_reason"] = ",".join(failure_reasons)
+        metadata["failure_reasons"] = failure_reasons
+    return metadata
+
+
 def run_sample(
     *,
     root: Path,
@@ -246,20 +311,14 @@ def run_sample(
         }
 
     finished = dt.datetime.now(dt.timezone.utc)
-    status = "ok" if proc.returncode == 0 else "failed"
-    payload: dict[str, object] | None = None
-    if proc.returncode == 0 and sample_out.exists():
-        payload = json.loads(sample_out.read_text())
-    reported_stack_bytes = (payload or {}).get("worker_stack_bytes")
-    summaries = (payload or {}).get("summary")
-    summary_scenarios = []
-    if isinstance(summaries, list):
-        summary_scenarios = [
-            item.get("scenario")
-            for item in summaries
-            if isinstance(item, dict) and isinstance(item.get("scenario"), str)
-        ]
-    return {
+    metadata: dict[str, object] = {}
+    status = "failed"
+    if proc.returncode == 0:
+        metadata = report_metadata(sample_out, scenario=scenario, stack_bytes=stack_bytes)
+        status = str(metadata.pop("status"))
+
+    sample_failed = status != "ok"
+    sample = {
         "scenario": scenario,
         "stack_bytes": stack_bytes,
         "status": status,
@@ -267,12 +326,11 @@ def run_sample(
         "started_at": started.isoformat(),
         "duration_ms": round((finished - started).total_seconds() * 1000, 3),
         "runtime_perf_out": str(sample_out),
-        "reported_worker_stack_bytes": reported_stack_bytes,
-        "stack_accounted": reported_stack_bytes == stack_bytes,
-        "stdout_tail": "" if proc.returncode == 0 else proc.stdout[-4000:],
-        "stderr_tail": "" if proc.returncode == 0 else proc.stderr[-4000:],
-        "summary_scenarios": summary_scenarios,
+        "stdout_tail": proc.stdout[-4000:] if sample_failed else "",
+        "stderr_tail": proc.stderr[-4000:] if sample_failed else "",
     }
+    sample.update(metadata)
+    return sample
 
 
 def first_success(samples: list[dict[str, object]], scenario: str) -> int | None:
@@ -280,7 +338,13 @@ def first_success(samples: list[dict[str, object]], scenario: str) -> int | None
         (sample for sample in samples if sample["scenario"] == scenario),
         key=lambda sample: int(sample["stack_bytes"]),
     ):
-        if sample["status"] == "ok":
+        summary_scenarios = sample.get("summary_scenarios", [])
+        if (
+            sample["status"] == "ok"
+            and sample.get("stack_accounted") is True
+            and isinstance(summary_scenarios, list)
+            and scenario in summary_scenarios
+        ):
             return int(sample["stack_bytes"])
     return None
 
