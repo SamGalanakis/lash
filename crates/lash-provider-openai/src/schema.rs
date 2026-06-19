@@ -169,6 +169,7 @@ impl Projector {
             return;
         };
 
+        self.flatten_single_all_of(obj, &path);
         self.convert_const(obj, &path);
         self.infer_type(obj, &path, is_root);
 
@@ -265,6 +266,55 @@ impl Projector {
             self.profile,
             OpenAiSchemaProfile::StrictToolParameters | OpenAiSchemaProfile::StructuredOutput
         )
+    }
+
+    fn flatten_single_all_of(&mut self, obj: &mut Map<String, Value>, path: &Path) {
+        let Some(all_of) = obj.remove("allOf") else {
+            return;
+        };
+        let Value::Array(mut branches) = all_of else {
+            obj.insert("allOf".to_string(), all_of);
+            return;
+        };
+        if branches.len() != 1 {
+            obj.insert("allOf".to_string(), Value::Array(branches));
+            return;
+        }
+
+        let branch = branches.pop().expect("single allOf branch");
+        let Value::Object(branch_obj) = branch else {
+            obj.insert("allOf".to_string(), Value::Array(vec![branch]));
+            self.errors.push(format!(
+                "{path}: single-branch allOf must contain an object schema"
+            ));
+            return;
+        };
+
+        let conflicts = branch_obj
+            .iter()
+            .filter_map(|(key, value)| {
+                obj.get(key)
+                    .filter(|existing| *existing != value)
+                    .map(|_| key.clone())
+            })
+            .collect::<Vec<_>>();
+        if !conflicts.is_empty() {
+            obj.insert(
+                "allOf".to_string(),
+                Value::Array(vec![Value::Object(branch_obj)]),
+            );
+            self.errors.push(format!(
+                "{path}: single-branch allOf conflicts with sibling schema keys: {}",
+                conflicts.join(", ")
+            ));
+            return;
+        }
+
+        for (key, value) in branch_obj {
+            obj.entry(key).or_insert(value);
+        }
+        self.diagnostics
+            .push(format!("{path}: flattened single-branch allOf"));
     }
 
     fn convert_const(&mut self, obj: &mut Map<String, Value>, path: &Path) {
@@ -568,6 +618,38 @@ mod tests {
     }
 
     #[test]
+    fn strict_projection_flattens_single_branch_all_of_before_nullable() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "description": "Maximum number of results.",
+                    "allOf": [
+                        {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100
+                        }
+                    ]
+                }
+            }
+        });
+        let projected = project_strict_tool_parameters(&schema).unwrap();
+        let limit = &projected.schema["properties"]["limit"];
+        assert!(limit.get("allOf").is_none());
+        assert_eq!(limit["description"], "Maximum number of results.");
+        assert_eq!(limit["type"], json!(["integer", "null"]));
+        assert_eq!(limit["minimum"], 1);
+        assert_eq!(limit["maximum"], 100);
+        assert!(
+            projected
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("flattened single-branch allOf"))
+        );
+    }
+
+    #[test]
     fn structured_output_enforces_strict_objects() {
         let schema = json!({
             "type": "object",
@@ -702,7 +784,10 @@ mod tests {
         let err = project_structured_output(&json!({
             "type": "object",
             "properties": {},
-            "allOf": [],
+            "allOf": [
+                { "type": "object", "properties": {} },
+                { "type": "object", "properties": {} }
+            ],
             "patternProperties": {}
         }))
         .unwrap_err();
