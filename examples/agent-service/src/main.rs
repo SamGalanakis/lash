@@ -230,12 +230,11 @@ async fn async_main() -> anyhow_like::Result<()> {
                 .listen_and_serve(restate_endpoint_addr)
                 .await;
         });
-        // Spawn the wake-driven runner after the workflow endpoint is bound so
-        // its first tick (which folds in the former startup-only recovery
-        // sweep) ingress-submits onto a registered LashProcessWorkflow. The
-        // runner then drives the registry's non-terminal rows on every poke and
-        // poll tick, lease-fencing each submit so a process runs exactly once.
-        process_deployment.spawn();
+        process_deployment
+            .process_work_driver()
+            .claim_and_run_pending("agent_service_startup")
+            .await
+            .map_err(|err| err.to_string())?;
         println!("agent-service Restate endpoint listening on http://{restate_endpoint_addr}");
     }
 
