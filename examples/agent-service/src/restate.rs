@@ -362,7 +362,12 @@ mod restate_tests {
                 })
                 .await;
         });
-        harness.process_deployment.spawn();
+        harness
+            .process_deployment
+            .process_work_driver()
+            .claim_and_run_pending("agent_service_e2e_startup")
+            .await
+            .expect("drive startup recovery");
 
         wait_for_endpoint_socket(local_probe_addr).await;
         register_restate_deployment(&admin_url, &endpoint_url).await;
