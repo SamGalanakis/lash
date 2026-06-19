@@ -61,7 +61,7 @@ services:
   worker-a:
     image: ubuntu:24.04
     command: /usr/local/bin/lash-e2e-worker
-    restart: "no"
+    restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,6 +91,7 @@ services:
   worker-b:
     image: ubuntu:24.04
     command: /usr/local/bin/lash-e2e-worker
+    restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy
