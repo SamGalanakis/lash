@@ -52,27 +52,52 @@ impl AppState {
         let _ = self.event_tx.send(item);
     }
 
-    /// Register the session handle driving an in-flight user turn. Dropping
-    /// the guard removes the entry, so abandoned workflows do not leak.
-    fn register_turn_cancel(&self, session: &lash::LashSession, turn_id: &str) -> TurnCancelGuard {
-        self.turn_cancels
-            .lock()
-            .expect("turn cancel lock")
-            .insert(turn_id.to_string(), session.clone());
-        TurnCancelGuard {
-            registry: Arc::clone(&self.turn_cancels),
-            turn_id: turn_id.to_string(),
-        }
+    fn track_restate_invocation(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        invocation_id: lash_restate::RestateInvocationId,
+    ) {
+        self.active_restate_invocations
+            .insert(session_id, turn_id, invocation_id);
     }
 
-    /// Cancel every in-flight user turn for `session_id`; returns how many.
-    fn cancel_turns_for_session(&self, session_id: &str) -> usize {
-        let registry = self.turn_cancels.lock().expect("turn cancel lock");
-        registry
-            .values()
-            .filter(|session| session.session_id() == session_id)
-            .map(lash::LashSession::cancel_running_turns)
-            .sum()
+    fn clear_restate_invocation_on_drop(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> ActiveRestateInvocationGuard {
+        self.active_restate_invocations.guard(session_id, turn_id)
+    }
+
+    /// Cancel every active Restate-backed turn invocation for `session_id`;
+    /// returns how many cancellation requests were accepted.
+    async fn cancel_turns_for_session(&self, session_id: &str) -> Result<usize, AppError> {
+        let active = self.active_restate_invocations.for_session(session_id);
+        let admin = lash_restate::RestateAdminClient::with_client(
+            self.restate_http.clone(),
+            self.restate_admin_url.clone(),
+        );
+        let mut cancelled = 0;
+        for (turn_id, invocation_id) in active {
+            admin
+                .cancel_invocation(&invocation_id)
+                .await
+                .map_err(|err| AppError::internal(err.to_string()))?;
+            cancelled += 1;
+            self.trace(
+                "turn.restate.cancel_requested",
+                json!({
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "invocation_id": invocation_id.as_str(),
+                }),
+            );
+        }
+        if cancelled > 0 {
+            self.publish(StreamItem::Done);
+        }
+        Ok(cancelled)
     }
 
     fn push_message(&self, role: impl Into<String>, text: impl Into<String>) -> ChatMessage {

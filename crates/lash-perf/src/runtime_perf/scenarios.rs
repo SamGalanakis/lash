@@ -27,6 +27,7 @@ pub(crate) enum RuntimePerfScenario {
     RlmToolCalls,
     RlmAsyncToolCompletion,
     RlmProcessHandles,
+    RlmTriggerMailPipeline,
     RlmProcessAsyncToolCompletion,
     RlmSubagentSpawn,
     RlmLlmQuery,
@@ -52,7 +53,7 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 29] = [
+    pub(crate) const DEFAULTS: [Self; 30] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -60,6 +61,7 @@ impl RuntimePerfScenario {
         Self::RlmToolCalls,
         Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
+        Self::RlmTriggerMailPipeline,
         Self::RlmProcessAsyncToolCompletion,
         Self::RlmSubagentSpawn,
         Self::RlmLlmQuery,
@@ -83,7 +85,7 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
     ];
-    pub(crate) const KNOWN: [Self; 29] = [
+    pub(crate) const KNOWN: [Self; 30] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -91,6 +93,7 @@ impl RuntimePerfScenario {
         Self::RlmToolCalls,
         Self::RlmAsyncToolCompletion,
         Self::RlmProcessHandles,
+        Self::RlmTriggerMailPipeline,
         Self::RlmProcessAsyncToolCompletion,
         Self::RlmSubagentSpawn,
         Self::RlmLlmQuery,
@@ -124,6 +127,7 @@ impl RuntimePerfScenario {
             "rlm_tool_calls" => Some(Self::RlmToolCalls),
             "rlm_async_tool_completion" => Some(Self::RlmAsyncToolCompletion),
             "rlm_process_handles" => Some(Self::RlmProcessHandles),
+            "rlm_trigger_mail_pipeline" => Some(Self::RlmTriggerMailPipeline),
             "rlm_process_async_tool_completion" => Some(Self::RlmProcessAsyncToolCompletion),
             "rlm_subagent_spawn" => Some(Self::RlmSubagentSpawn),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
@@ -159,6 +163,7 @@ impl RuntimePerfScenario {
             Self::RlmToolCalls => "rlm_tool_calls",
             Self::RlmAsyncToolCompletion => "rlm_async_tool_completion",
             Self::RlmProcessHandles => "rlm_process_handles",
+            Self::RlmTriggerMailPipeline => "rlm_trigger_mail_pipeline",
             Self::RlmProcessAsyncToolCompletion => "rlm_process_async_tool_completion",
             Self::RlmSubagentSpawn => "rlm_subagent_spawn",
             Self::RlmLlmQuery => "rlm_llm_query",
@@ -208,6 +213,7 @@ impl RuntimePerfScenario {
             | Self::RlmToolCalls
             | Self::RlmAsyncToolCompletion
             | Self::RlmProcessHandles
+            | Self::RlmTriggerMailPipeline
             | Self::RlmProcessAsyncToolCompletion
             | Self::RlmSubagentSpawn
             | Self::RlmLlmQuery

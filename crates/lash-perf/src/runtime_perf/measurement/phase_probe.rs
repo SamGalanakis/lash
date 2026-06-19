@@ -141,6 +141,7 @@ pub(crate) async fn run_once(
         | RuntimePerfScenario::RlmToolCalls
         | RuntimePerfScenario::RlmAsyncToolCompletion
         | RuntimePerfScenario::RlmProcessHandles
+        | RuntimePerfScenario::RlmTriggerMailPipeline
         | RuntimePerfScenario::RlmProcessAsyncToolCompletion
         | RuntimePerfScenario::RlmSubagentSpawn
         | RuntimePerfScenario::RlmLlmQuery
@@ -167,10 +168,24 @@ pub(crate) async fn run_once(
     } else {
         None
     };
+    let lashlang_trace_root = if matches!(scenario, RuntimePerfScenario::RlmTriggerMailPipeline) {
+        Some(make_temp_bench_dir(
+            "lash-runtime-perf-rlm-trigger-mail-pipeline",
+        )?)
+    } else {
+        None
+    };
+    let trace_config = lashlang_trace_root
+        .as_ref()
+        .map(|root| RuntimePerfTraceConfig {
+            trace_jsonl_path: None,
+            lashlang_execution_jsonl_path: Some(root.join("lashlang-execution.jsonl")),
+            trace_level: lash::tracing::TraceLevel::Extended,
+        });
     let mut runtime = if let Some(root) = sqlite_root.as_ref() {
         build_runtime_with_sqlite_store(scenario, root.clone()).await?
     } else {
-        build_runtime(scenario).await?
+        build_runtime_with_store(scenario, None, trace_config).await?
     };
     let build_runtime_ms = elapsed_ms(build_started);
     let build_runtime_alloc = alloc_delta(build_before_alloc, allocator_stats());

@@ -3,7 +3,10 @@ use std::{fmt::Write as _, path::PathBuf, sync::Arc};
 use lash::{
     LashCore,
     messages::MessageRole,
-    plugins::{PluginSpec, StaticPluginFactory},
+    plugins::{
+        PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
+        PluginSessionContext, PluginSpec, SessionPlugin, StaticPluginFactory,
+    },
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
     runtime::{PluginMessage, SessionSnapshot, TurnOutcome},
 };
@@ -18,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
-    BenchmarkEchoTool, BenchmarkLargeToolCatalog, benchmark_provider, benchmark_stream_profile,
+    BENCHMARK_MAIL_RECEIVED_SOURCE_TYPE, BenchmarkEchoTool, BenchmarkLargeToolCatalog,
+    BenchmarkWorkbenchMailTool, benchmark_provider, benchmark_stream_profile,
 };
 use super::scenarios::{ExecutionMode, RuntimePerfScenario};
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
@@ -27,6 +31,10 @@ const DEFAULT_PROMPT: &str =
     "Inspect the current state and reply with exactly: runtime perf benchmark ok";
 const HISTORY_EXCHANGES: usize = 18;
 const RUNTIME_PERF_MAX_TURNS: usize = 1;
+
+const BENCHMARK_MAIL_RESOURCE: &str = "Mail";
+const BENCHMARK_MAIL_ALIAS: &str = "mail";
+const BENCHMARK_MAIL_EVENT: &str = "received";
 
 fn benchmark_model_spec() -> lash::ModelSpec {
     lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
@@ -478,12 +486,6 @@ pub(crate) fn build_embed_core(
     }
 }
 
-pub(crate) async fn build_runtime(
-    scenario: RuntimePerfScenario,
-) -> anyhow::Result<BenchmarkRuntime> {
-    build_runtime_with_store(scenario, None, None).await
-}
-
 pub(crate) async fn build_runtime_with_store(
     scenario: RuntimePerfScenario,
     store: Option<Arc<RuntimePerfStore>>,
@@ -539,6 +541,9 @@ pub(crate) async fn build_runtime_with_store(
             "runtime_perf_large_tool_catalog",
             PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolCatalog::default())),
         )));
+    }
+    if matches!(scenario, RuntimePerfScenario::RlmTriggerMailPipeline) {
+        plugin_stack.push(Arc::new(BenchmarkWorkbenchTriggerPluginFactory));
     }
     let core = match execution_mode {
         ExecutionMode::Standard => {
@@ -602,6 +607,96 @@ pub(crate) async fn build_runtime_with_store(
         store: Some(store),
         _openai_compat_server: openai_compat_server,
     })
+}
+
+struct BenchmarkWorkbenchTriggerPluginFactory;
+
+impl PluginFactory for BenchmarkWorkbenchTriggerPluginFactory {
+    fn id(&self) -> &'static str {
+        "runtime_perf_workbench_trigger"
+    }
+
+    fn extension_contributions(&self) -> Vec<PluginExtensionContribution> {
+        vec![
+            PluginExtensionContribution::new(
+                lash::rlm::LASHLANG_SURFACE_EXTENSION_ID,
+                lash::rlm::LashlangSurfaceContribution::new(
+                    lash::rlm::LashlangAbilities::default()
+                        .with_processes()
+                        .with_sleep()
+                        .with_process_signals()
+                        .with_triggers(),
+                    lash::rlm::LashlangLanguageFeatures::default(),
+                    benchmark_workbench_lashlang_resources(),
+                ),
+            )
+            .expect("runtime perf lashlang surface serializes"),
+        ]
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(BenchmarkWorkbenchTriggerPlugin))
+    }
+}
+
+struct BenchmarkWorkbenchTriggerPlugin;
+
+impl SessionPlugin for BenchmarkWorkbenchTriggerPlugin {
+    fn id(&self) -> &'static str {
+        "runtime_perf_workbench_trigger"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.triggers().declare(lash_core::TriggerEvent::new(
+            BENCHMARK_MAIL_RESOURCE,
+            BENCHMARK_MAIL_ALIAS,
+            BENCHMARK_MAIL_EVENT,
+            lash_core::LashSchema::new(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "account": { "type": "string" },
+                    "title": { "type": "string" },
+                    "text": { "type": "string" }
+                },
+                "required": ["account", "title", "text"],
+                "additionalProperties": false
+            })),
+        ))?;
+        reg.tools().provider(Arc::new(BenchmarkWorkbenchMailTool))?;
+        Ok(())
+    }
+}
+
+fn benchmark_workbench_lashlang_resources() -> lash::rlm::LashlangHostCatalog {
+    let mut resources = lash::rlm::LashlangHostCatalog::new();
+    resources
+        .add_trigger_source_constructor(
+            BENCHMARK_MAIL_RECEIVED_SOURCE_TYPE.split('.'),
+            lash::rlm::TypeExpr::Object(vec![]),
+            benchmark_mail_received_event_type(),
+        )
+        .expect("valid benchmark mail trigger source");
+    resources
+}
+
+fn benchmark_mail_received_event_type() -> lash::rlm::NamedDataType {
+    lash::rlm::NamedDataType::object(
+        "mail.Received",
+        vec![
+            benchmark_field("account", lash::rlm::TypeExpr::Str),
+            benchmark_field("title", lash::rlm::TypeExpr::Str),
+            benchmark_field("text", lash::rlm::TypeExpr::Str),
+        ],
+    )
+    .expect("valid benchmark mail received type")
+}
+
+fn benchmark_field(name: &str, ty: lash::rlm::TypeExpr) -> lash::rlm::TypeField {
+    lash::rlm::TypeField {
+        name: name.into(),
+        ty,
+        optional: false,
+    }
 }
 
 pub(crate) async fn build_runtime_with_sqlite_store(
@@ -913,6 +1008,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::RlmProcessHandles => format!(
             "Turn {} in RLM mode. Exercise start/await/cancel process handles, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmTriggerMailPipeline => format!(
+            "Turn {} in RLM mode. Register a mail trigger, send through inbox.test, let the forwarder process run, and submit exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

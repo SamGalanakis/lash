@@ -62,16 +62,18 @@ async fn send_turn(
     state.push_message("user", text.clone());
     state.set_selected_model(ModelSelection::from_spec(&turn_model));
     let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
-    restate::submit_user_turn(
+    let session_id = state.current_session_id();
+    let invocation_id = restate::submit_user_turn(
         &state,
         restate::WorkbenchTurnWorkflowRequest {
-            turn_id,
-            session_id: state.current_session_id(),
+            turn_id: turn_id.clone(),
+            session_id: session_id.clone(),
             text,
             model: ModelSelection::from_spec(&turn_model),
         },
     )
     .await?;
+    state.track_restate_invocation(&session_id, &turn_id, invocation_id);
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
@@ -262,7 +264,7 @@ async fn inject_message(
 
 async fn cancel_turn(State(state): State<AppState>) -> Result<Json<CommandAccepted>, AppError> {
     let session_id = state.current_session_id();
-    let cancelled = state.cancel_turns_for_session(&session_id);
+    let cancelled = state.cancel_turns_for_session(&session_id).await?;
     state.trace(
         "api.turn.cancel",
         json!({ "session_id": session_id, "cancelled": cancelled }),

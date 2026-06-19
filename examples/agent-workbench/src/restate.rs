@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use croner::parser::{CronParser, Seconds};
+use futures_util::FutureExt as _;
 use lash::TurnInput;
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash_restate::LashProcessWorkflow;
@@ -146,9 +148,7 @@ impl WorkbenchTurnWorkflow for WorkbenchTurnWorkflowImpl {
     ) -> HandlerResult<Json<()>> {
         let session_id = request.session_id.clone();
         let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
-        run_user_turn(self.state.clone(), request, &controller)
-            .await
-            .map_err(terminal_handler_error)?;
+        run_user_turn_terminalized(self.state.clone(), request, &controller).await?;
         sync_cron_jobs_with_context(&self.state, controller.context(), "user_turn").await?;
         self.state
             .queued_work_driver
@@ -183,10 +183,7 @@ impl WorkbenchQueuedTurnWorkflow for WorkbenchQueuedTurnWorkflowImpl {
     ) -> HandlerResult<Json<()>> {
         let session_id = request.session_id.clone();
         let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
-        let outcome = run_queued_turn(self.state.clone(), request, &controller)
-            .await
-            .map_err(terminal_handler_error);
-        outcome?;
+        run_queued_turn_terminalized(self.state.clone(), request, &controller).await?;
         self.state
             .queued_work_driver
             .claim_and_run_pending(Some(&session_id), "queued_turn_completed")
@@ -378,19 +375,37 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
             Some(fired_at.to_rfc3339()),
         )
         .await?;
-        let Json(emit_report) =
-            emit_cron_occurrence(self.state.clone(), request, fired_at_text, &controller).await?;
-        self.state.trace(
+        journaled_workbench_trace(
+            controller.context(),
+            self.state.clone(),
             "cron.restate.run",
             json!({
                 "job_key": controller.context().key(),
-                "source_key": state.request.source_key,
-                "expr": state.request.expr,
-                "tz": state.request.tz,
+                "source_key": &state.request.source_key,
+                "expr": &state.request.expr,
+                "tz": &state.request.tz,
+                "fired_at": fired_at.to_rfc3339(),
+            }),
+            "workbench-cron:trace-run",
+        )
+        .await?;
+        let Json(emit_report) =
+            emit_cron_occurrence(self.state.clone(), request, fired_at_text, &controller).await?;
+        journaled_workbench_trace(
+            controller.context(),
+            self.state.clone(),
+            "cron.restate.emit_completed",
+            json!({
+                "job_key": controller.context().key(),
+                "source_key": &state.request.source_key,
+                "expr": &state.request.expr,
+                "tz": &state.request.tz,
                 "fired_at": fired_at.to_rfc3339(),
                 "started_process_ids": emit_report.started_process_ids,
             }),
-        );
+            "workbench-cron:trace-emit-completed",
+        )
+        .await?;
         self.state
             .queued_work_driver
             .claim_and_run_pending(Some(&state.request.session_id), "cron_tick")
@@ -444,44 +459,50 @@ pub(crate) fn spawn_restate_endpoint(
 pub(crate) async fn submit_user_turn(
     state: &AppState,
     request: WorkbenchTurnWorkflowRequest,
-) -> Result<(), AppError> {
-    let url = format!(
-        "{}/WorkbenchTurnWorkflow/{}/run/send",
-        state.restate_ingress_url.trim_end_matches('/'),
-        request.turn_id
-    );
-    submit_restate_json(state, url, &request).await
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    submit_restate_workflow_json(
+        &state.restate_http,
+        &state.restate_ingress_url,
+        "WorkbenchTurnWorkflow",
+        &request.turn_id,
+        &request,
+    )
+    .await
 }
 
 pub(crate) async fn submit_queued_turn_request(
     restate_http: &reqwest::Client,
     restate_ingress_url: &str,
     request: &WorkbenchQueuedTurnWorkflowRequest,
-) -> Result<(), AppError> {
-    let url = format!(
-        "{}/WorkbenchQueuedTurnWorkflow/{}/run/send",
-        restate_ingress_url.trim_end_matches('/'),
-        request.turn_id
-    );
-    submit_restate_json_with_client(restate_http, url, request).await
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    submit_restate_workflow_json(
+        restate_http,
+        restate_ingress_url,
+        "WorkbenchQueuedTurnWorkflow",
+        &request.turn_id,
+        request,
+    )
+    .await
 }
 
 pub(crate) async fn submit_button_trigger(
     state: &AppState,
     request: WorkbenchButtonTriggerWorkflowRequest,
-) -> Result<(), AppError> {
-    let url = format!(
-        "{}/WorkbenchButtonTriggerWorkflow/{}/run/send",
-        state.restate_ingress_url.trim_end_matches('/'),
-        request.operation_id
-    );
-    submit_restate_json(state, url, &request).await
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    submit_restate_workflow_json(
+        &state.restate_http,
+        &state.restate_ingress_url,
+        "WorkbenchButtonTriggerWorkflow",
+        &request.operation_id,
+        &request,
+    )
+    .await
 }
 
 pub(crate) async fn submit_mail_received(
     state: &AppState,
     request: WorkbenchMailReceivedWorkflowRequest,
-) -> Result<(), AppError> {
+) -> Result<lash_restate::RestateInvocationId, AppError> {
     submit_mail_received_with_client(&state.restate_http, &state.restate_ingress_url, request).await
 }
 
@@ -489,25 +510,29 @@ pub(crate) async fn submit_mail_received_with_client(
     restate_http: &reqwest::Client,
     restate_ingress_url: &str,
     request: WorkbenchMailReceivedWorkflowRequest,
-) -> Result<(), AppError> {
-    let url = format!(
-        "{}/WorkbenchMailReceivedWorkflow/{}/run/send",
-        restate_ingress_url.trim_end_matches('/'),
-        request.operation_id
-    );
-    submit_restate_json_with_client(restate_http, url, &request).await
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    submit_restate_workflow_json(
+        restate_http,
+        restate_ingress_url,
+        "WorkbenchMailReceivedWorkflow",
+        &request.operation_id,
+        &request,
+    )
+    .await
 }
 
 pub(crate) async fn submit_session_delete(
     state: &AppState,
     request: WorkbenchSessionDeleteWorkflowRequest,
-) -> Result<(), AppError> {
-    let url = format!(
-        "{}/WorkbenchSessionDeleteWorkflow/{}/run/send",
-        state.restate_ingress_url.trim_end_matches('/'),
-        request.operation_id
-    );
-    submit_restate_json(state, url, &request).await
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    submit_restate_workflow_json(
+        &state.restate_http,
+        &state.restate_ingress_url,
+        "WorkbenchSessionDeleteWorkflow",
+        &request.operation_id,
+        &request,
+    )
+    .await
 }
 
 /// Cancel every cron job belonging to `session_id`, derived from the durable
@@ -567,6 +592,8 @@ async fn run_user_turn(
     request: WorkbenchTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
+    let _active_invocation_guard =
+        state.clear_restate_invocation_on_drop(&request.session_id, &request.turn_id);
     let turn_model = model_spec_from_selection(request.model);
     let session = state
         .core
@@ -583,10 +610,6 @@ async fn run_user_turn(
     };
     let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
-    // Registered for /api/turn/cancel (the UI's stop button / Esc); the guard
-    // drops the registry entry when the turn finishes either way, and the
-    // cancel endpoint calls `cancel_running_turns()` on this session handle.
-    let _cancel_guard = state.register_turn_cancel(&session, &request.turn_id);
     let output = session
         .turn(input)
         .turn_id(request.turn_id.clone())
@@ -599,6 +622,24 @@ async fn run_user_turn(
         .map_err(AppError::internal)?;
     record_turn_output(&state, output, turn_state, "restate_user_turn.completed");
     Ok(())
+}
+
+async fn run_user_turn_terminalized(
+    state: AppState,
+    request: WorkbenchTurnWorkflowRequest,
+    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+) -> HandlerResult<()> {
+    let session_id = request.session_id.clone();
+    let turn_id = request.turn_id.clone();
+    terminalize_turn_execution(
+        &state,
+        &session_id,
+        &turn_id,
+        "restate_user_turn.failed",
+        AssertUnwindSafe(run_user_turn(state.clone(), request, controller))
+            .catch_unwind()
+            .await,
+    )
 }
 
 async fn run_button_trigger(
@@ -724,6 +765,8 @@ async fn run_queued_turn(
     request: WorkbenchQueuedTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
+    let _active_invocation_guard =
+        state.clear_restate_invocation_on_drop(&request.session_id, &request.turn_id);
     let session = state
         .core
         .session(request.session_id.clone())
@@ -775,6 +818,57 @@ async fn run_queued_turn(
     Ok(())
 }
 
+async fn run_queued_turn_terminalized(
+    state: AppState,
+    request: WorkbenchQueuedTurnWorkflowRequest,
+    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+) -> HandlerResult<()> {
+    let session_id = request.session_id.clone();
+    let turn_id = request.turn_id.clone();
+    terminalize_turn_execution(
+        &state,
+        &session_id,
+        &turn_id,
+        "restate_queued_turn.failed",
+        AssertUnwindSafe(run_queued_turn(state.clone(), request, controller))
+            .catch_unwind()
+            .await,
+    )
+}
+
+fn terminalize_turn_execution(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+    trace_name: &str,
+    result: Result<Result<(), AppError>, Box<dyn std::any::Any + Send>>,
+) -> HandlerResult<()> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => {
+            let message = err.message.clone();
+            record_turn_failure(state, session_id, turn_id, trace_name, &message);
+            Err(terminal_handler_error(err))
+        }
+        Err(payload) => {
+            let message = panic_payload_message(payload);
+            let message = format!("Restate-backed turn panicked: {message}");
+            record_turn_failure(state, session_id, turn_id, trace_name, &message);
+            Err(TerminalError::new(message).into())
+        }
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 fn record_turn_output(
     state: &AppState,
     output: lash::TurnResult,
@@ -809,6 +903,28 @@ fn record_turn_output(
     } else {
         state.push_message("assistant", assistant_text);
     }
+    state.publish(crate::StreamItem::Done);
+}
+
+fn record_turn_failure(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+    trace_name: &str,
+    message: &str,
+) {
+    state.trace(
+        trace_name,
+        json!({
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "error": message,
+        }),
+    );
+    state.push_message("event", format!("turn failed: {message}"));
+    state.publish(crate::StreamItem::Error {
+        message: message.to_string(),
+    });
     state.publish(crate::StreamItem::Done);
 }
 
@@ -989,6 +1105,26 @@ async fn journaled_now(
         .map_err(|err| TerminalError::new(err.to_string()).into())
 }
 
+async fn journaled_workbench_trace(
+    ctx: &ObjectContext<'_>,
+    state: AppState,
+    name: &'static str,
+    payload: Value,
+    effect_name: &'static str,
+) -> HandlerResult<()> {
+    ctx.run(move || {
+        let state = state.clone();
+        let payload = payload.clone();
+        async move {
+            state.trace(name, payload);
+            Ok::<(), HandlerError>(())
+        }
+    })
+    .name(effect_name)
+    .await?;
+    Ok(())
+}
+
 fn next_cron_time(
     expr: &str,
     tz: Option<&str>,
@@ -1043,32 +1179,20 @@ fn cron_job_key(session_id: &str, source_key: &str) -> String {
     format!("{session_id}:{source_key}")
 }
 
-async fn submit_restate_json<T: Serialize>(
-    state: &AppState,
-    url: String,
-    body: &T,
-) -> Result<(), AppError> {
-    submit_restate_json_with_client(&state.restate_http, url, body).await
-}
-
-async fn submit_restate_json_with_client<T: Serialize>(
+async fn submit_restate_workflow_json<T: Serialize>(
     restate_http: &reqwest::Client,
-    url: String,
+    restate_ingress_url: &str,
+    workflow: &str,
+    workflow_key: &str,
     body: &T,
-) -> Result<(), AppError> {
-    let response = restate_http
-        .post(&url)
-        .json(body)
-        .send()
-        .await
-        .map_err(|err| AppError::internal(format!("Restate submit failed: {err}")))?;
-    if !response.status().is_success() {
-        return Err(AppError::internal(format!(
-            "Restate submit failed with status {} for {url}",
-            response.status()
-        )));
-    }
-    Ok(())
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    lash_restate::RestateIngressClient::with_client(
+        restate_http.clone(),
+        restate_ingress_url.to_string(),
+    )
+    .send_workflow_json(workflow, workflow_key, "run", body)
+    .await
+    .map_err(|err| AppError::internal(format!("Restate submit failed: {err}")))
 }
 
 async fn submit_restate_empty(state: &AppState, url: String) -> Result<(), AppError> {

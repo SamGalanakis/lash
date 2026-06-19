@@ -11,6 +11,7 @@ use lash_core::testing::TestProvider;
 use lash_core::{
     Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract, ToolDefinition,
     ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    TriggerOccurrenceRequest, empty_trigger_source_key,
 };
 #[cfg(test)]
 use lash_lashlang_runtime::tool_lashlang_binding;
@@ -80,6 +81,9 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
 
 #[derive(Default)]
 pub(crate) struct BenchmarkEchoTool;
+
+#[derive(Default)]
+pub(crate) struct BenchmarkWorkbenchMailTool;
 
 #[derive(Clone)]
 pub(crate) struct BenchmarkLargeToolCatalog {
@@ -156,6 +160,177 @@ impl ToolProvider for BenchmarkEchoTool {
             _ => ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name)),
         }
     }
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for BenchmarkWorkbenchMailTool {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        benchmark_mail_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        benchmark_mail_tool_definition_for(name).map(|definition| Arc::new(definition.contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
+        let Some((account, operation)) = benchmark_mail_route(call.name) else {
+            return ToolResult::err_fmt(format_args!(
+                "Unknown benchmark workbench mail tool: {}",
+                call.name
+            ));
+        };
+        match operation {
+            "send" => execute_benchmark_mail_send(call, account).await,
+            "list" => ToolResult::ok(serde_json::json!({
+                "account": account,
+                "messages": [],
+            })),
+            _ => ToolResult::err_fmt(format_args!("unsupported mail operation `{operation}`")),
+        }
+    }
+}
+
+async fn execute_benchmark_mail_send(
+    call: lash_core::ToolCall<'_>,
+    account: &'static str,
+) -> ToolResult {
+    let title = call
+        .args
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("runtime perf mail");
+    let text = call
+        .args
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let Some(replay_key) = call.context.replay_key() else {
+        return ToolResult::err_fmt("benchmark mail send requires a replay key");
+    };
+    let source_key = match empty_trigger_source_key(BENCHMARK_MAIL_RECEIVED_SOURCE_TYPE) {
+        Ok(source_key) => source_key,
+        Err(err) => return ToolResult::err_fmt(err.to_string()),
+    };
+    let message_id = format!("{account}-{replay_key}");
+    let payload = serde_json::json!({
+        "account": account,
+        "title": title,
+        "text": text,
+    });
+    let idempotency_key = format!("{replay_key}:mail.received:{account}");
+    if let Err(err) = call
+        .context
+        .triggers()
+        .emit(
+            TriggerOccurrenceRequest::new(
+                BENCHMARK_MAIL_RECEIVED_SOURCE_TYPE,
+                source_key,
+                payload,
+                idempotency_key,
+            )
+            .with_source(serde_json::json!({})),
+        )
+        .await
+    {
+        return ToolResult::err_fmt(err.to_string());
+    }
+    ToolResult::ok(serde_json::json!({
+        "account": account,
+        "id": message_id,
+    }))
+}
+
+pub(crate) const BENCHMARK_MAIL_RECEIVED_SOURCE_TYPE: &str = "mail.received";
+
+const BENCHMARK_MAIL_ACCOUNTS: [&str; 2] = ["test", "test23"];
+const BENCHMARK_MAIL_OPERATIONS: [&str; 2] = ["send", "list"];
+
+fn benchmark_mail_route(name: &str) -> Option<(&'static str, &'static str)> {
+    let rest = name.strip_prefix("inbox__")?;
+    for account in BENCHMARK_MAIL_ACCOUNTS {
+        for operation in BENCHMARK_MAIL_OPERATIONS {
+            if let Some(tail) = rest.strip_prefix(account)
+                && tail.strip_prefix("__") == Some(operation)
+            {
+                return Some((account, operation));
+            }
+        }
+    }
+    None
+}
+
+fn benchmark_mail_tool_definition_for(name: &str) -> Option<ToolDefinition> {
+    let (account, operation) = benchmark_mail_route(name)?;
+    Some(benchmark_mail_tool_definition(account, operation))
+}
+
+fn benchmark_mail_tool_definitions() -> Vec<ToolDefinition> {
+    let mut definitions =
+        Vec::with_capacity(BENCHMARK_MAIL_ACCOUNTS.len() * BENCHMARK_MAIL_OPERATIONS.len());
+    for account in BENCHMARK_MAIL_ACCOUNTS {
+        for operation in BENCHMARK_MAIL_OPERATIONS {
+            definitions.push(benchmark_mail_tool_definition(account, operation));
+        }
+    }
+    definitions
+}
+
+fn benchmark_mail_tool_definition(account: &str, operation: &str) -> ToolDefinition {
+    let (input_schema, output_schema, description) = match operation {
+        "send" => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "text": { "type": "string" }
+                },
+                "required": ["title"],
+                "additionalProperties": false
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "account": { "type": "string" },
+                    "id": { "type": "string" }
+                },
+                "required": ["account", "id"],
+                "additionalProperties": false
+            }),
+            "Send a deterministic benchmark message and emit mail.received.",
+        ),
+        "list" => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "account": { "type": "string" },
+                    "messages": { "type": "array" }
+                },
+                "required": ["account", "messages"],
+                "additionalProperties": false
+            }),
+            "List deterministic benchmark messages.",
+        ),
+        _ => unreachable!("benchmark mail operation must be known"),
+    };
+    ToolDefinition::raw(
+        format!("tool:inbox__{account}__{operation}"),
+        format!("inbox__{account}__{operation}"),
+        format!("{description} Account inbox.{account}."),
+        input_schema,
+        output_schema,
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["inbox", account], operation).with_authority_type("Inbox"),
+    )
+    .with_scheduling(ToolScheduling::Parallel)
 }
 
 async fn execute_benchmark_echo(call: lash_core::ToolCall<'_>) -> ToolResult {
@@ -971,6 +1146,39 @@ cancel slow
 first_result = (await first)?
 second_result = (await second)?
 submit first_result.value
+```"#
+                .to_string();
+            text_profile(text)
+        }
+        RuntimePerfScenario::RlmTriggerMailPipeline => {
+            let text = r#"```lashlang
+@label(title: "Define and register mail forwarder")
+process forward_mail(event: mail.Received) {
+  if event.account == "test" {
+    await inbox.test23.send({
+      title: format("[Fwd from test] {}", event.title),
+      text: event.text
+    })?
+    wake { kind: "forwarded", from: "test", to: "test23", title: event.title }
+  }
+  finish true
+}
+
+handle = await triggers.register({
+  source: mail.received({}),
+  target: forward_mail,
+  inputs: { event: trigger.event },
+  name: "runtime-perf-test-to-test23-forwarder"
+})?
+
+@label(title: "Send test message to inbox.test")
+sent = await inbox.test.send({
+  title: "Hello from test",
+  text: "This is a forwarding test for runtime perf stack profiling."
+})?
+
+print { trigger_handle: handle, sent: sent }
+submit "runtime perf benchmark ok"
 ```"#
                 .to_string();
             text_profile(text)

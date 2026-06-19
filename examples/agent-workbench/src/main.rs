@@ -52,7 +52,7 @@ pub(crate) const MAIL_EVENT_RESOURCE: &str = "Mail";
 pub(crate) const MAIL_EVENT_ALIAS: &str = "mail";
 pub(crate) const MAIL_EVENT_EVENT: &str = "received";
 pub(crate) const MAIL_RECEIVED_SOURCE_TYPE: &str = "mail.received";
-const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 include!("main_sections/bootstrap.rs");
 include!("main_sections/state.rs");

@@ -186,6 +186,16 @@ class ProfileGuardCoverageTests(unittest.TestCase):
             profile_runtime_stack.DEFAULT_SCENARIOS,
         )
 
+    def test_workbench_trigger_mail_pipeline_is_in_default_stack_coverage(self) -> None:
+        self.assertIn(
+            "rlm_trigger_mail_pipeline",
+            profile_guard.DEFAULT_STACK_SCENARIOS,
+        )
+        self.assertIn(
+            "rlm_trigger_mail_pipeline",
+            profile_runtime_stack.DEFAULT_SCENARIOS,
+        )
+
     def test_typed_facade_scenarios_are_in_default_perf_coverage(self) -> None:
         required = {
             "standard",

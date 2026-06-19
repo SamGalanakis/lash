@@ -6,7 +6,10 @@ use lash_core::{
     ScopedEffectController,
 };
 use lash_postgres_store::PostgresStorage;
-use lash_restate::{RestateEffectHost, RestateProcessDeployment};
+use lash_restate::{
+    RestateAdminClient, RestateEffectHost, RestateIngressClient, RestateInvocationId,
+    RestateProcessDeployment,
+};
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
     EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_TOOL_BATCH_TEXT,
@@ -14,14 +17,13 @@ use lash_restate_postgres_workers_e2e::{
     build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
     process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
-use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 fn main() -> Result<()> {
     let stack_bytes = std::env::var("LASH_E2E_TOKIO_STACK_BYTES")
@@ -249,6 +251,7 @@ async fn async_main() -> Result<()> {
     if let Some(dir) = &trace_dir {
         assert_traces(dir).await?;
     }
+    assert_no_active_lash_restate_invocations(&admin_url).await?;
 
     println!(
         "restate-postgres-workers e2e passed: {} workflows, trigger process {}, signal process {}, traces {}",
@@ -385,30 +388,20 @@ async fn wait_for_mock_provider(base_url: &str) -> Result<()> {
     )
 }
 
-async fn submit_workflow(ingress_url: &str, request: &TurnRequest) -> Result<()> {
+async fn submit_workflow(ingress_url: &str, request: &TurnRequest) -> Result<RestateInvocationId> {
     let client = reqwest::Client::builder()
         .http2_prior_knowledge()
         .build()
         .context("build Restate ingress client")?;
+    let ingress = RestateIngressClient::with_client(client, ingress_url.to_string());
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut last_error = None;
     while Instant::now() < deadline {
-        match client
-            .post(workflow_send_url(ingress_url, &request.workflow_id))
-            .json(request)
-            .send()
+        match ingress
+            .send_workflow_json(TURN_WORKFLOW_NAME, &request.workflow_id, "run", request)
             .await
         {
-            Ok(response)
-                if response.status().is_success() || response.status() == StatusCode::CONFLICT =>
-            {
-                return Ok(());
-            }
-            Ok(response) => {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                last_error = Some(format!("{status}: {body}"));
-            }
+            Ok(invocation_id) => return Ok(invocation_id),
             Err(err) => last_error = Some(err.to_string()),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -454,13 +447,29 @@ async fn submit_signal_workflow(
     Ok(response)
 }
 
-fn workflow_send_url(ingress_url: &str, workflow_id: &str) -> String {
-    format!(
-        "{}/{}/{}/run/send",
-        ingress_url.trim_end_matches('/'),
-        TURN_WORKFLOW_NAME,
-        workflow_id
-    )
+async fn assert_no_active_lash_restate_invocations(admin_url: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .context("build Restate admin client")?;
+    let admin = RestateAdminClient::with_client(client, admin_url.to_string());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let active = admin
+            .unfinished_invocations_for_service_prefixes(&[
+                TURN_WORKFLOW_NAME,
+                "LashProcessWorkflow",
+            ])
+            .await
+            .context("query Restate active Lash invocations")?;
+        if active.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("Restate still has active Lash invocations: {active:#?}");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 async fn wait_for_terminal_result(pool: &sqlx::PgPool, workflow_id: &str) -> Result<TurnResponse> {

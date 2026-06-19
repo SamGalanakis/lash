@@ -404,16 +404,107 @@ mod tests {
             event_tx,
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
+            active_restate_invocations: ActiveRestateInvocations::default(),
         };
 
         state.publish(StreamItem::Done);
 
         assert!(state.timeline_snapshot().is_empty());
         assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn turn_cancel_route_cancels_active_restate_invocation() {
+        run_async_test_on_stack_budget("workbench-turn-cancel-test", || {
+            turn_cancel_route_cancels_active_restate_invocation_inner()
+        });
+    }
+
+    async fn turn_cancel_route_cancels_active_restate_invocation_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-turn-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete_error("cancel route test should not call the provider")
+            .build()
+            .into_handle();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let (event_tx, _) = broadcast::channel(16);
+        let mut events = event_tx.subscribe();
+        let (restate_admin_url, mut admin_requests) = spawn_restate_admin_capture().await;
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core,
+            process_observer,
+            session_ids: WorkbenchSessionIds::fresh(),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx,
+            queued_work_driver: inert_queued_work_driver(),
+            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_admin_url,
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
+            active_restate_invocations: ActiveRestateInvocations::default(),
+        };
+        let session_id = state.current_session_id();
+        state.track_restate_invocation(
+            &session_id,
+            "turn-cancel",
+            lash_restate::RestateInvocationId::new("inv_cancel"),
+        );
+
+        let Json(accepted) = cancel_turn(State(state.clone())).await.expect("cancel turn");
+
+        assert!(accepted.accepted);
+        assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        let request = tokio::time::timeout(Duration::from_secs(2), admin_requests.recv())
+            .await
+            .expect("Restate admin request")
+            .expect("Restate admin request payload");
+        assert_eq!(
+            request.get("path").and_then(Value::as_str),
+            Some("invocations/inv_cancel/cancel")
+        );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -560,10 +651,11 @@ mod tests {
             event_tx: broadcast::channel(1024).0,
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail_world.clone(),
+            active_restate_invocations: ActiveRestateInvocations::default(),
         };
 
         let receipt = enqueue_tool_catalog_refresh(&state, "initial_empty")
@@ -778,10 +870,11 @@ mod tests {
             event_tx: broadcast::channel(1024).0,
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
+            active_restate_invocations: ActiveRestateInvocations::default(),
         };
         let target_scope_prefix = format!("session:{}/frame:", state.current_session_id());
         let session_store =
@@ -913,10 +1006,11 @@ mod tests {
             event_tx,
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url,
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
+            active_restate_invocations: ActiveRestateInvocations::default(),
         };
         let session = state
             .core
@@ -1004,15 +1098,46 @@ mod tests {
         (format!("http://{addr}"), rx)
     }
 
+    async fn spawn_restate_admin_capture() -> (String, mpsc::UnboundedReceiver<Value>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Restate admin");
+        let addr = listener.local_addr().expect("mock Restate admin addr");
+        let app = Router::new()
+            .route("/{*path}", axum::routing::patch(capture_restate_admin_patch))
+            .with_state(tx);
+        tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app).await {
+                eprintln!("mock Restate admin stopped: {err}");
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
     async fn capture_restate_send(
         AxumPath(path): AxumPath<String>,
         State(tx): State<mpsc::UnboundedSender<Value>>,
         Json(body): Json<Value>,
-    ) -> StatusCode {
+    ) -> (StatusCode, Json<Value>) {
         let _ = tx.send(json!({
             "path": path,
             "body": body,
         }));
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "invocationId": format!("inv_{}", uuid::Uuid::new_v4()),
+                "status": "Accepted",
+            })),
+        )
+    }
+
+    async fn capture_restate_admin_patch(
+        AxumPath(path): AxumPath<String>,
+        State(tx): State<mpsc::UnboundedSender<Value>>,
+    ) -> StatusCode {
+        let _ = tx.send(json!({ "path": path }));
         StatusCode::ACCEPTED
     }
 
@@ -1082,10 +1207,11 @@ mod tests {
             event_tx: broadcast::channel(1024).0,
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url,
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
+            active_restate_invocations: ActiveRestateInvocations::default(),
         };
         let old_session_id = state.current_session_id();
         let session = state
@@ -1238,19 +1364,32 @@ mod tests {
         );
         wait_for_endpoint_socket(endpoint_bind).await;
         register_restate_deployment(&admin_url, &endpoint_url).await;
-        run_workbench_turn_via_restate(
+        let turn_invocation_id = run_workbench_turn_via_restate(
             &harness.state,
             "Register a cron trigger that runs every two seconds and reports the tick.",
         )
         .await;
         wait_for_workbench_message(&harness.state, "cron registered", Duration::from_secs(60))
             .await;
+        wait_for_restate_invocation_success(
+            &harness.state,
+            &turn_invocation_id,
+            Duration::from_secs(30),
+        )
+        .await;
         wait_for_restate_cron_sync(&harness.state, &harness.trace_path, Duration::from_secs(30))
             .await;
         wait_for_workbench_message(
             &harness.state,
             "cron tick observed",
             Duration::from_secs(60),
+        )
+        .await;
+        wait_for_trace_event_count(
+            &harness.trace_path,
+            "agent_workbench.cron.restate.run",
+            1,
+            Duration::from_secs(30),
         )
         .await;
         let trace_text =
@@ -1282,10 +1421,14 @@ mod tests {
             "live_e2e_cleanup",
         )
         .await;
+        assert_no_active_lash_restate_invocations(&harness.state, Duration::from_secs(10)).await;
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
-    async fn run_workbench_turn_via_restate(state: &AppState, text: &str) {
+    async fn run_workbench_turn_via_restate(
+        state: &AppState,
+        text: &str,
+    ) -> lash_restate::RestateInvocationId {
         state.push_message("user", text);
         let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
         let request = restate::WorkbenchTurnWorkflowRequest {
@@ -1294,24 +1437,77 @@ mod tests {
             text: text.to_string(),
             model: state.selected_model(),
         };
-        let url = format!(
-            "{}/WorkbenchTurnWorkflow/{}/run",
-            state.restate_ingress_url.trim_end_matches('/'),
-            turn_id,
-        );
-        let response = tokio::time::timeout(
+        let invocation_id = tokio::time::timeout(
             Duration::from_secs(60),
-            state.restate_http.post(&url).json(&request).send(),
+            restate::submit_user_turn(state, request),
         )
         .await
-        .expect("Restate-backed workbench turn timed out")
-        .expect("submit Restate-backed workbench turn");
-        assert!(
-            response.status().is_success(),
-            "Restate-backed workbench turn failed: {} {}",
-            response.status(),
-            response.text().await.unwrap_or_default(),
+            .expect("Restate-backed workbench turn timed out")
+            .expect("submit Restate-backed workbench turn");
+        state.track_restate_invocation(&state.current_session_id(), &turn_id, invocation_id.clone());
+        invocation_id
+    }
+
+    async fn wait_for_restate_invocation_success(
+        state: &AppState,
+        invocation_id: &lash_restate::RestateInvocationId,
+        timeout: Duration,
+    ) {
+        let admin = lash_restate::RestateAdminClient::with_client(
+            state.restate_http.clone(),
+            state.restate_admin_url.clone(),
         );
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match admin
+                .invocation_status(invocation_id)
+                .await
+                .expect("query Restate invocation status")
+            {
+                Some(status) if status.completed_successfully() => return,
+                Some(status) if status.status == "completed" => {
+                    panic!("Restate invocation {invocation_id} completed unsuccessfully: {status:#?}")
+                }
+                Some(status) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for Restate invocation {invocation_id} to complete; last status={status:#?}"
+                    );
+                }
+                None => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for Restate invocation {invocation_id} to appear"
+                    );
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn assert_no_active_lash_restate_invocations(state: &AppState, timeout: Duration) {
+        let admin = lash_restate::RestateAdminClient::with_client(
+            state.restate_http.clone(),
+            state.restate_admin_url.clone(),
+        );
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let active = admin
+                .unfinished_invocations_for_service_prefixes(&[
+                    "Workbench",
+                    "LashProcessWorkflow",
+                ])
+                .await
+                .expect("query active Lash Restate invocations");
+            if active.is_empty() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Restate still has active Lash invocations: {active:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     struct LiveWorkbenchRestateHarness {
@@ -1389,12 +1585,14 @@ mod tests {
         );
         let session_ids = WorkbenchSessionIds::fresh();
         let restate_http = reqwest::Client::new();
+        let active_restate_invocations = ActiveRestateInvocations::default();
         let queued_work_driver =
             lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
                 session_ids: session_ids.clone(),
                 store_factory: Arc::clone(&core_store_factory),
                 restate_ingress_url: restate_ingress_url.clone(),
                 restate_http: restate_http.clone(),
+                active_restate_invocations: active_restate_invocations.clone(),
             }));
         let core = RlmCore::builder()
             .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
@@ -1442,10 +1640,12 @@ mod tests {
             event_tx,
             queued_work_driver: queued_work_driver.clone(),
             restate_ingress_url,
+            restate_admin_url: std::env::var("RESTATE_ADMIN_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:19071".to_string()),
             restate_http,
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
+            active_restate_invocations,
         };
         LiveWorkbenchRestateHarness {
             state,

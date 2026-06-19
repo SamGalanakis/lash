@@ -2926,7 +2926,9 @@ async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
         *captured_server.lock().expect("captured lock") =
             Some(String::from_utf8_lossy(&buf[..n]).into_owned());
         socket
-            .write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n")
+            .write_all(
+                b"HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: 49\r\n\r\n{\"invocationId\":\"inv_task_1\",\"status\":\"Accepted\"}",
+            )
             .await
             .expect("write response");
         socket.flush().await.expect("flush");
@@ -2958,4 +2960,189 @@ async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
         Some("restate"),
         "the durable external_ref must be recorded after a successful submit"
     );
+    assert_eq!(
+        record
+            .external_ref
+            .as_ref()
+            .and_then(|external| external.metadata.as_ref())
+            .and_then(|metadata| metadata.get("invocation_id")),
+        Some(&serde_json::json!("inv_task_1"))
+    );
+}
+
+struct MockHttpResponse {
+    status: &'static str,
+    body: &'static str,
+}
+
+async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let mut buf = Vec::new();
+    let mut scratch = [0u8; 1024];
+    loop {
+        let n = socket.read(&mut scratch).await.expect("read request");
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&scratch[..n]);
+        let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if buf.len() >= header_end + 4 + content_length {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+async fn spawn_restate_http_capture(
+    responses: Vec<MockHttpResponse>,
+) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let captured_server = Arc::clone(&captured);
+    let server = tokio::spawn(async move {
+        for response in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut socket).await;
+            captured_server.lock().expect("captured lock").push(request);
+            let body = response.body.as_bytes();
+            let header = format!(
+                "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response.status,
+                body.len()
+            );
+            socket
+                .write_all(header.as_bytes())
+                .await
+                .expect("write response headers");
+            socket.write_all(body).await.expect("write response body");
+            socket.flush().await.expect("flush");
+        }
+    });
+    (format!("http://{addr}"), captured, server)
+}
+
+#[tokio::test]
+async fn restate_ingress_client_parses_send_invocation_id() {
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "202 Accepted",
+        body: r#"{"invocationId":"inv_123","status":"Accepted"}"#,
+    }])
+    .await;
+    let client = RestateIngressClient::new(base_url);
+
+    let invocation_id = client
+        .send_workflow_json(
+            "WorkbenchTurnWorkflow",
+            "turn-1",
+            "run",
+            &serde_json::json!({ "turn_id": "turn-1" }),
+        )
+        .await
+        .expect("send workflow");
+    server.await.expect("capture server");
+
+    assert_eq!(invocation_id.as_str(), "inv_123");
+    let requests = captured.lock().expect("captured lock");
+    assert!(
+        requests[0].starts_with("POST /WorkbenchTurnWorkflow/turn-1/run/send "),
+        "unexpected request: {}",
+        requests[0]
+    );
+    assert!(requests[0].contains(r#""turn_id":"turn-1""#));
+}
+
+#[tokio::test]
+async fn restate_ingress_client_accepts_previously_accepted_send() {
+    let (base_url, _captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "202 Accepted",
+        body: r#"{"invocationId":"inv_duplicate","status":"PreviouslyAccepted"}"#,
+    }])
+    .await;
+    let client = RestateIngressClient::new(base_url);
+
+    let invocation_id = client
+        .send_workflow_json(
+            "LashProcessWorkflow",
+            "process-1",
+            "run",
+            &serde_json::json!({ "process_id": "process-1" }),
+        )
+        .await
+        .expect("idempotent duplicate send");
+    server.await.expect("capture server");
+
+    assert_eq!(invocation_id.as_str(), "inv_duplicate");
+}
+
+#[tokio::test]
+async fn restate_admin_client_cancels_kills_and_queries_invocation_status() {
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![
+        MockHttpResponse {
+            status: "202 Accepted",
+            body: "",
+        },
+        MockHttpResponse {
+            status: "200 OK",
+            body: "",
+        },
+        MockHttpResponse {
+            status: "200 OK",
+            body: r#"{"rows":[{"id":"inv_123","target":"WorkbenchTurnWorkflow/turn-1/run","target_service_name":"WorkbenchTurnWorkflow","target_service_key":"turn-1","target_handler_name":"run","status":"completed","completion_result":"success","completion_failure":null}]}"#,
+        },
+    ])
+    .await;
+    let client = RestateAdminClient::new(base_url);
+    let invocation_id = RestateInvocationId::new("inv_123");
+
+    client
+        .cancel_invocation(&invocation_id)
+        .await
+        .expect("cancel");
+    client
+        .kill_invocation_for_test_cleanup(&invocation_id)
+        .await
+        .expect("kill");
+    let status = client
+        .invocation_status(&invocation_id)
+        .await
+        .expect("status")
+        .expect("status row");
+    server.await.expect("capture server");
+
+    assert!(status.completed_successfully());
+    assert_eq!(status.target_service_name, "WorkbenchTurnWorkflow");
+    let requests = captured.lock().expect("captured lock");
+    assert!(
+        requests[0].starts_with("PATCH /invocations/inv_123/cancel "),
+        "unexpected cancel request: {}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("PATCH /invocations/inv_123/kill "),
+        "unexpected kill request: {}",
+        requests[1]
+    );
+    assert!(
+        requests[2].starts_with("POST /query "),
+        "unexpected query request: {}",
+        requests[2]
+    );
+    assert!(requests[2].contains("FROM sys_invocation WHERE id = 'inv_123'"));
 }

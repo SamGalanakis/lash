@@ -25,7 +25,7 @@ just agent-workbench-down 3000
 For the old attached process style, use `just agent-workbench-foreground 3000`.
 
 The entrypoint checks for Restate ingress/admin on the configured ports. If
-they are not already running, it starts `restatedev/restate:1.6.2` in Docker,
+they are not already running, it starts `restatedev/restate:1.7.0` in Docker,
 waits for ingress/admin, starts the workbench and its in-process Restate
 endpoint, registers the endpoint through Restate Admin, then opens the browser.
 It writes PID, log, and run metadata under `.agent-workbench/run/`; stale PID
@@ -63,11 +63,11 @@ Configuration is read from `.env` or the process environment:
   Docker Restate container started by the entrypoint.
 - `AGENT_WORKBENCH_OPEN`: set to `0` to skip opening the browser.
 - `AGENT_WORKBENCH_RESTATE_IMAGE`: Restate Docker image for the entrypoint,
-  default `restatedev/restate:1.6.2`.
+  default `restatedev/restate:1.7.0`.
 - `AGENT_WORKBENCH_RESTATE_CONTAINER`: Restate Docker container name for the
   entrypoint, default `lash-agent-workbench-dev-restate`.
 - `AGENT_WORKBENCH_TOKIO_STACK_BYTES`: Tokio worker thread stack for the
-  workbench process, default `2097152`. Override only when diagnosing stack
+  workbench process, default `8388608`. Override only when diagnosing stack
   regressions or comparing runtime stack-size lanes.
 - `OPENROUTER_MODEL`: default `anthropic/claude-sonnet-4.6`.
 - `OPENROUTER_MODEL_VARIANT`: default `high`; choose `provider default` in
@@ -88,10 +88,9 @@ backed by Restate: ask the agent to schedule something and it can construct a
 typed `cron.Schedule` source whose registrations sync to Restate virtual
 objects. Started Lashlang background processes appear in the right rail.
 The **stop turn** button (or **Esc**) cancels the running turn for real:
-`POST /api/turn/cancel` calls `LashSession::cancel_running_turns()` on the
-live session handle inside the Restate turn workflow, the runtime aborts the
-in-flight provider call, and the turn commits as
-`TurnOutcome::Stopped(Cancelled)` — the transcript shows `turn cancelled`.
+`POST /api/turn/cancel` cancels the active Restate invocation through the
+Restate Admin API, and the UI clears once cancellation is requested or the
+workflow emits its terminal result.
 The Lashlang graph panel is backed by `TraceLashlangGraphStore`, a public
 trace-derived observation store for foreground blocks, durable process runs,
 and child execution links; command operations still go through the session's
