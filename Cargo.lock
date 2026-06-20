@@ -2806,9 +2806,9 @@ version = "0.1.0-alpha.64"
 dependencies = [
  "async-trait",
  "lash-core",
- "lash-lashlang-runtime",
  "lash-plugin-process-controls",
  "lash-sqlite-store",
+ "lash-tool-support",
  "lash-tools",
  "serde_json",
  "tokio",

@@ -1,5 +1,5 @@
 use lash_core::{ToolAvailabilityConfig, ToolDefinition, ToolScheduling};
-use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
+use lash_tool_support::{LashlangToolBinding, ToolDefinitionLashlangExt};
 
 pub fn batch_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
