@@ -125,9 +125,7 @@ pub(crate) fn default_model_variant_for_provider(
             }
         }
         "codex" => {
-            if model.eq_ignore_ascii_case("gpt-5.5") {
-                Some("medium")
-            } else if supported_variants.contains(&"xhigh") {
+            if model.eq_ignore_ascii_case("gpt-5.5") || supported_variants.contains(&"xhigh") {
                 Some("xhigh")
             } else {
                 Some("high")

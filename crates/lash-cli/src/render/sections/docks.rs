@@ -258,7 +258,7 @@ pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapsho
         lines,
         cursor: (cursor_col as u16, (cursor_row - scroll_offset) as u16),
         scroll_offset,
-        badge: build_input_badge(app),
+        badge: None,
     }
 }
 

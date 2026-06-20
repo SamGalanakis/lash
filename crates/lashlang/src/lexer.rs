@@ -139,14 +139,9 @@ impl<'a> Lexer<'a> {
                 '|' => self.double_or_single('|', TokenKind::OrOr, TokenKind::Pipe),
                 '<' => self.double_or_single('=', TokenKind::LessEqual, TokenKind::Less),
                 '>' => self.double_or_single('=', TokenKind::GreaterEqual, TokenKind::Greater),
-                '"' if self.starts_with_at(offset, "\"\"\"") => {
-                    self.triple_string(false, "\"\"\"")?
-                }
+                '"' if self.starts_with_at(offset, "\"\"\"") => self.triple_string()?,
                 '"' => self.string()?,
-                'r' if self.starts_with_at(offset, "r\"\"\"") => {
-                    self.triple_string(true, "\"\"\"")?
-                }
-                'r' if self.starts_with_at(offset, "r'''") => self.triple_string(true, "'''")?,
+                'r' if self.raw_string_hash_count(offset).is_some() => self.raw_string()?,
                 c if is_ident_start(c) => self.ident_or_keyword(),
                 c if c.is_ascii_digit() => self.number()?,
                 _ => return Err(LexError::UnexpectedChar { ch, offset }),
@@ -240,25 +235,11 @@ impl<'a> Lexer<'a> {
         Err(LexError::UnterminatedString { offset: start })
     }
 
-    fn triple_string(&mut self, raw: bool, delimiter: &str) -> Result<Token, LexError> {
+    fn triple_string(&mut self) -> Result<Token, LexError> {
         let (start, _) = self.peek().expect("triple string requires input");
-        let delimiter_start = start + usize::from(raw);
-        let content_start = delimiter_start + delimiter.len();
+        let delimiter = "\"\"\"";
+        let content_start = start + delimiter.len();
         self.consume_until_byte(content_start);
-
-        if raw {
-            let Some(relative_end) = self.source[content_start..].find(delimiter) else {
-                return Err(LexError::UnterminatedString { offset: start });
-            };
-            let content_end = content_start + relative_end;
-            let end = content_end + delimiter.len();
-            let value = CompactString::from(&self.source[content_start..content_end]);
-            self.consume_until_byte(end);
-            return Ok(Token {
-                kind: TokenKind::String(value),
-                span: Span { start, end },
-            });
-        }
 
         let mut value = String::new();
         while let Some((offset, ch)) = self.bump() {
@@ -291,6 +272,46 @@ impl<'a> Lexer<'a> {
         }
 
         Err(LexError::UnterminatedString { offset: start })
+    }
+
+    fn raw_string_hash_count(&self, offset: usize) -> Option<usize> {
+        let rest = self.source.get(offset..)?;
+        let mut chars = rest.char_indices();
+        match chars.next() {
+            Some((_, 'r')) => {}
+            _ => return None,
+        }
+        let mut hashes = 0usize;
+        for (_, ch) in chars {
+            match ch {
+                '#' => hashes += 1,
+                '"' => return Some(hashes),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn raw_string(&mut self) -> Result<Token, LexError> {
+        let (start, _) = self.peek().expect("raw string requires input");
+        let hashes = self
+            .raw_string_hash_count(start)
+            .expect("raw string branch requires valid opener");
+        let opener_len = 1 + hashes + 1;
+        let content_start = start + opener_len;
+        let closing = format!("\"{}", "#".repeat(hashes));
+
+        let Some(relative_end) = self.source[content_start..].find(&closing) else {
+            return Err(LexError::UnterminatedString { offset: start });
+        };
+        let content_end = content_start + relative_end;
+        let end = content_end + closing.len();
+        let value = CompactString::from(&self.source[content_start..content_end]);
+        self.consume_until_byte(end);
+        Ok(Token {
+            kind: TokenKind::String(value),
+            span: Span { start, end },
+        })
     }
 
     fn required_double(&mut self, expected: char, kind: TokenKind) -> Result<Token, LexError> {
@@ -503,14 +524,14 @@ mod tests {
     }
 
     #[test]
-    fn lexes_multiline_and_raw_multiline_strings() {
+    fn lexes_multiline_and_rust_style_raw_strings() {
         let tokens = lex(r####"
             normal = """line1\n"quoted"
 line2"""
-            raw = r"""*** Begin Patch
+            raw = r#"*** Begin Patch
 @@
 \n { untouched }
-*** End Patch"""
+*** End Patch"#
             "####)
         .expect("lexing should succeed");
 
@@ -531,13 +552,15 @@ line2"""
     }
 
     #[test]
-    fn lexes_raw_triple_single_quoted_strings() {
-        let tokens = lex(r####"
-            script = r'''python3 - <<'PY'
+    fn lexes_rust_style_raw_strings_with_hash_delimiters() {
+        let tokens = lex(r#####"
+            script = r##"python3 - <<'PY'
 print("""double quotes are preserved""")
 \n { braces stay raw }
-PY'''
-            "####)
+PY"##
+            markdown = r###"This body can mention "## without ending.
+It ends only at quote plus three hashes."###
+            "#####)
         .expect("lexing should succeed");
 
         let strings: Vec<_> = tokens
@@ -549,9 +572,14 @@ PY'''
             .collect();
         assert_eq!(
             strings,
-            vec![CompactString::from(
-                "python3 - <<'PY'\nprint(\"\"\"double quotes are preserved\"\"\")\n\\n { braces stay raw }\nPY"
-            )]
+            vec![
+                CompactString::from(
+                    "python3 - <<'PY'\nprint(\"\"\"double quotes are preserved\"\"\")\n\\n { braces stay raw }\nPY",
+                ),
+                CompactString::from(
+                    "This body can mention \"## without ending.\nIt ends only at quote plus three hashes.",
+                ),
+            ]
         );
     }
 
@@ -561,8 +589,8 @@ PY'''
             regular = "@label(title: \"plain\")"
             multiline = """@label(title: "plain")
 finish null"""
-            raw = r'''@label(title: "plain")
-@label(title: "still plain") finish null'''
+            raw = r#"@label(title: "plain")
+@label(title: "still plain") finish null"#
             "####)
         .expect("lexing should succeed");
 
@@ -627,10 +655,10 @@ finish null"""
         let err = lex("\"\"\"abc").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
 
-        let err = lex("r\"\"\"abc").expect_err("lexing should fail");
+        let err = lex("r#\"abc").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
 
-        let err = lex("r'''abc").expect_err("lexing should fail");
+        let err = lex("r##\"abc\"#").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
     }
 

@@ -451,9 +451,34 @@ impl ToolContract {
         manifest: &ToolManifest,
         example_limit: usize,
     ) -> CompactToolContract {
+        self.compact_contract_with_signature_name_and_example_limit(
+            manifest,
+            &manifest.name,
+            example_limit,
+        )
+    }
+
+    pub fn compact_contract_with_signature_name(
+        &self,
+        manifest: &ToolManifest,
+        signature_name: &str,
+    ) -> CompactToolContract {
+        self.compact_contract_with_signature_name_and_example_limit(
+            manifest,
+            signature_name,
+            COMPACT_TOOL_EXAMPLE_LIMIT,
+        )
+    }
+
+    pub fn compact_contract_with_signature_name_and_example_limit(
+        &self,
+        manifest: &ToolManifest,
+        signature_name: &str,
+        example_limit: usize,
+    ) -> CompactToolContract {
         CompactToolContract {
-            name: manifest.name.clone(),
-            signature: self.input_signature(manifest),
+            name: signature_name.to_string(),
+            signature: self.input_signature_with_name(manifest, signature_name),
             returns: self.output_summary(),
             parameters: self.parameter_metadata(),
             return_fields: self.output_contract.return_fields(&self.output_schema),
@@ -463,6 +488,14 @@ impl ToolContract {
     }
 
     pub fn input_signature(&self, manifest: &ToolManifest) -> String {
+        self.input_signature_with_name(manifest, &manifest.name)
+    }
+
+    pub fn input_signature_with_name(
+        &self,
+        _manifest: &ToolManifest,
+        signature_name: &str,
+    ) -> String {
         let params = self
             .parameter_docs()
             .into_iter()
@@ -475,7 +508,7 @@ impl ToolContract {
         };
         format!(
             "{}{}({})",
-            manifest.name,
+            signature_name,
             self.output_contract
                 .type_parameter_suffix()
                 .unwrap_or_default(),

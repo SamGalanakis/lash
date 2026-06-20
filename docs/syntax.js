@@ -55,18 +55,24 @@
   // contextual keywords (process / start / finish / yield / wake / signal /
   // wait / run / with / trigger / while / break / continue / let /
   // enum), the builtins.rs registry, and the primitive type names. Comments
-  // are `#` and `//`; strings are single- or triple-quoted ("""…""",
-  // r"""…""", r'''…'''). There are no /* */ block comments in lashlang.
+  // are `#` and `//`; strings are quoted, triple-quoted ("""…"""), or
+  // Rust-style raw strings (r#"…"#, r##"…"##). There are no /* */ block
+  // comments in lashlang.
   function defineLashlang(Prism) {
     if (!Prism || !Prism.languages || Prism.languages.lashlang) return;
     Prism.languages.lashlang = {
+      "raw-string": {
+        pattern: /r"[\s\S]*?"|r(#+)"[\s\S]*?"\1/,
+        alias: "string",
+        greedy: true,
+      },
       "triple-string": {
-        pattern: /r?"""[\s\S]*?"""|r'''[\s\S]*?'''/,
+        pattern: /"""[\s\S]*?"""/,
         alias: "string",
         greedy: true,
       },
       "string": {
-        pattern: /r?"(?:[^"\\]|\\.)*"/,
+        pattern: /"(?:[^"\\]|\\.)*"/,
         greedy: true,
       },
       "comment": {

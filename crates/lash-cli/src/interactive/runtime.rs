@@ -6,7 +6,7 @@ use lash_core::{
     PluginMessage,
 };
 
-use super::helpers::TurnActivityBridge;
+use super::helpers::SessionObservationBridge;
 use super::*;
 use crate::event::AppEventTx;
 use crate::input_items::build_items_from_editor_input;
@@ -197,8 +197,8 @@ pub(super) async fn send_user_message(
         "send_user_message armed runtime return channel"
     );
 
-    let sink = TurnActivityBridge::spawn(stream_id, app_tx.clone());
-    let (cancel, return_rx) = spawn_session_turn(session, turn_input, sink, stream_id);
+    SessionObservationBridge::spawn(&session, stream_id, app_tx.clone());
+    let (cancel, return_rx) = spawn_session_turn(session, turn_input, stream_id);
     *cancel_token = Some(cancel);
     *runtime_return_rx = Some(return_rx);
 }
@@ -252,8 +252,8 @@ pub(super) async fn send_queued_work(
         "dispatching durable queued runtime turn"
     );
 
-    let sink = TurnActivityBridge::spawn(stream_id, app_tx.clone());
-    let (cancel, return_rx) = spawn_session_queued_turn(session, batch_ids, sink, stream_id);
+    SessionObservationBridge::spawn(&session, stream_id, app_tx.clone());
+    let (cancel, return_rx) = spawn_session_queued_turn(session, batch_ids, stream_id);
     *cancel_token = Some(cancel);
     *runtime_return_rx = Some(return_rx);
 }
@@ -373,6 +373,9 @@ pub(crate) async fn generate_session_name(sessions_dir: &std::path::Path) -> Str
 /// selection, and finally the last assistant response.
 pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Option<(u16, u16)>) {
     let input_text = app.selected_input_text();
+    let document_text = terminal_size.and_then(|(width, height)| {
+        crate::render::extract_document_selection_text(app, width, height)
+    });
     let history_text = terminal_size.and_then(|(width, height)| {
         crate::render::extract_history_selection_text(app, width, height)
     });
@@ -387,12 +390,13 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
         selection_visible = app.selection.visible,
         selection_active = app.selection.active,
         input_selected_chars = input_text.as_ref().map(|text| text.chars().count()),
+        document_selected_chars = document_text.as_ref().map(|text| text.chars().count()),
         history_selected_chars = history_text.as_ref().map(|text| text.chars().count()),
         fallback_chars = last_text.as_ref().map(|text| text.chars().count()),
         has_terminal_size = terminal_size.is_some(),
         "copy path invoked"
     );
-    if let Some(text) = input_text.or(history_text).or(last_text) {
+    if let Some(text) = input_text.or(document_text).or(history_text).or(last_text) {
         let copied_chars = text.chars().count();
         match crate::clipboard::copy_text_robustly(&text) {
             Ok(method) => tracing::debug!(copied_chars, method, "clipboard write succeeded"),

@@ -1320,7 +1320,9 @@ mod tests {
         let defs = BenchmarkLargeToolCatalog::build_tool_definitions();
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
-            let binding = tool_lashlang_binding(&def.manifest);
+            let binding = tool_lashlang_binding(&def.manifest)
+                .expect("valid lashlang binding")
+                .expect("benchmark tool has lashlang binding");
             def.manifest.availability.base == ToolAvailability::Callable
                 && binding.module_path == vec!["gmail".to_string()]
                 && !def.contract.input_schema["properties"]

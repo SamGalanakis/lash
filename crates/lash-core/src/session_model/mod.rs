@@ -95,6 +95,33 @@ impl<'de> serde::Deserialize<'de> for ProtocolEvent {
 
 pub type SessionEventRecord = lash_sansio::session_model::SessionEventRecord<ProtocolEvent>;
 
+pub const PLUGIN_RUNTIME_PROTOCOL_PLUGIN_ID: &str = "lash.plugin_runtime";
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PersistedPluginRuntimeEvent {
+    pub plugin_id: String,
+    pub event: crate::PluginRuntimeEvent,
+}
+
+pub fn plugin_runtime_protocol_event(
+    plugin_id: impl Into<String>,
+    event: crate::PluginRuntimeEvent,
+) -> Result<ProtocolEvent, serde_json::Error> {
+    ProtocolEvent::typed(
+        PLUGIN_RUNTIME_PROTOCOL_PLUGIN_ID,
+        PersistedPluginRuntimeEvent {
+            plugin_id: plugin_id.into(),
+            event,
+        },
+    )
+}
+
+pub fn plugin_runtime_event_from_protocol(
+    event: &ProtocolEvent,
+) -> Result<Option<PersistedPluginRuntimeEvent>, serde_json::Error> {
+    event.decode(PLUGIN_RUNTIME_PROTOCOL_PLUGIN_ID)
+}
+
 /// Send an event to the channel if it's still open.
 pub(crate) async fn send_event(tx: &mpsc::Sender<SessionEvent>, event: SessionEvent) {
     if !tx.is_closed() {

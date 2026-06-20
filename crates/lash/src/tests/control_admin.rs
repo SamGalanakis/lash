@@ -37,6 +37,20 @@ impl lash_core::ProcessRunHandle for NoopProcessRunHandle {
     }
 }
 
+struct NonblockingObservationQuery;
+
+impl lash_core::PluginOperation for NonblockingObservationQuery {
+    const NAME: &'static str = "test.nonblocking_observation_query";
+    const DESCRIPTION: &'static str =
+        "Return a static value through observation-backed query dispatch.";
+    const SESSION_PARAM: lash_core::SessionParam = lash_core::SessionParam::Optional;
+
+    type Args = serde_json::Value;
+    type Output = serde_json::Value;
+}
+
+impl lash_core::PluginQuery for NonblockingObservationQuery {}
+
 #[derive(Default)]
 struct RecordingCancelAbility {
     calls: StdMutex<Vec<(lash_core::ProcessCancelSource, String, Option<String>)>>,
@@ -447,6 +461,17 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
+        .plugin(Arc::new(StaticPluginFactory::new(
+            "nonblocking-observation-query",
+            lash_core::PluginSpec::new()
+                .with_plugin_query_typed::<NonblockingObservationQuery, _, _>(
+                    |_ctx, _args| async move {
+                        Ok::<_, lash_core::PluginOperationFailure>(
+                            serde_json::json!({ "ok": true }),
+                        )
+                    },
+                ),
+        )))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
@@ -470,6 +495,17 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         let _ = session.usage_report();
         let _ = session.admin().tools().state().await?;
         let _ = session.admin().tools().active_manifests().await?;
+        let (_plugin_id, query_output) = session
+            .plugin_operations()
+            .query_raw(
+                <NonblockingObservationQuery as lash_core::PluginOperation>::NAME,
+                serde_json::json!({}),
+            )
+            .await?;
+        assert_eq!(
+            query_output.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
         let _ = session.processes().list().await?;
         Result::<()>::Ok(())
     })

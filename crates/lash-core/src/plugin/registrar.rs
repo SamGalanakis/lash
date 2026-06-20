@@ -99,7 +99,9 @@ pub(crate) struct PluginContributions {
     pub(crate) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
     pub(crate) runtime_event_hooks: Vec<RegisteredHook<PluginLifecycleEventHook>>,
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
-    pub(crate) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
+    pub(crate) plugin_queries: BTreeMap<String, RegisteredPluginQuery>,
+    pub(crate) plugin_commands: BTreeMap<String, RegisteredPluginCommand>,
+    pub(crate) plugin_tasks: BTreeMap<String, RegisteredPluginTask>,
     pub(crate) turn_context_transforms: Vec<(i32, RegisteredHook<Arc<dyn TurnContextTransform>>)>,
     pub(crate) context_compactors: Vec<(i32, RegisteredHook<Arc<dyn ContextCompactor>>)>,
     pub(crate) protocol_session: Option<RegisteredExclusiveHook<Arc<dyn ProtocolSessionPlugin>>>,
@@ -246,50 +248,173 @@ impl SessionRegistrations<'_> {
     }
 }
 
-pub struct PluginActionRegistrations<'a> {
+pub struct PluginOperationRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
-impl PluginActionRegistrations<'_> {
-    pub fn op(self, def: PluginActionDef, handler: PluginActionHandler) -> Result<(), PluginError> {
-        self.reg.add_plugin_action(def, handler)
+impl PluginOperationRegistrations<'_> {
+    pub(crate) fn query(
+        self,
+        def: PluginOperationDef,
+        handler: PluginQueryHandler,
+    ) -> Result<(), PluginError> {
+        self.reg.add_plugin_query(def, handler)
     }
 
-    pub fn typed<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
+    pub(crate) fn command(
+        self,
+        def: PluginOperationDef,
+        handler: PluginCommandHandler,
+    ) -> Result<(), PluginError> {
+        self.reg.add_plugin_command(def, handler)
+    }
+
+    pub(crate) fn task(
+        self,
+        def: PluginOperationDef,
+        handler: PluginTaskHandler,
+    ) -> Result<(), PluginError> {
+        self.reg.add_plugin_task(def, handler)
+    }
+
+    pub fn typed_query<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
     where
-        Op: PluginAction,
-        F: Fn(PluginActionContext, Op::Args) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Op::Output, PluginActionFailure>> + Send + 'static,
+        Op: PluginQuery,
+        F: Fn(PluginQueryContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Op::Output, PluginOperationFailure>> + Send + 'static,
     {
-        self.op(
-            plugin_action_def::<Op>(),
+        self.query(
+            plugin_operation_def::<Op>(PluginOperationKind::Query),
             Arc::new(move |ctx, args| {
                 let parsed = serde_json::from_value::<Op::Args>(args);
                 match parsed {
                     Ok(args) => {
                         let fut = handler(ctx, args);
                         Box::pin(async move {
-                            match fut.await {
-                                Ok(output) => match serde_json::to_value(output) {
-                                    Ok(value) => ToolResult::ok(value),
-                                    Err(err) => ToolResult::err(serde_json::json!(format!(
-                                        "failed to serialize {} output: {err}",
-                                        Op::NAME
-                                    ))),
-                                },
-                                Err(err) => ToolResult::err(serde_json::json!(err.to_string())),
-                            }
-                        })
+                            let output = fut.await?;
+                            serde_json::to_value(output).map_err(|err| {
+                                PluginOperationFailure::new(format!(
+                                    "failed to serialize {} output: {err}",
+                                    Op::NAME
+                                ))
+                            })
+                        }) as PluginQueryInvokeFuture
                     }
                     Err(err) => Box::pin(async move {
-                        ToolResult::err(serde_json::json!(format!(
+                        Err(PluginOperationFailure::new(format!(
                             "invalid {} args: {err}",
                             Op::NAME
                         )))
-                    }),
+                    }) as PluginQueryInvokeFuture,
                 }
             }),
         )
+    }
+
+    pub fn typed_command<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
+    where
+        Op: PluginCommand,
+        F: Fn(PluginCommandContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<PluginCommandOutcome<Op::Output>, PluginOperationFailure>>
+            + Send
+            + 'static,
+    {
+        self.command(
+            plugin_operation_def::<Op>(PluginOperationKind::Command),
+            Arc::new(move |ctx, args| {
+                let parsed = serde_json::from_value::<Op::Args>(args);
+                match parsed {
+                    Ok(args) => {
+                        let fut = handler(ctx, args);
+                        Box::pin(async move {
+                            let outcome = fut.await?;
+                            let output = serde_json::to_value(outcome.output).map_err(|err| {
+                                PluginOperationFailure::new(format!(
+                                    "failed to serialize {} output: {err}",
+                                    Op::NAME
+                                ))
+                            })?;
+                            Ok(ErasedPluginCommandOutcome {
+                                output,
+                                events: outcome.events,
+                                directives: outcome.directives,
+                            })
+                        }) as PluginCommandInvokeFuture
+                    }
+                    Err(err) => Box::pin(async move {
+                        Err(PluginOperationFailure::new(format!(
+                            "invalid {} args: {err}",
+                            Op::NAME
+                        )))
+                    }) as PluginCommandInvokeFuture,
+                }
+            }),
+        )
+    }
+
+    pub fn typed_command_value<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
+    where
+        Op: PluginCommand,
+        F: Fn(PluginCommandContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Op::Output, PluginOperationFailure>> + Send + 'static,
+    {
+        self.typed_command::<Op, _, _>(move |ctx, args| {
+            let fut = handler(ctx, args);
+            async move { fut.await.map(PluginCommandOutcome::new) }
+        })
+    }
+
+    pub fn typed_task<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
+    where
+        Op: PluginTask,
+        F: Fn(PluginTaskContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<PluginTaskOutcome<Op::Output>, PluginOperationFailure>>
+            + Send
+            + 'static,
+    {
+        self.task(
+            plugin_operation_def::<Op>(PluginOperationKind::Task),
+            Arc::new(move |ctx, args| {
+                let parsed = serde_json::from_value::<Op::Args>(args);
+                match parsed {
+                    Ok(args) => {
+                        let fut = handler(ctx, args);
+                        Box::pin(async move {
+                            let outcome = fut.await?;
+                            let output = serde_json::to_value(outcome.output).map_err(|err| {
+                                PluginOperationFailure::new(format!(
+                                    "failed to serialize {} output: {err}",
+                                    Op::NAME
+                                ))
+                            })?;
+                            Ok(ErasedPluginTaskOutcome {
+                                output,
+                                events: outcome.events,
+                                directives: outcome.directives,
+                            })
+                        }) as PluginTaskInvokeFuture
+                    }
+                    Err(err) => Box::pin(async move {
+                        Err(PluginOperationFailure::new(format!(
+                            "invalid {} args: {err}",
+                            Op::NAME
+                        )))
+                    }) as PluginTaskInvokeFuture,
+                }
+            }),
+        )
+    }
+
+    pub fn typed_task_value<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
+    where
+        Op: PluginTask,
+        F: Fn(PluginTaskContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Op::Output, PluginOperationFailure>> + Send + 'static,
+    {
+        self.typed_task::<Op, _, _>(move |ctx, args| {
+            let fut = handler(ctx, args);
+            async move { fut.await.map(PluginTaskOutcome::new) }
+        })
     }
 }
 
@@ -398,8 +523,8 @@ impl PluginRegistrar {
         SessionRegistrations { reg: self }
     }
 
-    pub fn actions(&mut self) -> PluginActionRegistrations<'_> {
-        PluginActionRegistrations { reg: self }
+    pub fn operations(&mut self) -> PluginOperationRegistrations<'_> {
+        PluginOperationRegistrations { reg: self }
     }
 
     pub fn context(&mut self) -> ContextRegistrations<'_> {
@@ -546,20 +671,75 @@ impl PluginRegistrar {
         )
     }
 
-    fn add_plugin_action(
-        &mut self,
-        def: PluginActionDef,
-        handler: PluginActionHandler,
-    ) -> Result<(), PluginError> {
-        if self.contributions.plugin_actions.contains_key(&def.name) {
+    fn operation_owner(&self) -> Result<String, PluginError> {
+        self.registering_plugin_id
+            .clone()
+            .ok_or_else(|| PluginError::Registration("missing registering plugin id".to_string()))
+    }
+
+    fn ensure_unique_operation_name(&self, name: &str) -> Result<(), PluginError> {
+        if self.contributions.plugin_queries.contains_key(name)
+            || self.contributions.plugin_commands.contains_key(name)
+            || self.contributions.plugin_tasks.contains_key(name)
+        {
             return Err(PluginError::Registration(format!(
-                "duplicate plugin action name `{}`",
-                def.name
+                "duplicate plugin operation name `{name}`"
             )));
         }
-        self.contributions
-            .plugin_actions
-            .insert(def.name.clone(), RegisteredPluginAction { def, handler });
+        Ok(())
+    }
+
+    fn add_plugin_query(
+        &mut self,
+        def: PluginOperationDef,
+        handler: PluginQueryHandler,
+    ) -> Result<(), PluginError> {
+        self.ensure_unique_operation_name(&def.name)?;
+        let plugin_id = self.operation_owner()?;
+        self.contributions.plugin_queries.insert(
+            def.name.clone(),
+            RegisteredPluginQuery {
+                plugin_id,
+                def,
+                handler,
+            },
+        );
+        Ok(())
+    }
+
+    fn add_plugin_command(
+        &mut self,
+        def: PluginOperationDef,
+        handler: PluginCommandHandler,
+    ) -> Result<(), PluginError> {
+        self.ensure_unique_operation_name(&def.name)?;
+        let plugin_id = self.operation_owner()?;
+        self.contributions.plugin_commands.insert(
+            def.name.clone(),
+            RegisteredPluginCommand {
+                plugin_id,
+                def,
+                handler,
+            },
+        );
+        Ok(())
+    }
+
+    fn add_plugin_task(
+        &mut self,
+        def: PluginOperationDef,
+        handler: PluginTaskHandler,
+    ) -> Result<(), PluginError> {
+        self.ensure_unique_operation_name(&def.name)?;
+        let plugin_id = self.operation_owner()?;
+        self.contributions.plugin_tasks.insert(
+            def.name.clone(),
+            RegisteredPluginTask {
+                plugin_id,
+                def,
+                handler,
+            },
+        );
         Ok(())
     }
 

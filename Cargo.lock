@@ -2467,6 +2467,7 @@ version = "0.1.0-alpha.64"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-runtime",
  "lash-tui",
  "lash-tui-extensions",
@@ -2713,6 +2714,7 @@ version = "0.1.0-alpha.64"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-tool-support",
  "lash-tools",
  "schemars",
@@ -2804,6 +2806,7 @@ version = "0.1.0-alpha.64"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-lashlang-runtime",
  "lash-plugin-process-controls",
  "lash-sqlite-store",
  "lash-tools",

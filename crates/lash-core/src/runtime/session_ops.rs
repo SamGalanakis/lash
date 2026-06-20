@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::{PluginActionInvokeError, SessionError};
+use crate::{PluginOperationInvokeError, SessionError};
 
 use super::LashRuntime;
 use super::state::{
@@ -271,19 +271,46 @@ impl LashRuntime {
             .collect())
     }
 
-    pub async fn invoke_plugin_action(
+    pub async fn query_plugin(
         &self,
         name: &str,
         args: serde_json::Value,
         session_id: Option<String>,
-    ) -> Result<crate::ToolResult, PluginActionInvokeError> {
+    ) -> Result<(String, serde_json::Value), PluginOperationInvokeError> {
         let manager = self.runtime_session_services()?;
         let Some(session) = self.session.as_ref() else {
-            return Err(PluginActionInvokeError::Unknown(name.to_string()));
+            return Err(PluginOperationInvokeError::Unknown(
+                "runtime session not available".to_string(),
+            ));
         };
         session
             .plugins()
-            .invoke_plugin_action(
+            .query_plugin(
+                name,
+                args,
+                session_id,
+                true,
+                manager.read_service(),
+                manager.process_read_service(),
+            )
+            .await
+    }
+
+    pub async fn run_plugin_command(
+        &mut self,
+        name: &str,
+        args: serde_json::Value,
+        session_id: Option<String>,
+    ) -> Result<crate::PluginCommandReceipt<serde_json::Value>, PluginOperationInvokeError> {
+        let manager = self.runtime_session_services()?;
+        let Some(session) = self.session.as_ref() else {
+            return Err(PluginOperationInvokeError::Unknown(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let (plugin_id, outcome) = session
+            .plugins()
+            .run_plugin_command(
                 name,
                 args,
                 session_id,
@@ -293,6 +320,171 @@ impl LashRuntime {
                 manager.graph_service(),
                 manager.process_service(),
             )
-            .await
+            .await?;
+        let (events, queued_batches) = self
+            .apply_plugin_operation_effects(&plugin_id, outcome.events, outcome.directives)
+            .await?;
+        Ok(crate::PluginCommandReceipt {
+            output: outcome.output,
+            events,
+            queued_batches,
+        })
+    }
+
+    pub async fn run_plugin_task(
+        &mut self,
+        name: &str,
+        args: serde_json::Value,
+        session_id: Option<String>,
+        scoped_effect_controller: crate::ScopedEffectController<'static>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Result<crate::PluginTaskReceipt<serde_json::Value>, PluginOperationInvokeError> {
+        let manager = self.runtime_session_services()?;
+        let Some(session) = self.session.as_ref() else {
+            return Err(PluginOperationInvokeError::Unknown(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let (plugin_id, outcome) = session
+            .plugins()
+            .run_plugin_task(
+                name,
+                args,
+                session_id,
+                true,
+                manager.state_service(),
+                manager.lifecycle_service(),
+                manager.graph_service(),
+                manager.process_service(),
+                scoped_effect_controller,
+                cancellation_token,
+            )
+            .await?;
+        let (events, queued_batches) = self
+            .apply_plugin_operation_effects(&plugin_id, outcome.events, outcome.directives)
+            .await?;
+        Ok(crate::PluginTaskReceipt {
+            output: outcome.output,
+            events,
+            queued_batches,
+        })
+    }
+
+    async fn apply_plugin_operation_effects(
+        &mut self,
+        plugin_id: &str,
+        events: Vec<crate::PluginRuntimeEvent>,
+        directives: Vec<crate::PluginRuntimeDirective>,
+    ) -> Result<
+        (
+            Vec<crate::PluginOwned<crate::PluginRuntimeEvent>>,
+            Vec<crate::runtime::QueuedWorkBatch>,
+        ),
+        PluginOperationInvokeError,
+    > {
+        let owned_events = events
+            .into_iter()
+            .map(|event| crate::PluginOwned {
+                plugin_id: plugin_id.to_string(),
+                value: event,
+            })
+            .collect::<Vec<_>>();
+        if !owned_events.is_empty() {
+            let nodes = owned_events
+                .iter()
+                .map(|owned| {
+                    crate::plugin_runtime_protocol_event(&owned.plugin_id, owned.value.clone())
+                        .map(crate::SessionAppendNode::protocol_event)
+                        .map_err(|err| {
+                            PluginOperationInvokeError::Failed(format!(
+                                "failed to encode plugin runtime event: {err}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            self.append_plugin_runtime_event_nodes(&nodes).await?;
+        }
+        self.stamp_live_plugin_state();
+        self.persist_plugin_operation_state_if_needed().await?;
+
+        let mut queued_batches = Vec::new();
+        for directive in directives {
+            match directive {
+                crate::PluginRuntimeDirective::QueueTurn {
+                    input,
+                    delivery_policy,
+                    slot_policy,
+                    source_key,
+                } => {
+                    let batch = self
+                        .enqueue_turn_input(input, delivery_policy, slot_policy, source_key)
+                        .await
+                        .map_err(|err| {
+                            PluginOperationInvokeError::Failed(format!(
+                                "failed to queue plugin turn request: {err}"
+                            ))
+                        })?;
+                    queued_batches.push(batch);
+                }
+            }
+        }
+
+        Ok((owned_events, queued_batches))
+    }
+
+    async fn append_plugin_runtime_event_nodes(
+        &mut self,
+        nodes: &[crate::SessionAppendNode],
+    ) -> Result<(), PluginOperationInvokeError> {
+        let node_ids = append_session_nodes_to_state_with_clock(
+            &mut self.state,
+            nodes,
+            self.host.core.clock.as_ref(),
+        );
+        if let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        {
+            let graph = crate::store::GraphCommitDelta::Append {
+                nodes: node_ids
+                    .iter()
+                    .filter_map(|id| self.state.session_graph.find_node(id).cloned())
+                    .collect(),
+                leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
+            };
+            let commit = crate::store::RuntimeCommit::persisted_state_with_graph_commit(
+                &self.state,
+                graph,
+                &[],
+            );
+            let result = store.commit_runtime_state(commit).await.map_err(|err| {
+                PluginOperationInvokeError::Failed(format!(
+                    "failed to persist plugin runtime events: {err}"
+                ))
+            })?;
+            self.state.apply_persisted_commit_result(result);
+        }
+        Ok(())
+    }
+
+    async fn persist_plugin_operation_state_if_needed(
+        &mut self,
+    ) -> Result<(), PluginOperationInvokeError> {
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            return Ok(());
+        };
+        let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
+        let result = store.commit_runtime_state(commit).await.map_err(|err| {
+            PluginOperationInvokeError::Failed(format!(
+                "failed to persist plugin operation state: {err}"
+            ))
+        })?;
+        self.state.apply_persisted_commit_result(result);
+        Ok(())
     }
 }

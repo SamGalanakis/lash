@@ -88,20 +88,20 @@ pub(crate) fn status_tool_result(root: &Path, state: &Arc<Mutex<RuntimeState>>) 
     }
 }
 
-pub(crate) fn tool_result_output<T>(result: ToolResult) -> Result<T, PluginActionFailure>
+pub(crate) fn tool_result_output<T>(result: ToolResult) -> Result<T, PluginOperationFailure>
 where
     T: serde::de::DeserializeOwned,
 {
     if !result.is_success() {
-        return Err(PluginActionFailure::new(
+        return Err(PluginOperationFailure::new(
             result.value_for_projection().to_string(),
         ));
     }
     let output = result
         .into_done_output()
-        .map_err(|_| PluginActionFailure::new("autoresearch tool returned pending output"))?;
+        .map_err(|_| PluginOperationFailure::new("autoresearch tool returned pending output"))?;
     serde_json::from_value(output.value_for_projection())
-        .map_err(|err| PluginActionFailure::new(format!("invalid autoresearch output: {err}")))
+        .map_err(|err| PluginOperationFailure::new(format!("invalid autoresearch output: {err}")))
 }
 
 pub(crate) fn autoresearch_tool_names() -> Vec<String> {

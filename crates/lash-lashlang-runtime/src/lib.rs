@@ -83,54 +83,23 @@ impl LashlangToolBinding {
         self
     }
 
-    pub fn executable_for(&self, tool_name: &str) -> ResolvedLashlangToolBinding {
-        let module_path = if self.module_path.is_empty() {
-            vec!["tools".to_string()]
-        } else {
-            self.module_path.clone()
-        };
-        let operation = self
-            .operation
-            .as_deref()
-            .filter(|operation| !operation.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| tool_name.replace('_', "."));
-        let authority_type = self
-            .authority_type
-            .as_deref()
-            .filter(|authority_type| !authority_type.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| default_authority_type(&module_path));
-        ResolvedLashlangToolBinding {
-            module_path,
-            operation,
-            authority_type,
-            aliases: self.aliases.clone(),
-        }
-    }
-
-    pub fn required_for_remote(
-        manifest: &lash_core::ToolManifest,
-    ) -> Result<ResolvedLashlangToolBinding, String> {
-        tool_lashlang_binding(manifest).required_executable_for_remote(&manifest.name)
-    }
-
-    pub fn required_executable_for_remote(
-        &self,
-        tool_name: &str,
-    ) -> Result<ResolvedLashlangToolBinding, String> {
+    pub fn executable_for(&self, tool_name: &str) -> Result<ResolvedLashlangToolBinding, String> {
         if self.module_path.is_empty() {
             return Err(format!(
-                "tool `{tool_name}` is missing an explicit remote module path"
+                "tool `{tool_name}` is missing an explicit Lashlang module path"
             ));
+        }
+        for segment in &self.module_path {
+            validate_lashlang_identifier(tool_name, "module path segment", segment)?;
         }
         let operation = self
             .operation
             .as_deref()
             .filter(|operation| !operation.trim().is_empty())
             .ok_or_else(|| {
-                format!("tool `{tool_name}` is missing an explicit remote operation name")
+                format!("tool `{tool_name}` is missing an explicit Lashlang operation name")
             })?;
+        validate_lashlang_identifier(tool_name, "operation name", operation)?;
         let authority_type = self
             .authority_type
             .as_deref()
@@ -143,6 +112,19 @@ impl LashlangToolBinding {
             authority_type,
             aliases: self.aliases.clone(),
         })
+    }
+
+    pub fn required_for_remote(
+        manifest: &lash_core::ToolManifest,
+    ) -> Result<ResolvedLashlangToolBinding, String> {
+        required_tool_lashlang_executable(manifest)
+    }
+
+    pub fn required_executable_for_remote(
+        &self,
+        tool_name: &str,
+    ) -> Result<ResolvedLashlangToolBinding, String> {
+        self.executable_for(tool_name)
     }
 }
 
@@ -177,13 +159,57 @@ fn default_authority_type(module_path: &[String]) -> String {
         .unwrap_or_else(|| "Tool".to_string())
 }
 
-pub fn tool_lashlang_binding(manifest: &lash_core::ToolManifest) -> LashlangToolBinding {
+fn validate_lashlang_identifier(tool_name: &str, label: &str, value: &str) -> Result<(), String> {
+    let value = value.trim();
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(format!("tool `{tool_name}` has an empty Lashlang {label}"));
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(format!(
+            "tool `{tool_name}` has invalid Lashlang {label} `{value}`"
+        ));
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        return Err(format!(
+            "tool `{tool_name}` has invalid Lashlang {label} `{value}`"
+        ));
+    }
+    Ok(())
+}
+
+pub fn tool_lashlang_binding(
+    manifest: &lash_core::ToolManifest,
+) -> Result<Option<LashlangToolBinding>, String> {
     manifest
         .bindings
         .get(LASHLANG_TOOL_BINDING_KEY)
         .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|err| {
+            format!(
+                "tool `{}` has invalid `{LASHLANG_TOOL_BINDING_KEY}` binding: {err}",
+                manifest.name
+            )
+        })
+}
+
+pub fn required_tool_lashlang_binding(
+    manifest: &lash_core::ToolManifest,
+) -> Result<LashlangToolBinding, String> {
+    tool_lashlang_binding(manifest)?.ok_or_else(|| {
+        format!(
+            "tool `{}` is missing an explicit `{LASHLANG_TOOL_BINDING_KEY}` binding",
+            manifest.name
+        )
+    })
+}
+
+pub fn required_tool_lashlang_executable(
+    manifest: &lash_core::ToolManifest,
+) -> Result<ResolvedLashlangToolBinding, String> {
+    required_tool_lashlang_binding(manifest)?.executable_for(&manifest.name)
 }
 
 pub trait ToolManifestLashlangExt {
@@ -300,7 +326,10 @@ impl LashlangSurface {
         Ok(self)
     }
 
-    pub fn host_environment(&self, catalog: &lash_core::ToolCatalog) -> LashlangHostEnvironment {
+    pub fn host_environment(
+        &self,
+        catalog: &lash_core::ToolCatalog,
+    ) -> Result<LashlangHostEnvironment, String> {
         lashlang_host_environment_from_tool_catalog(
             catalog,
             self.abilities,
@@ -315,23 +344,25 @@ pub fn lashlang_host_environment_from_tool_catalog(
     abilities: LashlangAbilities,
     language_features: LashlangLanguageFeatures,
     host_resources: LashlangHostCatalog,
-) -> LashlangHostEnvironment {
-    let mut resources = lashlang_resources_from_tool_catalog(catalog);
+) -> Result<LashlangHostEnvironment, String> {
+    let mut resources = lashlang_resources_from_tool_catalog(catalog)?;
     resources.extend(host_resources);
     if abilities.triggers {
         lashlang::add_trigger_resource_operations(&mut resources);
     }
-    LashlangHostEnvironment::new(resources, abilities).with_language_features(language_features)
+    Ok(
+        LashlangHostEnvironment::new(resources, abilities)
+            .with_language_features(language_features),
+    )
 }
 
 pub fn lashlang_resources_from_tool_catalog(
     catalog: &lash_core::ToolCatalog,
-) -> LashlangHostCatalog {
+) -> Result<LashlangHostCatalog, String> {
     let mut host_catalog = LashlangHostCatalog::new();
     for entry in catalog.tools.iter() {
         if entry.availability.is_callable() {
-            let lashlang_binding =
-                tool_lashlang_binding(&entry.manifest).executable_for(&entry.manifest.name);
+            let lashlang_binding = required_tool_lashlang_executable(&entry.manifest)?;
             host_catalog.add_module_operation(
                 lashlang_binding.module_path.iter().map(String::as_str),
                 lashlang_binding.authority_type.clone(),
@@ -342,7 +373,7 @@ pub fn lashlang_resources_from_tool_catalog(
             );
         }
     }
-    host_catalog
+    Ok(host_catalog)
 }
 
 pub fn lashlang_host_environment_satisfies_requirements(
@@ -762,7 +793,9 @@ impl lash_core::ProcessEngine for LashlangProcessEngine {
             .surface
             .clone()
             .for_process_registry(context.process_registry_available());
-        let host_environment = surface.host_environment(context.tool_catalog());
+        let host_environment = surface
+            .host_environment(context.tool_catalog())
+            .map_err(lash_core::PluginError::Session)?;
         if let Err(err) = lashlang_host_environment_satisfies_requirements(
             &artifact.host_requirements,
             &host_environment,
@@ -882,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_binding_defaults_remain_lashlang_local_policy() {
+    fn missing_tool_binding_is_not_fabricated() {
         let tool = lash_core::ToolDefinition::raw(
             "tool:test/read_file",
             "read_file",
@@ -891,12 +924,10 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let binding = tool_lashlang_binding(&tool.manifest).executable_for(&tool.manifest.name);
+        let err = required_tool_lashlang_executable(&tool.manifest)
+            .expect_err("missing explicit binding should fail");
 
-        assert_eq!(binding.module_path, vec!["tools"]);
-        assert_eq!(binding.operation, "read.file");
-        assert_eq!(binding.authority_type, "Tools");
-        assert_eq!(binding.call_path(), "tools.read.file");
+        assert!(err.contains("missing an explicit `lashlang.tool` binding"));
     }
 
     #[test]
@@ -914,12 +945,30 @@ mod tests {
                 .with_aliases(["cat"]),
         );
 
-        let binding = tool_lashlang_binding(&tool.manifest).executable_for(&tool.manifest.name);
+        let binding =
+            required_tool_lashlang_executable(&tool.manifest).expect("explicit binding resolves");
 
         assert_eq!(binding.module_path, vec!["fs"]);
         assert_eq!(binding.operation, "read");
         assert_eq!(binding.authority_type, "Filesystem");
         assert_eq!(binding.aliases, vec!["cat"]);
+    }
+
+    #[test]
+    fn dotted_operation_names_are_rejected() {
+        let tool = lash_core::ToolDefinition::raw(
+            "tool:test/update_plan",
+            "update_plan",
+            "update a plan",
+            lash_core::ToolDefinition::default_input_schema(),
+            serde_json::Value::Null,
+        )
+        .with_lashlang_binding(LashlangToolBinding::new(["tools"], "update.plan"));
+
+        let err = required_tool_lashlang_executable(&tool.manifest)
+            .expect_err("dotted operation cannot compile as one Lashlang operation");
+
+        assert!(err.contains("invalid Lashlang operation name `update.plan`"));
     }
 
     #[test]
@@ -1085,7 +1134,9 @@ mod tests {
         let surface = LashlangSurface::default()
             .with_plugin_extensions(&extensions)
             .expect("lashlang surface extension merges");
-        let environment = surface.host_environment(&lash_core::ToolCatalog::default());
+        let environment = surface
+            .host_environment(&lash_core::ToolCatalog::default())
+            .expect("empty tool catalog has no Lashlang bindings to validate");
 
         assert!(environment.abilities.sleep);
         assert!(environment.abilities.processes);

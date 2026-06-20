@@ -1,6 +1,7 @@
 //! Autoresearch tool catalog: tool provider, definitions, and shell execution.
 
 use super::*;
+use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 
 pub(crate) struct AutoresearchTools {
     pub(crate) workdir: PathBuf,
@@ -13,6 +14,12 @@ pub(crate) fn autoresearch_tool(
     input_schema: Value,
     output_schema: Value,
 ) -> ToolDefinition {
+    let operation = match name {
+        "init_experiment" => "init",
+        "run_experiment" => "run",
+        "log_experiment" => "log",
+        other => panic!("unknown autoresearch Lashlang tool binding for `{other}`"),
+    };
     ToolDefinition::raw(
         format!("tool:{name}"),
         name,
@@ -21,6 +28,10 @@ pub(crate) fn autoresearch_tool(
         output_schema,
     )
     .with_availability(lash_core::ToolAvailabilityConfig::off())
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["research"],
+        operation,
+    ))
     .with_scheduling(ToolScheduling::Parallel)
 }
 

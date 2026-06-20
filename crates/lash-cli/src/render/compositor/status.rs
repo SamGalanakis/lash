@@ -122,40 +122,44 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if !left_spans.is_empty() {
         let line = Line::from(left_spans);
         let width = line.width() as u16;
-        frame.write_line(0, 0, &line, width);
+        frame.write_line(area.x, area.y, &line, width);
     }
     if !right_spans.is_empty() {
         let line = Line::from(right_spans);
         let width = line.width() as u16;
         let x = area.width.saturating_sub(width);
-        frame.write_line(x, 0, &line, width);
+        frame.write_line(area.x + x, area.y, &line, width);
     }
 }
 
 fn build_status_slots(app: &App) -> (Vec<StatusSlot>, Vec<StatusSlot>) {
     let sep_style = theme::text_faint_style();
 
-    // LEFT side: brand · model · execution mode · variant
+    // LEFT side: model + level · execution mode · plugin modes.
+    // No "lash" brand here: this row is persistent chrome, and the input
+    // prompt already identifies the app strongly enough.
     let mut left = Vec::new();
-    left.push(StatusSlot {
-        spans: vec![
-            Span::raw(" "),
-            Span::styled(
-                "lash",
-                Style::default()
-                    .fg(theme::brand())
-                    .add_modifier(Modifier::Bold),
-            ),
-        ],
-        priority: 100, // always keep — identity anchor
-    });
     if !app.model.is_empty() {
+        let mut model = app.model.clone();
+        if let Some(variant) = app
+            .model_variant
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            model.push(' ');
+            model.push_str(variant);
+        }
         left.push(StatusSlot {
             spans: vec![
-                Span::styled(" · ", sep_style),
-                Span::styled(app.model.clone(), theme::text_subtle_style()),
+                Span::raw(" "),
+                Span::styled(
+                    model,
+                    Style::default()
+                        .fg(theme::text_primary())
+                        .add_modifier(Modifier::Bold),
+                ),
             ],
-            priority: 80,
+            priority: 100,
         });
     }
     if !app.execution_mode_label.is_empty() {
@@ -164,37 +168,62 @@ fn build_status_slots(app: &App) -> (Vec<StatusSlot>, Vec<StatusSlot>) {
                 Span::styled(" · ", sep_style),
                 Span::styled(app.execution_mode_label.clone(), theme::text_subtle_style()),
             ],
-            priority: 70,
+            priority: 80,
         });
     }
-    if let Some(variant) = app
-        .model_variant
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
+    for label in app.plugin_mode_indicators.values() {
         left.push(StatusSlot {
             spans: vec![
                 Span::styled(" · ", sep_style),
                 Span::styled(
-                    variant.to_string(),
+                    label.clone(),
                     Style::default()
                         .fg(theme::brand())
                         .add_modifier(Modifier::Bold),
                 ),
             ],
-            priority: 40, // drop before model under pressure
+            priority: 50,
         });
     }
 
-    // RIGHT side: context-window meter. The expand keybind is searchable
-    // via `/controls` and the `▸` marker on tool activities — no teaching
-    // slot needed in the status bar.
+    // RIGHT side: context-window meter · git/cwd metadata.
     let mut right = Vec::new();
     if let Some(ctx) = status_bar_context_spans(app) {
         right.push(ctx);
     }
+    right.extend(status_bar_location_slots(app));
 
     (left, right)
+}
+
+fn status_bar_location_slots(app: &App) -> Vec<StatusSlot> {
+    let repo_label = app.repo_status.as_ref().map(|repo| repo.display_ref());
+    let has_repo_label = repo_label.as_deref().is_some_and(|label| !label.is_empty());
+    let has_cwd = !app.cwd.is_empty();
+    if !has_repo_label && !has_cwd {
+        return Vec::new();
+    }
+    let mut slots = Vec::new();
+    if let Some(label) = repo_label.filter(|label| !label.is_empty()) {
+        slots.push(StatusSlot {
+            spans: vec![
+                Span::styled(" · ", theme::text_faint_style()),
+                text_display::sanitize_span(label, theme::text_subtle_style()),
+            ],
+            priority: 75,
+        });
+    }
+    if has_cwd {
+        slots.push(StatusSlot {
+            spans: vec![
+                Span::styled(" · ", theme::text_faint_style()),
+                text_display::sanitize_span(app.cwd.clone(), theme::text_subtle_style()),
+                Span::raw(" "),
+            ],
+            priority: 35,
+        });
+    }
+    slots
 }
 
 fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {

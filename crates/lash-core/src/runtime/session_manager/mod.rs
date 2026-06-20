@@ -219,6 +219,14 @@ impl RuntimeSessionServices {
         })
     }
 
+    pub(in crate::runtime) fn read_service(
+        self: &Arc<Self>,
+    ) -> Arc<dyn crate::plugin::SessionReadService> {
+        Arc::new(RuntimeSessionStateService {
+            services: Arc::clone(self),
+        })
+    }
+
     pub(in crate::runtime) fn lifecycle_service(
         self: &Arc<Self>,
     ) -> Arc<dyn crate::plugin::SessionLifecycleService> {
@@ -236,6 +244,14 @@ impl RuntimeSessionServices {
     }
 
     pub(in crate::runtime) fn process_service(self: &Arc<Self>) -> Arc<dyn crate::ProcessService> {
+        Arc::new(RuntimeSessionProcessService {
+            services: Arc::clone(self),
+        })
+    }
+
+    pub(in crate::runtime) fn process_read_service(
+        self: &Arc<Self>,
+    ) -> Arc<dyn crate::plugin::ProcessReadService> {
         Arc::new(RuntimeSessionProcessService {
             services: Arc::clone(self),
         })
@@ -269,9 +285,9 @@ impl RuntimeSessionServices {
         runtime: &LashRuntime,
         persist_usage_to_store: bool,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Self, PluginActionInvokeError> {
+    ) -> Result<Self, PluginOperationInvokeError> {
         let Some(session) = runtime.session.as_ref() else {
-            return Err(PluginActionInvokeError::Unknown(
+            return Err(PluginOperationInvokeError::Unknown(
                 "session_manager".to_string(),
             ));
         };

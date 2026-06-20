@@ -248,7 +248,7 @@ impl ToolCatalog {
             .as_ref()
     }
 
-    fn resolve_contract(&self, tool_name: &str) -> Option<Arc<ToolContract>> {
+    pub fn resolve_contract(&self, tool_name: &str) -> Option<Arc<ToolContract>> {
         self.resolve_contract
             .as_ref()
             .and_then(|resolve| resolve(tool_name))

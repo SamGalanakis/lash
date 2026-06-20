@@ -403,6 +403,7 @@ impl SqliteRuntimeEffectController {
         let scope_id = claim.scope_id.clone();
         let replay_key = claim.replay_key.clone();
         let envelope_hash = claim.envelope_hash.clone();
+        let owner_id = self.inner.owner_id.clone();
         let lease_token = claim.lease_token.clone();
         let status = status.to_string();
 
@@ -412,26 +413,30 @@ impl SqliteRuntimeEffectController {
             .write(move |tx| {
                 let changed = tx.execute(
                     "UPDATE runtime_effect_replay
-                     SET status = ?5,
-                         outcome_json = ?6,
-                         error_json = ?7,
+                     SET status = ?6,
+                         outcome_json = ?7,
+                         error_json = ?8,
                          lease_owner_id = NULL,
                          lease_token = NULL,
                          lease_expires_at_ms = 0,
-                         updated_at_ms = ?8
+                         updated_at_ms = ?9
                      WHERE scope_id = ?1
                        AND replay_key = ?2
                        AND envelope_hash = ?3
-                       AND lease_token = ?4
-                       AND status = 'in_progress'",
+                       AND lease_owner_id = ?4
+                       AND lease_token = ?5
+                       AND status = 'in_progress'
+                       AND lease_expires_at_ms > ?10",
                     params![
                         scope_id.as_str(),
                         replay_key.as_str(),
                         envelope_hash.as_str(),
+                        owner_id.as_str(),
                         lease_token.as_str(),
                         status.as_str(),
                         outcome_json,
                         error_json,
+                        now as i64,
                         now as i64,
                     ],
                 )?;
@@ -448,6 +453,82 @@ impl SqliteRuntimeEffectController {
             .await
             .map_err(effect_sqlite_error)?;
         result
+    }
+
+    async fn renew_effect_lease(
+        &self,
+        claim: &ClaimedEffect,
+    ) -> Result<(), RuntimeEffectControllerError> {
+        let now = current_epoch_ms();
+        let renewed_expires_at = now.saturating_add(self.inner.lease_ttl_ms);
+        let scope_id = claim.scope_id.clone();
+        let replay_key = claim.replay_key.clone();
+        let envelope_hash = claim.envelope_hash.clone();
+        let owner_id = self.inner.owner_id.clone();
+        let lease_token = claim.lease_token.clone();
+
+        let result: Result<(), RuntimeEffectControllerError> = self
+            .inner
+            .conn
+            .write(move |tx| {
+                let changed = tx.execute(
+                    "UPDATE runtime_effect_replay
+                     SET lease_expires_at_ms = ?6,
+                         updated_at_ms = ?7
+                     WHERE scope_id = ?1
+                       AND replay_key = ?2
+                       AND envelope_hash = ?3
+                       AND lease_owner_id = ?4
+                       AND lease_token = ?5
+                       AND status = 'in_progress'
+                       AND lease_expires_at_ms > ?8",
+                    params![
+                        scope_id.as_str(),
+                        replay_key.as_str(),
+                        envelope_hash.as_str(),
+                        owner_id.as_str(),
+                        lease_token.as_str(),
+                        renewed_expires_at as i64,
+                        now as i64,
+                        now as i64,
+                    ],
+                )?;
+                if changed != 1 {
+                    return Ok(Err(RuntimeEffectControllerError::new(
+                        "sqlite_effect_replay_lease_lost",
+                        format!(
+                            "runtime effect replay lease was lost while executing scope `{scope_id}` replay key `{replay_key}`"
+                        ),
+                    )));
+                }
+                Ok(Ok(()))
+            })
+            .await
+            .map_err(effect_sqlite_error)?;
+        result
+    }
+
+    async fn execute_claimed_effect_with_renewal(
+        &self,
+        claim: &ClaimedEffect,
+        envelope: RuntimeEffectEnvelope,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let renew_every = Duration::from_millis((self.inner.lease_ttl_ms / 3).max(1));
+        let effect = self.execute_claimed_effect(claim, envelope, local_executor);
+        tokio::pin!(effect);
+        let renew_sleep = tokio::time::sleep(renew_every);
+        tokio::pin!(renew_sleep);
+
+        loop {
+            tokio::select! {
+                result = &mut effect => return result,
+                _ = &mut renew_sleep => {
+                    self.renew_effect_lease(claim).await?;
+                    renew_sleep.as_mut().reset(tokio::time::Instant::now() + renew_every);
+                }
+            }
+        }
     }
 
     async fn execute_claimed_effect(
@@ -579,7 +660,7 @@ impl RuntimeEffectController for SqliteRuntimeEffectController {
                 PreparedEffect::ReplayError(err) => return Err(err),
                 PreparedEffect::Claimed(claim) => {
                     let result = self
-                        .execute_claimed_effect(&claim, envelope, local_executor)
+                        .execute_claimed_effect_with_renewal(&claim, envelope, local_executor)
                         .await;
                     let finalize = self.finalize_effect(&claim, &result).await;
                     return match (result, finalize) {

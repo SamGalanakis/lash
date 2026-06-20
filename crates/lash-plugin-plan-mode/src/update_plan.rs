@@ -26,16 +26,17 @@ use lash_core::plugin::{
     SessionPlugin,
 };
 use lash_core::{PromptContribution, ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 const PLUGIN_ID: &str = "update_plan";
 const UPDATE_PLAN_SNAPSHOT_EVENT: &str = "update_plan.snapshot";
 const PLANNING_GUIDANCE: &str = concat!(
-    "Use `update_plan` for substantial multi-step work and skip it for trivial or single-step asks. ",
+    "Use `plan.update` for substantial multi-step work and skip it for trivial or single-step asks. ",
     "Write short steps and keep exactly one step `in_progress` while work is underway. ",
     "Mark completed work before moving on, use `explanation` when the plan changes, and update the plan as soon as scope or sequencing shifts. ",
     "Do not let the plan go stale while coding or running validation. ",
-    "After an `update_plan` call, briefly summarize what changed and what comes next instead of repeating the full checklist. ",
+    "After a `plan.update` call, briefly summarize what changed and what comes next instead of repeating the full checklist. ",
     "Finish by marking every step `completed` when the task is done.",
 );
 
@@ -139,6 +140,7 @@ fn update_plan_tool_definition() -> ToolDefinition {
                 "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}"
                     .into(),
             ])
+            .with_lashlang_binding(LashlangToolBinding::new(["plan"], "update"))
             .with_scheduling(ToolScheduling::Parallel)
 }
 

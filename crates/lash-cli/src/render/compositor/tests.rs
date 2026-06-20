@@ -62,12 +62,13 @@ mod tests {
         });
 
         let snapshot = lash_tui::render_snapshot(80, 4, |frame| draw(frame, &mut app));
-        let top = snapshot.visible_line_trimmed(0);
-        assert!(top.contains("lash · gpt-5.4 · standard · high"));
+        let bottom = snapshot.visible_line_trimmed(3);
+        assert!(bottom.contains("gpt-5.4 high · standard"));
+        assert!(!bottom.contains("lash · gpt-5.4"));
         // Context meter: tokens used + integer percent, separated by a
         // middle dot. The old representation was `7.0k / 1.1M (0.6%)`,
         // which gave three renderings of the same number.
-        assert!(top.contains("ctx 7.0k · 1%"));
+        assert!(bottom.contains("ctx 7.0k · 1%"));
     }
 
     #[test]
@@ -84,14 +85,16 @@ mod tests {
         // No `last_prompt_usage`, no `last_response_usage` — first turn.
 
         let snapshot = lash_tui::render_snapshot(80, 4, |frame| draw(frame, &mut app));
-        let top = snapshot.visible_line_trimmed(0);
-        // The `·` separators between identity fields (`lash · gpt-5.4`)
-        // are fine; what we don't want is a raw token count or a percent
-        // sourced from the streaming output estimate.
-        assert!(!top.contains('%'), "unexpected percent on top line: {top}");
+        let bottom = snapshot.visible_line_trimmed(3);
+        // What we don't want is a raw token count or a percent sourced from
+        // the streaming output estimate.
         assert!(
-            !top.contains("36"),
-            "unexpected token count on top line: {top}"
+            !bottom.contains('%'),
+            "unexpected percent on bottom line: {bottom}"
+        );
+        assert!(
+            !bottom.contains("36"),
+            "unexpected token count on bottom line: {bottom}"
         );
     }
 
@@ -231,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn input_badge_omits_session_name() {
+    fn bottom_metadata_omits_session_name_and_repo_name() {
         let mut app = App::new(
             "gpt-5.4".into(),
             "autumn-falls".into(),
@@ -244,10 +247,11 @@ mod tests {
             worktree: None,
         });
 
-        let snapshot = lash_tui::render_snapshot(84, 8, |frame| draw(frame, &mut app));
+        let snapshot = lash_tui::render_snapshot(84, 10, |frame| draw(frame, &mut app));
         let visible = snapshot.visible_lines_trimmed().join("\n");
 
-        assert!(visible.contains("lash · staging"));
+        assert!(visible.contains("staging"));
+        assert!(!visible.contains("lash · staging"));
         assert!(!visible.contains("autumn-falls"));
     }
 
@@ -430,7 +434,7 @@ mod tests {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: lash_tui_extensions::TuiExtensionContext<'_>,
+            _ctx: lash_tui_extensions::TuiExtensionContext,
         ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }

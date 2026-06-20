@@ -153,7 +153,8 @@ fn process_rows_are_input_chrome_not_history_content() {
 
     let areas = crate::render::chrome_areas(&app, 80, 24);
     assert_eq!(areas.process.height, 2);
-    assert_eq!(areas.process.y, areas.input.y + areas.input.height);
+    assert_eq!(areas.status.y, areas.input.y + areas.input.height);
+    assert_eq!(areas.process.y, areas.status.y + areas.status.height);
 }
 
 #[test]
@@ -336,6 +337,52 @@ fn tool_call_flushes_intermediate_stream_text_immediately() {
         app.timeline.get(1),
         Some(UiTimelineItem::Activity(_))
     ));
+}
+
+#[test]
+fn tool_call_started_renders_running_activity_until_completion() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.timeline.truncate(0);
+
+    app.handle_session_event(SessionEvent::ToolCallStart {
+        call_id: Some("tc-running".into()),
+        name: "read_file".into(),
+        args: serde_json::json!({"path":"README.md"}),
+    });
+
+    assert_eq!(app.timeline.len(), 1);
+    match &app.timeline[0] {
+        UiTimelineItem::Activity(activity) => {
+            assert_eq!(activity.call.call_id.as_deref(), Some("tc-running"));
+            assert_eq!(activity.call.summary, "read README.md");
+            assert_eq!(activity.result.status, ActivityStatus::Running);
+        }
+        other => panic!(
+            "expected running activity block, got {:?}",
+            other_variant_name(other)
+        ),
+    }
+
+    app.handle_session_event(SessionEvent::ToolCall {
+        call_id: Some("tc-running".into()),
+        name: "read_file".into(),
+        args: serde_json::json!({"path":"README.md"}),
+        output: lash_core::ToolCallOutput::success(serde_json::json!("==> README.md <==\n# Lash")),
+        duration_ms: 12,
+    });
+
+    assert_eq!(app.timeline.len(), 1);
+    match &app.timeline[0] {
+        UiTimelineItem::Activity(activity) => {
+            assert_eq!(activity.call.call_id.as_deref(), Some("tc-running"));
+            assert_eq!(activity.result.status, ActivityStatus::Completed);
+            assert_eq!(activity.duration_ms, 12);
+        }
+        other => panic!(
+            "expected completed activity block, got {:?}",
+            other_variant_name(other)
+        ),
+    }
 }
 
 #[test]

@@ -100,7 +100,7 @@ impl TuiExtension for ChromeTuiExtension {
         &self,
         action: &str,
         _arg: Option<&str>,
-        _ctx: TuiExtensionContext<'_>,
+        _ctx: TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String> {
         Err(format!("unknown chrome UI action `{action}`"))
     }

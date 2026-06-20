@@ -28,7 +28,7 @@ fn history_content_lines_snapshot(
     lines
 }
 
-fn line_slice_by_display_columns(line: &Line<'_>, start: usize, end: usize) -> String {
+pub(crate) fn line_slice_by_display_columns(line: &Line<'_>, start: usize, end: usize) -> String {
     let mut out = String::new();
     let mut col = 0usize;
     for span in &line.spans {
@@ -140,6 +140,60 @@ pub(crate) fn document_lines_snapshot(
         }
     }
     lines
+}
+
+pub(crate) fn document_overlay_content_area(body_area: Rect) -> Option<Rect> {
+    let width = 92u16.min(body_area.width.saturating_sub(4));
+    let height = body_area.height.saturating_sub(2).min(24);
+    if width < 32 || height < 8 {
+        return None;
+    }
+    let popup = text_layout::centered_rect(body_area, width, height);
+    Some(Rect::new(
+        popup.x + 2,
+        popup.y + 1,
+        popup.width.saturating_sub(4),
+        popup.height.saturating_sub(3),
+    ))
+}
+
+pub(crate) fn extract_document_selection_text(
+    app: &App,
+    frame_width: u16,
+    frame_height: u16,
+) -> Option<String> {
+    if !(app.selection.active || app.selection.visible) {
+        return None;
+    }
+    let document = app.document_state()?;
+    let content_area = document_overlay_content_area(Rect::new(0, 0, frame_width, frame_height))?;
+    let lines = document_lines_snapshot(document, content_area.width as usize);
+    let ((start_col, start_row), (end_col, end_row)) = selection_ordered(&app.selection);
+    let mut out = String::new();
+
+    for row in start_row..=end_row {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let local_start = if row == start_row {
+            start_col.saturating_sub(content_area.x) as usize
+        } else {
+            0
+        };
+        let local_end = if row == end_row {
+            end_col.saturating_sub(content_area.x) as usize
+        } else {
+            content_area.width as usize
+        };
+        if local_end <= local_start {
+            continue;
+        }
+        if let Some(line) = lines.get(row) {
+            out.push_str(line_slice_by_display_columns(line, local_start, local_end).trim_end());
+        }
+    }
+
+    if out.is_empty() { None } else { Some(out) }
 }
 
 pub(crate) fn document_max_scroll(

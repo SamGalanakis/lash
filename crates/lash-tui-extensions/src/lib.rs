@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash::admin::PluginAction;
-use lash::{PluginActions, TurnEvent};
+use lash::TurnEvent;
+use lash::plugins::PluginRuntimeEvent;
 use lash_tui::{Frame, InputEvent, TermCapabilities};
 
 pub use surface::{
@@ -136,6 +136,14 @@ pub enum TuiHostEffect {
         display_text: String,
         effective_text: String,
     },
+    RunPluginCommand {
+        name: String,
+        args: serde_json::Value,
+    },
+    RunPluginTask {
+        name: String,
+        args: serde_json::Value,
+    },
     MountSurface {
         spec: TuiSurfaceSpec,
     },
@@ -154,22 +162,8 @@ pub enum TuiHostEffect {
     },
 }
 
-pub async fn call_plugin_action<Op>(
-    actions: &PluginActions,
-    args: Op::Args,
-) -> Result<Op::Output, String>
-where
-    Op: PluginAction,
-{
-    actions
-        .call::<Op>(args)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-pub struct TuiExtensionContext<'a> {
-    pub actions: &'a PluginActions,
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TuiExtensionContext;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TuiRenderContext<'a> {
@@ -209,20 +203,16 @@ pub trait TuiExtension: Send + Sync {
         &self,
         _surface_key: &str,
         _event: &InputEvent,
-        _ctx: TuiExtensionContext<'_>,
+        _ctx: TuiExtensionContext,
     ) -> TuiInputOutcome {
         TuiInputOutcome::Ignored
-    }
-
-    async fn snapshot(&self, _ctx: TuiExtensionContext<'_>) -> Result<Vec<TuiHostEffect>, String> {
-        Ok(Vec::new())
     }
 
     async fn invoke_action(
         &self,
         action: &str,
         arg: Option<&str>,
-        ctx: TuiExtensionContext<'_>,
+        ctx: TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String>;
 
     fn handle_turn_event(&self, _event: &TurnEvent) -> Vec<TuiHostEffect> {
@@ -411,26 +401,10 @@ impl TuiExtensions {
         })
     }
 
-    pub async fn snapshot_all(
-        &self,
-        ctx: TuiExtensionContext<'_>,
-    ) -> Result<Vec<TuiHostEffect>, String> {
-        let mut effects = Vec::new();
-        for extension in &self.extensions {
-            let extension_effects = extension
-                .snapshot(TuiExtensionContext {
-                    actions: ctx.actions,
-                })
-                .await?;
-            effects.extend(self.process_effects(extension.id(), extension_effects));
-        }
-        Ok(effects)
-    }
-
     pub async fn invoke_parsed_command(
         &self,
         invocation: &TuiSlashInvocation,
-        ctx: TuiExtensionContext<'_>,
+        ctx: TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String> {
         let effects = invocation
             .extension
@@ -442,7 +416,7 @@ impl TuiExtensions {
     pub async fn invoke_shortcut(
         &self,
         invocation: &TuiShortcutInvocation,
-        ctx: TuiExtensionContext<'_>,
+        ctx: TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String> {
         let effects = invocation
             .extension
@@ -589,11 +563,7 @@ impl TuiExtensions {
         );
     }
 
-    pub fn handle_input(
-        &self,
-        event: &InputEvent,
-        ctx: TuiExtensionContext<'_>,
-    ) -> TuiInputOutcome {
+    pub fn handle_input(&self, event: &InputEvent, ctx: TuiExtensionContext) -> TuiInputOutcome {
         let target = self
             .surfaces
             .lock()
@@ -642,40 +612,6 @@ struct PlanModeStatus {
     plan_path: Option<String>,
 }
 
-async fn invoke_plan_mode_action(
-    ctx: TuiExtensionContext<'_>,
-    op_name: &str,
-) -> Result<PlanModeStatus, String> {
-    let status = match op_name {
-        "plan_mode.toggle" => {
-            call_plugin_action::<lash_plugin_plan_mode::PlanModeToggleOp>(
-                ctx.actions,
-                lash_plugin_plan_mode::PlanModeExternalArgs {},
-            )
-            .await?
-        }
-        "plan_mode.enable" => {
-            call_plugin_action::<lash_plugin_plan_mode::PlanModeEnableOp>(
-                ctx.actions,
-                lash_plugin_plan_mode::PlanModeExternalArgs {},
-            )
-            .await?
-        }
-        "plan_mode.disable" => {
-            call_plugin_action::<lash_plugin_plan_mode::PlanModeDisableOp>(
-                ctx.actions,
-                lash_plugin_plan_mode::PlanModeExternalArgs {},
-            )
-            .await?
-        }
-        other => return Err(format!("unknown plan mode op `{other}`")),
-    };
-    Ok(PlanModeStatus {
-        enabled: status.enabled,
-        plan_path: status.plan_path,
-    })
-}
-
 fn plan_mode_effects(status: &PlanModeStatus) -> Vec<TuiHostEffect> {
     let key = global_surface_id("plan_mode", "mode");
     let mut effects = if status.enabled {
@@ -708,6 +644,16 @@ fn plan_mode_effects(status: &PlanModeStatus) -> Vec<TuiHostEffect> {
         });
     }
     effects
+}
+
+fn plan_mode_status_from_payload(payload: &serde_json::Value) -> Option<PlanModeStatus> {
+    Some(PlanModeStatus {
+        enabled: payload.get("enabled")?.as_bool()?,
+        plan_path: payload
+            .get("plan_path")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    })
 }
 
 struct PlanModeTuiExtension;
@@ -748,26 +694,27 @@ impl TuiExtension for PlanModeTuiExtension {
         &self,
         action: &str,
         _arg: Option<&str>,
-        ctx: TuiExtensionContext<'_>,
+        _ctx: TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String> {
         match action {
-            "toggle" => {
-                let status = invoke_plan_mode_action(ctx, "plan_mode.toggle")
-                    .await
-                    .map_err(|err| format!("failed to toggle plan mode: {err}"))?;
-                let mut effects = plan_mode_effects(&status);
-                effects.push(TuiHostEffect::PushSystemMessage(if status.enabled {
-                    "Plan mode on.".to_string()
-                } else {
-                    "Plan mode off.".to_string()
-                }));
-                Ok(effects)
-            }
+            "toggle" => Ok(vec![TuiHostEffect::RunPluginCommand {
+                name: "plan_mode.toggle".to_string(),
+                args: serde_json::json!({}),
+            }]),
             other => Err(format!("unknown plan-mode UI action `{other}`")),
         }
     }
 
     fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
+        if let TurnEvent::PluginRuntime { plugin_id, event } = event
+            && plugin_id == "plan_mode"
+            && let PluginRuntimeEvent::Custom { name, payload } = event
+            && name == "plan_mode.state"
+            && let Some(status) = plan_mode_status_from_payload(payload)
+        {
+            return plan_mode_effects(&status);
+        }
+
         let TurnEvent::ToolCallCompleted { name, output, .. } = event else {
             return Vec::new();
         };
@@ -908,7 +855,7 @@ mod tests {
                 &self,
                 _action: &str,
                 _arg: Option<&str>,
-                _ctx: TuiExtensionContext<'_>,
+                _ctx: TuiExtensionContext,
             ) -> Result<Vec<TuiHostEffect>, String> {
                 Ok(Vec::new())
             }
@@ -1012,7 +959,7 @@ mod tests {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: TuiExtensionContext<'_>,
+            _ctx: TuiExtensionContext,
         ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }

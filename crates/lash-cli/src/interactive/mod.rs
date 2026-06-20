@@ -153,7 +153,7 @@ pub(crate) async fn run_app(
     let mut event_pump = AppEventPump::new();
     let app_tx = event_pump.sender();
     prompt_bridge.set_event_tx(app_tx.clone());
-    let mut snapshot_worker = UiSnapshotWorker::spawn(app_tx.clone(), Arc::clone(&ui_extensions));
+    let mut snapshot_worker = UiSnapshotWorker::spawn(app_tx.clone());
 
     // Kick off the background `@`-completion file index. Starting it here
     // (rather than lazily on the first `@` keystroke) means the walk is
@@ -297,7 +297,7 @@ pub(crate) async fn run_app(
             last_turn = Some(TurnReplayPayload {
                 prepared_turn: prepared,
                 turn_input,
-                execution_mode: current_execution_mode.clone(),
+                execution_mode: current_execution_mode,
             });
         }
     }
@@ -812,6 +812,26 @@ pub(crate) async fn run_app(
                     let _ = app_tx.send(AppEvent::RequestUiSnapshot);
                     last_ui_sync = tokio::time::Instant::now();
                 }
+            }
+            AppEvent::RequestQueuedWorkSnapshot => {
+                if let Err(err) = refresh_queued_work_snapshot(&mut app, &runtime).await {
+                    push_system_message(
+                        &mut app,
+                        format!("Failed to refresh durable queue: {err}"),
+                    );
+                }
+                app.dirty = true;
+            }
+            AppEvent::SystemMessage { message } => {
+                push_system_message(&mut app, message);
+                app.dirty = true;
+            }
+            AppEvent::SessionObservationFinished { stream_id } => {
+                tracing::trace!(
+                    stream_id,
+                    active_stream_id,
+                    "session observation stream reached commit"
+                );
             }
             AppEvent::Session {
                 stream_id,

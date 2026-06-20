@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(all(test, feature = "lashlang"))]
-use lash_lashlang_runtime::tool_lashlang_binding;
+use lash_lashlang_runtime::required_tool_lashlang_executable;
 use serde_json::Value;
 
 use crate::catalog::CatalogTool;
@@ -625,13 +625,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn catalog_tool(name: &str, description: &str) -> Value {
-        catalog_tool_from_definition(ToolDefinition::raw(
-            format!("tool:test/{name}"),
-            name,
-            description,
-            ToolContract::default_input_schema(),
-            json!({}),
-        ))
+        catalog_tool_with_metadata(name, description, Some("tools"), Vec::new())
     }
 
     fn catalog_tool_with_metadata(
@@ -682,7 +676,8 @@ mod tests {
         #[cfg(feature = "lashlang")]
         {
             let mut projected = projected;
-            let lashlang_binding = tool_lashlang_binding(&manifest).executable_for(&manifest.name);
+            let lashlang_binding = required_tool_lashlang_executable(&manifest)
+                .expect("catalog test tool has explicit Lashlang binding");
             let call = lashlang_binding.call_path();
             let projected_object = projected.as_object_mut().expect("catalog object");
             projected_object.insert(
@@ -902,7 +897,11 @@ mod tests {
         .with_examples(vec![
             "search songs by genre".to_string(),
             "search songs by play count".to_string(),
-        ]);
+        ])
+        .with_lashlang_binding(
+            LashlangToolBinding::new(["appworld"], "spotify_search_songs")
+                .with_aliases(["spotify_search_songs"]),
+        );
         let index = ToolDiscoveryIndex::build(1, &[catalog_tool_from_definition(spotify)]);
 
         let results = index.search(&json!({ "query": "spotify" }));

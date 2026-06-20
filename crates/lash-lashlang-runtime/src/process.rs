@@ -101,7 +101,12 @@ pub async fn run_lashlang_process(
             .surface
             .clone()
             .for_process_registry(context.process_registry_available());
-        let host_environment = surface.host_environment(&tool_catalog);
+        let host_environment = match surface.host_environment(&tool_catalog) {
+            Ok(host_environment) => host_environment,
+            Err(err) => {
+                return process_lashlang_failure("process_host_environment_invalid", err, None);
+            }
+        };
         if let Err(err) = lashlang_host_environment_satisfies_requirements(
             &artifact.host_requirements,
             &host_environment,

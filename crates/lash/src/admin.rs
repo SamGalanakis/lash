@@ -1,6 +1,6 @@
 pub use crate::session::SessionConfigPatch;
 use crate::support::*;
-pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
+pub use lash_core::{AcceptedInjectedTurnInput, PluginCommand, PluginQuery, PluginTask};
 
 #[derive(Clone)]
 pub struct Completions {
@@ -570,55 +570,94 @@ impl SessionAdmin {
         .await
     }
 
-    async fn invoke_plugin_action(
+    async fn query_plugin_raw(
         &self,
         name: &str,
         args: serde_json::Value,
-    ) -> Result<ToolResult> {
-        let session_id = self.runtime.observe().session_id().to_string();
-        let writer = self.runtime.writer();
-        writer
-            .lock()
-            .await
-            .invoke_plugin_action(name, args, Some(session_id))
+    ) -> Result<(String, serde_json::Value)> {
+        let observation = self.runtime.observe();
+        let session_id = observation.session_id().to_string();
+        observation
+            .query_plugin(name, args, Some(session_id))
             .await
             .map_err(Into::into)
     }
 
-    async fn call_plugin_action<Op: lash_core::PluginAction>(
+    async fn run_plugin_command_raw(
         &self,
-        args: Op::Args,
-    ) -> Result<Op::Output> {
-        let result = self
-            .invoke_plugin_action(
-                Op::NAME,
-                serde_json::to_value(args).map_err(|err| {
-                    EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
-                        "invalid {} args: {err}",
-                        Op::NAME
-                    )))
-                })?,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<lash_core::PluginCommandReceipt<serde_json::Value>> {
+        let session_id = self.runtime.observe().session_id().to_string();
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let receipt = runtime
+            .run_plugin_command(name, args, Some(session_id))
+            .await?;
+        self.record_plugin_operation_observations(&receipt.events, &receipt.queued_batches);
+        self.runtime.publish_from(&runtime);
+        Ok(receipt)
+    }
+
+    async fn run_plugin_task_raw_with_cancel(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        cancellation_token: CancellationToken,
+    ) -> Result<lash_core::PluginTaskReceipt<serde_json::Value>> {
+        let session_id = self.runtime.observe().session_id().to_string();
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let scope_id = format!(
+            "{session_id}:plugin_task:{name}:{}",
+            lash_core::TurnActivityId::fresh().0
+        );
+        let scoped_effect_controller = runtime
+            .effect_host()
+            .scoped_static(lash_core::ExecutionScope::runtime_operation(scope_id))
+            .map_err(EmbedError::Runtime)?
+            .ok_or_else(|| {
+                EmbedError::Plugin(lash_core::PluginError::Session(
+                    "plugin task execution requires an effect host that can create a static runtime-operation scope".to_string(),
+                ))
+            })?;
+        let receipt = runtime
+            .run_plugin_task(
+                name,
+                args,
+                Some(session_id),
+                scoped_effect_controller,
+                cancellation_token,
             )
             .await?;
-        let Some(output) = result.as_done_output() else {
-            return Err(EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
-                "{} returned a pending result where completed output is required",
-                Op::NAME
-            ))));
-        };
-        if !output.is_success() {
-            return Err(EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
-                "{} failed: {}",
-                Op::NAME,
-                output.value_for_projection()
-            ))));
+        self.record_plugin_operation_observations(&receipt.events, &receipt.queued_batches);
+        self.runtime.publish_from(&runtime);
+        Ok(receipt)
+    }
+
+    fn record_plugin_operation_observations(
+        &self,
+        events: &[lash_core::PluginOwned<lash_core::PluginRuntimeEvent>],
+        queued_batches: &[lash_core::runtime::QueuedWorkBatch],
+    ) {
+        for owned in events {
+            self.runtime
+                .record_turn_activity(lash_core::TurnActivity::independent(
+                    lash_core::TurnEvent::PluginRuntime {
+                        plugin_id: owned.plugin_id.clone(),
+                        event: owned.value.clone(),
+                    },
+                ));
         }
-        serde_json::from_value(output.value_for_projection()).map_err(|err| {
-            EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
-                "invalid {} output: {err}",
-                Op::NAME
-            )))
-        })
+        if !queued_batches.is_empty() {
+            self.runtime.record_queue_changed(
+                lash_core::SessionQueueEventKind::Enqueued,
+                queued_batches
+                    .iter()
+                    .map(|batch| batch.batch_id.clone())
+                    .collect(),
+            );
+        }
     }
 
     async fn compact_context(
@@ -1244,14 +1283,117 @@ impl SessionStateAdmin {
 }
 
 #[derive(Clone)]
-pub struct PluginActions {
+pub struct PluginOperations {
     pub(crate) control: SessionAdmin,
 }
 
-impl PluginActions {
-    pub async fn call<Op: lash_core::PluginAction>(&self, args: Op::Args) -> Result<Op::Output> {
-        self.control.call_plugin_action::<Op>(args).await
+impl PluginOperations {
+    pub async fn query<Op: lash_core::PluginQuery>(&self, args: Op::Args) -> Result<Op::Output> {
+        let (_plugin_id, output) = self
+            .control
+            .query_plugin_raw(Op::NAME, encode_plugin_args::<Op>(args)?)
+            .await?;
+        decode_plugin_output::<Op>(output)
     }
+
+    pub async fn query_raw(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<(String, serde_json::Value)> {
+        self.control.query_plugin_raw(name, args).await
+    }
+
+    pub async fn run_command<Op: lash_core::PluginCommand>(
+        &self,
+        args: Op::Args,
+    ) -> Result<lash_core::PluginCommandReceipt<Op::Output>> {
+        let receipt = self
+            .control
+            .run_plugin_command_raw(Op::NAME, encode_plugin_args::<Op>(args)?)
+            .await?;
+        Ok(lash_core::PluginCommandReceipt {
+            output: decode_plugin_output::<Op>(receipt.output)?,
+            events: receipt.events,
+            queued_batches: receipt.queued_batches,
+        })
+    }
+
+    pub async fn run_command_raw(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<lash_core::PluginCommandReceipt<serde_json::Value>> {
+        self.control.run_plugin_command_raw(name, args).await
+    }
+
+    pub async fn run_task<Op: lash_core::PluginTask>(
+        &self,
+        args: Op::Args,
+    ) -> Result<lash_core::PluginTaskReceipt<Op::Output>> {
+        self.run_task_with_cancel::<Op>(args, CancellationToken::new())
+            .await
+    }
+
+    pub async fn run_task_with_cancel<Op: lash_core::PluginTask>(
+        &self,
+        args: Op::Args,
+        cancellation_token: CancellationToken,
+    ) -> Result<lash_core::PluginTaskReceipt<Op::Output>> {
+        let receipt = self
+            .control
+            .run_plugin_task_raw_with_cancel(
+                Op::NAME,
+                encode_plugin_args::<Op>(args)?,
+                cancellation_token,
+            )
+            .await?;
+        Ok(lash_core::PluginTaskReceipt {
+            output: decode_plugin_output::<Op>(receipt.output)?,
+            events: receipt.events,
+            queued_batches: receipt.queued_batches,
+        })
+    }
+
+    pub async fn run_task_raw(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<lash_core::PluginTaskReceipt<serde_json::Value>> {
+        self.run_task_raw_with_cancel(name, args, CancellationToken::new())
+            .await
+    }
+
+    pub async fn run_task_raw_with_cancel(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        cancellation_token: CancellationToken,
+    ) -> Result<lash_core::PluginTaskReceipt<serde_json::Value>> {
+        self.control
+            .run_plugin_task_raw_with_cancel(name, args, cancellation_token)
+            .await
+    }
+}
+
+fn encode_plugin_args<Op: lash_core::PluginOperation>(args: Op::Args) -> Result<serde_json::Value> {
+    serde_json::to_value(args).map_err(|err| {
+        EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
+            "invalid {} args: {err}",
+            Op::NAME
+        )))
+    })
+}
+
+fn decode_plugin_output<Op: lash_core::PluginOperation>(
+    output: serde_json::Value,
+) -> Result<Op::Output> {
+    serde_json::from_value(output).map_err(|err| {
+        EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
+            "invalid {} output: {err}",
+            Op::NAME
+        )))
+    })
 }
 
 #[derive(Clone)]

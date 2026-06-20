@@ -159,11 +159,23 @@ impl PluginSession {
             .expect("plugin session must have a protocol driver")
     }
 
-    pub fn plugin_actions(&self) -> Vec<PluginActionDef> {
+    pub fn plugin_operations(&self) -> Vec<PluginOperationDef> {
         self.contributions
-            .plugin_actions
+            .plugin_queries
             .values()
             .map(|op| op.def.clone())
+            .chain(
+                self.contributions
+                    .plugin_commands
+                    .values()
+                    .map(|op| op.def.clone()),
+            )
+            .chain(
+                self.contributions
+                    .plugin_tasks
+                    .values()
+                    .map(|op| op.def.clone()),
+            )
             .collect()
     }
 
@@ -552,11 +564,71 @@ impl PluginSession {
         )
     }
 
+    fn effective_operation_session(
+        &self,
+        name: &str,
+        session_param: SessionParam,
+        session_id: Option<String>,
+        default_to_current_session: bool,
+    ) -> Result<Option<String>, PluginOperationInvokeError> {
+        let effective_session = session_id.or_else(|| {
+            if default_to_current_session && !self.session_id.is_empty() {
+                Some(self.session_id.clone())
+            } else {
+                None
+            }
+        });
+
+        match (session_param, effective_session.as_ref()) {
+            (SessionParam::Required, None) => {
+                return Err(PluginOperationInvokeError::MissingSession(name.to_string()));
+            }
+            (SessionParam::Forbidden, Some(_)) => {
+                return Err(PluginOperationInvokeError::UnexpectedSession(
+                    name.to_string(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(effective_session)
+    }
+
+    pub(crate) async fn query_plugin(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        session_id: Option<String>,
+        default_to_current_session: bool,
+        sessions: Arc<dyn SessionReadService>,
+        processes: Arc<dyn ProcessReadService>,
+    ) -> Result<(String, serde_json::Value), PluginOperationInvokeError> {
+        let Some(op) = self.contributions.plugin_queries.get(name).cloned() else {
+            return Err(PluginOperationInvokeError::Unknown(name.to_string()));
+        };
+        let effective_session = self.effective_operation_session(
+            name,
+            op.def.session_param,
+            session_id,
+            default_to_current_session,
+        )?;
+        let output = (op.handler)(
+            PluginQueryContext {
+                session_id: effective_session,
+                sessions,
+                processes,
+            },
+            args,
+        )
+        .await
+        .map_err(|err| PluginOperationInvokeError::Failed(err.to_string()))?;
+        Ok((op.plugin_id, output))
+    }
+
     #[expect(
         clippy::too_many_arguments,
-        reason = "plugin action invocation carries the explicit host services exposed to actions"
+        reason = "plugin command invocation carries the runtime mutation services exposed to commands"
     )]
-    pub async fn invoke_plugin_action(
+    pub async fn run_plugin_command_value(
         &self,
         name: &str,
         args: serde_json::Value,
@@ -566,61 +638,10 @@ impl PluginSession {
         session_lifecycle: Arc<dyn SessionLifecycleService>,
         session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
-    ) -> Result<ToolResult, PluginActionInvokeError> {
-        let Some(op) = self.contributions.plugin_actions.get(name).cloned() else {
-            return Err(PluginActionInvokeError::Unknown(name.to_string()));
-        };
-
-        let effective_session = session_id.or_else(|| {
-            if default_to_current_session && !self.session_id.is_empty() {
-                Some(self.session_id.clone())
-            } else {
-                None
-            }
-        });
-
-        match (op.def.session_param, effective_session.as_ref()) {
-            (SessionParam::Required, None) => {
-                return Err(PluginActionInvokeError::MissingSession(name.to_string()));
-            }
-            (SessionParam::Forbidden, Some(_)) => {
-                return Err(PluginActionInvokeError::UnexpectedSession(name.to_string()));
-            }
-            _ => {}
-        }
-
-        Ok((op.handler)(
-            PluginActionContext {
-                session_id: effective_session,
-                sessions,
-                session_lifecycle,
-                session_graph,
-                processes,
-            },
-            args,
-        )
-        .await)
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "typed action invocation mirrors the raw plugin action host service boundary"
-    )]
-    pub async fn call_plugin_action<Op: PluginAction>(
-        &self,
-        args: Op::Args,
-        session_id: Option<String>,
-        default_to_current_session: bool,
-        sessions: Arc<dyn SessionStateService>,
-        session_lifecycle: Arc<dyn SessionLifecycleService>,
-        session_graph: Arc<dyn SessionGraphService>,
-        processes: Arc<dyn crate::ProcessService>,
-    ) -> Result<Op::Output, PluginError> {
-        let args = serde_json::to_value(args)
-            .map_err(|err| PluginError::Invoke(format!("invalid {} args: {err}", Op::NAME)))?;
-        let result = self
-            .invoke_plugin_action(
-                Op::NAME,
+    ) -> Result<(String, PluginCommandOutcome<serde_json::Value>), PluginOperationInvokeError> {
+        let (plugin_id, outcome) = self
+            .run_plugin_command(
+                name,
                 args,
                 session_id,
                 default_to_current_session,
@@ -629,22 +650,137 @@ impl PluginSession {
                 session_graph,
                 processes,
             )
-            .await
-            .map_err(|err| PluginError::Invoke(err.to_string()))?;
-        let Some(output) = result.as_done_output() else {
-            return Err(PluginError::Invoke(format!(
-                "{} returned a pending result where completed output is required",
-                Op::NAME
-            )));
+            .await?;
+        Ok((
+            plugin_id,
+            PluginCommandOutcome {
+                output: outcome.output,
+                events: outcome.events,
+                directives: outcome.directives,
+            },
+        ))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "plugin command invocation carries the runtime mutation services exposed to commands"
+    )]
+    pub(crate) async fn run_plugin_command(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        session_id: Option<String>,
+        default_to_current_session: bool,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
+        processes: Arc<dyn crate::ProcessService>,
+    ) -> Result<(String, ErasedPluginCommandOutcome), PluginOperationInvokeError> {
+        let Some(op) = self.contributions.plugin_commands.get(name).cloned() else {
+            return Err(PluginOperationInvokeError::Unknown(name.to_string()));
         };
-        if !output.is_success() {
-            return Err(PluginError::Invoke(format!(
-                "{} failed: {}",
-                Op::NAME,
-                output.value_for_projection()
-            )));
-        }
-        serde_json::from_value(output.value_for_projection())
-            .map_err(|err| PluginError::Invoke(format!("invalid {} output: {err}", Op::NAME)))
+        let effective_session = self.effective_operation_session(
+            name,
+            op.def.session_param,
+            session_id,
+            default_to_current_session,
+        )?;
+        let outcome = (op.handler)(
+            PluginCommandContext {
+                session_id: effective_session,
+                sessions,
+                session_lifecycle,
+                session_graph,
+                processes,
+            },
+            args,
+        )
+        .await
+        .map_err(|err| PluginOperationInvokeError::Failed(err.to_string()))?;
+        Ok((op.plugin_id, outcome))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "plugin task invocation carries mutation services plus the scoped effect boundary"
+    )]
+    pub async fn run_plugin_task_value(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        session_id: Option<String>,
+        default_to_current_session: bool,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
+        processes: Arc<dyn crate::ProcessService>,
+        scoped_effect_controller: crate::ScopedEffectController<'static>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Result<(String, PluginTaskOutcome<serde_json::Value>), PluginOperationInvokeError> {
+        let (plugin_id, outcome) = self
+            .run_plugin_task(
+                name,
+                args,
+                session_id,
+                default_to_current_session,
+                sessions,
+                session_lifecycle,
+                session_graph,
+                processes,
+                scoped_effect_controller,
+                cancellation_token,
+            )
+            .await?;
+        Ok((
+            plugin_id,
+            PluginTaskOutcome {
+                output: outcome.output,
+                events: outcome.events,
+                directives: outcome.directives,
+            },
+        ))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "plugin task invocation carries mutation services plus the scoped effect boundary"
+    )]
+    pub(crate) async fn run_plugin_task(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        session_id: Option<String>,
+        default_to_current_session: bool,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
+        processes: Arc<dyn crate::ProcessService>,
+        scoped_effect_controller: crate::ScopedEffectController<'static>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Result<(String, ErasedPluginTaskOutcome), PluginOperationInvokeError> {
+        let Some(op) = self.contributions.plugin_tasks.get(name).cloned() else {
+            return Err(PluginOperationInvokeError::Unknown(name.to_string()));
+        };
+        let effective_session = self.effective_operation_session(
+            name,
+            op.def.session_param,
+            session_id,
+            default_to_current_session,
+        )?;
+        let outcome = (op.handler)(
+            PluginTaskContext {
+                session_id: effective_session,
+                sessions,
+                session_lifecycle,
+                session_graph,
+                processes,
+                scoped_effect_controller,
+                cancellation_token,
+            },
+            args,
+        )
+        .await
+        .map_err(|err| PluginOperationInvokeError::Failed(err.to_string()))?;
+        Ok((op.plugin_id, outcome))
     }
 }

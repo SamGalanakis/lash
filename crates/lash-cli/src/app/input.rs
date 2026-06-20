@@ -117,6 +117,8 @@ impl App {
     }
 
     pub fn show_document(&mut self, document: crate::overlay::DocumentState) {
+        self.clear_selection();
+        self.clear_input_selection();
         self.overlay = Some(OverlayState::Document(document));
         self.dirty = true;
     }

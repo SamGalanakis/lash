@@ -28,6 +28,13 @@ pub enum AppEvent {
         result: UiSnapshotResult,
     },
     RequestUiSnapshot,
+    RequestQueuedWorkSnapshot,
+    SystemMessage {
+        message: String,
+    },
+    SessionObservationFinished {
+        stream_id: u64,
+    },
     FrameRequested,
     /// 100ms tick for spinner animation (only triggers redraw when a session is running).
     Tick,
@@ -162,10 +169,14 @@ fn lane_for_event(event: &AppEvent) -> EventLane {
         AppEvent::Terminal(_) | AppEvent::ClipboardImageReady { .. } | AppEvent::Quit => {
             EventLane::High
         }
-        AppEvent::Session { .. } | AppEvent::Prompt { .. } => EventLane::Normal,
+        AppEvent::Session { .. }
+        | AppEvent::Prompt { .. }
+        | AppEvent::SystemMessage { .. }
+        | AppEvent::SessionObservationFinished { .. } => EventLane::Normal,
         AppEvent::UpdateCheckFinished { .. }
         | AppEvent::UiSnapshot { .. }
         | AppEvent::RequestUiSnapshot
+        | AppEvent::RequestQueuedWorkSnapshot
         | AppEvent::FrameRequested
         | AppEvent::Tick
         | AppEvent::FileIndexReady => EventLane::Low,

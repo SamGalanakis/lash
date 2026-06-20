@@ -3,7 +3,7 @@
 use super::*;
 
 pub(crate) async fn set_autoresearch_tools_enabled(
-    ctx: &PluginActionContext,
+    ctx: &PluginCommandContext,
     enabled: bool,
 ) -> Result<(), ToolResult> {
     let Some(session_id) = ctx.session_id.as_deref() else {
@@ -27,7 +27,7 @@ pub(crate) async fn set_autoresearch_tools_enabled(
 }
 
 pub(crate) async fn start_mode_command(
-    ctx: PluginActionContext,
+    ctx: PluginCommandContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
     args: Value,
@@ -43,7 +43,7 @@ pub(crate) async fn start_mode_command(
 }
 
 pub(crate) async fn stop_mode_command(
-    ctx: PluginActionContext,
+    ctx: PluginCommandContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
 ) -> ToolResult {
@@ -58,7 +58,7 @@ pub(crate) async fn stop_mode_command(
 }
 
 pub(crate) async fn clear_mode_command(
-    ctx: PluginActionContext,
+    ctx: PluginCommandContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
 ) -> ToolResult {

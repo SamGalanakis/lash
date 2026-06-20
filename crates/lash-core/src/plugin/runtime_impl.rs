@@ -249,30 +249,6 @@ impl PluginHost {
         Ok(session)
     }
 
-    pub async fn invoke_plugin_action_sessionless(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<ToolResult, PluginError> {
-        let session = self.build_session(
-            format!("__external__-{}", uuid::Uuid::new_v4().simple()),
-            None,
-        )?;
-        session
-            .invoke_plugin_action(
-                name,
-                args,
-                None,
-                false,
-                Arc::new(NoopSessionManager),
-                Arc::new(NoopSessionManager),
-                Arc::new(NoopSessionManager),
-                Arc::new(crate::UnavailableProcessService),
-            )
-            .await
-            .map_err(|err| PluginError::Invoke(err.to_string()))
-    }
-
     fn register_session(
         &self,
         session_id: &str,
@@ -301,13 +277,16 @@ impl PluginHost {
         Ok(())
     }
 
-    pub fn session(&self, session_id: &str) -> Result<Arc<PluginSession>, PluginActionInvokeError> {
+    pub fn session(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<PluginSession>, PluginOperationInvokeError> {
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| PluginActionInvokeError::SessionRegistryPoisoned)?;
+            .map_err(|_| PluginOperationInvokeError::SessionRegistryPoisoned)?;
         let Some(weak) = sessions.get(session_id).cloned() else {
-            return Err(PluginActionInvokeError::UnknownSession(
+            return Err(PluginOperationInvokeError::UnknownSession(
                 session_id.to_string(),
             ));
         };
@@ -315,39 +294,10 @@ impl PluginHost {
             Some(session) => Ok(session),
             None => {
                 sessions.remove(session_id);
-                Err(PluginActionInvokeError::UnknownSession(
+                Err(PluginOperationInvokeError::UnknownSession(
                     session_id.to_string(),
                 ))
             }
         }
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "host action invocation wires the runtime service bundle at the plugin boundary"
-    )]
-    pub async fn invoke_plugin_action_for_session(
-        &self,
-        session_id: &str,
-        name: &str,
-        args: serde_json::Value,
-        sessions: Arc<dyn SessionStateService>,
-        session_lifecycle: Arc<dyn SessionLifecycleService>,
-        session_graph: Arc<dyn SessionGraphService>,
-        processes: Arc<dyn crate::ProcessService>,
-    ) -> Result<ToolResult, PluginActionInvokeError> {
-        let session = self.session(session_id)?;
-        session
-            .invoke_plugin_action(
-                name,
-                args,
-                Some(session_id.to_string()),
-                false,
-                sessions,
-                session_lifecycle,
-                session_graph,
-                processes,
-            )
-            .await
     }
 }

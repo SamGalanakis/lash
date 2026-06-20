@@ -49,3 +49,5 @@ autoresearch.jsonl
 autoresearch.md
 autoresearch.html
 .todos.md
+# Local Lash runtime/workbench state and generated captures.
+/agent-workbench-*.png

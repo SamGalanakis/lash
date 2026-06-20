@@ -1033,11 +1033,11 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                 tool_result_projector: None,
                 runtime_event: None,
                 external_registrar: Some(Arc::new(|reg| {
-                    reg.actions().op(
-                        crate::PluginActionDef {
+                    reg.operations().command(
+                        crate::PluginOperationDef {
                             name: "test.spawn".to_string(),
                             description: "spawn".to_string(),
-                            kind: crate::PluginActionKind::Command,
+                            kind: crate::PluginOperationKind::Command,
                             session_param: crate::SessionParam::Optional,
                             input_schema: json!({}),
                             output_schema: json!({}),
@@ -1063,7 +1063,9 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                         )]),
                                     )
                                     .await
-                                    .map_err(|err| crate::ToolResult::err_fmt(err.to_string()));
+                                    .map_err(|err| {
+                                        crate::PluginOperationFailure::new(err.to_string())
+                                    });
                                 match handle {
                                     Ok(handle) => {
                                         let snapshot = ctx
@@ -1071,17 +1073,21 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                             .snapshot_session(&handle.session_id)
                                             .await
                                             .map_err(|err| {
-                                                crate::ToolResult::err_fmt(err.to_string())
+                                                crate::PluginOperationFailure::new(err.to_string())
                                             });
                                         match snapshot {
-                                            Ok(snapshot) => crate::ToolResult::ok(json!({
+                                            Ok(snapshot) => Ok(crate::plugin::ErasedPluginCommandOutcome {
+                                                output: json!({
                                                 "session_id": handle.session_id,
                                                 "message_count": snapshot.read_model().messages.len(),
-                                            })),
-                                            Err(err) => err,
+                                                }),
+                                                events: Vec::new(),
+                                                directives: Vec::new(),
+                                            }),
+                                            Err(err) => Err(err),
                                         }
                                     }
-                                    Err(err) => err,
+                                    Err(err) => Err(err),
                                 }
                             })
                         }),
@@ -1116,20 +1122,19 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
     );
 
     let result = runtime
-        .invoke_plugin_action("test.spawn", json!({}), None)
+        .run_plugin_command("test.spawn", json!({}), None)
         .await
         .expect("invoke");
-    assert!(result.is_success());
     assert_eq!(
         result
-            .value_for_projection()
+            .output
             .get("session_id")
             .and_then(|value| value.as_str()),
         Some("branched")
     );
     assert_eq!(
         result
-            .value_for_projection()
+            .output
             .get("message_count")
             .and_then(|value| value.as_u64()),
         Some(2)

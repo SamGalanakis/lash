@@ -32,7 +32,7 @@ pub(crate) fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         lash_core::MessageRole::System,
         format!(
-            "Plan mode: use `{display}` as the single source of truth. Read/search/list, web, and `ask(...)` as needed, and update only that file with `apply_patch`. Do not present the plan with snippets, showcases, or prose checklists; the host can surface the file path while planning. When the plan is ready for review, call `plan_exit()`."
+            "Plan mode: use `{display}` as the single source of truth. Use `files.read`, `files.ls`, `files.glob`, `files.grep`, `web.search`, `web.fetch`, and `user.ask` as needed, and update only that file with `files.patch`. Do not present the plan with snippets, showcases, or prose checklists; the host can surface the file path while planning. When the plan is ready for review, call `plan.exit`."
         ),
     )
 }
@@ -40,10 +40,10 @@ pub(crate) fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
 pub(crate) fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode tools: read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, `plan_exit()`. The host can surface the plan file path; full review happens in `plan_exit()`.",
+            "Plan mode tools: `files.read`, `files.ls`, `files.glob`, `files.grep`, `web.search`, `web.fetch`, `user.ask`, `files.patch` for `{}`, `plan.exit`. The host can surface the plan file path; full review happens in `plan.exit`.",
             plan_display_path(path)
         ),
-        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, `plan_exit()`. The host can surface the plan file path; full review happens in `plan_exit()`.".to_string(),
+        None => "Plan mode tools: `files.read`, `files.ls`, `files.glob`, `files.grep`, `web.search`, `web.fetch`, `user.ask`, plan-file `files.patch`, `plan.exit`. The host can surface the plan file path; full review happens in `plan.exit`.".to_string(),
     }
 }
 

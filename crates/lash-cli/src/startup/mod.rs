@@ -30,7 +30,7 @@ use lash_plugin_mcp::McpPluginFactory;
 use lash_tui::Terminal;
 use serde_json::Value as JsonValue;
 
-use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
+use crate::autonomous::{AutonomousMode, AutonomousPersistenceContext, run_autonomous};
 use crate::config::LashConfig;
 use crate::execution_settings::{
     ExecutionMode, OmOverrides, ensure_supported_execution_mode, parse_execution_mode,
@@ -230,7 +230,28 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         println!("{}", info_text_unconfigured(&execution_mode, &cwd));
         return Ok(());
     }
-    let interactive_startup = !args.info && args.print_prompt.is_none();
+    if args.mode != crate::CliMode::Interactive && args.debug_ui_trace.is_some() {
+        return Err(anyhow::anyhow!(
+            "`--debug-ui-trace` only applies to the interactive TUI."
+        ));
+    }
+    if args.mode == crate::CliMode::Json && args.print_prompt.is_none() {
+        return Err(anyhow::anyhow!(
+            "`--mode json` requires `--print <prompt>`."
+        ));
+    }
+    if args.mode == crate::CliMode::Rpc && args.print_prompt.is_some() {
+        return Err(anyhow::anyhow!(
+            "`--mode rpc` reads prompts from stdin; do not pass `--print`."
+        ));
+    }
+    if args.mode == crate::CliMode::Rpc && args.turn_usage_json.is_some() {
+        return Err(anyhow::anyhow!(
+            "`--turn-usage-json` is a single-turn --print artifact and is not supported with `--mode rpc`."
+        ));
+    }
+    let interactive_startup =
+        !args.info && args.print_prompt.is_none() && args.mode != crate::CliMode::Rpc;
     let startup_system_message: Option<String> = None;
     let (mut lash_config, mut active_provider) =
         provider::resolve_config_and_provider(&args, existing_config, shortcut_api_key.as_deref())
@@ -240,7 +261,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     if let Some(ref key) = args.tavily_api_key {
         lash_config.set_tavily_api_key(Some(key.clone()));
     }
-    if args.print_prompt.is_none() {
+    if args.print_prompt.is_none() && args.mode != crate::CliMode::Rpc {
         expose_provider_thinking(&mut active_provider);
         lash_config.save(&crate::paths::config_file())?;
     }
@@ -269,6 +290,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     )?;
     if args.resume.is_none()
         && args.print_prompt.is_none()
+        && args.mode != crate::CliMode::Rpc
         && (args.model.is_some() || args.variant.is_some())
     {
         lash_config.set_model_default(
@@ -289,7 +311,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         None
     };
 
-    let autonomous = args.print_prompt.is_some();
+    let autonomous = args.print_prompt.is_some() || args.mode == crate::CliMode::Rpc;
     if !autonomous && (args.await_background_work || args.turn_usage_json.is_some()) {
         return Err(anyhow::anyhow!(
             "`--await-background-work` and `--turn-usage-json` require `--print`."
@@ -337,7 +359,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         }
         None => persisted_host_config
             .as_ref()
-            .map(|config| config.execution_mode.clone())
+            .map(|config| config.execution_mode)
             .and_then(|mode| ensure_supported_execution_mode(mode).ok())
             .unwrap_or(ExecutionMode::Standard),
     };
@@ -390,7 +412,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let mut plugin_stack =
         plugins::plugin_factories_for_surface(plugins::PluginFactorySurfaceInput {
             autonomous,
-            execution_mode: execution_mode.clone(),
+            execution_mode,
             standard_context_approach: configured_standard_context_approach.clone(),
             tavily_key,
             instruction_source: Arc::clone(&instruction_source),
@@ -445,7 +467,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         .open_prepared(
             session_bootstrap,
             session_policy.clone(),
-            execution_mode.clone(),
+            execution_mode,
             configured_standard_context_approach.clone(),
         )
         .await?;
@@ -475,7 +497,12 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     // ── Stage 7a: autonomous preset — skip TUI, run session, print response ──
-    if let Some(prompt) = args.print_prompt {
+    if let Some(prompt) = args.print_prompt.clone() {
+        let mode = match args.mode {
+            crate::CliMode::Interactive => AutonomousMode::Print,
+            crate::CliMode::Json => AutonomousMode::Json,
+            crate::CliMode::Rpc => AutonomousMode::Rpc,
+        };
         return run_autonomous(
             session,
             prompt,
@@ -485,6 +512,21 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
                 turn_usage_json: args.turn_usage_json.clone(),
             },
             rlm_projected_bindings,
+            mode,
+        )
+        .await;
+    }
+    if args.mode == crate::CliMode::Rpc {
+        return run_autonomous(
+            session,
+            String::new(),
+            SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
+            AutonomousPersistenceContext {
+                await_background_work: args.await_background_work,
+                turn_usage_json: args.turn_usage_json.clone(),
+            },
+            None,
+            AutonomousMode::Rpc,
         )
         .await;
     }

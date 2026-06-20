@@ -77,24 +77,25 @@ async fn handle_ui_command(
     ui_extensions: &TuiExtensions,
     runtime: &mut Option<LashSession>,
 ) {
-    let Some(session) = runtime.as_ref() else {
+    if runtime.is_none() {
         push_system_message(app, "No active session for UI command.".to_string());
         return;
-    };
+    }
     match ui_extensions
-        .invoke_parsed_command(
-            &invocation,
-            TuiExtensionContext {
-                actions: &session.plugin_actions(),
-            },
-        )
+        .invoke_parsed_command(&invocation, TuiExtensionContext)
         .await
     {
         Ok(effects) => {
             if let Err(err) = sync_runtime_tool_catalog(runtime).await {
                 push_system_message(app, format!("Failed to sync tool catalog: {err}"));
             }
-            apply_ui_host_effects(app, effects)
+            crate::ui_effects::apply_ui_host_effects_with_runtime(
+                app,
+                ui_extensions,
+                runtime,
+                effects,
+            )
+            .await
         }
         Err(err) => push_system_message(app, err),
     }
@@ -219,7 +220,7 @@ pub(super) async fn dispatch_queued_turn(
         *last_turn = Some(TurnReplayPayload {
             turn_input: make_turn_input(&first_turn),
             prepared_turn: first_turn,
-            execution_mode: current_execution_mode.clone(),
+            execution_mode: *current_execution_mode,
         });
     }
     send_queued_work(

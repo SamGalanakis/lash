@@ -210,6 +210,26 @@ fn extract_history_selection_text_reads_across_scrolled_content_rows() {
 }
 
 #[test]
+fn extract_document_selection_text_reads_overlay_rows() {
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+    app.show_document(crate::overlay::DocumentState::new(
+        "Info",
+        vec![crate::overlay::DocumentSection::new(
+            "Runtime",
+            vec![crate::overlay::DocumentRow::Text("alpha beta".into())],
+        )],
+    ));
+    let area =
+        document_overlay_content_area(lash_tui::Rect::new(0, 0, 100, 30)).expect("document area");
+    app.selection.anchor = (area.x, 1);
+    app.selection.end = (area.x + 5, 1);
+    app.selection.visible = true;
+
+    let selected = extract_document_selection_text(&app, 100, 30).expect("selected text");
+    assert_eq!(selected, "alpha");
+}
+
+#[test]
 fn input_byte_offset_mapping_tracks_wrapped_rows() {
     assert_eq!(input_byte_offset_at_visual_position("abcdef", 1, 3, 6), 5);
 }
@@ -618,7 +638,7 @@ fn input_box_shows_ui_command_argument_hint_inline() {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: TuiExtensionContext<'_>,
+            _ctx: TuiExtensionContext,
         ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }

@@ -6,14 +6,16 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 
 use lash_core::plugin::{
-    PluginAction, PluginActionFailure, PluginActionKind, PluginDirective, PluginError,
-    PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, SessionParam,
-    SessionPlugin, SnapshotReader, SnapshotWriter, ToolCatalogContribution, ToolCatalogOverride,
+    PluginCommand, PluginCommandOutcome, PluginDirective, PluginError, PluginFactory,
+    PluginOperation, PluginOperationFailure, PluginRegistrar, PluginSessionContext,
+    PluginSnapshotMeta, SessionParam, SessionPlugin, SnapshotReader, SnapshotWriter,
+    ToolCatalogContribution, ToolCatalogOverride,
 };
 use lash_core::{
     JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
     ToolScheduling,
 };
+use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use lash_tools::apply_patch::{PatchAction, inspect_patch_ops};
 
@@ -110,32 +112,35 @@ pub struct PlanModeEnableOp;
 pub struct PlanModeDisableOp;
 pub struct PlanModeToggleOp;
 
-impl PluginAction for PlanModeEnableOp {
+impl PluginOperation for PlanModeEnableOp {
     const NAME: &'static str = "plan_mode.enable";
     const DESCRIPTION: &'static str = "Enable plan mode for this session.";
-    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = PlanModeExternalArgs;
     type Output = PlanModeExternalStatus;
 }
 
-impl PluginAction for PlanModeDisableOp {
+impl PluginCommand for PlanModeEnableOp {}
+
+impl PluginOperation for PlanModeDisableOp {
     const NAME: &'static str = "plan_mode.disable";
     const DESCRIPTION: &'static str = "Disable plan mode for this session.";
-    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = PlanModeExternalArgs;
     type Output = PlanModeExternalStatus;
 }
 
-impl PluginAction for PlanModeToggleOp {
+impl PluginCommand for PlanModeDisableOp {}
+
+impl PluginOperation for PlanModeToggleOp {
     const NAME: &'static str = "plan_mode.toggle";
     const DESCRIPTION: &'static str = "Toggle plan mode for this session.";
-    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = PlanModeExternalArgs;
     type Output = PlanModeExternalStatus;
 }
+
+impl PluginCommand for PlanModeToggleOp {}
 
 async fn ensure_plan_path<H>(
     state: &Arc<Mutex<PlanModeState>>,
@@ -469,8 +474,9 @@ fn plan_exit_tool_definition() -> ToolDefinition {
         plan_exit_input_schema(),
         plan_exit_output_schema(),
     )
-    .with_examples(vec!["plan_exit()".into()])
+    .with_examples(vec!["await plan.exit({})?".into()])
     .with_availability(lash_core::ToolAvailabilityConfig::off())
+    .with_lashlang_binding(LashlangToolBinding::new(["plan"], "exit"))
     .with_scheduling(ToolScheduling::Parallel)
 }
 
@@ -654,7 +660,7 @@ impl SessionPlugin for PlanModePlugin {
                     return Ok(vec![PluginDirective::AbortTurn {
                         code: "plan_mode_tool_blocked".to_string(),
                         message: format!(
-                            "Plan mode blocks `{}`. Use planning tools or `plan_exit()`.",
+                            "Plan mode blocks `{}`. Use planning tools or `plan.exit`.",
                             ctx.tool_name
                         ),
                     }]);
@@ -834,33 +840,42 @@ fn register_plan_mode_op<Op>(
     state: Arc<Mutex<PlanModeState>>,
 ) -> Result<(), PluginError>
 where
-    Op: PluginAction<Args = PlanModeExternalArgs, Output = PlanModeExternalStatus>,
+    Op: PluginCommand<Args = PlanModeExternalArgs, Output = PlanModeExternalStatus>,
 {
-    reg.actions().typed::<Op, _, _>(move |ctx, _args| {
-        let state = Arc::clone(&state);
-        async move {
-            let Some(session_id) = ctx.session_id else {
-                return Err(PluginActionFailure::new(format!(
-                    "{} requires session_id",
-                    Op::NAME
-                )));
-            };
-            let target_enabled = match state.lock() {
-                Ok(guard) => match Op::NAME {
-                    "plan_mode.enable" => true,
-                    "plan_mode.disable" => false,
-                    "plan_mode.toggle" => !guard.enabled,
-                    _ => unreachable!(),
-                },
-                Err(_) => return Err(PluginActionFailure::new("plan mode state poisoned")),
-            };
-            let enabled =
-                set_plan_mode_enabled_state(&state, &session_id, &ctx.sessions, target_enabled)
-                    .await?;
-            let report = ensure_plan_report(&state, &session_id, &ctx.sessions, enabled).await?;
-            Ok(plan_mode_payload(&session_id, enabled, Some(&report)))
-        }
-    })
+    reg.operations()
+        .typed_command::<Op, _, _>(move |ctx, _args| {
+            let state = Arc::clone(&state);
+            async move {
+                let Some(session_id) = ctx.session_id else {
+                    return Err(PluginOperationFailure::new(format!(
+                        "{} requires session_id",
+                        Op::NAME
+                    )));
+                };
+                let target_enabled = match state.lock() {
+                    Ok(guard) => match Op::NAME {
+                        "plan_mode.enable" => true,
+                        "plan_mode.disable" => false,
+                        "plan_mode.toggle" => !guard.enabled,
+                        _ => unreachable!(),
+                    },
+                    Err(_) => return Err(PluginOperationFailure::new("plan mode state poisoned")),
+                };
+                let enabled =
+                    set_plan_mode_enabled_state(&state, &session_id, &ctx.sessions, target_enabled)
+                        .await?;
+                let report =
+                    ensure_plan_report(&state, &session_id, &ctx.sessions, enabled).await?;
+                let status = plan_mode_payload(&session_id, enabled, Some(&report));
+                Ok(
+                    PluginCommandOutcome::new(status).with_events(vec![plan_protocol_state_event(
+                        &session_id,
+                        enabled,
+                        Some(&report),
+                    )?]),
+                )
+            }
+        })
 }
 
 #[cfg(test)]
