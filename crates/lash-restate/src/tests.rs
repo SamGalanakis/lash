@@ -1979,6 +1979,7 @@ impl RecoveryProcessTool {
             }),
             serde_json::json!({ "type": "object" }),
         )
+        .with_lashlang_binding(LashlangToolBinding::new(["tools"], "recovery_echo"))
     }
 }
 
