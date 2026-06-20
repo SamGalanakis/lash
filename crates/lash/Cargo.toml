@@ -39,7 +39,13 @@ tokio-util = { workspace = true }
 
 [features]
 default = []
-rlm = ["dep:lash-lashlang-runtime", "dep:lash-protocol-rlm", "dep:lash-rlm-types", "dep:lashlang"]
+rlm = [
+    "dep:lash-lashlang-runtime",
+    "dep:lash-protocol-rlm",
+    "dep:lash-rlm-types",
+    "dep:lashlang",
+    "lash-protocol-standard/lashlang",
+]
 # Exposes `lash::testing` (e.g. `TestProvider`) for embedder integration tests.
 testing = ["lash-core/testing"]
 
