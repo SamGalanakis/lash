@@ -21,7 +21,7 @@ use lash::plugins::{
 };
 use lash::provider::{ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy};
 use lash::runtime::AdvancedLashCoreBuilder;
-use lash::tools::{ToolActivation, LashlangToolBinding, ToolCallRecord, ToolOutputContract};
+use lash::tools::{ToolActivation, ToolCallRecord, ToolOutputContract};
 use lash::turn::{AssistantOutput, TurnIssue};
 use lash::{ModelLimits, ModelSpec};
 
@@ -176,9 +176,8 @@ fn tool_contract_types_are_nameable(
     activation: ToolActivation,
     record: ToolCallRecord,
     contract: ToolOutputContract,
-    lashlang_binding: LashlangToolBinding,
 ) {
-    let _ = (activation, record, contract, lashlang_binding);
+    let _ = (activation, record, contract);
 }
 
 fn tool_catalog_types_are_nameable(

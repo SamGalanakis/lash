@@ -524,8 +524,10 @@ mod tests {
             .into_iter()
             .find(|manifest| manifest.name == "inbox__work__send")
             .expect("work send manifest");
-        let surface =
-            lash_lashlang_runtime::tool_lashlang_binding(&manifest).executable_for(&manifest.name);
+        let surface = lash_lashlang_runtime::required_tool_lashlang_binding(&manifest)
+            .expect("work send binding")
+            .executable_for(&manifest.name)
+            .expect("work send surface");
         assert_eq!(surface.call_path(), "inbox.work.send");
         assert_eq!(surface.authority_type, "Inbox");
 
