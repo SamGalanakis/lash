@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="${LASH_DEV_REPO:-/workspace/code/lash}"
+binary="${repo}/target/debug/lash"
+
+if [[ "${LASH_SKIP_REBUILD:-}" != "1" ]]; then
+  cargo build -q --manifest-path "${repo}/Cargo.toml" -p lash-cli --bin lash
+fi
+
+exec "${binary}" "$@"

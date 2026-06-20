@@ -1,6 +1,9 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use lash::{TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput};
-use lash_core::{SessionPolicy, SessionSnapshot};
+use lash::observe::{
+    SessionCursor, SessionObservationEventPayload, SessionObservationSubscription,
+};
+use lash::{LashSession, TurnActivity, TurnActivityId, TurnEvent, TurnInput};
+use lash_core::{LiveReplayGap, SessionPolicy, SessionSnapshot};
 use lash_tui_extensions::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
 };
@@ -20,117 +23,194 @@ pub(super) struct TurnReplayPayload {
     pub(super) execution_mode: ExecutionMode,
 }
 
-pub(super) struct TurnActivityAppSink {
-    tx: mpsc::Sender<TurnActivity>,
-}
+pub(super) struct SessionObservationBridge;
 
-#[async_trait::async_trait]
-impl TurnActivitySink for TurnActivityAppSink {
-    async fn emit(&self, activity: TurnActivity) {
-        let _ = self.tx.send(activity).await;
+impl SessionObservationBridge {
+    pub(super) fn spawn(session: &LashSession, stream_id: u64, app_tx: AppEventTx) {
+        let observable = session.observe();
+        let cursor = observable.current_observation().cursor;
+        Self::spawn_from_cursor(session, cursor, stream_id, app_tx);
     }
-}
 
-pub(super) struct TurnActivityBridge;
+    pub(super) fn spawn_from_cursor(
+        session: &LashSession,
+        cursor: SessionCursor,
+        stream_id: u64,
+        app_tx: AppEventTx,
+    ) {
+        let observable = session.observe();
+        let subscription = match observable.subscribe_from_cursor(&cursor) {
+            Ok(SessionObservationSubscription::Subscribed(subscription)) => subscription,
+            Ok(SessionObservationSubscription::Gap { observation, gap }) => {
+                emit_observation_gap(&app_tx, &gap);
+                match observable.subscribe_from_cursor(&observation.cursor) {
+                    Ok(SessionObservationSubscription::Subscribed(subscription)) => subscription,
+                    Ok(SessionObservationSubscription::Gap { gap, .. }) => {
+                        emit_observation_gap(&app_tx, &gap);
+                        let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
+                        return;
+                    }
+                    Err(err) => {
+                        let _ = app_tx.send(AppEvent::SystemMessage {
+                            message: format!("Live session observation failed: {err}"),
+                        });
+                        let _ = app_tx.send(AppEvent::RequestUiSnapshot);
+                        let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
+                        let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
+                        return;
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = app_tx.send(AppEvent::SystemMessage {
+                    message: format!("Live session observation failed: {err}"),
+                });
+                let _ = app_tx.send(AppEvent::RequestUiSnapshot);
+                let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
+                let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
+                return;
+            }
+        };
 
-impl TurnActivityBridge {
-    pub(super) fn spawn(stream_id: u64, app_tx: AppEventTx) -> TurnActivityAppSink {
-        let (tx, mut rx) = mpsc::channel::<TurnActivity>(256);
         tokio::spawn(async move {
-            let mut pending_text = String::new();
-            let mut pending_correlation_id: Option<TurnActivityId> = None;
-            let mut flush = Box::pin(tokio::time::sleep(std::time::Duration::from_secs(86_400)));
-            let mut flush_armed = false;
-            let mut coalesced = 0usize;
-
+            let mut subscription = subscription;
+            let mut coalescer = TurnActivityCoalescer::new(stream_id, app_tx.clone());
             loop {
                 tokio::select! {
                     biased;
-                    _ = &mut flush, if flush_armed => {
-                        if !pending_text.is_empty() {
-                            let text = std::mem::take(&mut pending_text);
-                            let correlation_id = pending_correlation_id
-                                .take()
-                                .unwrap_or_else(TurnActivityId::fresh);
-                            let _ = app_tx.send(AppEvent::Session {
-                                stream_id,
-                                activity: Box::new(TurnActivity::new(
-                                    correlation_id,
-                                    TurnEvent::AssistantProseDelta { text },
-                                )),
-                            });
-                            if coalesced > 0 {
-                                tracing::trace!(stream_id, coalesced, "coalesced runtime text deltas");
-                            }
-                            coalesced = 0;
-                        }
-                        flush_armed = false;
+                    _ = &mut coalescer.flush, if coalescer.flush_armed => {
+                        coalescer.flush().await;
                     }
-                    maybe_activity = rx.recv() => {
-                        let Some(activity) = maybe_activity else {
-                            break;
-                        };
-                        match activity.event {
-                            TurnEvent::AssistantProseDelta { text } => {
-                                if text.is_empty() {
-                                    continue;
+                    next = subscription.next_event() => {
+                        match next {
+                            Ok(event) => match event.payload {
+                                SessionObservationEventPayload::TurnActivity(activity) => {
+                                    coalescer.emit(activity).await;
                                 }
-                                if pending_text.is_empty() {
-                                    pending_correlation_id = Some(activity.correlation_id);
-                                    flush.as_mut().reset(tokio::time::Instant::now() + TEXT_DELTA_REDRAW_INTERVAL);
-                                    flush_armed = true;
-                                } else {
-                                    coalesced += 1;
+                                SessionObservationEventPayload::QueueChanged { .. } => {
+                                    coalescer.flush().await;
+                                    let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
                                 }
-                                pending_text.push_str(&text);
-                            }
-                            event => {
-                                if !pending_text.is_empty() {
-                                    let text = std::mem::take(&mut pending_text);
-                                    let correlation_id = pending_correlation_id
-                                        .take()
-                                        .unwrap_or_else(TurnActivityId::fresh);
-                                    let _ = app_tx.send(AppEvent::Session {
-                                        stream_id,
-                                        activity: Box::new(TurnActivity::new(
-                                            correlation_id,
-                                            TurnEvent::AssistantProseDelta { text },
-                                        )),
-                                    });
-                                    if coalesced > 0 {
-                                        tracing::trace!(stream_id, coalesced, "coalesced runtime text deltas before structural event");
-                                    }
-                                    coalesced = 0;
-                                    flush_armed = false;
+                                SessionObservationEventPayload::ProcessChanged { .. } => {
+                                    coalescer.flush().await;
+                                    let _ = app_tx.send(AppEvent::RequestUiSnapshot);
                                 }
-                                let _ = app_tx.send(AppEvent::Session {
-                                    stream_id,
-                                    activity: Box::new(TurnActivity {
-                                        event,
-                                        ..activity
-                                    }),
+                                SessionObservationEventPayload::AgentFrameSwitched { .. } => {
+                                    coalescer.flush().await;
+                                    let _ = app_tx.send(AppEvent::RequestUiSnapshot);
+                                }
+                                SessionObservationEventPayload::Committed { .. } => {
+                                    coalescer.flush().await;
+                                    let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
+                                    break;
+                                }
+                            },
+                            Err(err) => {
+                                coalescer.flush().await;
+                                let _ = app_tx.send(AppEvent::SystemMessage {
+                                    message: format!("Live session observation ended early: {err}"),
                                 });
+                                let _ = app_tx.send(AppEvent::RequestUiSnapshot);
+                                let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
+                                let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
+                                break;
                             }
                         }
                     }
                 }
             }
+        });
+    }
+}
 
-            if !pending_text.is_empty() {
-                let correlation_id = pending_correlation_id
-                    .take()
-                    .unwrap_or_else(TurnActivityId::fresh);
-                let _ = app_tx.send(AppEvent::Session {
-                    stream_id,
-                    activity: Box::new(TurnActivity::new(
-                        correlation_id,
-                        TurnEvent::AssistantProseDelta { text: pending_text },
-                    )),
+pub(super) struct TurnActivityCoalescer {
+    stream_id: u64,
+    app_tx: AppEventTx,
+    pending_text: String,
+    pending_correlation_id: Option<TurnActivityId>,
+    flush: std::pin::Pin<Box<tokio::time::Sleep>>,
+    flush_armed: bool,
+    coalesced: usize,
+}
+
+impl TurnActivityCoalescer {
+    pub(super) fn new(stream_id: u64, app_tx: AppEventTx) -> Self {
+        Self {
+            stream_id,
+            app_tx,
+            pending_text: String::new(),
+            pending_correlation_id: None,
+            flush: Box::pin(tokio::time::sleep(std::time::Duration::from_secs(86_400))),
+            flush_armed: false,
+            coalesced: 0,
+        }
+    }
+
+    pub(super) async fn emit(&mut self, activity: TurnActivity) {
+        match activity.event {
+            TurnEvent::AssistantProseDelta { text } => {
+                if text.is_empty() {
+                    return;
+                }
+                if self.pending_text.is_empty() {
+                    self.pending_correlation_id = Some(activity.correlation_id);
+                    self.flush
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + TEXT_DELTA_REDRAW_INTERVAL);
+                    self.flush_armed = true;
+                } else {
+                    self.coalesced += 1;
+                }
+                self.pending_text.push_str(&text);
+            }
+            event => {
+                self.flush().await;
+                let _ = self.app_tx.send(AppEvent::Session {
+                    stream_id: self.stream_id,
+                    activity: Box::new(TurnActivity { event, ..activity }),
                 });
             }
-        });
-        TurnActivityAppSink { tx }
+        }
     }
+
+    pub(super) async fn flush(&mut self) {
+        if self.pending_text.is_empty() {
+            self.flush_armed = false;
+            return;
+        }
+        let text = std::mem::take(&mut self.pending_text);
+        let correlation_id = self
+            .pending_correlation_id
+            .take()
+            .unwrap_or_else(TurnActivityId::fresh);
+        let _ = self.app_tx.send(AppEvent::Session {
+            stream_id: self.stream_id,
+            activity: Box::new(TurnActivity::new(
+                correlation_id,
+                TurnEvent::AssistantProseDelta { text },
+            )),
+        });
+        if self.coalesced > 0 {
+            tracing::trace!(
+                stream_id = self.stream_id,
+                coalesced = self.coalesced,
+                "coalesced runtime text deltas"
+            );
+        }
+        self.coalesced = 0;
+        self.flush_armed = false;
+    }
+}
+
+fn emit_observation_gap(app_tx: &AppEventTx, gap: &LiveReplayGap) {
+    let _ = app_tx.send(AppEvent::SystemMessage {
+        message: format!(
+            "Live session observation skipped buffered events ({:?}); refreshed from the current session snapshot.",
+            gap.reason
+        ),
+    });
+    let _ = app_tx.send(AppEvent::RequestUiSnapshot);
+    let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
 }
 
 pub(super) struct UiSnapshotWorker {
@@ -146,17 +226,14 @@ struct UiSnapshotRequest {
 }
 
 impl UiSnapshotWorker {
-    pub(super) fn spawn(
-        app_tx: AppEventTx,
-        ui_extensions: std::sync::Arc<lash_tui_extensions::TuiExtensions>,
-    ) -> Self {
+    pub(super) fn spawn(app_tx: AppEventTx) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<UiSnapshotRequest>();
         tokio::spawn(async move {
             while let Some(request) = request_rx.recv().await {
                 let started = std::time::Instant::now();
                 let snapshot = tokio::time::timeout(
                     std::time::Duration::from_millis(200),
-                    collect_ui_snapshot(request.session.clone(), ui_extensions.as_ref()),
+                    collect_ui_snapshot(request.session.clone()),
                 )
                 .await;
                 let result = match snapshot {

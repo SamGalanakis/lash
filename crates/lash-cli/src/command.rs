@@ -615,7 +615,7 @@ mod tests {
                 &self,
                 _action: &str,
                 _arg: Option<&str>,
-                _ctx: TuiExtensionContext<'_>,
+                _ctx: TuiExtensionContext,
             ) -> Result<Vec<TuiHostEffect>, String> {
                 Ok(Vec::new())
             }

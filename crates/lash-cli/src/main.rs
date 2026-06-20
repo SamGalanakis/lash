@@ -88,6 +88,17 @@ enum CliTraceLevel {
     Extended,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum CliMode {
+    /// Interactive terminal UI.
+    #[default]
+    Interactive,
+    /// Autonomous JSONL event stream. Requires --print.
+    Json,
+    /// LF-delimited JSON-RPC-style protocol over stdin/stdout.
+    Rpc,
+}
+
 impl From<CliTraceLevel> for TraceLevel {
     fn from(value: CliTraceLevel) -> Self {
         match value {
@@ -259,6 +270,10 @@ struct Args {
     /// Run autonomously: execute prompt, print response to stdout, exit
     #[arg(short = 'p', long = "print")]
     print_prompt: Option<String>,
+
+    /// Non-interactive integration mode: `json` streams turn events for --print; `rpc` speaks JSONL over stdin/stdout
+    #[arg(long = "mode", value_enum, default_value_t = CliMode::Interactive)]
+    mode: CliMode,
 
     /// In autonomous mode, wait for plugin background work for this session before exiting
     #[arg(long)]
@@ -640,6 +655,17 @@ mod tests {
             copy_binding_from_env(Some("ctrl-c")),
             CopyBinding::CtrlShiftC
         );
+    }
+
+    #[test]
+    fn parses_json_and_rpc_modes() {
+        let json = Args::parse_from(["lash", "--mode", "json", "--print", "hello"]);
+        assert_eq!(json.mode, CliMode::Json);
+        assert_eq!(json.print_prompt.as_deref(), Some("hello"));
+
+        let rpc = Args::parse_from(["lash", "--mode", "rpc"]);
+        assert_eq!(rpc.mode, CliMode::Rpc);
+        assert!(rpc.print_prompt.is_none());
     }
 
     #[tokio::test]

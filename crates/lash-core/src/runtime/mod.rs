@@ -53,7 +53,7 @@ use crate::session_model::{
     transport_stream_events,
 };
 use crate::{
-    CheckpointKind, PersistentRuntimeServices, PluginActionInvokeError, PromptHookContext,
+    CheckpointKind, PersistentRuntimeServices, PluginOperationInvokeError, PromptHookContext,
     RuntimeServices, SandboxMessage, Session, SessionCreateRequest, SessionError, SessionHandle,
     SessionSnapshot, SessionStartPoint, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
 };

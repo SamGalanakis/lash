@@ -379,7 +379,7 @@ async fn handle_tab_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
     *ctx.last_turn = Some(TurnReplayPayload {
         turn_input,
         prepared_turn: queued,
-        execution_mode: ctx.current_execution_mode.clone(),
+        execution_mode: *ctx.current_execution_mode,
     });
     Ok(false)
 }
@@ -567,7 +567,7 @@ async fn handle_enter_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
             *ctx.last_turn = Some(TurnReplayPayload {
                 turn_input,
                 prepared_turn: queued,
-                execution_mode: ctx.current_execution_mode.clone(),
+                execution_mode: *ctx.current_execution_mode,
             });
         }
         TurnSubmissionRoute::QueueNextFullTurn => {

@@ -447,10 +447,10 @@ async fn numeric_helper_errors_are_rejected() {
 #[tokio::test(flavor = "current_thread")]
 async fn parser_accepts_trailing_semicolon_after_raw_string() {
     let program = parse(
-        r#"
-        msg = r'''hello''';
+        r##"
+        msg = r#"hello"#;
         submit msg
-        "#,
+        "##,
     )
     .expect("program should parse");
 
@@ -486,19 +486,19 @@ second"""
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn raw_multiline_strings_preserve_patch_text() {
+async fn rust_style_raw_strings_preserve_patch_text() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
         execute(
             r####"
-            patch = r"""*** Begin Patch
+            patch = r#"*** Begin Patch
 *** Update File: src/lib.rs
 @@
 -old
 +new
 \n { braces stay raw }
-*** End Patch"""
+*** End Patch"#
             submit patch
             "####,
             &mut state,
@@ -518,18 +518,18 @@ async fn raw_multiline_strings_preserve_patch_text() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn raw_triple_single_strings_preserve_script_text() {
+async fn rust_style_raw_strings_preserve_script_text() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
         execute(
-            r####"
-            script = r'''python3 - <<'PY'
+            r#####"
+            script = r##"python3 - <<'PY'
 print("""hello""")
 \n { braces stay raw }
-PY'''
+PY"##
             submit script
-            "####,
+            "#####,
             &mut state,
             &host,
         )

@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash::TurnEvent;
-use lash::admin::PluginAction;
 use lash_tui::{
     Axis, Color, Column, ColumnWidth, Constraint, Frame, InputEvent, KeyCode as InputKeyCode,
     KeyEventKind, Layout, Line, Modifier, Rect, Span, Style, Table, TableCell, TableRow,
@@ -11,9 +10,8 @@ use lash_tui::{
 use lash_tui_extensions::{
     KeyChord, KeyCode, KeyModifiers, ShortcutSpec, SlashCommandSpec, TuiExtension,
     TuiExtensionContext, TuiHostEffect, TuiInputOutcome, TuiRenderContext, TuiSurfaceSize,
-    TuiSurfaceSlot, TuiSurfaceSpec, call_plugin_action,
+    TuiSurfaceSlot, TuiSurfaceSpec,
 };
-use serde_json::Value;
 
 use crate::model::{
     Direction, ExperimentStatus, PLUGIN_ID, RunningStatus, StatusSummary, format_confidence,
@@ -94,21 +92,11 @@ impl TuiExtension for AutoresearchTuiExtension {
         AUTORESEARCH_SHORTCUTS
     }
 
-    async fn snapshot(&self, ctx: TuiExtensionContext<'_>) -> Result<Vec<TuiHostEffect>, String> {
-        let summary = fetch_status(ctx).await?;
-        let mut state = self.lock_state()?;
-        state.summary = summary;
-        let result_len = state.summary.results.len();
-        sync_selection(&mut state.workspace_table, result_len);
-        sync_selection(&mut state.overlay_table, result_len);
-        Ok(surface_effects(&state))
-    }
-
     async fn invoke_action(
         &self,
         action: &str,
         arg: Option<&str>,
-        ctx: TuiExtensionContext<'_>,
+        ctx: TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String> {
         match action {
             "command" => self.handle_command(arg, ctx).await,
@@ -172,7 +160,7 @@ impl TuiExtension for AutoresearchTuiExtension {
         &self,
         surface_key: &str,
         event: &InputEvent,
-        _ctx: TuiExtensionContext<'_>,
+        _ctx: TuiExtensionContext,
     ) -> TuiInputOutcome {
         let Ok(mut state) = self.state.lock() else {
             return TuiInputOutcome::Ignored;
@@ -235,6 +223,10 @@ impl TuiExtension for AutoresearchTuiExtension {
             Err(_) => return Vec::new(),
         };
         state.summary = summary;
+        if !state.summary.active {
+            state.expanded = false;
+            state.overlay_open = false;
+        }
         let result_len = state.summary.results.len();
         sync_selection(&mut state.workspace_table, result_len);
         sync_selection(&mut state.overlay_table, result_len);
@@ -246,92 +238,19 @@ impl AutoresearchTuiExtension {
     async fn handle_command(
         &self,
         arg: Option<&str>,
-        ctx: TuiExtensionContext<'_>,
+        _ctx: TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String> {
-        match arg.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(raw) if raw.eq_ignore_ascii_case("help") => {
-                let state = self.lock_state()?;
-                let mut effects = surface_effects(&state);
-                effects.push(TuiHostEffect::PushSystemMessage(autoresearch_help_text()));
-                Ok(effects)
-            }
-            Some(raw) if raw.eq_ignore_ascii_case("off") => {
-                let result = invoke_plugin_action_op::<crate::AutoresearchStopOp>(
-                    ctx,
-                    crate::AutoresearchEmptyArgs {},
-                )
-                .await?;
-                self.apply_command_result(result, false)
-            }
-            Some(raw) if raw.eq_ignore_ascii_case("clear") => {
-                let result = invoke_plugin_action_op::<crate::AutoresearchClearOp>(
-                    ctx,
-                    crate::AutoresearchEmptyArgs {},
-                )
-                .await?;
-                self.apply_command_result(result, true)
-            }
-            Some(raw) if raw.eq_ignore_ascii_case("export") => {
-                let result = call_plugin_action::<crate::AutoresearchExportOp>(
-                    ctx.actions,
-                    crate::AutoresearchEmptyArgs {},
-                )
-                .await?;
-                let status = result.status;
-                let path = result.path;
-                let mut state = self.lock_state()?;
-                state.summary = status;
-                let mut effects = surface_effects(&state);
-                effects.push(TuiHostEffect::PushSystemMessage(if path.is_empty() {
-                    "Exported autoresearch summary.".to_string()
-                } else {
-                    format!("Wrote {path}.")
-                }));
-                Ok(effects)
-            }
-            objective => {
-                let result = invoke_plugin_action_op::<crate::AutoresearchStartOp>(
-                    ctx,
-                    crate::AutoresearchStartArgs {
-                        objective: objective.map(str::to_string),
-                    },
-                )
-                .await?;
-                self.apply_command_result(result, false)
-            }
+        let raw = arg.map(str::trim).filter(|value| !value.is_empty());
+        if matches!(raw, Some(value) if value.eq_ignore_ascii_case("export")) {
+            return Ok(vec![TuiHostEffect::RunPluginTask {
+                name: "autoresearch.export".to_string(),
+                args: serde_json::json!({}),
+            }]);
         }
-    }
-
-    fn apply_command_result(
-        &self,
-        result: Value,
-        clear_ui: bool,
-    ) -> Result<Vec<TuiHostEffect>, String> {
-        let status = parse_status_field(&result)?;
-        let message = result
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Autoresearch updated.")
-            .to_string();
-        let queued_input = result
-            .get("queued_input")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let mut state = self.lock_state()?;
-        state.summary = status;
-        if clear_ui || !state.summary.active {
-            state.expanded = false;
-            state.overlay_open = false;
-        }
-        let result_len = state.summary.results.len();
-        sync_selection(&mut state.workspace_table, result_len);
-        sync_selection(&mut state.overlay_table, result_len);
-        let mut effects = surface_effects(&state);
-        effects.push(TuiHostEffect::PushSystemMessage(message));
-        if let Some(input) = queued_input {
-            effects.push(TuiHostEffect::QueueTurn { input });
-        }
-        Ok(effects)
+        Ok(vec![TuiHostEffect::RunPluginCommand {
+            name: "autoresearch.command".to_string(),
+            args: serde_json::json!({ "raw": raw }),
+        }])
     }
 
     fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, SessionUiState>, String> {
@@ -339,55 +258,6 @@ impl AutoresearchTuiExtension {
             .lock()
             .map_err(|_| "autoresearch UI state poisoned".to_string())
     }
-}
-
-fn autoresearch_help_text() -> String {
-    [
-        "Autoresearch",
-        "",
-        "Commands:",
-        "  /autoresearch <objective>  Start autoresearch or update the objective",
-        "  /autoresearch help         Show this help",
-        "  /autoresearch off          Stop autoresearch mode",
-        "  /autoresearch clear        Clear autoresearch state and UI",
-        "  /autoresearch export       Export the current summary",
-        "",
-        "Shortcuts:",
-        "  Ctrl+X         Toggle the autoresearch table",
-        "  Ctrl+Shift+X   Toggle the autoresearch overlay",
-        "",
-        "Workflow:",
-        "  1. Start with /autoresearch <objective>.",
-        "  2. Let the agent iterate with init_experiment, run_experiment, and log_experiment.",
-        "  3. Use export when you want a written summary artifact.",
-    ]
-    .join("\n")
-}
-
-async fn fetch_status(ctx: TuiExtensionContext<'_>) -> Result<StatusSummary, String> {
-    call_plugin_action::<crate::AutoresearchStatusOp>(ctx.actions, crate::AutoresearchEmptyArgs {})
-        .await
-}
-
-async fn invoke_plugin_action_op<Op>(
-    ctx: TuiExtensionContext<'_>,
-    args: Op::Args,
-) -> Result<Value, String>
-where
-    Op: PluginAction,
-    Op::Output: serde::Serialize,
-{
-    let result = call_plugin_action::<Op>(ctx.actions, args).await?;
-    serde_json::to_value(result).map_err(|err| format!("invalid autoresearch output: {err}"))
-}
-
-fn parse_status_field(value: &Value) -> Result<StatusSummary, String> {
-    let status = value
-        .get("status")
-        .cloned()
-        .unwrap_or_else(|| value.clone());
-    serde_json::from_value(status)
-        .map_err(|err| format!("invalid autoresearch status payload: {err}"))
 }
 
 fn surface_effects(state: &SessionUiState) -> Vec<TuiHostEffect> {
@@ -1062,11 +932,37 @@ mod tests {
         assert!(rendered.contains("waiting for first logged result"));
     }
 
-    #[test]
-    fn help_text_mentions_commands_and_shortcuts() {
-        let help = autoresearch_help_text();
-        assert!(help.contains("/autoresearch help"));
-        assert!(help.contains("Ctrl+X"));
-        assert!(help.contains("Ctrl+Shift+X"));
+    #[tokio::test]
+    async fn slash_objective_dispatches_runtime_command_target() {
+        let extension = AutoresearchTuiExtension::default();
+        let effects = extension
+            .invoke_action("command", Some("  improve latency  "), TuiExtensionContext)
+            .await
+            .expect("command dispatch");
+
+        assert_eq!(
+            effects,
+            vec![TuiHostEffect::RunPluginCommand {
+                name: "autoresearch.command".to_string(),
+                args: serde_json::json!({ "raw": "improve latency" }),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_export_dispatches_runtime_task_target() {
+        let extension = AutoresearchTuiExtension::default();
+        let effects = extension
+            .invoke_action("command", Some(" export "), TuiExtensionContext)
+            .await
+            .expect("export dispatch");
+
+        assert_eq!(
+            effects,
+            vec![TuiHostEffect::RunPluginTask {
+                name: "autoresearch.export".to_string(),
+                args: serde_json::json!({}),
+            }]
+        );
     }
 }

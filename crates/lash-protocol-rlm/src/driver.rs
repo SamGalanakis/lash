@@ -62,12 +62,15 @@ pub fn build_rlm_preamble(
     let tool_names_fingerprint = tool_catalog.tool_names_fingerprint();
     let mut prompt_contributions = Vec::new();
 
-    let tool_docs = tool_catalog.prompt_tool_docs();
+    let tool_docs = crate::tool_catalog::rlm_prompt_tool_docs(tool_catalog);
     if !tool_docs.trim().is_empty() {
         prompt_contributions.push(PromptContribution::execution("Showcased Tools", tool_docs));
     }
     prompt_contributions.extend(input.extra_prompt_contributions);
-    let lashlang_host_environment = config.lashlang_surface.host_environment(tool_catalog);
+    let lashlang_host_environment = config
+        .lashlang_surface
+        .host_environment(tool_catalog)
+        .expect("RLM tool catalog registration must validate explicit Lashlang bindings");
 
     TurnDriverPreamble {
         config: TurnDriverConfig {
@@ -96,8 +99,13 @@ pub fn build_rlm_preamble(
 mod catalogue_tests {
     use super::*;
     use lash_core::{ToolActivation, ToolAvailabilityConfig, ToolScheduling};
+    use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 
-    fn tool(name: &str) -> lash_core::ToolDefinition {
+    fn tool(
+        name: &str,
+        module: &'static str,
+        operation: &'static str,
+    ) -> lash_core::ToolDefinition {
         lash_core::ToolDefinition::raw(
             format!("tool:{name}"),
             name,
@@ -112,11 +120,15 @@ mod catalogue_tests {
         .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
         .with_scheduling(ToolScheduling::Parallel)
+        .with_lashlang_binding(LashlangToolBinding::new([module], operation))
     }
 
     #[test]
     fn rlm_preamble_uses_resolved_tool_catalog_without_search_tool_special_cases() {
-        let definitions = vec![tool("search_tools"), tool("grep")];
+        let definitions = vec![
+            tool("search_tools", "tools", "search"),
+            tool("grep", "files", "grep"),
+        ];
         let contracts = definitions
             .iter()
             .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
@@ -154,13 +166,14 @@ mod catalogue_tests {
             .map(|contribution| contribution.content.as_ref())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(prompt.contains("search_tools"));
-        assert!(prompt.contains("grep"));
+        assert!(prompt.contains("tools.search"));
+        assert!(prompt.contains("files.grep"));
+        assert!(!prompt.contains("search_tools("));
     }
 
     #[test]
     fn rlm_preamble_uses_lashlang_host_environment_abilities() {
-        let definitions = vec![tool("grep")];
+        let definitions = vec![tool("grep", "files", "grep")];
         let contracts = definitions
             .iter()
             .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))

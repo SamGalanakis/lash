@@ -25,7 +25,7 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::admin::{
-    AdvancedToolAdmin, Completions, CoreTriggerAdmin, PluginActions, SessionCommandAdmin,
+    AdvancedToolAdmin, Completions, CoreTriggerAdmin, PluginOperations, SessionCommandAdmin,
     SessionTriggerAdmin, ToolAdmin,
 };
 pub use crate::core::{
@@ -59,8 +59,8 @@ pub use tokio_util::sync::CancellationToken;
 pub mod prelude {
     pub use crate::{
         AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, InputItem, LashCore,
-        LashCoreBuilder, LashSession, ModelLimits, ModelSpec, ObservableSession, PluginActions,
-        PluginBinding, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
+        LashCoreBuilder, LashSession, ModelLimits, ModelSpec, ObservableSession, PluginBinding,
+        PluginOperations, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
         SessionCommand, SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch,
         SessionDeleteReport, SessionSpec, SessionTriggerAdmin, StandardCore, StandardCoreBuilder,
         ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder,

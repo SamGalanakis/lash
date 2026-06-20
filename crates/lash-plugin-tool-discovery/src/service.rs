@@ -272,8 +272,9 @@ mod tests {
         #[cfg(feature = "lashlang")]
         {
             let mut projected = projected;
-            let lashlang_binding = lash_lashlang_runtime::tool_lashlang_binding(&manifest)
-                .executable_for(&manifest.name);
+            let lashlang_binding =
+                lash_lashlang_runtime::required_tool_lashlang_executable(&manifest)
+                    .expect("catalog test tool has explicit Lashlang binding");
             let call = lashlang_binding.call_path();
             let projected_object = projected.as_object_mut().expect("catalog object");
             projected_object.insert(

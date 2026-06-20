@@ -189,7 +189,7 @@ result = await agents.spawn({
 })?
 submit result
 ```"#,
-                "```lashlang\nawait tools.submit_error({ reason: \"child boom\" })?\n```",
+                "```lashlang\nawait task.fail({ reason: \"child boom\" })?\n```",
             ],
             root_prompt: "Spawn a child that fails and preserve its execution graph.",
             expected_submitted_value: None,

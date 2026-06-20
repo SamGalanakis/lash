@@ -376,15 +376,15 @@ async fn prompt_claim_value_literals_parse_and_evaluate() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_raw_triple_single_strings_parse_and_evaluate() {
+async fn prompt_claim_rust_style_raw_strings_parse_and_evaluate() {
     let host = MockHost::default();
     assert_eq!(
         run(
             &host,
-            r####"submit r'''python3 - <<'PY'
+            r#####"submit r##"python3 - <<'PY'
 print("""hello""")
 \n { braces stay raw }
-PY'''"####
+PY"##"#####
         ),
         Value::String(
             "python3 - <<'PY'\nprint(\"\"\"hello\"\"\")\n\\n { braces stay raw }\nPY".into()
@@ -1218,19 +1218,19 @@ async fn prompt_example_validates_nontrivial_edit_before_submit() {
     assert_eq!(
         run(
             &host,
-            r#"patch = r"""*** Begin Patch
+            r##"patch = r#"*** Begin Patch
 *** Update File: src/lib.rs
 @@
 -old
 +new
-*** End Patch"""
+*** End Patch"#
 await files.patch({ input: patch })?
 check = await shell.exec({ cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
 if check.exit_code != 0 {
   print slice(check.output, 0, 4000)
 } else {
   submit "Edit applied and validation passed."
-}"#,
+}"##,
         ),
         Value::String("Edit applied and validation passed.".into())
     );

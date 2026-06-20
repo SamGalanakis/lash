@@ -28,11 +28,17 @@ mod snapshot;
 mod tool_catalog;
 mod trigger_registry;
 
-pub(crate) use actions::RegisteredPluginAction;
+pub(crate) use actions::{
+    ErasedPluginCommandOutcome, ErasedPluginTaskOutcome, PluginCommandHandler,
+    PluginCommandInvokeFuture, PluginQueryHandler, PluginQueryInvokeFuture, PluginTaskHandler,
+    PluginTaskInvokeFuture, RegisteredPluginCommand, RegisteredPluginQuery, RegisteredPluginTask,
+};
 pub use actions::{
-    PluginAction, PluginActionContext, PluginActionDef, PluginActionFailure, PluginActionFuture,
-    PluginActionHandler, PluginActionInvokeFuture, PluginActionKind, SessionParam,
-    plugin_action_def,
+    PluginCommand, PluginCommandContext, PluginCommandOutcome, PluginCommandReceipt,
+    PluginOperation, PluginOperationDef, PluginOperationFailure, PluginOperationFuture,
+    PluginOperationKind, PluginQuery, PluginQueryContext, PluginRuntimeDirective, PluginTask,
+    PluginTaskContext, PluginTaskOutcome, PluginTaskReceipt, ProcessReadService, SessionParam,
+    SessionReadService, plugin_operation_def,
 };
 pub use error::PluginError;
 pub use history::{
@@ -56,10 +62,10 @@ pub use protocol::{
     ProtocolSessionPlugin,
 };
 pub use registrar::{
-    ContextRegistrations, ExecutionRegistrations, OutputRegistrations, PluginActionRegistrations,
-    PluginRegistrar, PromptRegistrations, ProtocolRegistrations, SessionRegistrations,
-    ToolCallRegistrations, ToolCatalogRegistrations, ToolRegistrations, ToolResultRegistrations,
-    TriggerEventRegistrations, TurnRegistrations,
+    ContextRegistrations, ExecutionRegistrations, OutputRegistrations,
+    PluginOperationRegistrations, PluginRegistrar, PromptRegistrations, ProtocolRegistrations,
+    SessionRegistrations, ToolCallRegistrations, ToolCatalogRegistrations, ToolRegistrations,
+    ToolResultRegistrations, TriggerEventRegistrations, TurnRegistrations,
 };
 pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
@@ -72,8 +78,9 @@ pub use runtime_host::{
     SessionTurnRequest,
 };
 pub use runtime_impl::{PluginHost, SessionAuthorityContext};
+#[cfg(any(test, feature = "testing"))]
 pub(crate) use services::NoopSessionManager;
-pub use services::{PersistentRuntimeServices, PluginActionInvokeError, RuntimeServices};
+pub use services::{PersistentRuntimeServices, PluginOperationInvokeError, RuntimeServices};
 pub use session_obj::PluginSession;
 pub use session_types::{
     AgentFrameAssignment, AgentFrameId, AgentFrameReason, AgentFrameRecord, AgentFrameStatus,
@@ -134,14 +141,15 @@ mod tests {
 
     struct TypedEchoOp;
 
-    impl PluginAction for TypedEchoOp {
+    impl PluginOperation for TypedEchoOp {
         const NAME: &'static str = "mock.typed_echo";
         const DESCRIPTION: &'static str = "typed echo";
-        const KIND: PluginActionKind = PluginActionKind::Query;
         const SESSION_PARAM: SessionParam = SessionParam::Optional;
         type Args = TypedEchoArgs;
         type Output = TypedEchoOutput;
     }
+
+    impl PluginQuery for TypedEchoOp {}
 
     #[async_trait::async_trait]
     impl ToolProvider for MockToolProvider {
@@ -257,11 +265,11 @@ mod tests {
                 })
             }));
             let session_id = self.session_id.clone();
-            reg.actions().op(
-                PluginActionDef {
+            reg.operations().query(
+                PluginOperationDef {
                     name: "mock.echo".to_string(),
                     description: "echo".to_string(),
-                    kind: PluginActionKind::Query,
+                    kind: PluginOperationKind::Query,
                     session_param: SessionParam::Optional,
                     input_schema: json!({}),
                     output_schema: json!({}),
@@ -269,7 +277,7 @@ mod tests {
                 Arc::new(move |ctx, args| {
                     let session_id = session_id.clone();
                     Box::pin(async move {
-                        ToolResult::ok(json!({
+                        Ok(json!({
                             "session_id": ctx.session_id,
                             "plugin_session_id": session_id,
                             "args": args,
@@ -277,8 +285,8 @@ mod tests {
                     })
                 }),
             )?;
-            reg.actions()
-                .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
+            reg.operations()
+                .typed_query::<TypedEchoOp, _, _>(move |ctx, args| async move {
                     Ok(TypedEchoOutput {
                         value: args.value,
                         session_id: ctx.session_id,
@@ -397,43 +405,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_invoke_defaults_to_current_session_when_requested() {
+    async fn external_query_defaults_to_current_session_when_requested() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let session = host.build_session("root", None).expect("session");
-        let result = session
-            .invoke_plugin_action(
+        let (_plugin_id, result) = session
+            .query_plugin(
                 "mock.echo",
                 json!({"ok":true}),
                 None,
                 true,
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(crate::UnavailableProcessService),
+                Arc::new(NoopSessionManager),
+                Arc::new(NoopSessionManager),
             )
             .await
             .expect("invoke");
-        assert!(result.is_success());
         assert_eq!(
-            result
-                .value_for_projection()
-                .get("session_id")
-                .and_then(|v| v.as_str()),
+            result.get("session_id").and_then(|v| v.as_str()),
             Some("root")
         );
     }
 
     #[tokio::test]
-    async fn plugin_action_generates_schema_and_invokes_typed_output() {
+    async fn plugin_query_generates_schema_and_invokes_typed_output() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let session = host.build_session("root", None).expect("session");
 
         let def = session
-            .plugin_actions()
+            .plugin_operations()
             .into_iter()
             .find(|def| def.name == TypedEchoOp::NAME)
             .expect("typed op definition");
-        assert_eq!(def.kind, PluginActionKind::Query);
+        assert_eq!(def.kind, PluginOperationKind::Query);
         assert_eq!(def.session_param, SessionParam::Optional);
         let value_type = def
             .input_schema
@@ -442,26 +444,27 @@ mod tests {
             .and_then(serde_json::Value::as_str);
         assert_eq!(value_type, Some("string"));
 
-        let output = session
-            .call_plugin_action::<TypedEchoOp>(
-                TypedEchoArgs {
+        let (_plugin_id, output) = session
+            .query_plugin(
+                TypedEchoOp::NAME,
+                serde_json::to_value(TypedEchoArgs {
                     value: "hello".to_string(),
-                },
+                })
+                .unwrap(),
                 None,
                 true,
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(crate::UnavailableProcessService),
+                Arc::new(NoopSessionManager),
+                Arc::new(NoopSessionManager),
             )
             .await
             .expect("typed invoke");
+        let output: TypedEchoOutput = serde_json::from_value(output).unwrap();
         assert_eq!(output.value, "hello");
         assert_eq!(output.session_id.as_deref(), Some("root"));
     }
 
     #[test]
-    fn plugin_action_rejects_duplicate_names() {
+    fn plugin_operation_rejects_duplicate_names() {
         struct DuplicatePlugin;
 
         impl SessionPlugin for DuplicatePlugin {
@@ -470,15 +473,15 @@ mod tests {
             }
 
             fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-                reg.actions()
-                    .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
+                reg.operations()
+                    .typed_query::<TypedEchoOp, _, _>(move |ctx, args| async move {
                         Ok(TypedEchoOutput {
                             value: args.value,
                             session_id: ctx.session_id,
                         })
                     })?;
-                reg.actions()
-                    .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
+                reg.operations()
+                    .typed_query::<TypedEchoOp, _, _>(move |ctx, args| async move {
                         Ok(TypedEchoOutput {
                             value: args.value,
                             session_id: ctx.session_id,
@@ -503,108 +506,94 @@ mod tests {
 
         let err =
             match PluginHost::new(vec![Arc::new(DuplicateFactory)]).build_session("root", None) {
-                Ok(_) => panic!("duplicate typed plugin action should fail"),
+                Ok(_) => panic!("duplicate typed plugin operation should fail"),
                 Err(err) => err,
             };
-        assert!(err.to_string().contains("duplicate plugin action name"));
+        assert!(err.to_string().contains("duplicate plugin operation name"));
     }
 
     #[tokio::test]
-    async fn typed_external_invoke_errors_on_failed_or_invalid_output() {
+    async fn typed_external_query_errors_on_invalid_output() {
         struct BadOp;
-        impl PluginAction for BadOp {
+        impl PluginOperation for BadOp {
             const NAME: &'static str = "mock.echo";
             const DESCRIPTION: &'static str = "bad typed projection over raw op";
-            const KIND: PluginActionKind = PluginActionKind::Query;
             const SESSION_PARAM: SessionParam = SessionParam::Optional;
             type Args = TypedEchoArgs;
             type Output = TypedEchoOutput;
         }
+        impl PluginQuery for BadOp {}
 
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let session = host.build_session("root", None).expect("session");
-        let err = session
-            .call_plugin_action::<BadOp>(
-                TypedEchoArgs {
+        let (_plugin_id, output) = session
+            .query_plugin(
+                BadOp::NAME,
+                serde_json::to_value(TypedEchoArgs {
                     value: "hello".to_string(),
-                },
+                })
+                .unwrap(),
                 None,
                 true,
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(crate::UnavailableProcessService),
+                Arc::new(NoopSessionManager),
+                Arc::new(NoopSessionManager),
             )
             .await
+            .expect("raw query");
+        let err = serde_json::from_value::<TypedEchoOutput>(output)
             .expect_err("raw output shape should not match typed output");
-        assert!(err.to_string().contains("invalid mock.echo output"));
+        assert!(err.to_string().contains("missing field"));
     }
 
     #[tokio::test]
-    async fn plugin_host_can_invoke_plugin_action_for_registered_session() {
+    async fn plugin_session_queries_registered_session() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let _session = host.build_session("root", None).expect("session");
+        let session = host.build_session("root", None).expect("session");
 
-        let result = host
-            .invoke_plugin_action_for_session(
-                "root",
+        let (_plugin_id, result) = session
+            .query_plugin(
                 "mock.echo",
                 json!({"ok":true}),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(crate::UnavailableProcessService),
+                Some("root".to_string()),
+                false,
+                Arc::new(NoopSessionManager),
+                Arc::new(NoopSessionManager),
             )
             .await
             .expect("invoke");
-        assert!(result.is_success());
         assert_eq!(
-            result
-                .value_for_projection()
-                .get("session_id")
-                .and_then(|v| v.as_str()),
+            result.get("session_id").and_then(|v| v.as_str()),
             Some("root")
         );
         assert_eq!(
-            result
-                .value_for_projection()
-                .get("plugin_session_id")
-                .and_then(|v| v.as_str()),
+            result.get("plugin_session_id").and_then(|v| v.as_str()),
             Some("root")
         );
     }
 
     #[tokio::test]
-    async fn plugin_host_can_invoke_plugin_action_for_forked_session() {
+    async fn plugin_session_queries_forked_session() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let root = host.build_session("root", None).expect("root");
         let child = root.fork_for_session("child").expect("child");
 
-        let result = host
-            .invoke_plugin_action_for_session(
-                "child",
+        let (_plugin_id, result) = child
+            .query_plugin(
                 "mock.echo",
                 json!({"ok":true}),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(MockSessionManager::default()),
-                Arc::new(crate::UnavailableProcessService),
+                Some("child".to_string()),
+                false,
+                Arc::new(NoopSessionManager),
+                Arc::new(NoopSessionManager),
             )
             .await
             .expect("invoke");
-        assert!(result.is_success());
         assert_eq!(
-            result
-                .value_for_projection()
-                .get("session_id")
-                .and_then(|v| v.as_str()),
+            result.get("session_id").and_then(|v| v.as_str()),
             Some("child")
         );
         assert_eq!(
-            result
-                .value_for_projection()
-                .get("plugin_session_id")
-                .and_then(|v| v.as_str()),
+            result.get("plugin_session_id").and_then(|v| v.as_str()),
             Some("child")
         );
 
@@ -618,7 +607,7 @@ mod tests {
         assert!(host.session("root").is_ok());
         host.unregister_session("root").expect("unregister");
         match host.session("root") {
-            Err(PluginActionInvokeError::UnknownSession(id)) => assert_eq!(id, "root"),
+            Err(PluginOperationInvokeError::UnknownSession(id)) => assert_eq!(id, "root"),
             Ok(_) => panic!("expected missing session"),
             Err(other) => panic!("unexpected error: {other}"),
         }

@@ -225,6 +225,7 @@ impl RuntimeTurnDriver<'_> {
             let result = call_provider.complete(llm_request).await;
             (result, call_provider)
         });
+        let mut llm_task_abort = AbortOnDrop::new(llm_task.abort_handle());
 
         let mut text_streamed = false;
         let mut streamed_usage = LlmUsage::default();
@@ -306,7 +307,10 @@ impl RuntimeTurnDriver<'_> {
                 }
                 join = &mut llm_task => {
                     let (result, provider_after) = match join {
-                        Ok(v) => v,
+                        Ok(v) => {
+                            llm_task_abort.disarm();
+                            v
+                        }
                         Err(e) => break Err(LlmCallError {
                             message: format!("internal task failed: {e}"),
                             retryable: false,
@@ -860,6 +864,32 @@ impl RuntimeTurnDriver<'_> {
                 .await?;
         }
         Ok(())
+    }
+}
+
+struct AbortOnDrop {
+    handle: tokio::task::AbortHandle,
+    armed: bool,
+}
+
+impl AbortOnDrop {
+    fn new(handle: tokio::task::AbortHandle) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.abort();
+        }
     }
 }
 

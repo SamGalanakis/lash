@@ -42,7 +42,7 @@ fn ui_extension_argument_suggestions_complete_second_token() {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: TuiExtensionContext<'_>,
+            _ctx: TuiExtensionContext,
         ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }

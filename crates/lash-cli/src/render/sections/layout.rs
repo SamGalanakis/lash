@@ -73,6 +73,9 @@ fn chrome_layout(app: &App, frame_width: u16, frame_height: u16) -> ChromeLayout
         .saturating_sub(input_desired)
         .saturating_sub(MIN_HISTORY_HEIGHT);
     let process_height = process_desired.min(process_available);
+    // Reserve one status row, rendered below the input, for model/context/git
+    // metadata. This replaces the old top chrome row so the transcript can
+    // start at row 0 and all session metadata lives at the bottom.
     let reserved_height = 1 + dock_height + queue_height + footer_height + process_height;
     let input_height = input_height(app, frame_width, frame_height, reserved_height);
     let history_height = frame_height.saturating_sub(
@@ -107,21 +110,22 @@ pub struct ChromeAreas {
 /// draw loop uses this to avoid recomputing the layout once per region.
 pub fn chrome_areas(app: &App, frame_width: u16, frame_height: u16) -> ChromeAreas {
     let layout = chrome_layout(app, frame_width, frame_height);
-    let history_y = 1;
+    let history_y = 0;
     let dock_y = history_y + layout.history_height;
     let queue_y = dock_y + layout.dock_height;
     let footer_y = queue_y + layout.queue_height;
     let input_y = footer_y + layout.footer_height;
-    let process_y = input_y + layout.input_height;
+    let status_y = input_y + layout.input_height;
+    let process_y = status_y + 1;
     ChromeAreas {
-        status: Rect::new(0, 0, frame_width, 1),
+        status: Rect::new(0, status_y, frame_width, 1),
         history: Rect::new(0, history_y, frame_width, layout.history_height),
         dock: Rect::new(0, dock_y, frame_width, layout.dock_height),
         queue: Rect::new(0, queue_y, frame_width, layout.queue_height),
         footer: Rect::new(0, footer_y, frame_width, layout.footer_height),
         input: Rect::new(0, input_y, frame_width, layout.input_height),
         process: Rect::new(0, process_y, frame_width, layout.process_height),
-        body: Rect::new(0, 1, frame_width, frame_height.saturating_sub(1)),
+        body: Rect::new(0, 0, frame_width, frame_height),
     }
 }
 
@@ -131,13 +135,12 @@ pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -
 
 pub fn history_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     let layout = chrome_layout(app, frame_width, frame_height);
-    Rect::new(0, 1, frame_width, layout.history_height)
+    Rect::new(0, 0, frame_width, layout.history_height)
 }
 
 pub fn input_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     let layout = chrome_layout(app, frame_width, frame_height);
-    let y =
-        1 + layout.history_height + layout.dock_height + layout.queue_height + layout.footer_height;
+    let y = layout.history_height + layout.dock_height + layout.queue_height + layout.footer_height;
     Rect::new(0, y, frame_width, layout.input_height)
 }
 

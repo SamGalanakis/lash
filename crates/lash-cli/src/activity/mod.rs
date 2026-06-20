@@ -138,6 +138,8 @@ pub struct PatchFilePreview {
 /// What the tool was invoked as. Describes the call, not what came back.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActivityCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     pub kind: ActivityKind,
     pub tool_name: String,
     pub args: Value,
@@ -194,6 +196,7 @@ impl ActivityBlock {
     ) -> Self {
         Self {
             call: ActivityCall {
+                call_id: None,
                 kind,
                 tool_name: tool_name.into(),
                 args,
@@ -224,6 +227,11 @@ impl ActivityBlock {
 
     pub fn with_extra(mut self, extra: Option<ActivityExtra>) -> Self {
         self.call.extra = extra;
+        self
+    }
+
+    pub fn with_call_id(mut self, call_id: Option<String>) -> Self {
+        self.call.call_id = call_id;
         self
     }
 }
@@ -298,6 +306,31 @@ impl ActivityState {
         self.shell_handles.clear();
     }
 
+    pub fn project_tool_start(
+        &mut self,
+        call_id: Option<String>,
+        name: &str,
+        args: Value,
+    ) -> Vec<ActivityBlock> {
+        let name = activity_tool_name(name);
+        if name == "batch" {
+            return Vec::new();
+        }
+        let summary = shared::semantic_tool_summary(name, &args);
+        vec![
+            ActivityBlock::new(
+                running_activity_kind(name),
+                name,
+                args,
+                summary,
+                ActivityStatus::Running,
+                Value::Null,
+                0,
+            )
+            .with_call_id(call_id),
+        ]
+    }
+
     pub fn project_tool_output(
         &mut self,
         name: &str,
@@ -368,6 +401,9 @@ impl ActivityState {
         timeline: &mut UiTimeline,
         activity: ActivityBlock,
     ) {
+        if replace_running_activity(timeline, activity.clone()) {
+            return;
+        }
         if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
             && merge_projected_activity(existing, activity.clone())
         {
@@ -443,6 +479,40 @@ impl ActivityState {
         };
         self.project_tool_output(name, args, output, duration_ms)
     }
+}
+
+fn running_activity_kind(name: &str) -> ActivityKind {
+    match name {
+        "read_file" | "grep" | "glob" | "ls" => ActivityKind::Exploration,
+        "apply_patch" => ActivityKind::Edit,
+        "exec_command" | "start_command" => ActivityKind::ShellCommand,
+        "write_stdin" => ActivityKind::ShellInteraction,
+        "search_web" => ActivityKind::WebSearch,
+        "fetch_url" => ActivityKind::WebFetch,
+        "spawn_agent" | "wait_agent" | "send_input" | "close_agent" | "resume_agent" => {
+            ActivityKind::Subagent
+        }
+        "request_user_input" => ActivityKind::Ask,
+        _ => ActivityKind::GenericTool,
+    }
+}
+
+fn replace_running_activity(timeline: &mut UiTimeline, incoming: ActivityBlock) -> bool {
+    let Some(call_id) = incoming.call.call_id.as_deref() else {
+        return false;
+    };
+    for item in timeline.iter_mut().rev() {
+        let UiTimelineItem::Activity(activity) = item else {
+            continue;
+        };
+        if activity.call.call_id.as_deref() == Some(call_id)
+            && activity.result.status == ActivityStatus::Running
+        {
+            *item = UiTimelineItem::Activity(Box::new(incoming));
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, Default)]

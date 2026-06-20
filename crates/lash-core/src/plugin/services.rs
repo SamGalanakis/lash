@@ -3,15 +3,17 @@ use std::sync::Arc;
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
-pub enum PluginActionInvokeError {
-    #[error("unknown plugin action `{0}`")]
+pub enum PluginOperationInvokeError {
+    #[error("unknown plugin operation `{0}`")]
     Unknown(String),
     #[error("unknown plugin session `{0}`")]
     UnknownSession(String),
-    #[error("plugin action `{0}` requires a session")]
+    #[error("plugin operation `{0}` requires a session")]
     MissingSession(String),
-    #[error("plugin action `{0}` does not accept a session")]
+    #[error("plugin operation `{0}` does not accept a session")]
     UnexpectedSession(String),
+    #[error("plugin operation failed: {0}")]
+    Failed(String),
     #[error("plugin session registry is unavailable")]
     SessionRegistryPoisoned,
 }
@@ -36,10 +38,18 @@ impl std::ops::Deref for PersistentRuntimeServices {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) struct NoopSessionManager;
 
+#[cfg(any(test, feature = "testing"))]
+impl SessionReadService for NoopSessionManager {}
+#[cfg(any(test, feature = "testing"))]
+impl ProcessReadService for NoopSessionManager {}
+#[cfg(any(test, feature = "testing"))]
 impl SessionStateService for NoopSessionManager {}
+#[cfg(any(test, feature = "testing"))]
 impl SessionLifecycleService for NoopSessionManager {}
+#[cfg(any(test, feature = "testing"))]
 impl SessionGraphService for NoopSessionManager {}
 impl RuntimeServices {
     pub fn new(plugins: Arc<PluginSession>) -> Self {

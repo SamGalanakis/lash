@@ -209,22 +209,25 @@ pub use plugin::{
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
     CheckpointHookContext, CompactionContext, ContextCompaction, ContextCompactor, ContextError,
     ContextRegistrations, DirectCompletion, DirectLlmCompletion, OpenAgentFrameRequest,
-    OpenAgentFrameResult, PersistentRuntimeServices, PluginAction, PluginActionContext,
-    PluginActionDef, PluginActionFailure, PluginActionInvokeError, PluginActionKind,
-    PluginDirective, PluginError, PluginExtensionContribution, PluginExtensions, PluginFactory,
-    PluginHost, PluginLifecycleEvent, PluginLifecycleEventHook, PluginOptions, PluginOwned,
-    PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
-    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
-    PromptHookContext, ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices,
-    SessionAppendNode, SessionConfigChangedContext, SessionContextOverlay, SessionCreateRequest,
-    SessionGraphService, SessionHandle, SessionLifecycleService, SessionParam, SessionPlugin,
-    SessionPluginSource, SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
-    SessionStateChangedContext, SessionStateService, SessionToolAccess, SessionTurnInput,
-    SessionTurnRequest, SnapshotReader, SnapshotWriter, SubagentSessionContext,
-    ToolCatalogContribution, ToolDiscoveryContext, ToolDiscoveryContribution,
-    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
-    ToolResultProjector, TriggerEventRegistrations, TurnContextTransform, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
+    OpenAgentFrameResult, PersistentRuntimeServices, PluginCommand, PluginCommandContext,
+    PluginCommandOutcome, PluginCommandReceipt, PluginDirective, PluginError,
+    PluginExtensionContribution, PluginExtensions, PluginFactory, PluginHost, PluginLifecycleEvent,
+    PluginLifecycleEventHook, PluginOperation, PluginOperationDef, PluginOperationFailure,
+    PluginOperationInvokeError, PluginOperationKind, PluginOptions, PluginOwned, PluginQuery,
+    PluginQueryContext, PluginRegistrar, PluginRuntimeDirective, PluginSession,
+    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
+    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PluginTask, PluginTaskContext,
+    PluginTaskOutcome, PluginTaskReceipt, PromptHookContext, ProtocolBeforeLlmCallContext,
+    ProtocolLlmCallAction, RuntimeServices, SessionAppendNode, SessionConfigChangedContext,
+    SessionContextOverlay, SessionCreateRequest, SessionGraphService, SessionHandle,
+    SessionLifecycleService, SessionParam, SessionPlugin, SessionPluginSource, SessionReadView,
+    SessionRelation, SessionSnapshot, SessionStartPoint, SessionStateChangedContext,
+    SessionStateService, SessionToolAccess, SessionTurnInput, SessionTurnRequest, SnapshotReader,
+    SnapshotWriter, SubagentSessionContext, ToolCatalogContribution, ToolDiscoveryContext,
+    ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
+    ToolResultProjectionContext, ToolResultProjector, TriggerEventRegistrations,
+    TurnContextTransform, TurnHookContext, TurnResultHookContext, TurnResultSummary,
+    TurnTransformContext, plugin_operation_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -290,6 +293,10 @@ pub(crate) use runtime::{
     process_event_payload_hash, process_wake_batch_draft, process_wake_delivery,
     process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
     require_event_replay,
+};
+pub use session_model::{
+    PLUGIN_RUNTIME_PROTOCOL_PLUGIN_ID, PersistedPluginRuntimeEvent,
+    plugin_runtime_event_from_protocol, plugin_runtime_protocol_event,
 };
 // Effect / process-control types consumed by external effect hosts (e.g.
 // lash-restate's workflows) and their integration tests. Kept on the public

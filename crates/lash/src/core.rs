@@ -580,7 +580,9 @@ impl RlmCore {
         )
         .with_plugin_extensions(plugin_host.extensions())
         .map_err(lash_core::PluginError::Registration)?;
-        let host_environment = surface.host_environment(&tool_catalog);
+        let host_environment = surface
+            .host_environment(&tool_catalog)
+            .map_err(lash_core::PluginError::Registration)?;
         Ok(crate::rlm::LashlangCompileSurface {
             host_environment,
             tool_catalog,

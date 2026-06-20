@@ -11,11 +11,14 @@ use std::sync::Arc;
 
 use super::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantStreamHook,
-    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, ContextCompactor, PluginAction,
-    PluginActionDef, PluginActionHandler, PluginError, PluginHost, PluginLifecycleEventHook,
-    PluginRegistrar, PluginSnapshotMeta, PromptContributor, SessionConfigMutator,
-    SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
-    ToolCatalogContributor, ToolDiscoveryContributor, ToolResultProjector, TurnContextTransform,
+    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, ContextCompactor, PluginCommand,
+    PluginCommandHandler, PluginCommandInvokeFuture, PluginCommandOutcome, PluginError, PluginHost,
+    PluginLifecycleEventHook, PluginOperationDef, PluginOperationFailure, PluginOperationKind,
+    PluginQuery, PluginQueryHandler, PluginQueryInvokeFuture, PluginRegistrar, PluginSnapshotMeta,
+    PluginTask, PluginTaskHandler, PluginTaskInvokeFuture, PluginTaskOutcome, PromptContributor,
+    SessionConfigMutator, SessionToolAccess, SnapshotReader, SnapshotWriter,
+    SubagentSessionContext, ToolCatalogContributor, ToolDiscoveryContributor, ToolResultProjector,
+    TurnContextTransform,
 };
 use crate::{PluginOptions, ToolProvider};
 
@@ -97,7 +100,9 @@ pub struct PluginSpec {
     pub tool_result_projector: Option<ToolResultProjector>,
     pub runtime_event_hooks: Vec<PluginLifecycleEventHook>,
     pub session_config_mutators: Vec<SessionConfigMutator>,
-    pub plugin_actions: Vec<(PluginActionDef, PluginActionHandler)>,
+    pub(crate) plugin_queries: Vec<(PluginOperationDef, PluginQueryHandler)>,
+    pub(crate) plugin_commands: Vec<(PluginOperationDef, PluginCommandHandler)>,
+    pub(crate) plugin_tasks: Vec<(PluginOperationDef, PluginTaskHandler)>,
     pub turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub context_compactors: Vec<(i32, Arc<dyn ContextCompactor>)>,
 }
@@ -185,70 +190,178 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_plugin_action(
+    pub(crate) fn with_plugin_query(
         mut self,
-        def: PluginActionDef,
-        handler: PluginActionHandler,
+        def: PluginOperationDef,
+        handler: PluginQueryHandler,
     ) -> Self {
-        self.plugin_actions.push((def, handler));
+        self.plugin_queries.push((def, handler));
         self
     }
 
-    pub fn with_plugin_action_typed<Op, F, Fut>(self, handler: F) -> Self
+    pub fn with_plugin_query_typed<Op, F, Fut>(self, handler: F) -> Self
     where
-        Op: PluginAction,
-        F: Fn(super::PluginActionContext, Op::Args) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Op::Output, super::PluginActionFailure>>
+        Op: PluginQuery,
+        F: Fn(super::PluginQueryContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Op::Output, PluginOperationFailure>>
             + Send
             + 'static,
     {
-        self.with_plugin_action(
-            super::plugin_action_def::<Op>(),
+        self.with_plugin_query(
+            super::plugin_operation_def::<Op>(PluginOperationKind::Query),
             Arc::new(move |ctx, args| {
                 let parsed = serde_json::from_value::<Op::Args>(args);
                 match parsed {
                     Ok(args) => {
                         let fut = handler(ctx, args);
                         Box::pin(async move {
-                            match fut.await {
-                                Ok(output) => match serde_json::to_value(output) {
-                                    Ok(value) => crate::ToolResult::ok(value),
-                                    Err(err) => crate::ToolResult::err(serde_json::json!(format!(
-                                        "failed to serialize {} output: {err}",
-                                        Op::NAME
-                                    ))),
-                                },
-                                Err(err) => {
-                                    crate::ToolResult::err(serde_json::json!(err.to_string()))
-                                }
-                            }
-                        })
+                            let output = fut.await?;
+                            serde_json::to_value(output).map_err(|err| {
+                                PluginOperationFailure::new(format!(
+                                    "failed to serialize {} output: {err}",
+                                    Op::NAME
+                                ))
+                            })
+                        }) as PluginQueryInvokeFuture
                     }
                     Err(err) => Box::pin(async move {
-                        crate::ToolResult::err(serde_json::json!(format!(
+                        Err(PluginOperationFailure::new(format!(
                             "invalid {} args: {err}",
                             Op::NAME
                         )))
-                    }),
+                    }) as PluginQueryInvokeFuture,
                 }
             }),
         )
     }
 
-    pub fn with_plugin_action_sync<Op, F>(self, handler: F) -> Self
+    pub(crate) fn with_plugin_command(
+        mut self,
+        def: PluginOperationDef,
+        handler: PluginCommandHandler,
+    ) -> Self {
+        self.plugin_commands.push((def, handler));
+        self
+    }
+
+    pub fn with_plugin_command_typed<Op, F, Fut>(self, handler: F) -> Self
     where
-        Op: PluginAction,
-        F: Fn(
-                super::PluginActionContext,
-                Op::Args,
-            ) -> Result<Op::Output, super::PluginActionFailure>
-            + Send
-            + Sync
+        Op: PluginCommand,
+        F: Fn(super::PluginCommandContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<
+                Output = Result<PluginCommandOutcome<Op::Output>, PluginOperationFailure>,
+            > + Send
             + 'static,
     {
-        self.with_plugin_action_typed::<Op, _, _>(move |ctx, args| {
-            let result = handler(ctx, args);
-            async move { result }
+        self.with_plugin_command(
+            super::plugin_operation_def::<Op>(PluginOperationKind::Command),
+            Arc::new(move |ctx, args| {
+                let parsed = serde_json::from_value::<Op::Args>(args);
+                match parsed {
+                    Ok(args) => {
+                        let fut = handler(ctx, args);
+                        Box::pin(async move {
+                            let outcome = fut.await?;
+                            let output = serde_json::to_value(outcome.output).map_err(|err| {
+                                PluginOperationFailure::new(format!(
+                                    "failed to serialize {} output: {err}",
+                                    Op::NAME
+                                ))
+                            })?;
+                            Ok(super::actions::ErasedPluginCommandOutcome {
+                                output,
+                                events: outcome.events,
+                                directives: outcome.directives,
+                            })
+                        }) as PluginCommandInvokeFuture
+                    }
+                    Err(err) => Box::pin(async move {
+                        Err(PluginOperationFailure::new(format!(
+                            "invalid {} args: {err}",
+                            Op::NAME
+                        )))
+                    }) as PluginCommandInvokeFuture,
+                }
+            }),
+        )
+    }
+
+    pub fn with_plugin_command_value<Op, F, Fut>(self, handler: F) -> Self
+    where
+        Op: PluginCommand,
+        F: Fn(super::PluginCommandContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Op::Output, PluginOperationFailure>>
+            + Send
+            + 'static,
+    {
+        self.with_plugin_command_typed::<Op, _, _>(move |ctx, args| {
+            let fut = handler(ctx, args);
+            async move { fut.await.map(PluginCommandOutcome::new) }
+        })
+    }
+
+    pub(crate) fn with_plugin_task(
+        mut self,
+        def: PluginOperationDef,
+        handler: PluginTaskHandler,
+    ) -> Self {
+        self.plugin_tasks.push((def, handler));
+        self
+    }
+
+    pub fn with_plugin_task_typed<Op, F, Fut>(self, handler: F) -> Self
+    where
+        Op: PluginTask,
+        F: Fn(super::PluginTaskContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<
+                Output = Result<PluginTaskOutcome<Op::Output>, PluginOperationFailure>,
+            > + Send
+            + 'static,
+    {
+        self.with_plugin_task(
+            super::plugin_operation_def::<Op>(PluginOperationKind::Task),
+            Arc::new(move |ctx, args| {
+                let parsed = serde_json::from_value::<Op::Args>(args);
+                match parsed {
+                    Ok(args) => {
+                        let fut = handler(ctx, args);
+                        Box::pin(async move {
+                            let outcome = fut.await?;
+                            let output = serde_json::to_value(outcome.output).map_err(|err| {
+                                PluginOperationFailure::new(format!(
+                                    "failed to serialize {} output: {err}",
+                                    Op::NAME
+                                ))
+                            })?;
+                            Ok(super::actions::ErasedPluginTaskOutcome {
+                                output,
+                                events: outcome.events,
+                                directives: outcome.directives,
+                            })
+                        }) as PluginTaskInvokeFuture
+                    }
+                    Err(err) => Box::pin(async move {
+                        Err(PluginOperationFailure::new(format!(
+                            "invalid {} args: {err}",
+                            Op::NAME
+                        )))
+                    }) as PluginTaskInvokeFuture,
+                }
+            }),
+        )
+    }
+
+    pub fn with_plugin_task_value<Op, F, Fut>(self, handler: F) -> Self
+    where
+        Op: PluginTask,
+        F: Fn(super::PluginTaskContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Op::Output, PluginOperationFailure>>
+            + Send
+            + 'static,
+    {
+        self.with_plugin_task_typed::<Op, _, _>(move |ctx, args| {
+            let fut = handler(ctx, args);
+            async move { fut.await.map(PluginTaskOutcome::new) }
         })
     }
 
@@ -505,8 +618,14 @@ impl SessionPlugin for SpecPlugin {
         for hook in &self.spec.session_config_mutators {
             reg.session().config_mutator(Arc::clone(hook));
         }
-        for (def, handler) in &self.spec.plugin_actions {
-            reg.actions().op(def.clone(), Arc::clone(handler))?;
+        for (def, handler) in &self.spec.plugin_queries {
+            reg.operations().query(def.clone(), Arc::clone(handler))?;
+        }
+        for (def, handler) in &self.spec.plugin_commands {
+            reg.operations().command(def.clone(), Arc::clone(handler))?;
+        }
+        for (def, handler) in &self.spec.plugin_tasks {
+            reg.operations().task(def.clone(), Arc::clone(handler))?;
         }
         for (priority, transform) in &self.spec.turn_context_transforms {
             reg.context().prepare_turn(*priority, Arc::clone(transform));

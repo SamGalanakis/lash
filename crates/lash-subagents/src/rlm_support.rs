@@ -230,8 +230,8 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
         submit_error_output_schema(),
     )
     .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
-        ["tools"],
-        "submit_error",
+        ["task"],
+        "fail",
     ))
     .with_scheduling(ToolScheduling::Serial)
 }

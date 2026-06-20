@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use lash_core::plugin::{
-    PluginAction, PluginActionContext, PluginActionFailure, PluginActionKind, PluginDirective,
-    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta,
-    PromptHookContext, SessionParam, SessionPlugin, SnapshotReader, SnapshotWriter,
-    ToolCallHookContext, ToolResultHookContext, TurnResultHookContext,
+    PluginCommand, PluginCommandContext, PluginCommandOutcome, PluginDirective, PluginError,
+    PluginFactory, PluginOperation, PluginOperationFailure, PluginRegistrar,
+    PluginRuntimeDirective, PluginSessionContext, PluginSnapshotMeta, PluginTask,
+    PluginTaskContext, PluginTaskOutcome, PromptHookContext, SessionParam, SessionPlugin,
+    SnapshotReader, SnapshotWriter, ToolCallHookContext, ToolResultHookContext,
+    TurnResultHookContext,
 };
 use lash_core::{
     MessageRole, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolCall, ToolContext,
@@ -80,6 +82,11 @@ pub struct AutoresearchStartArgs {
     pub objective: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, lash_core::JsonSchema)]
+pub struct AutoresearchCommandArgs {
+    pub raw: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, lash_core::JsonSchema)]
 pub struct AutoresearchCommandOutput {
     pub status: StatusSummary,
@@ -95,58 +102,28 @@ pub struct AutoresearchExportOutput {
     pub message: String,
 }
 
-pub struct AutoresearchStatusOp;
-pub struct AutoresearchStartOp;
-pub struct AutoresearchStopOp;
-pub struct AutoresearchClearOp;
+pub struct AutoresearchCommandOp;
 pub struct AutoresearchExportOp;
 
-impl PluginAction for AutoresearchStatusOp {
-    const NAME: &'static str = "autoresearch.status";
-    const DESCRIPTION: &'static str =
-        "Return the current autoresearch runtime and journal summary.";
-    const KIND: PluginActionKind = PluginActionKind::Query;
+impl PluginOperation for AutoresearchCommandOp {
+    const NAME: &'static str = "autoresearch.command";
+    const DESCRIPTION: &'static str = "Parse and apply an autoresearch slash command.";
     const SESSION_PARAM: SessionParam = SessionParam::Required;
-    type Args = AutoresearchEmptyArgs;
-    type Output = StatusSummary;
-}
-
-impl PluginAction for AutoresearchStartOp {
-    const NAME: &'static str = "autoresearch.start";
-    const DESCRIPTION: &'static str =
-        "Enable autoresearch mode and optionally seed a new objective.";
-    const KIND: PluginActionKind = PluginActionKind::Command;
-    const SESSION_PARAM: SessionParam = SessionParam::Required;
-    type Args = AutoresearchStartArgs;
+    type Args = AutoresearchCommandArgs;
     type Output = AutoresearchCommandOutput;
 }
 
-impl PluginAction for AutoresearchStopOp {
-    const NAME: &'static str = "autoresearch.stop";
-    const DESCRIPTION: &'static str = "Disable autoresearch mode for the current session.";
-    const KIND: PluginActionKind = PluginActionKind::Command;
-    const SESSION_PARAM: SessionParam = SessionParam::Required;
-    type Args = AutoresearchEmptyArgs;
-    type Output = AutoresearchCommandOutput;
-}
+impl PluginCommand for AutoresearchCommandOp {}
 
-impl PluginAction for AutoresearchClearOp {
-    const NAME: &'static str = "autoresearch.clear";
-    const DESCRIPTION: &'static str = "Delete autoresearch session files and clear runtime state.";
-    const KIND: PluginActionKind = PluginActionKind::Command;
-    const SESSION_PARAM: SessionParam = SessionParam::Required;
-    type Args = AutoresearchEmptyArgs;
-    type Output = AutoresearchCommandOutput;
-}
-
-impl PluginAction for AutoresearchExportOp {
+impl PluginOperation for AutoresearchExportOp {
     const NAME: &'static str = "autoresearch.export";
     const DESCRIPTION: &'static str = "Write an HTML export of the current autoresearch summary.";
-    const KIND: PluginActionKind = PluginActionKind::Task;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = AutoresearchEmptyArgs;
     type Output = AutoresearchExportOutput;
 }
+
+impl PluginTask for AutoresearchExportOp {}
 
 struct AutoresearchPlugin {
     workdir: PathBuf,
@@ -163,6 +140,62 @@ impl AutoresearchPlugin {
             provider: Arc::new(AutoresearchTools { workdir, state }),
         }
     }
+}
+
+async fn run_autoresearch_command(
+    ctx: PluginCommandContext,
+    root: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+    args: AutoresearchCommandArgs,
+) -> Result<PluginCommandOutcome<AutoresearchCommandOutput>, PluginOperationFailure> {
+    let raw = args.raw.as_deref().map(str::trim).unwrap_or_default();
+    if raw.eq_ignore_ascii_case("help") {
+        let status: StatusSummary = tool_result_output(status_tool_result(root, state))?;
+        return Ok(PluginCommandOutcome::new(AutoresearchCommandOutput {
+            status,
+            queued_input: None,
+            message: autoresearch_help_text(),
+        }));
+    }
+
+    let result = if raw.eq_ignore_ascii_case("off") {
+        stop_mode_command(ctx, root, state).await
+    } else if raw.eq_ignore_ascii_case("clear") {
+        clear_mode_command(ctx, root, state).await
+    } else {
+        let objective = (!raw.is_empty()).then(|| raw.to_string());
+        start_mode_command(
+            ctx,
+            root,
+            state,
+            serde_json::to_value(AutoresearchStartArgs { objective }).unwrap_or_default(),
+        )
+        .await
+    };
+    let output: AutoresearchCommandOutput = tool_result_output(result)?;
+    let mut directives = Vec::new();
+    if let Some(input) = output.queued_input.clone() {
+        directives.push(PluginRuntimeDirective::queue_turn(
+            lash_core::TurnInput::text(input),
+        ));
+    }
+    Ok(PluginCommandOutcome::new(output.clone())
+        .with_events(vec![status_event(&output.status)?])
+        .with_directives(directives))
+}
+
+fn autoresearch_help_text() -> String {
+    [
+        "Autoresearch",
+        "",
+        "Commands:",
+        "  /autoresearch <objective>  Start autoresearch or update the objective",
+        "  /autoresearch help         Show this help",
+        "  /autoresearch off          Stop autoresearch mode",
+        "  /autoresearch clear        Clear autoresearch state and UI",
+        "  /autoresearch export       Export the current summary",
+    ]
+    .join("\n")
 }
 
 impl SessionPlugin for AutoresearchPlugin {
@@ -295,59 +328,28 @@ impl SessionPlugin for AutoresearchPlugin {
             })
         }));
 
-        reg.actions().typed::<AutoresearchStatusOp, _, _>({
+        reg.operations()
+            .typed_command::<AutoresearchCommandOp, _, _>({
+                let root = self.workdir.clone();
+                let state = Arc::clone(&self.state);
+                move |ctx: PluginCommandContext, args: AutoresearchCommandArgs| {
+                    let root = root.clone();
+                    let state = Arc::clone(&state);
+                    async move { run_autoresearch_command(ctx, &root, &state, args).await }
+                }
+            })?;
+        reg.operations().typed_task::<AutoresearchExportOp, _, _>({
             let root = self.workdir.clone();
             let state = Arc::clone(&self.state);
-            move |_ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
-                let root = root.clone();
-                let state = Arc::clone(&state);
-                async move { tool_result_output(status_tool_result(&root, &state)) }
-            }
-        })?;
-        reg.actions().typed::<AutoresearchStartOp, _, _>({
-            let root = self.workdir.clone();
-            let state = Arc::clone(&self.state);
-            move |ctx: PluginActionContext, args: AutoresearchStartArgs| {
+            move |_ctx: PluginTaskContext, _args: AutoresearchEmptyArgs| {
                 let root = root.clone();
                 let state = Arc::clone(&state);
                 async move {
-                    tool_result_output(
-                        start_mode_command(
-                            ctx,
-                            &root,
-                            &state,
-                            serde_json::to_value(args).unwrap_or_default(),
-                        )
-                        .await,
-                    )
+                    let output: AutoresearchExportOutput =
+                        tool_result_output(export_summary(&root, &state))?;
+                    Ok(PluginTaskOutcome::new(output.clone())
+                        .with_events(vec![status_event(&output.status)?]))
                 }
-            }
-        })?;
-        reg.actions().typed::<AutoresearchStopOp, _, _>({
-            let root = self.workdir.clone();
-            let state = Arc::clone(&self.state);
-            move |ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
-                let root = root.clone();
-                let state = Arc::clone(&state);
-                async move { tool_result_output(stop_mode_command(ctx, &root, &state).await) }
-            }
-        })?;
-        reg.actions().typed::<AutoresearchClearOp, _, _>({
-            let root = self.workdir.clone();
-            let state = Arc::clone(&self.state);
-            move |ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
-                let root = root.clone();
-                let state = Arc::clone(&state);
-                async move { tool_result_output(clear_mode_command(ctx, &root, &state).await) }
-            }
-        })?;
-        reg.actions().typed::<AutoresearchExportOp, _, _>({
-            let root = self.workdir.clone();
-            let state = Arc::clone(&self.state);
-            move |_ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
-                let root = root.clone();
-                let state = Arc::clone(&state);
-                async move { tool_result_output(export_summary(&root, &state)) }
             }
         })?;
 
@@ -419,7 +421,46 @@ use tools::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::InputItem;
+    use lash_core::plugin::PluginRuntimeDirective;
+    use lash_core::testing::MockSessionManager;
     use tempfile::tempdir;
+
+    fn command_context(
+        manager: Arc<MockSessionManager>,
+    ) -> lash_core::plugin::PluginCommandContext {
+        lash_core::plugin::PluginCommandContext {
+            session_id: Some("root".to_string()),
+            sessions: manager.clone(),
+            session_lifecycle: manager.clone(),
+            session_graph: manager.clone(),
+            processes: manager,
+        }
+    }
+
+    fn manager_with_autoresearch_tools(
+        root: &Path,
+        state: Arc<Mutex<RuntimeState>>,
+    ) -> Arc<MockSessionManager> {
+        let provider = Arc::new(AutoresearchTools {
+            workdir: root.to_path_buf(),
+            state,
+        }) as Arc<dyn ToolProvider>;
+        let registry =
+            lash_core::ToolRegistry::from_tool_provider(provider).expect("tool registry");
+        Arc::new(MockSessionManager::default().with_tool_registry(registry))
+    }
+
+    fn queued_directive_text(directive: &PluginRuntimeDirective) -> Option<&str> {
+        match directive {
+            PluginRuntimeDirective::QueueTurn { input, .. } => {
+                input.items.iter().find_map(|item| match item {
+                    InputItem::Text { text } => Some(text.as_str()),
+                    InputItem::ImageRef { .. } => None,
+                })
+            }
+        }
+    }
 
     #[test]
     fn parse_metrics_reads_metric_lines() {
@@ -467,5 +508,128 @@ mod tests {
                 .into_iter()
                 .all(|tool| { tool.effective_availability() == lash_core::ToolAvailability::Off })
         );
+    }
+
+    #[tokio::test]
+    async fn autoresearch_command_start_emits_status_and_queue_directive() {
+        let dir = tempdir().expect("tempdir");
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let manager = manager_with_autoresearch_tools(dir.path(), Arc::clone(&state));
+
+        let outcome = run_autoresearch_command(
+            command_context(Arc::clone(&manager)),
+            dir.path(),
+            &state,
+            AutoresearchCommandArgs {
+                raw: Some("improve latency".to_string()),
+            },
+        )
+        .await
+        .expect("autoresearch command");
+
+        assert!(outcome.output.status.active);
+        assert_eq!(
+            outcome.output.status.objective.as_deref(),
+            Some("improve latency")
+        );
+        assert!(
+            outcome
+                .output
+                .queued_input
+                .as_deref()
+                .is_some_and(|input| input.contains("Objective: improve latency"))
+        );
+        assert_eq!(outcome.events.len(), 1);
+        let PluginRuntimeEvent::Custom { name, payload } = &outcome.events[0] else {
+            panic!("expected custom status event");
+        };
+        assert_eq!(name, "autoresearch.status");
+        let status: StatusSummary = serde_json::from_value(payload.clone()).expect("status");
+        assert!(status.active);
+        assert_eq!(status.objective.as_deref(), Some("improve latency"));
+        assert_eq!(outcome.directives.len(), 1);
+        assert!(
+            queued_directive_text(&outcome.directives[0])
+                .is_some_and(|text| text.contains("Objective: improve latency"))
+        );
+        assert!(
+            manager
+                .tool_registry
+                .as_ref()
+                .expect("registry")
+                .export_state()
+                .tool_manifests()
+                .iter()
+                .all(|tool| tool.effective_availability()
+                    == lash_core::ToolAvailability::Showcased)
+        );
+    }
+
+    #[tokio::test]
+    async fn autoresearch_command_off_emits_inactive_status() {
+        let dir = tempdir().expect("tempdir");
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let manager = manager_with_autoresearch_tools(dir.path(), Arc::clone(&state));
+        run_autoresearch_command(
+            command_context(Arc::clone(&manager)),
+            dir.path(),
+            &state,
+            AutoresearchCommandArgs {
+                raw: Some("improve latency".to_string()),
+            },
+        )
+        .await
+        .expect("start command");
+
+        let outcome = run_autoresearch_command(
+            command_context(Arc::clone(&manager)),
+            dir.path(),
+            &state,
+            AutoresearchCommandArgs {
+                raw: Some("off".to_string()),
+            },
+        )
+        .await
+        .expect("off command");
+
+        assert!(!outcome.output.status.active);
+        assert!(outcome.directives.is_empty());
+        assert_eq!(outcome.events.len(), 1);
+        let PluginRuntimeEvent::Custom { name, payload } = &outcome.events[0] else {
+            panic!("expected custom status event");
+        };
+        assert_eq!(name, "autoresearch.status");
+        let status: StatusSummary = serde_json::from_value(payload.clone()).expect("status");
+        assert!(!status.active);
+        assert!(
+            manager
+                .tool_registry
+                .as_ref()
+                .expect("registry")
+                .export_state()
+                .tool_manifests()
+                .iter()
+                .all(|tool| tool.effective_availability() == lash_core::ToolAvailability::Off)
+        );
+    }
+
+    #[test]
+    fn autoresearch_export_writes_artifact_without_ui_status_rpc() {
+        let dir = tempdir().expect("tempdir");
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let start: AutoresearchCommandOutput = tool_result_output(start_mode(
+            dir.path(),
+            &state,
+            serde_json::json!({ "objective": "improve latency" }),
+        ))
+        .expect("start mode");
+        assert!(start.status.active);
+
+        let output: AutoresearchExportOutput =
+            tool_result_output(export_summary(dir.path(), &state)).expect("export");
+
+        assert!(output.status.active);
+        assert!(Path::new(&output.path).exists());
+        assert!(output.message.contains(EXPORT_FILE));
     }
 }

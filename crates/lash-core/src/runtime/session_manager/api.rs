@@ -1,6 +1,50 @@
 use super::*;
 
 #[async_trait::async_trait]
+impl crate::plugin::SessionReadService for RuntimeSessionStateService {
+    async fn snapshot_current(&self) -> Result<SessionSnapshot, crate::PluginError> {
+        self.services.current.snapshot_current().await
+    }
+
+    async fn snapshot_session(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionSnapshot, crate::PluginError> {
+        self.services
+            .current
+            .snapshot_session(&self.services.managed, session_id)
+            .await
+    }
+
+    async fn tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+        self.services
+            .current
+            .tool_catalog(&self.services.managed, session_id)
+            .await
+    }
+
+    async fn shared_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
+        self.services
+            .current
+            .shared_tool_catalog(&self.services.managed, session_id)
+            .await
+    }
+
+    async fn tool_state(&self, session_id: &str) -> Result<crate::ToolState, crate::PluginError> {
+        self.services
+            .current
+            .tool_state(&self.services.managed, session_id)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
 impl crate::plugin::SessionStateService for RuntimeSessionStateService {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, crate::PluginError> {
         self.services.current.snapshot_current().await
@@ -109,6 +153,21 @@ impl crate::plugin::SessionGraphService for RuntimeSessionGraphService {
         event: lash_trace::TraceEvent,
     ) -> Result<(), crate::PluginError> {
         self.services.current.emit_trace_event(context, event).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::plugin::ProcessReadService for RuntimeSessionProcessService {
+    async fn list_visible(
+        &self,
+        session_id: &str,
+        mode: crate::ProcessListMode,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, crate::PluginError> {
+        self.services
+            .processes
+            .list_process_handles(&self.services.current, session_id, mode, scope)
+            .await
     }
 }
 

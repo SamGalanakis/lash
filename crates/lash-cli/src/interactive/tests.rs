@@ -1,34 +1,38 @@
-use super::helpers::TurnActivityBridge;
 use super::*;
+use std::sync::Arc;
+
 use crate::app::App;
 use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
-use lash::{TurnActivity, TurnActivityId, TurnActivitySink};
+use lash::{TurnActivity, TurnActivityId};
 use lash_core::SessionPolicy;
 
 #[tokio::test]
-async fn runtime_event_bridge_coalesces_text_before_structural_event() {
+async fn observation_activity_coalescer_batches_text_before_structural_event() {
     let mut pump = crate::event::AppEventPump::new();
-    let sink = TurnActivityBridge::spawn(7, pump.sender());
+    let mut coalescer = super::helpers::TurnActivityCoalescer::new(7, pump.sender());
 
-    sink.emit(TurnActivity::new(
-        TurnActivityId::new("assistant"),
-        TurnEvent::AssistantProseDelta {
-            text: "Hello".to_string(),
-        },
-    ))
-    .await;
-    sink.emit(TurnActivity::new(
-        TurnActivityId::new("assistant"),
-        TurnEvent::AssistantProseDelta {
-            text: ", world".to_string(),
-        },
-    ))
-    .await;
-    sink.emit(TurnActivity::independent(TurnEvent::ModelRequestStarted {
-        protocol_iteration: 0,
-    }))
-    .await;
+    coalescer
+        .emit(TurnActivity::new(
+            TurnActivityId::new("assistant"),
+            TurnEvent::AssistantProseDelta {
+                text: "Hello".to_string(),
+            },
+        ))
+        .await;
+    coalescer
+        .emit(TurnActivity::new(
+            TurnActivityId::new("assistant"),
+            TurnEvent::AssistantProseDelta {
+                text: ", world".to_string(),
+            },
+        ))
+        .await;
+    coalescer
+        .emit(TurnActivity::independent(TurnEvent::ModelRequestStarted {
+            protocol_iteration: 0,
+        }))
+        .await;
 
     let first = pump.recv().await.expect("text event").event;
     let AppEvent::Session {
@@ -59,6 +63,158 @@ async fn runtime_event_bridge_coalesces_text_before_structural_event() {
         activity.event,
         TurnEvent::ModelRequestStarted { .. }
     ));
+}
+
+#[tokio::test]
+async fn cli_turn_runner_streams_to_ui_through_session_observation() {
+    let session = observation_test_session(
+        "cli-observation-bridge",
+        Some("Hello from observation"),
+        None,
+    )
+    .await;
+    let mut pump = crate::event::AppEventPump::new();
+    let stream_id = 42;
+
+    super::helpers::SessionObservationBridge::spawn(&session, stream_id, pump.sender());
+    let (_cancel, return_rx) = crate::turn_runner::spawn_session_turn(
+        session,
+        lash_core::TurnInput::text("hello"),
+        stream_id,
+    );
+
+    let mut saw_text = false;
+    let mut saw_finished = false;
+    while !saw_text || !saw_finished {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), pump.recv())
+            .await
+            .expect("observation event")
+            .expect("app event")
+            .event;
+        match event {
+            AppEvent::Session {
+                stream_id: observed,
+                activity,
+            } => {
+                assert_eq!(observed, stream_id);
+                if let TurnEvent::AssistantProseDelta { text } = activity.event {
+                    assert_eq!(text, "Hello from observation");
+                    saw_text = true;
+                }
+            }
+            AppEvent::SessionObservationFinished {
+                stream_id: observed,
+            } => {
+                assert_eq!(observed, stream_id);
+                saw_finished = true;
+            }
+            _ => {}
+        }
+    }
+
+    let done = return_rx.await.expect("turn result");
+    assert_eq!(done.stream_id, stream_id);
+    assert!(matches!(
+        done.result.outcome,
+        lash_core::TurnOutcome::Finished(_)
+    ));
+}
+
+#[tokio::test]
+async fn session_observation_bridge_surfaces_gap_and_requests_refresh() {
+    let session =
+        observation_test_session("cli-observation-gap", Some("gap response"), Some(1)).await;
+    let stale_cursor = session.observe().current_observation().cursor;
+    session
+        .turn(lash_core::TurnInput::text("first"))
+        .run()
+        .await
+        .expect("first turn");
+    session
+        .turn(lash_core::TurnInput::text("second"))
+        .run()
+        .await
+        .expect("second turn");
+
+    let mut pump = crate::event::AppEventPump::new();
+    super::helpers::SessionObservationBridge::spawn_from_cursor(
+        &session,
+        stale_cursor,
+        77,
+        pump.sender(),
+    );
+
+    let mut saw_diagnostic = false;
+    let mut saw_queue_refresh = false;
+    let mut saw_ui_refresh = false;
+    for _ in 0..8 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), pump.recv())
+            .await
+            .expect("gap bridge event")
+            .expect("app event")
+            .event;
+        match event {
+            AppEvent::SystemMessage { message } => {
+                saw_diagnostic |=
+                    message.contains("Live session observation skipped buffered events");
+            }
+            AppEvent::RequestQueuedWorkSnapshot => saw_queue_refresh = true,
+            AppEvent::RequestUiSnapshot => saw_ui_refresh = true,
+            _ => {}
+        }
+        if saw_diagnostic && saw_queue_refresh && saw_ui_refresh {
+            break;
+        }
+    }
+    assert!(saw_diagnostic, "expected live replay gap diagnostic");
+    assert!(saw_queue_refresh, "expected queued-work refresh request");
+    assert!(saw_ui_refresh, "expected UI snapshot refresh request");
+}
+
+async fn observation_test_session(
+    session_id: &str,
+    response: Option<&'static str>,
+    live_replay_capacity: Option<usize>,
+) -> LashSession {
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("observation-test")
+        .complete(move |_| async move {
+            Ok(lash_core::LlmResponse {
+                full_text: response.unwrap_or_default().to_string(),
+                parts: Vec::new(),
+                usage: Default::default(),
+                terminal_reason: lash_core::LlmTerminalReason::Stop,
+                terminal_diagnostic: None,
+                provider_usage: None,
+                request_body: None,
+                http_summary: None,
+            })
+        })
+        .build()
+        .into_handle();
+    let mut builder = lash::StandardCore::builder()
+        .provider(provider)
+        .model(
+            lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+                .expect("model spec"),
+        )
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .store_factory(Arc::new(
+            lash::persistence::InMemorySessionStoreFactory::new(),
+        ));
+    if let Some(capacity) = live_replay_capacity {
+        builder =
+            builder.live_replay_store(Arc::new(lash_core::InMemoryLiveReplayStore::with_bounds(
+                capacity,
+                std::time::Duration::from_secs(120),
+            )));
+    }
+    let core = builder.build().expect("core");
+    core.session(session_id).open().await.expect("session")
 }
 
 #[test]

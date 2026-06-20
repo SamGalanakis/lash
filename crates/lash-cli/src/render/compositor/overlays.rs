@@ -448,12 +448,9 @@ fn draw_document_overlay(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
         popup.width.saturating_sub(4),
     );
 
-    let content_area = Rect::new(
-        popup.x + 2,
-        popup.y + 1,
-        popup.width.saturating_sub(4),
-        popup.height.saturating_sub(3),
-    );
+    let Some(content_area) = render::document_overlay_content_area(body_area) else {
+        return;
+    };
     let lines = render::document_lines_snapshot(document, content_area.width as usize);
     let max_scroll = lines.len().saturating_sub(content_area.height as usize);
     let scroll = document.scroll_offset.min(max_scroll);
@@ -470,6 +467,8 @@ fn draw_document_overlay(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
             content_area.width,
         );
     }
+
+    apply_document_selection_highlight(frame, app, content_area, scroll);
 
     if max_scroll > 0 {
         let track_height = content_area.height as usize;
@@ -511,5 +510,45 @@ fn draw_document_overlay(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
             theme::text_faint_style(),
             hint_width,
         );
+    }
+}
+
+fn apply_document_selection_highlight(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    scroll: usize,
+) {
+    if !(app.selection.active || app.selection.visible) || content_area.height == 0 {
+        return;
+    }
+
+    let ((start_col, start_row), (end_col, end_row)) = selection_ordered(&app.selection);
+    let view_top = scroll;
+    let view_bottom = scroll + content_area.height as usize;
+    let visible_start = start_row.max(view_top);
+    let visible_end = end_row.min(view_bottom.saturating_sub(1));
+    if visible_start > visible_end {
+        return;
+    }
+
+    for row in visible_start..=visible_end {
+        let screen_y = content_area.y + (row - scroll) as u16;
+        let col_start = if row == start_row {
+            start_col
+        } else {
+            content_area.x
+        };
+        let col_end = if row == end_row {
+            end_col
+        } else {
+            content_area.x + content_area.width
+        };
+        let span_width = col_end.saturating_sub(col_start);
+        if span_width > 0 {
+            frame.patch_row_style_range(col_start, screen_y, span_width, |style| {
+                style.bg(theme::SELECTION_BG)
+            });
+        }
     }
 }

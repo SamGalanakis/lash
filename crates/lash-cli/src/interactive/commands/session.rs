@@ -125,7 +125,7 @@ pub(super) async fn handle_clear(
     let opened = runtime_factory
         .fresh(
             policy,
-            current_execution_mode.clone(),
+            *current_execution_mode,
             fallback_standard_context_approach(current_execution_mode),
         )
         .await?;
@@ -334,7 +334,7 @@ pub(crate) async fn switch_to_session_identifier(
         .resume(
             identifier,
             policy,
-            current_execution_mode.clone(),
+            *current_execution_mode,
             fallback_standard_context_approach(current_execution_mode),
         )
         .await?;

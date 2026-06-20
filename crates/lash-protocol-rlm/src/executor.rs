@@ -88,7 +88,21 @@ async fn execute_code_inner(
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
 ) -> ExecResponse {
     state.dirty = true;
-    let host_environment = lashlang_surface.host_environment(ctx.tool_catalog().as_ref());
+    let host_environment = match lashlang_surface.host_environment(ctx.tool_catalog().as_ref()) {
+        Ok(host_environment) => host_environment,
+        Err(err) => {
+            return ExecResponse {
+                observations: Vec::new(),
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: Some(format!("invalid Lashlang host tool surface: {err}")),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            };
+        }
+    };
     let compile_result = {
         let _phase = ctx.named_phase("rlm_lashlang.compile_link");
         state
@@ -116,7 +130,7 @@ async fn execute_code_inner(
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 printed_images: Vec::new(),
-                error: Some(lashlang::format_link_diagnostic(code, &err)),
+                error: Some(format_rlm_link_diagnostic(code, &err)),
                 duration_ms: start.elapsed().as_millis() as u64,
                 terminal_finish: None,
             };
@@ -266,6 +280,33 @@ async fn execute_code_inner(
         duration_ms: start.elapsed().as_millis() as u64,
         terminal_finish,
     }
+}
+
+const RLM_BARE_TOOL_CALL_DIAGNOSTIC: &str =
+    "bare tool calls are not allowed; call the module operation instead.";
+
+fn format_rlm_link_diagnostic(code: &str, err: &lashlang::LinkError) -> String {
+    let diagnostic = lashlang::format_link_diagnostic(code, err);
+    let lashlang::LinkError::BareToolCall { suggestion, .. } = err else {
+        return diagnostic;
+    };
+
+    let mut rlm_diagnostic = match diagnostic.find('\n') {
+        Some(message_end) => {
+            format!(
+                "{}{}",
+                RLM_BARE_TOOL_CALL_DIAGNOSTIC,
+                &diagnostic[message_end..]
+            )
+        }
+        None => RLM_BARE_TOOL_CALL_DIAGNOSTIC.to_string(),
+    };
+    if !suggestion.is_empty() {
+        rlm_diagnostic.push_str("\nhint: use `");
+        rlm_diagnostic.push_str(suggestion);
+        rlm_diagnostic.push('`');
+    }
+    rlm_diagnostic
 }
 
 fn tool_result_projectors(ctx: &RuntimeExecutionContext<'_>) -> Vec<crate::RlmToolResultProjector> {
@@ -869,6 +910,37 @@ mod tests {
 
             assert!(response.error.is_none(), "{:?}", response.error);
             assert_eq!(response.terminal_finish, Some(serde_json::json!("awake")));
+        });
+    }
+
+    #[test]
+    fn executor_reports_rlm_bare_tool_call_diagnostic_at_link_time() {
+        let mut resources = lashlang::LashlangHostCatalog::new();
+        resources.add_module_operation(
+            ["files"],
+            "Files",
+            "read",
+            "read_file",
+            lashlang::TypeExpr::Any,
+            lashlang::TypeExpr::Any,
+        );
+
+        block_on(async {
+            let response = execute_with_lashlang_host_environment(
+                r#"submit read_file({ path: "Cargo.toml" })"#,
+                lashlang::LashlangAbilities::default(),
+                resources,
+            )
+            .await;
+            let error = response
+                .error
+                .as_deref()
+                .expect("bare tool call should fail at link time");
+
+            assert!(error.starts_with(RLM_BARE_TOOL_CALL_DIAGNOSTIC), "{error}");
+            assert!(error.contains("hint: use `files.read`"), "{error}");
+            assert!(response.tool_calls.is_empty());
+            assert!(response.terminal_finish.is_none());
         });
     }
 

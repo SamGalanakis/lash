@@ -207,13 +207,17 @@ impl App {
                 args,
                 output,
                 duration_ms,
+                call_id,
                 ..
             } => {
                 self.finalize_live_markdown();
                 self.clear_live_tool_output();
-                let activities =
+                let mut activities =
                     self.activity_state
                         .project_tool_output(&name, args, output, duration_ms);
+                for activity in &mut activities {
+                    activity.call.call_id = call_id.clone();
+                }
                 let renders_prompt_response_inline = activities
                     .iter()
                     .any(Self::activity_renders_prompt_response_inline);
@@ -250,9 +254,19 @@ impl App {
             } => {
                 self.finalize_live_markdown();
                 let title = live::live_tool_output_title(&name, &args);
+                let activities =
+                    self.activity_state
+                        .project_tool_start(call_id.clone(), &name, args.clone());
                 self.live.tool_output.start(call_id, title);
                 self.set_status(CliRunState::RunningTool, Some(name), true);
+                for activity in activities {
+                    self.push_activity_block(activity);
+                }
+                if !matches!(self.timeline.last(), Some(UiTimelineItem::Splash)) {
+                    self.mark_visible_output();
+                }
                 self.invalidate_live_tool_output_cache();
+                self.scroll_to_bottom();
             }
             TurnEvent::CodeBlockStarted { code, .. } => {
                 self.finalize_live_markdown();

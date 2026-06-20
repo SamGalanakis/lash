@@ -65,7 +65,7 @@ pub enum EmbedError {
     #[error("failed to encode protocol turn options: {0}")]
     ProtocolTurnOptions(#[from] serde_json::Error),
     #[error("runtime control unavailable: {0}")]
-    Control(#[from] lash_core::PluginActionInvokeError),
+    Control(#[from] lash_core::PluginOperationInvokeError),
 }
 
 pub type Result<T> = std::result::Result<T, EmbedError>;

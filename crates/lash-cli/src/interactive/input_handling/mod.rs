@@ -164,15 +164,10 @@ pub(super) fn handle_surface_input(
     session: Option<&LashSession>,
     app: &mut App,
 ) -> bool {
-    let Some(session) = session else {
+    if session.is_none() {
         return false;
-    };
-    match ui_extensions.handle_input(
-        event,
-        TuiExtensionContext {
-            actions: &session.plugin_actions(),
-        },
-    ) {
+    }
+    match ui_extensions.handle_input(event, TuiExtensionContext) {
         TuiInputOutcome::Ignored => false,
         TuiInputOutcome::Handled(effects) => {
             apply_ui_host_effects(app, effects);
@@ -241,21 +236,24 @@ pub(super) async fn dispatch_key_event(
     if let Some(chord) = key_chord_from_event(key)
         && let Some(shortcut) = ctx.ui_extensions.shortcut_for(chord)
     {
-        let Some(session) = ctx.runtime.as_ref() else {
+        if ctx.runtime.is_none() {
             push_system_message(ctx.app, "No active session for UI shortcut.".to_string());
             return Ok(false);
-        };
+        }
         match ctx
             .ui_extensions
-            .invoke_shortcut(
-                &shortcut,
-                TuiExtensionContext {
-                    actions: &session.plugin_actions(),
-                },
-            )
+            .invoke_shortcut(&shortcut, TuiExtensionContext)
             .await
         {
-            Ok(effects) => apply_ui_host_effects(ctx.app, effects),
+            Ok(effects) => {
+                crate::ui_effects::apply_ui_host_effects_with_runtime(
+                    ctx.app,
+                    ctx.ui_extensions,
+                    ctx.runtime,
+                    effects,
+                )
+                .await
+            }
             Err(err) => push_system_message(ctx.app, err),
         }
         return Ok(false);

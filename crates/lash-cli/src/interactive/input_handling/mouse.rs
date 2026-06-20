@@ -133,6 +133,67 @@ pub(in crate::interactive) fn handle_mouse_event(
     let (term_width, term_height) = terminal.size()?;
     let prompt_area = render::input_area(app, term_width, term_height);
     let input_area = render::input_content_area(app, term_width, term_height);
+    let body_area = lash_tui::Rect::new(0, 0, term_width, term_height);
+    if app.has_document()
+        && let Some(document) = app.document_state()
+        && let Some(document_area) = render::document_overlay_content_area(body_area)
+    {
+        let document_scroll = document.scroll_offset;
+        let document_max_scroll = render::document_max_scroll(
+            document,
+            document_area.width as usize,
+            document_area.height as usize,
+        );
+        let in_document = document_area.width > 0
+            && document_area.height > 0
+            && mouse.row >= document_area.y
+            && mouse.row < document_area.y + document_area.height
+            && mouse.column >= document_area.x
+            && mouse.column < document_area.x + document_area.width;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                app.document_scroll_up(3);
+                app.dirty = true;
+                return Ok(());
+            }
+            MouseEventKind::ScrollDown => {
+                app.document_scroll_down(3, document_max_scroll);
+                app.dirty = true;
+                return Ok(());
+            }
+            MouseEventKind::Down(MouseButton::Left) if in_document => {
+                app.clear_input_selection();
+                let vrow = document_scroll + (mouse.row - document_area.y) as usize;
+                app.selection.anchor = (mouse.column, vrow);
+                app.selection.end = (mouse.column, vrow);
+                app.selection.active = true;
+                app.selection.visible = false;
+                app.dirty = true;
+                return Ok(());
+            }
+            MouseEventKind::Drag(MouseButton::Left) if app.selection.active => {
+                let col = mouse.column.clamp(
+                    document_area.x,
+                    document_area.x + document_area.width.saturating_sub(1),
+                );
+                let row = mouse.row.clamp(
+                    document_area.y,
+                    document_area.y + document_area.height.saturating_sub(1),
+                );
+                let vrow = document_scroll + (row - document_area.y) as usize;
+                app.selection.end = (col, vrow);
+                app.selection.visible = true;
+                app.dirty = true;
+                return Ok(());
+            }
+            MouseEventKind::Up(MouseButton::Left) if app.selection.active => {
+                app.selection.active = false;
+                app.dirty = true;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     let workspace_active = app
         .ui_extensions()
         .has_surface_in_slot(TuiSurfaceSlot::Workspace);

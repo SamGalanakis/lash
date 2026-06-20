@@ -27,29 +27,27 @@ impl CatalogTool {
         let id = obj.get("id")?.as_str()?.to_string();
         let name = obj.get("name")?.as_str()?.to_string();
         #[cfg(feature = "lashlang")]
-        let module_path = string_vec(obj.get("module_path"));
+        let module_path = {
+            let module_path = string_vec(obj.get("module_path"));
+            if module_path.is_empty() {
+                return None;
+            }
+            module_path
+        };
         #[cfg(feature = "lashlang")]
         let operation = obj
             .get("operation")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| name.clone());
+            .map(str::to_string)?;
         #[cfg(feature = "lashlang")]
         let call = obj
             .get("call")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                if module_path.is_empty() {
-                    operation.clone()
-                } else {
-                    format!("{}.{}", module_path.join("."), operation)
-                }
-            });
+            .map(str::to_string)?;
         #[cfg(feature = "lashlang")]
         let aliases = string_vec(obj.get("aliases"));
         let searchable = obj

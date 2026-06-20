@@ -1,6 +1,6 @@
 use lash::CancellationToken;
 use lash::LashSession;
-use lash::{TurnActivitySink, TurnInput};
+use lash::TurnInput;
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
     AssistantOutput, ExecutionScope, ExecutionSummary, OutputState, TokenUsage, TurnIssue,
@@ -26,15 +26,11 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
     TurnInput::items(items).with_image_blobs(image_blobs)
 }
 
-pub(crate) fn spawn_session_turn<S>(
+pub(crate) fn spawn_session_turn(
     session: LashSession,
     turn_input: TurnInput,
-    sink: S,
     stream_id: u64,
-) -> (CancellationToken, oneshot::Receiver<RuntimeRunResult>)
-where
-    S: TurnActivitySink + Send + Sync + 'static,
-{
+) -> (CancellationToken, oneshot::Receiver<RuntimeRunResult>) {
     let (return_tx, return_rx) = oneshot::channel();
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
@@ -55,7 +51,7 @@ where
                 .turn_id(turn_id)
                 .cancel(task_cancel)
                 .advanced()
-                .stream_to_with_scope(&sink, scoped)
+                .stream_to_with_scope(&lash::runtime::NoopTurnActivitySink, scoped)
                 .await
         }
         .await
@@ -77,15 +73,11 @@ where
     (cancel, return_rx)
 }
 
-pub(crate) fn spawn_session_queued_turn<S>(
+pub(crate) fn spawn_session_queued_turn(
     session: LashSession,
     batch_ids: Vec<String>,
-    sink: S,
     stream_id: u64,
-) -> (CancellationToken, oneshot::Receiver<RuntimeRunResult>)
-where
-    S: TurnActivitySink + Send + Sync + 'static,
-{
+) -> (CancellationToken, oneshot::Receiver<RuntimeRunResult>) {
     let (return_tx, return_rx) = oneshot::channel();
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
@@ -110,7 +102,7 @@ where
                 .drain_id(drain_id)
                 .cancel(task_cancel)
                 .advanced()
-                .stream_to_with_scope(&sink, scoped)
+                .stream_to_with_scope(&lash::runtime::NoopTurnActivitySink, scoped)
                 .await
         }
         .await

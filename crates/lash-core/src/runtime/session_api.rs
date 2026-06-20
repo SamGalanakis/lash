@@ -166,14 +166,14 @@ impl LashRuntime {
 
     pub(super) fn runtime_session_services(
         &self,
-    ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
+    ) -> Result<Arc<RuntimeSessionServices>, PluginOperationInvokeError> {
         Ok(Arc::new(RuntimeSessionServices::new(self, true, None)?))
     }
 
     pub(super) fn runtime_session_services_for_turn(
         &self,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
+    ) -> Result<Arc<RuntimeSessionServices>, PluginOperationInvokeError> {
         Ok(Arc::new(RuntimeSessionServices::new(
             self,
             false,
@@ -183,28 +183,28 @@ impl LashRuntime {
 
     pub fn session_state_service(
         &self,
-    ) -> Result<Arc<dyn crate::plugin::SessionStateService>, PluginActionInvokeError> {
+    ) -> Result<Arc<dyn crate::plugin::SessionStateService>, PluginOperationInvokeError> {
         self.runtime_session_services()
             .map(|services| services.state_service())
     }
 
     pub fn session_lifecycle_service(
         &self,
-    ) -> Result<Arc<dyn crate::plugin::SessionLifecycleService>, PluginActionInvokeError> {
+    ) -> Result<Arc<dyn crate::plugin::SessionLifecycleService>, PluginOperationInvokeError> {
         self.runtime_session_services()
             .map(|services| services.lifecycle_service())
     }
 
     pub fn session_graph_service(
         &self,
-    ) -> Result<Arc<dyn crate::plugin::SessionGraphService>, PluginActionInvokeError> {
+    ) -> Result<Arc<dyn crate::plugin::SessionGraphService>, PluginOperationInvokeError> {
         self.runtime_session_services()
             .map(|services| services.graph_service())
     }
 
     pub fn process_service(
         &self,
-    ) -> Result<Arc<dyn crate::ProcessService>, PluginActionInvokeError> {
+    ) -> Result<Arc<dyn crate::ProcessService>, PluginOperationInvokeError> {
         self.runtime_session_services()
             .map(|services| services.process_service())
     }
@@ -279,10 +279,10 @@ impl LashRuntime {
         &mut self,
         instructions: Option<String>,
         scoped_effect_controller: crate::ScopedEffectController<'_>,
-    ) -> Result<bool, PluginActionInvokeError> {
+    ) -> Result<bool, PluginOperationInvokeError> {
         let services = self.runtime_session_services()?;
         let Some(plugin_session) = self.session.as_ref().map(|s| Arc::clone(s.plugins())) else {
-            return Err(PluginActionInvokeError::Unknown(
+            return Err(PluginOperationInvokeError::Unknown(
                 "runtime session not available".to_string(),
             ));
         };
@@ -296,7 +296,7 @@ impl LashRuntime {
             scoped_effect_controller,
         };
         let Some(compaction) = plugin_session.compact_context(&ctx).await.map_err(|err| {
-            PluginActionInvokeError::Unknown(format!("context compaction failed: {err}"))
+            PluginOperationInvokeError::Unknown(format!("context compaction failed: {err}"))
         })?
         else {
             return Ok(false);

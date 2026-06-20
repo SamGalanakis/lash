@@ -8,7 +8,7 @@ use crate::chrome_ui::TurnStatusLabel;
 use crate::chrome_ui::animated_lash_word;
 use crate::editor::SuggestionKind;
 use crate::text_layout::{centered_rect, display_width, selection_ordered};
-use crate::{render, theme};
+use crate::{render, text_display, theme};
 
 const INPUT_HORIZONTAL_PADDING: u16 = 1;
 const PROMPT_HORIZONTAL_PADDING: u16 = 1;

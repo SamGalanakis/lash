@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
@@ -20,6 +20,7 @@ use lash_core::{
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
+use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 fn unavailable_processes() -> Arc<dyn lash_core::ProcessService> {
@@ -195,7 +196,8 @@ fn plan_mode_test_tool_definition() -> ToolDefinition {
         lash_core::ToolAvailabilityConfig::off(),
         lash_core::ToolScheduling::Parallel,
     )
-    .with_examples(vec!["plan_exit()".to_string()])
+    .with_examples(vec!["await plan.exit({})?".to_string()])
+    .with_lashlang_binding(LashlangToolBinding::new(["plan"], "exit"))
 }
 
 fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
@@ -283,6 +285,31 @@ fn plan_mode_host(plan_factory: PlanModePluginFactory) -> PluginHost {
     PluginHost::new(factories)
 }
 
+async fn run_plan_command<T>(
+    session: &lash_core::PluginSession,
+    name: &str,
+    args: Value,
+    manager: &Arc<T>,
+) -> Value
+where
+    T: SessionStateService + SessionLifecycleService + SessionGraphService + 'static,
+{
+    let (_, outcome) = session
+        .run_plugin_command_value(
+            name,
+            args,
+            None,
+            true,
+            sessions(manager),
+            session_lifecycle(manager),
+            session_graph(manager),
+            unavailable_processes(),
+        )
+        .await
+        .expect(name);
+    outcome.output
+}
+
 #[tokio::test]
 async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let _guard = plan_mode_env_lock().lock().await;
@@ -292,21 +319,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
 
-    let enabled = session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
-    assert!(enabled.is_success());
-    let enabled_value = enabled.value_for_projection();
+    let enabled_value = run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
     assert_eq!(
         enabled_value.get("enabled").and_then(|v| v.as_bool()),
         Some(true)
@@ -323,20 +336,8 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let restored = host
         .build_session("restored", Some(&snapshot))
         .expect("restored");
-    let restored_toggle = restored
-        .invoke_plugin_action(
-            "plan_mode.toggle",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("toggle restored");
-    let restored_toggle_value = restored_toggle.value_for_projection();
+    let restored_toggle_value =
+        run_plan_command(&restored, "plan_mode.toggle", json!({}), &manager).await;
     assert_eq!(
         restored_toggle_value
             .get("enabled")
@@ -348,20 +349,8 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
         .restore(&lash_core::PluginSessionSnapshot::default())
         .expect("reset restore");
     let reset_manager = Arc::new(mock_session_manager("run-session"));
-    let reset_toggle = restored
-        .invoke_plugin_action(
-            "plan_mode.toggle",
-            json!({}),
-            None,
-            true,
-            sessions(&reset_manager),
-            session_lifecycle(&reset_manager),
-            session_graph(&reset_manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("toggle reset");
-    let reset_toggle_value = reset_toggle.value_for_projection();
+    let reset_toggle_value =
+        run_plan_command(&restored, "plan_mode.toggle", json!({}), &reset_manager).await;
     assert_eq!(
         reset_toggle_value.get("enabled").and_then(|v| v.as_bool()),
         Some(true)
@@ -387,19 +376,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager_host),
-            session_lifecycle(&manager_host),
-            session_graph(&manager_host),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager_host).await;
 
     let enabled = manager
         .tool_state("root")
@@ -409,19 +386,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         tool.manifest().effective_availability() == lash_core::ToolAvailability::Showcased
     }));
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.disable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager_host),
-            session_lifecycle(&manager_host),
-            session_graph(&manager_host),
-            unavailable_processes(),
-        )
-        .await
-        .expect("disable");
+    run_plan_command(&session, "plan_mode.disable", json!({}), &manager_host).await;
 
     let disabled = manager
         .tool_state("root")
@@ -441,19 +406,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     let before_turn = session
         .before_turn(TurnHookContext {
@@ -471,7 +424,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 message.role == MessageRole::System
                     && message.content.contains("Plan mode:")
                     && message.content.contains(".lash/plans/run-session.md")
-                    && message.content.contains("plan_exit()")
+                    && message.content.contains("plan.exit")
                     && message.content.contains("single source of truth")
                     && message.content.contains("host can surface the file path"))
     )));
@@ -643,32 +596,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 && message.contains(".lash/plans/run-session.md")
     )));
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.disable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("disable");
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.disable", json!({}), &manager).await;
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     let checkpoint = session
         .at_checkpoint(lash_core::CheckpointHookContext {
@@ -686,7 +615,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         PluginDirective::EnqueueMessages { messages }
             if messages.iter().any(|message|
                 message.content.contains(".lash/plans/run-session.md")
-                    && message.content.contains("plan_exit()")
+                    && message.content.contains("plan.exit")
                     && message.content.contains("single source of truth")
                     && message.content.contains("host can surface the file path"))
     )));
@@ -712,19 +641,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     let first_before_turn = session
         .before_turn(TurnHookContext {
@@ -775,19 +692,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     let allowed = session
         .before_tool_call(ToolCallHookContext::new(
@@ -898,19 +803,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     );
     let session = host.build_session("root", None).expect("session");
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager_host),
-            session_lifecycle(&manager_host),
-            session_graph(&manager_host),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager_host).await;
     session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
@@ -1025,19 +918,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
     let session = host.build_session("root", None).expect("session");
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     session
         .before_turn(TurnHookContext {
@@ -1133,19 +1014,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
     let session = host.build_session("root", None).expect("session");
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     session
         .before_turn(TurnHookContext {
@@ -1238,19 +1107,7 @@ async fn plan_mode_after_tool_call_switches_agent_frame_on_fresh_context_approva
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(CapturingSessionManager::default());
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     let directives = session
         .after_tool_call(ToolResultHookContext::new(
@@ -1305,19 +1162,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
 
-    session
-        .invoke_plugin_action(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            sessions(&manager),
-            session_lifecycle(&manager),
-            session_graph(&manager),
-            unavailable_processes(),
-        )
-        .await
-        .expect("enable");
+    run_plan_command(&session, "plan_mode.enable", json!({}), &manager).await;
 
     let stream = session
         .transform_assistant_stream("root", "Keep this text exactly.".to_string())

@@ -536,8 +536,8 @@ impl LashSession {
         SessionProcessAdmin::new(self.admin())
     }
 
-    pub fn plugin_actions(&self) -> PluginActions {
-        PluginActions {
+    pub fn plugin_operations(&self) -> PluginOperations {
+        PluginOperations {
             control: self.admin(),
         }
     }

@@ -255,8 +255,8 @@ mod tests {
     fn label_annotation_text_inside_strings_is_plain_text() {
         let program = parse(
             r####"
-            submit r'''@label(title: "Plain text")
-@label(title: "Still text") finish null'''
+            submit r#"@label(title: "Plain text")
+@label(title: "Still text") finish null"#
             "####,
         )
         .expect("label-like text inside strings should parse as text");

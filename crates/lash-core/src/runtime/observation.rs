@@ -26,6 +26,9 @@ pub struct RuntimeObservation {
     pub tool_state: Option<crate::ToolState>,
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
     pub tool_catalog_error: Option<String>,
+    pub plugin_session: Option<Arc<crate::PluginSession>>,
+    pub session_read_service: Option<Arc<dyn crate::plugin::SessionReadService>>,
+    pub process_read_service: Option<Arc<dyn crate::plugin::ProcessReadService>>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
     pub queue_store: Option<Arc<dyn crate::RuntimePersistence>>,
     pub queued_work_driver: Option<super::QueuedWorkDriver>,
@@ -65,6 +68,23 @@ impl RuntimeObservation {
             },
             (None, _) => None,
         };
+        let (plugin_session, session_read_service, process_read_service) =
+            match (runtime.session.as_ref(), runtime.runtime_session_services()) {
+                (Some(session), Ok(services)) => (
+                    Some(Arc::clone(session.plugins())),
+                    Some(services.read_service()),
+                    Some(services.process_read_service()),
+                ),
+                (_, Err(err)) => {
+                    tracing::warn!(
+                        session_id = %runtime.session_id(),
+                        error = %err,
+                        "failed to capture plugin query services for observation",
+                    );
+                    (None, None, None)
+                }
+                (None, _) => (None, None, None),
+            };
         let revision = SessionRevision::from_runtime(runtime);
         Self {
             session_id: Arc::from(runtime.session_id()),
@@ -77,6 +97,9 @@ impl RuntimeObservation {
             tool_state,
             tool_catalog,
             tool_catalog_error,
+            plugin_session,
+            session_read_service,
+            process_read_service,
             process_registry: runtime.host.process_registry.clone(),
             queue_store: runtime
                 .session
@@ -111,6 +134,39 @@ impl RuntimeObservation {
 
     pub fn process_scope_id(&self) -> crate::SessionScopeId {
         self.process_scope().id()
+    }
+
+    pub async fn query_plugin(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        session_id: Option<String>,
+    ) -> Result<(String, serde_json::Value), crate::PluginOperationInvokeError> {
+        let Some(plugin_session) = self.plugin_session.as_ref().cloned() else {
+            return Err(crate::PluginOperationInvokeError::Unknown(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let Some(session_read_service) = self.session_read_service.as_ref().cloned() else {
+            return Err(crate::PluginOperationInvokeError::Unknown(
+                "runtime session read service not available".to_string(),
+            ));
+        };
+        let Some(process_read_service) = self.process_read_service.as_ref().cloned() else {
+            return Err(crate::PluginOperationInvokeError::Unknown(
+                "runtime process read service not available".to_string(),
+            ));
+        };
+        plugin_session
+            .query_plugin(
+                name,
+                args,
+                session_id,
+                true,
+                session_read_service,
+                process_read_service,
+            )
+            .await
     }
 
     pub async fn list_process_handles(&self) -> Vec<ProcessHandleSummary> {

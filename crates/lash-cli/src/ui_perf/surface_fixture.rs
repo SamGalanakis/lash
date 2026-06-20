@@ -181,7 +181,7 @@ impl TuiExtension for SurfaceBenchmarkTuiExtension {
         &self,
         _action: &str,
         _arg: Option<&str>,
-        _ctx: lash_tui_extensions::TuiExtensionContext<'_>,
+        _ctx: lash_tui_extensions::TuiExtensionContext,
     ) -> Result<Vec<TuiHostEffect>, String> {
         Ok(Vec::new())
     }
