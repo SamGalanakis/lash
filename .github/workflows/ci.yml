@@ -40,6 +40,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -130,6 +132,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -168,6 +172,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -210,6 +216,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -248,6 +256,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -287,6 +297,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -322,6 +334,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -375,6 +389,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
           # Full history INCLUDING TAGS: release_version.py computes the next
           # version from `git tag --list`. A shallow checkout with fetch-tags
           # does NOT deliver the tags (tag-following only covers fetched
