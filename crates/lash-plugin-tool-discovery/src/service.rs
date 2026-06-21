@@ -13,7 +13,20 @@ use crate::rerank::{
 
 #[derive(Clone, Default)]
 struct IndexCache {
-    index: Option<Arc<ToolDiscoveryIndex>>,
+    index: Option<CachedIndex>,
+}
+
+#[derive(Clone)]
+struct CachedIndex {
+    catalog_addr: usize,
+    catalog_len: usize,
+    index: Arc<ToolDiscoveryIndex>,
+}
+
+impl CachedIndex {
+    fn matches_catalog_arc(&self, catalog: &Arc<Vec<Value>>) -> bool {
+        self.catalog_addr == Arc::as_ptr(catalog) as usize && self.catalog_len == catalog.len()
+    }
 }
 
 #[derive(Clone)]
@@ -35,6 +48,18 @@ impl ToolDiscoveryToolsProvider {
     }
 
     fn index_for_catalog(&self, catalog: Arc<Vec<Value>>) -> Arc<ToolDiscoveryIndex> {
+        if let Some(index) = self
+            .cache
+            .read()
+            .expect("tool discovery cache lock poisoned")
+            .index
+            .as_ref()
+            .filter(|cached| cached.matches_catalog_arc(&catalog))
+            .map(|cached| Arc::clone(&cached.index))
+        {
+            return index;
+        }
+
         let key = catalog_key(catalog.as_ref());
         if let Some(index) = self
             .cache
@@ -42,17 +67,22 @@ impl ToolDiscoveryToolsProvider {
             .expect("tool discovery cache lock poisoned")
             .index
             .as_ref()
-            .filter(|index| index.key == key)
-            .cloned()
+            .filter(|cached| cached.index.key == key)
+            .map(|cached| Arc::clone(&cached.index))
         {
             return index;
         }
 
         let index = Arc::new(ToolDiscoveryIndex::build(key, catalog.as_ref()));
+        let cached = CachedIndex {
+            catalog_addr: Arc::as_ptr(&catalog) as usize,
+            catalog_len: catalog.len(),
+            index: Arc::clone(&index),
+        };
         self.cache
             .write()
             .expect("tool discovery cache lock poisoned")
-            .index = Some(Arc::clone(&index));
+            .index = Some(cached);
         index
     }
 
@@ -328,6 +358,31 @@ mod tests {
                 .bindings
                 .contains_key(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
         );
+    }
+
+    #[test]
+    fn index_cache_records_and_reuses_shared_catalog_identity() {
+        let provider = ToolDiscoveryToolsProvider::new();
+        let catalog = Arc::new(vec![catalog_tool_with_metadata(
+            "read_file",
+            "Read file contents",
+            Some("filesystem"),
+            vec!["cat"],
+        )]);
+
+        let first = provider.index_for_catalog(Arc::clone(&catalog));
+        let second = provider.index_for_catalog(Arc::clone(&catalog));
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let cache = provider.cache.read().expect("cache lock");
+        let cached = cache.index.as_ref().expect("cached index");
+        assert_eq!(cached.catalog_addr, Arc::as_ptr(&catalog) as usize);
+        assert_eq!(cached.catalog_len, catalog.len());
+        drop(cache);
+
+        let same_content = Arc::new(catalog.as_ref().clone());
+        let third = provider.index_for_catalog(same_content);
+        assert!(Arc::ptr_eq(&first, &third));
     }
 
     #[tokio::test]

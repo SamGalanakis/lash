@@ -5,6 +5,8 @@
 //! `tool_contract.rs`; only the entry points used by the contract types are
 //! `pub(crate)`.
 
+use std::borrow::Cow;
+
 use super::*;
 
 pub fn schema_for<T>() -> serde_json::Value
@@ -280,9 +282,22 @@ pub(crate) fn return_field_metadata(schema: &serde_json::Value) -> Vec<serde_jso
         .collect()
 }
 
-fn resolve_schema_refs(schema: &serde_json::Value) -> serde_json::Value {
+fn resolve_schema_refs(schema: &serde_json::Value) -> Cow<'_, serde_json::Value> {
+    if !schema_contains_ref(schema) {
+        return Cow::Borrowed(schema);
+    }
     let mut resolving = Vec::new();
-    resolve_schema_ref_value(schema, schema, &mut resolving)
+    Cow::Owned(resolve_schema_ref_value(schema, schema, &mut resolving))
+}
+
+fn schema_contains_ref(schema: &serde_json::Value) -> bool {
+    match schema {
+        serde_json::Value::Object(map) => {
+            map.contains_key("$ref") || map.values().any(schema_contains_ref)
+        }
+        serde_json::Value::Array(values) => values.iter().any(schema_contains_ref),
+        _ => false,
+    }
 }
 
 fn resolve_schema_ref_value(
@@ -872,5 +887,49 @@ fn display_default_value(value: &serde_json::Value) -> String {
         serde_json::Value::Number(v) => v.to_string(),
         serde_json::Value::String(v) => format!("{v:?}"),
         _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod schema_doc_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_schema_refs_borrows_schema_without_refs() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" }
+            }
+        });
+
+        match resolve_schema_refs(&schema) {
+            Cow::Borrowed(value) => assert!(std::ptr::eq(value, &schema)),
+            Cow::Owned(_) => panic!("schema without refs should not be cloned"),
+        }
+    }
+
+    #[test]
+    fn resolve_schema_refs_owns_schema_with_local_ref_expansion() {
+        let schema = serde_json::json!({
+            "$defs": {
+                "path": { "type": "string" }
+            },
+            "type": "object",
+            "properties": {
+                "path": { "$ref": "#/$defs/path" }
+            }
+        });
+
+        let resolved = resolve_schema_refs(&schema);
+        assert!(matches!(resolved, Cow::Owned(_)));
+        assert_eq!(
+            resolved
+                .get("properties")
+                .and_then(|value| value.get("path"))
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str),
+            Some("string")
+        );
     }
 }

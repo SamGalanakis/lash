@@ -19,6 +19,7 @@ pub(crate) struct CatalogTool {
     pub(crate) aliases: Vec<String>,
     pub(crate) searchable: bool,
     pub(crate) contract: CompactToolContract,
+    rendered_signature: String,
 }
 
 impl CatalogTool {
@@ -54,10 +55,11 @@ impl CatalogTool {
             .get("searchable")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let contract = obj
+        let contract: CompactToolContract = obj
             .get("contract")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())?;
+        let rendered_signature = contract.render_signature();
         Some(Self {
             id,
             name,
@@ -71,6 +73,7 @@ impl CatalogTool {
             aliases,
             searchable,
             contract,
+            rendered_signature,
         })
     }
 
@@ -86,7 +89,7 @@ impl CatalogTool {
         }
         out.insert(
             "signature".to_string(),
-            json!(self.contract.render_signature()),
+            json!(self.rendered_signature.clone()),
         );
         if !self.contract.description.is_empty() {
             out.insert(

@@ -180,16 +180,7 @@ impl ToolRegistry {
             .into_iter()
             .map(|manifest| manifest_with_compact_contract(source.as_ref(), manifest))
             .collect::<Vec<_>>();
-        validate_unique_manifests(&advertised_tools)?;
-
-        let advertised_names = advertised_tools
-            .iter()
-            .map(|manifest| manifest.name.clone())
-            .collect::<BTreeSet<_>>();
-        let advertised_ids = advertised_tools
-            .iter()
-            .map(|manifest| manifest.id.clone())
-            .collect::<BTreeSet<_>>();
+        validate_unique_manifests(advertised_tools.iter())?;
         let mut state = self
             .state
             .write()
@@ -199,52 +190,63 @@ impl ToolRegistry {
             .iter()
             .map(|(id, entry)| (id.clone(), entry.manifest.availability_override))
             .collect::<BTreeMap<_, _>>();
-        match policy {
-            SourceReconcilePolicy::RejectExternalConflicts => {
-                // Orphans never conflict: a live advertisement supersedes a
-                // tool that is currently unresolvable. Matching id means the
-                // source came back, with its availability override preserved
-                // via `previous_overrides`.
-                for manifest in &advertised_tools {
-                    if let Some(existing) = state.tools.get(&manifest.id)
-                        && let Some(existing_source) = existing.binding.source_id()
-                        && existing_source != source_id
-                    {
-                        return Err(ReconfigureError::Validation(format!(
-                            "duplicate tool id `{}` from source `{}` conflicts with source `{}`",
-                            manifest.id, source_id, existing_source
-                        )));
+        {
+            let advertised_names = advertised_tools
+                .iter()
+                .map(|manifest| manifest.name.as_str())
+                .collect::<BTreeSet<_>>();
+            let advertised_ids = advertised_tools
+                .iter()
+                .map(|manifest| &manifest.id)
+                .collect::<BTreeSet<_>>();
+            match policy {
+                SourceReconcilePolicy::RejectExternalConflicts => {
+                    // Orphans never conflict: a live advertisement supersedes a
+                    // tool that is currently unresolvable. Matching id means the
+                    // source came back, with its availability override preserved
+                    // via `previous_overrides`.
+                    for manifest in &advertised_tools {
+                        if let Some(existing) = state.tools.get(&manifest.id)
+                            && let Some(existing_source) = existing.binding.source_id()
+                            && existing_source != source_id
+                        {
+                            return Err(ReconfigureError::Validation(format!(
+                                "duplicate tool id `{}` from source `{}` conflicts with source `{}`",
+                                manifest.id, source_id, existing_source
+                            )));
+                        }
+                        if let Some((existing_id, existing_source)) =
+                            state.tools.iter().find_map(|(id, entry)| {
+                                let existing_source = entry.binding.source_id()?;
+                                (existing_source != source_id && entry.manifest.name == manifest.name)
+                                    .then(|| (id.clone(), existing_source.to_string()))
+                            })
+                        {
+                            return Err(ReconfigureError::Validation(format!(
+                                "duplicate tool name `{}` from source `{}` conflicts with tool id `{}` from source `{}`",
+                                manifest.name, source_id, existing_id, existing_source
+                            )));
+                        }
                     }
-                    if let Some((existing_id, existing_source)) =
-                        state.tools.iter().find_map(|(id, entry)| {
-                            let existing_source = entry.binding.source_id()?;
-                            (existing_source != source_id && entry.manifest.name == manifest.name)
-                                .then(|| (id.clone(), existing_source.to_string()))
-                        })
-                    {
-                        return Err(ReconfigureError::Validation(format!(
-                            "duplicate tool name `{}` from source `{}` conflicts with tool id `{}` from source `{}`",
-                            manifest.name, source_id, existing_id, existing_source
-                        )));
-                    }
+                    state.tools.retain(|id, entry| match &entry.binding {
+                        // Drop this source's previous surface; it is re-inserted
+                        // from the fresh advertisement below.
+                        ToolBinding::Bound(bound) => bound != &source_id,
+                        // Drop orphans the fresh advertisement supersedes by id,
+                        // or by name when a different grant now owns the alias.
+                        ToolBinding::Orphaned => {
+                            !advertised_ids.contains(id)
+                                && !advertised_names.contains(&entry.manifest.name.as_str())
+                        }
+                    });
                 }
-                state.tools.retain(|id, entry| match &entry.binding {
-                    // Drop this source's previous surface; it is re-inserted
-                    // from the fresh advertisement below.
-                    ToolBinding::Bound(bound) => bound != &source_id,
-                    // Drop orphans the fresh advertisement supersedes by id,
-                    // or by name when a different grant now owns the alias.
-                    ToolBinding::Orphaned => {
-                        !advertised_ids.contains(id) && !advertised_names.contains(&entry.manifest.name)
-                    }
-                });
-            }
-            SourceReconcilePolicy::OverlayReplacingConflicts => {
-                state.tools.retain(|id, entry| {
-                    entry.binding.source_id() != Some(source_id.as_str())
-                        && !advertised_ids.contains(id)
-                        && !advertised_names.contains(&entry.manifest.name)
-                });
+                SourceReconcilePolicy::OverlayReplacingConflicts => {
+                    state.tools.retain(|id, entry| {
+                        entry.binding.source_id() != Some(source_id.as_str())
+                            && !advertised_ids.contains(id)
+                            && !advertised_names.contains(&entry.manifest.name.as_str())
+                    });
+                }
             }
         }
         for mut manifest in advertised_tools {

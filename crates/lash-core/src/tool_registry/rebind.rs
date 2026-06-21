@@ -1,4 +1,6 @@
-fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), ReconfigureError> {
+fn validate_unique_manifests<'a>(
+    manifests: impl IntoIterator<Item = &'a ToolManifest>,
+) -> Result<(), ReconfigureError> {
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for manifest in manifests {
@@ -7,7 +9,7 @@ fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), Reconfigu
                 "tool id cannot be empty".to_string(),
             ));
         }
-        if !ids.insert(manifest.id.clone()) {
+        if !ids.insert(&manifest.id) {
             return Err(ReconfigureError::Validation(format!(
                 "duplicate tool id `{}` in source",
                 manifest.id
@@ -18,7 +20,7 @@ fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), Reconfigu
                 "tool name cannot be empty".to_string(),
             ));
         }
-        if !names.insert(manifest.name.clone()) {
+        if !names.insert(manifest.name.as_str()) {
             return Err(ReconfigureError::Validation(format!(
                 "duplicate tool name `{}` in source",
                 manifest.name
@@ -142,9 +144,5 @@ fn rebind_tool_state_entries(
 fn validate_unique_manifest_entries<'a>(
     entries: impl IntoIterator<Item = &'a ToolStateEntry>,
 ) -> Result<(), ReconfigureError> {
-    let manifests = entries
-        .into_iter()
-        .map(|entry| entry.stored_manifest().clone())
-        .collect::<Vec<_>>();
-    validate_unique_manifests(&manifests)
+    validate_unique_manifests(entries.into_iter().map(ToolStateEntry::stored_manifest))
 }

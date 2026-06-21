@@ -40,6 +40,12 @@ pub(crate) struct RankedCandidate {
     pub(crate) semantic_score: Option<f64>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct MatchedFields {
+    any: bool,
+    params_or_input_fields: bool,
+}
+
 #[derive(Debug)]
 pub struct ToolDiscoveryIndex {
     pub(crate) key: u64,
@@ -113,7 +119,7 @@ impl ToolDiscoveryIndex {
                 doc,
                 &matched_fields,
             );
-            if query.is_empty() || !matched_fields.is_empty() {
+            if query.is_empty() || matched_fields.any {
                 lexical.push(RankedCandidate {
                     idx,
                     lexical_score: score,
@@ -440,7 +446,7 @@ fn adjusted_score(
     base_score: f64,
     query_tokens: &[String],
     doc: &DiscoveryDoc,
-    matched_fields: &[String],
+    matched_fields: &MatchedFields,
 ) -> f64 {
     if query_tokens.is_empty() {
         return base_score;
@@ -460,11 +466,7 @@ fn adjusted_score(
         score += 4.0;
     }
 
-    let input_only = primary_hits == 0
-        && output_hits == 0
-        && matched_fields
-            .iter()
-            .any(|field| field == "params" || field == "input_fields");
+    let input_only = primary_hits == 0 && output_hits == 0 && matched_fields.params_or_input_fields;
     if input_only {
         score *= 0.35;
     }
@@ -481,8 +483,8 @@ fn exact_field_token_hits(query_tokens: &[String], doc: &DiscoveryDoc, field_nam
         .count()
 }
 
-fn matched_fields(query_tokens: &[String], doc: &DiscoveryDoc) -> Vec<String> {
-    let mut hits = BTreeSet::new();
+fn matched_fields(query_tokens: &[String], doc: &DiscoveryDoc) -> MatchedFields {
+    let mut hits = MatchedFields::default();
     for field in &doc.fields {
         if field.raw.is_empty() {
             continue;
@@ -499,10 +501,11 @@ fn matched_fields(query_tokens: &[String], doc: &DiscoveryDoc) -> Vec<String> {
                 })
             });
         if hit {
-            hits.insert(field.name.to_string());
+            hits.any = true;
+            hits.params_or_input_fields |= matches!(field.name, "params" | "input_fields");
         }
     }
-    hits.into_iter().collect()
+    hits
 }
 
 pub(crate) fn reciprocal_rank_fusion(
