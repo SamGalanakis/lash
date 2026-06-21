@@ -539,6 +539,38 @@ line2'''
     }
 
     #[test]
+    fn lexes_shell_and_formatter_shaped_string_literals() {
+        let tokens = lex(r####"
+            date = "date '+%Y-%m-%d %H:%M:%S %Z (%z)'"
+            printf = 'printf "%s\\n" "$value"'
+            json = "{\"cmd\":\"echo 'ok'\"}"
+            shell = "${HOME:-/tmp} && echo %done"
+            comment_text = "// not a comment # also not a comment"
+            label_text = "@label(title: \"plain\")"
+            "####)
+        .expect("lexing should succeed");
+
+        let strings: Vec<_> = tokens
+            .into_iter()
+            .filter_map(|token| match token.kind {
+                TokenKind::String(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            strings,
+            vec![
+                CompactString::from("date '+%Y-%m-%d %H:%M:%S %Z (%z)'"),
+                CompactString::from("printf \"%s\\n\" \"$value\""),
+                CompactString::from("{\"cmd\":\"echo 'ok'\"}"),
+                CompactString::from("${HOME:-/tmp} && echo %done"),
+                CompactString::from("// not a comment # also not a comment"),
+                CompactString::from("@label(title: \"plain\")"),
+            ]
+        );
+    }
+
+    #[test]
     fn lexes_raw_triple_strings() {
         let tokens = lex(r#####"
             script = r'''python3 - <<'PY'

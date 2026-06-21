@@ -57,6 +57,8 @@ use lash::tracing::TraceLevel;
 #[cfg(test)]
 use lash::{InputItem, TurnActivity, TurnEvent};
 
+use execution_settings::RlmTerminationMode;
+
 #[cfg(test)]
 use app::PreparedTurn;
 #[cfg(test)]
@@ -218,6 +220,10 @@ struct Args {
     /// RLM modes only: load JSON object read-only projections for the autonomous turn
     #[arg(long = "rlm-vars-file", value_name = "PATH")]
     rlm_vars_file: Option<std::path::PathBuf>,
+
+    /// RLM modes only: finalization mode (`prose-or-submit` or `submit-required`)
+    #[arg(long = "rlm-termination", value_enum, value_name = "MODE")]
+    rlm_termination: Option<RlmTerminationMode>,
 
     /// Base URL for the LLM API
     #[arg(long, default_value = "")]
@@ -619,6 +625,51 @@ mod tests {
         assert!(turn.effective_text.starts_with("/yolopush merge staging"));
         assert!(turn.input_metadata.transforms.is_empty());
         assert!(turn.effective_text.contains("<skill>"));
+    }
+
+    #[test]
+    fn rlm_termination_flag_decodes_known_values() {
+        let prose = Args::try_parse_from([
+            "lash",
+            "--execution-mode",
+            "rlm",
+            "--rlm-termination",
+            "prose-or-submit",
+        ])
+        .expect("parse prose-or-submit");
+        assert_eq!(
+            prose.rlm_termination,
+            Some(RlmTerminationMode::ProseOrSubmit)
+        );
+
+        let strict = Args::try_parse_from([
+            "lash",
+            "--execution-mode",
+            "rlm",
+            "--rlm-termination",
+            "submit-required",
+        ])
+        .expect("parse submit-required");
+        assert_eq!(
+            strict.rlm_termination,
+            Some(RlmTerminationMode::SubmitRequired)
+        );
+    }
+
+    #[test]
+    fn rlm_termination_flag_rejects_unknown_values() {
+        let err = match Args::try_parse_from([
+            "lash",
+            "--execution-mode",
+            "rlm",
+            "--rlm-termination",
+            "always-submit",
+        ]) {
+            Ok(_) => panic!("unknown value should fail clap parsing"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("always-submit"));
     }
 
     #[test]

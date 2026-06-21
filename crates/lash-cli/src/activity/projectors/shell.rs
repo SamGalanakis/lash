@@ -332,6 +332,31 @@ mod tests {
     }
 
     #[test]
+    fn exec_command_timeout_remains_failed_activity() {
+        let mut state = ActivityState::new();
+        let blocks = state.project_tool_call(
+            "exec_command",
+            json!({
+                "cmd": "sleep 5",
+                "timeout_ms": 50,
+            }),
+            json!({
+                "output": "",
+                "status": "timed_out",
+                "timed_out": true,
+                "done": true,
+                "running": false
+            }),
+            false,
+            50,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
+        assert_eq!(blocks[0].call.summary, "failed sleep 5");
+    }
+
+    #[test]
     fn start_command_running_uses_session_id_handle() {
         let mut state = ActivityState::new();
         let blocks = state.project_tool_call(

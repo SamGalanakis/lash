@@ -1,5 +1,5 @@
-//! Execution-mode and standard-context-approach settings: parsing, labels,
-//! and the observational-memory tuning-flag overrides.
+//! Execution-mode, RLM termination, and standard-context-approach settings:
+//! parsing, labels, and the observational-memory tuning-flag overrides.
 
 use lash_standard_plugins::{StandardContextApproach, StandardContextApproachKind};
 
@@ -36,6 +36,30 @@ pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String>
             "Unknown execution mode `{other}`. Expected `rlm` or `standard`."
         )),
     }
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RlmTerminationMode {
+    #[value(name = "prose-or-submit")]
+    ProseOrSubmit,
+    #[value(name = "submit-required")]
+    SubmitRequired,
+}
+
+impl RlmTerminationMode {
+    pub(crate) fn as_rlm_termination(self) -> lash_rlm_types::RlmTermination {
+        match self {
+            Self::ProseOrSubmit => lash_rlm_types::RlmTermination::ProseOrSubmit,
+            Self::SubmitRequired => lash_rlm_types::RlmTermination::SubmitRequired { schema: None },
+        }
+    }
+}
+
+pub(crate) fn default_rlm_termination_for_mode(mode: ExecutionMode) -> Option<RlmTerminationMode> {
+    mode.is_rlm().then_some(RlmTerminationMode::ProseOrSubmit)
 }
 
 pub(crate) fn parse_standard_context_approach(
@@ -243,5 +267,29 @@ mod tests {
         .apply(StandardContextApproach::RollingHistory(Default::default()))
         .expect_err("expected validation error");
         assert!(err.contains("observational_memory"));
+    }
+
+    #[test]
+    fn rlm_termination_mode_maps_to_protocol_termination() {
+        assert_eq!(
+            RlmTerminationMode::ProseOrSubmit.as_rlm_termination(),
+            lash_rlm_types::RlmTermination::ProseOrSubmit
+        );
+        assert!(matches!(
+            RlmTerminationMode::SubmitRequired.as_rlm_termination(),
+            lash_rlm_types::RlmTermination::SubmitRequired { schema: None }
+        ));
+    }
+
+    #[test]
+    fn rlm_termination_defaults_only_for_rlm_mode() {
+        assert_eq!(
+            default_rlm_termination_for_mode(ExecutionMode::Rlm),
+            Some(RlmTerminationMode::ProseOrSubmit)
+        );
+        assert_eq!(
+            default_rlm_termination_for_mode(ExecutionMode::Standard),
+            None
+        );
     }
 }

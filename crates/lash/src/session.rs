@@ -419,6 +419,34 @@ fn apply_rlm_session_options(
     Ok(())
 }
 
+#[cfg(all(test, feature = "rlm"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_rlm_session_options_preserves_existing_termination() -> Result<()> {
+        let mut state = RuntimeSessionState::default();
+        state.protocol_turn_options =
+            ProtocolTurnOptions::typed(lash_rlm_types::RlmCreateExtras {
+                termination: lash_rlm_types::RlmTermination::ProseOrSubmit,
+                final_answer_format: None,
+            })?;
+
+        apply_rlm_session_options(true, None, &mut state)?;
+
+        let extras: lash_rlm_types::RlmCreateExtras = state.protocol_turn_options.decode()?;
+        assert_eq!(
+            extras.termination,
+            lash_rlm_types::RlmTermination::ProseOrSubmit
+        );
+        assert_eq!(
+            extras.final_answer_format,
+            Some(lash_rlm_types::RlmFinalAnswerFormat::Markdown)
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct LashSession {
     pub(crate) runtime: RuntimeHandle,

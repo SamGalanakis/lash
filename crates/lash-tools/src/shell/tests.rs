@@ -888,6 +888,23 @@ mod tests {
     }
 
     #[test]
+    fn shell_exec_contract_documents_nonzero_exit_as_result_data() {
+        let shell = StandardShell::default();
+        let exec = shell
+            .tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name() == "exec_command")
+            .expect("exec_command definition");
+        let description = exec.description();
+
+        assert!(description.contains("exit_code"));
+        assert!(description.contains("Nonzero exit codes are returned as ordinary result data"));
+        assert!(description.contains("await shell.exec(...)?"));
+        assert!(description.contains("does not abort just because the process exited nonzero"));
+        assert!(description.contains("Timed-out commands are killed and returned as a tool failure"));
+    }
+
+    #[test]
     fn start_command_contract_uses_process_handles() {
         let shell = StandardShell::default();
         let definition = shell

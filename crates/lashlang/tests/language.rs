@@ -553,6 +553,95 @@ async fn raw_single_and_double_strings_preserve_backslashes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_exact_shell_exec_date_command_string() {
+    let program = parse(
+        r#"
+        now = await shell.exec({ cmd: "date '+%Y-%m-%d %H:%M:%S %Z (%z)'" })?
+        submit now
+        "#,
+    )
+    .expect("program should parse");
+
+    assert_eq!(program_len(&program), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn record_strings_preserve_shell_date_command_text() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            submit { cmd: "date '+%Y-%m-%d %H:%M:%S %Z (%z)'" }
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("program should run"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(
+        record["cmd"],
+        Value::String("date '+%Y-%m-%d %H:%M:%S %Z (%z)'".into())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn string_literals_cover_shell_quotes_formats_and_raw_forms() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#####"
+            submit [
+              "date '+%Y-%m-%d %H:%M:%S %Z (%z)'",
+              'printf "%s\\n" "$value"',
+              "json: {\"cmd\":\"echo 'ok'\"}",
+              "// not a comment # also not a comment",
+              "${HOME:-/tmp} && echo %done",
+              r"C:\Users\sam\file.txt",
+              R'\n stays slash-n',
+              """line "quoted" and 'single'
+next""",
+              '''line "double" and 'single'
+next''',
+              r"""python3 - <<'PY'
+print("ok")
+PY"""
+            ]
+            "#####,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("program should run"),
+    );
+
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::String("date '+%Y-%m-%d %H:%M:%S %Z (%z)'".into()),
+                Value::String("printf \"%s\\n\" \"$value\"".into()),
+                Value::String("json: {\"cmd\":\"echo 'ok'\"}".into()),
+                Value::String("// not a comment # also not a comment".into()),
+                Value::String("${HOME:-/tmp} && echo %done".into()),
+                Value::String("C:\\Users\\sam\\file.txt".into()),
+                Value::String("\\n stays slash-n".into()),
+                Value::String("line \"quoted\" and 'single'\nnext".into()),
+                Value::String("line \"double\" and 'single'\nnext".into()),
+                Value::String("python3 - <<'PY'\nprint(\"ok\")\nPY".into()),
+            ]
+            .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn strings_preserve_utf8_content() {
     let host = TestHost::default();
     let mut state = State::new();
