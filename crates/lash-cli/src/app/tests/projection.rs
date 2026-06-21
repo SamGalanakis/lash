@@ -1013,6 +1013,44 @@ fn interrupted_read_view_appends_only_uncommitted_tail() {
 }
 
 #[test]
+fn interrupted_read_view_hides_rlm_submit_reminder_system_messages() {
+    let messages = vec![
+        text_message("m0", MessageRole::User, "What time is it?"),
+        text_message("m1", MessageRole::Assistant, "Checking the system time."),
+        plugin_text_message(
+            "m2",
+            MessageRole::System,
+            "rlm_protocol",
+            "Deliver the final answer from a paired `<lashlang>...</lashlang>` block by calling `submit <value>`. Plain text before the block is not delivered.",
+        ),
+    ];
+    let events = events_from_messages(&messages);
+    let blocks = interrupted_blocks_from_test_read_view(
+        &events,
+        &messages,
+        &[],
+        &UiProjectionState::default(),
+        crate::util::manual_interrupt_message(),
+    );
+
+    assert!(
+        !blocks.iter().any(|block| matches!(
+            block,
+            UiTimelineItem::SystemMessage(text) if text.contains("Deliver the final answer")
+        )),
+        "RLM protocol submit reminder leaked into interrupted UI: {blocks:#?}"
+    );
+    assert!(blocks.iter().any(|block| matches!(
+        block,
+        UiTimelineItem::AssistantText(text) if text == "Checking the system time."
+    )));
+    assert!(matches!(
+        blocks.last(),
+        Some(UiTimelineItem::SystemMessage(text)) if text == crate::util::manual_interrupt_message()
+    ));
+}
+
+#[test]
 fn interrupted_assistant_tail_ignores_visible_blocks_already_on_screen() {
     let blocks = vec![
         UiTimelineItem::TurnStart(Turn::user(false)),

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser, ValueEnum};
 use lash_debug_cli_harness::{
-    ExecutionMode, HarnessConfig, LiveHarness, repo_root_from_manifest_dir,
+    ExecutionMode, HarnessConfig, LiveHarness, MouseHarnessEvent, repo_root_from_manifest_dir,
 };
 
 #[derive(Debug, Parser)]
@@ -161,6 +161,10 @@ fn handle_control_command(
             }
             println!("HARNESS ok");
         }
+        "mouse" => {
+            handle_mouse_command(harness, rest)?;
+            println!("HARNESS ok");
+        }
         "wait" => {
             harness.wait_for_text(rest, Duration::from_secs(45))?;
             println!("HARNESS ok");
@@ -220,7 +224,7 @@ fn print_artifact_paths(harness: &LiveHarness) {
 
 fn print_help_summary() {
     println!(
-        "commands: send TEXT | type TEXT | key NAME | idle | wait TEXT | screen | screenshot NAME | artifacts | log | quit | kill | help"
+        "commands: send TEXT | type TEXT | key NAME | mouse EVENT COL ROW | idle | wait TEXT | screen | screenshot NAME | artifacts | log | quit | kill | help"
     );
 }
 
@@ -232,6 +236,9 @@ fn print_help() {
     println!(
         "  key NAME         press Enter, Tab, Esc, Backspace, Delete, arrows, Home/End, PageUp/PageDown, Ctrl-X, Alt-Up"
     );
+    println!("  mouse down|drag|up COL ROW  send zero-based SGR mouse event");
+    println!("  mouse click COL ROW         send down+up at a zero-based cell");
+    println!("  mouse select C1 R1 C2 R2    send down+drag+up between zero-based cells");
     println!("  idle             wait until a submitted turn settles back to Idle");
     println!("  wait TEXT        wait until TEXT appears on the visible screen");
     println!("  screen           print current visible screen text");
@@ -244,4 +251,55 @@ fn print_help() {
 
 fn is_enter_key(key: &str) -> bool {
     matches!(key.trim().to_ascii_lowercase().as_str(), "enter" | "return")
+}
+
+fn handle_mouse_command(harness: &mut LiveHarness, rest: &str) -> Result<()> {
+    let parts = rest.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["down", col, row] | ["press", col, row] => harness.send_mouse(MouseHarnessEvent::Down {
+            col: parse_mouse_coord("col", col)?,
+            row: parse_mouse_coord("row", row)?,
+        }),
+        ["drag", col, row] | ["move", col, row] => harness.send_mouse(MouseHarnessEvent::Drag {
+            col: parse_mouse_coord("col", col)?,
+            row: parse_mouse_coord("row", row)?,
+        }),
+        ["up", col, row] | ["release", col, row] => harness.send_mouse(MouseHarnessEvent::Up {
+            col: parse_mouse_coord("col", col)?,
+            row: parse_mouse_coord("row", row)?,
+        }),
+        ["click", col, row] => {
+            let col = parse_mouse_coord("col", col)?;
+            let row = parse_mouse_coord("row", row)?;
+            harness.send_mouse(MouseHarnessEvent::Down { col, row })?;
+            harness.send_mouse(MouseHarnessEvent::Up { col, row })
+        }
+        ["select", start_col, start_row, end_col, end_row] => {
+            let start_col = parse_mouse_coord("start_col", start_col)?;
+            let start_row = parse_mouse_coord("start_row", start_row)?;
+            let end_col = parse_mouse_coord("end_col", end_col)?;
+            let end_row = parse_mouse_coord("end_row", end_row)?;
+            harness.send_mouse(MouseHarnessEvent::Down {
+                col: start_col,
+                row: start_row,
+            })?;
+            harness.send_mouse(MouseHarnessEvent::Drag {
+                col: end_col,
+                row: end_row,
+            })?;
+            harness.send_mouse(MouseHarnessEvent::Up {
+                col: end_col,
+                row: end_row,
+            })
+        }
+        _ => bail!(
+            "usage: mouse down|drag|up COL ROW, mouse click COL ROW, or mouse select C1 R1 C2 R2"
+        ),
+    }
+}
+
+fn parse_mouse_coord(label: &str, value: &str) -> Result<u16> {
+    value
+        .parse::<u16>()
+        .with_context(|| format!("parse mouse {label} coordinate `{value}`"))
 }

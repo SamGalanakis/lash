@@ -2,7 +2,7 @@ use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, TermCapabilities};
 use lash_tui_extensions::{TuiRenderContext, TuiSurfaceScene, TuiSurfaceSlot};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, CliRunState, format_tokens};
+use crate::app::{App, CliRunState, ToastKind, format_tokens, smart_truncate_preview_line};
 use crate::chrome_ui::TurnStatusLabel;
 #[cfg(test)]
 use crate::chrome_ui::animated_lash_word;

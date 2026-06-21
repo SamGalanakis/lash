@@ -75,6 +75,52 @@ pub fn draw_with_capabilities(
     draw_process_overview(frame, app, body_area);
     draw_document_overlay(frame, app, body_area);
     draw_overlay_surface(frame, app, &surfaces, body_area, capabilities);
+    draw_toast(frame, app, body_area);
+}
+
+fn draw_toast(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(toast) = app.toast.as_ref() else {
+        return;
+    };
+    if area.width < 8 || area.height == 0 {
+        return;
+    }
+
+    let max_width = area.width.saturating_sub(4).min(60).max(4);
+    let inner_width = max_width.saturating_sub(4).max(1) as usize;
+    let message = smart_truncate_preview_line(&toast.message, inner_width);
+    let message_width = display_width(&message) as u16;
+    let width = message_width.saturating_add(4).min(max_width).max(4);
+    let height = if area.height >= 3 { 3 } else { 1 };
+    let x = area.x + area.width.saturating_sub(width + 2);
+    let y = area.y + 2.min(area.height.saturating_sub(height));
+    let toast_area = Rect::new(x, y, width, height);
+    let panel = bg(theme::surface_raised());
+    frame.fill(toast_area, ' ', panel);
+
+    let border_color = match toast.kind {
+        ToastKind::Info => theme::brand(),
+        ToastKind::Error => theme::state_error(),
+    };
+    let border = Style::default()
+        .fg(border_color)
+        .bg(theme::surface_raised())
+        .add_modifier(Modifier::Bold);
+    for row in 0..height {
+        frame.write_text(x, y + row, "│", border, 1);
+        frame.write_text(x + width.saturating_sub(1), y + row, "│", border, 1);
+    }
+
+    let text_style = Style::default()
+        .fg(theme::text_primary())
+        .bg(theme::surface_raised());
+    let line_y = if height >= 3 { y + 1 } else { y };
+    frame.write_line(
+        x + 2,
+        line_y,
+        &Line::from(Span::styled(message, text_style)),
+        width.saturating_sub(4),
+    );
 }
 
 fn sync_surface_areas(

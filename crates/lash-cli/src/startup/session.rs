@@ -20,7 +20,9 @@ use lash_core::{
 use lash_sqlite_store::Store;
 use lash_standard_plugins::StandardContextApproach;
 
-use crate::execution_settings::ExecutionMode;
+use crate::execution_settings::{
+    ExecutionMode, RlmTerminationMode, default_rlm_termination_for_mode,
+};
 use crate::session_log::{self, SessionLogger, SessionStart};
 
 pub(crate) enum SessionBootstrapSource {
@@ -60,16 +62,25 @@ pub(crate) struct SessionBootstrap {
 pub(crate) struct CliSessionHostConfig {
     pub(crate) execution_mode: ExecutionMode,
     pub(crate) standard_context_approach: Option<StandardContextApproach>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rlm_termination: Option<RlmTerminationMode>,
 }
 
 impl CliSessionHostConfig {
     pub(crate) fn new(
         execution_mode: ExecutionMode,
         standard_context_approach: Option<StandardContextApproach>,
+        rlm_termination: Option<RlmTerminationMode>,
     ) -> Self {
+        let rlm_termination = if execution_mode.is_rlm() {
+            rlm_termination.or_else(|| default_rlm_termination_for_mode(execution_mode))
+        } else {
+            None
+        };
         Self {
             execution_mode,
             standard_context_approach,
+            rlm_termination,
         }
     }
 }
@@ -303,8 +314,7 @@ impl CliSessionOpener {
         &self,
         bootstrap: SessionBootstrap,
         fallback_policy: SessionPolicy,
-        fallback_execution_mode: ExecutionMode,
-        fallback_standard_context_approach: Option<StandardContextApproach>,
+        host_config: CliSessionHostConfig,
     ) -> Result<OpenedCliLashSession> {
         let session_id = bootstrap
             .run_session_id()
@@ -314,19 +324,25 @@ impl CliSessionOpener {
             session_id.clone(),
             bootstrap.persisted_config().as_ref(),
         );
-        let host_config = bootstrap.persisted_host_config().unwrap_or_else(|| {
-            CliSessionHostConfig::new(fallback_execution_mode, fallback_standard_context_approach)
-        });
         bootstrap.save_host_config(&host_config)?;
         let logger = bootstrap
             .logger(&policy.model.id, Some(session_id.clone()))
             .await?;
-        let state = RuntimeSessionState {
+        let mut state = RuntimeSessionState {
             session_id: session_id.clone(),
             policy: policy.clone(),
             session_graph: bootstrap.initial_graph(),
             ..RuntimeSessionState::default()
         };
+        if host_config.execution_mode.is_rlm()
+            && let Some(termination) = host_config.rlm_termination
+        {
+            state.protocol_turn_options =
+                lash_core::ProtocolTurnOptions::typed(lash_rlm_types::RlmCreateExtras {
+                    termination: termination.as_rlm_termination(),
+                    final_answer_format: None,
+                })?;
+        }
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
         let effect_host = Arc::new(
             lash_sqlite_store::SqliteEffectHost::open(&bootstrap.effects_db_file()).await?,
@@ -410,8 +426,11 @@ impl CliSessionOpener {
         self.open_prepared(
             bootstrap,
             fallback_policy,
-            execution_mode,
-            standard_context_approach,
+            CliSessionHostConfig::new(
+                execution_mode,
+                standard_context_approach,
+                default_rlm_termination_for_mode(execution_mode),
+            ),
         )
         .await
     }
@@ -427,13 +446,23 @@ impl CliSessionOpener {
             SessionBootstrapSource::from_resume_arg(Some(identifier.to_string())).await,
         )
         .await?;
-        self.open_prepared(
-            bootstrap,
-            fallback_policy,
-            execution_mode,
-            standard_context_approach,
-        )
-        .await
+        let persisted_host_config = bootstrap.persisted_host_config();
+        let host_config = CliSessionHostConfig::new(
+            persisted_host_config
+                .as_ref()
+                .map(|config| config.execution_mode)
+                .unwrap_or(execution_mode),
+            persisted_host_config
+                .as_ref()
+                .and_then(|config| config.standard_context_approach.clone())
+                .or(standard_context_approach),
+            persisted_host_config
+                .as_ref()
+                .and_then(|config| config.rlm_termination)
+                .or_else(|| default_rlm_termination_for_mode(execution_mode)),
+        );
+        self.open_prepared(bootstrap, fallback_policy, host_config)
+            .await
     }
 }
 
@@ -442,6 +471,35 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash_core::SessionMeta;
+
+    #[test]
+    fn host_config_round_trips_rlm_termination_and_accepts_old_files() -> Result<()> {
+        let temp = TempDirGuard::new("lash-cli-host-config");
+        save_host_config(
+            temp.path(),
+            "rlm.db",
+            &CliSessionHostConfig::new(
+                ExecutionMode::Rlm,
+                None,
+                Some(RlmTerminationMode::SubmitRequired),
+            ),
+        )?;
+        let loaded = load_host_config(temp.path(), "rlm.db").expect("saved host config");
+        assert_eq!(loaded.execution_mode, ExecutionMode::Rlm);
+        assert_eq!(
+            loaded.rlm_termination,
+            Some(RlmTerminationMode::SubmitRequired)
+        );
+
+        std::fs::write(
+            host_config_path(temp.path(), "old.db"),
+            r#"{"execution_mode":"rlm","standard_context_approach":null}"#,
+        )?;
+        let old = load_host_config(temp.path(), "old.db").expect("old host config");
+        assert_eq!(old.execution_mode, ExecutionMode::Rlm);
+        assert_eq!(old.rlm_termination, None);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn fresh_cli_session_opens_with_durable_artifact_store() -> Result<()> {
@@ -482,6 +540,13 @@ mod tests {
         assert!(opened.bootstrap.processes_db_file().is_file());
         assert!(opened.bootstrap.process_env_db_file().is_file());
         assert!(opened.bootstrap.triggers_db_file().is_file());
+        let host_config =
+            load_host_config(opened.bootstrap.sessions_dir(), opened.bootstrap.filename())
+                .expect("saved host config");
+        assert_eq!(
+            host_config.rlm_termination,
+            Some(RlmTerminationMode::ProseOrSubmit)
+        );
         Ok(())
     }
 

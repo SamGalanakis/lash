@@ -458,11 +458,11 @@ mod tests {
         let result = run(
             &shell,
             "exec_command",
-            &json!({"cmd": cmd, "timeout_ms": 50, "allow_nonzero_exit": true}),
+            &json!({"cmd": cmd, "timeout_ms": 50}),
         )
         .await;
 
-        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert!(!result.is_success(), "{}", result.value_for_projection());
         assert_eq!(result.value_for_projection()["status"], "timed_out");
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(!marker.exists(), "timed-out child process wrote marker");
@@ -773,26 +773,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_command_legacy_allow_nonzero_exit_still_returns_nonzero_as_success() {
-        let shell = test_shell();
-        let result = run(
-            &shell,
-            "exec_command",
-            &json!({"cmd": "echo expected failure; exit 7", "allow_nonzero_exit": true}),
-        )
-        .await;
-        assert!(result.is_success(), "{}", result.value_for_projection());
-        assert_eq!(result.value_for_projection()["exit_code"], 7);
-        assert!(result.value_for_projection()["error"].is_null());
-        assert!(
-            result.value_for_projection()["output"]
-                .as_str()
-                .unwrap()
-                .contains("expected failure")
-        );
-    }
-
-    #[tokio::test]
     async fn exec_command_head_style_pipeline_is_not_failed_by_sigpipe() {
         let shell = test_shell();
         let result = run(
@@ -905,6 +885,23 @@ mod tests {
                 .render_signature()
                 .contains("sequence")
         );
+    }
+
+    #[test]
+    fn shell_exec_contract_documents_nonzero_exit_as_result_data() {
+        let shell = StandardShell::default();
+        let exec = shell
+            .tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name() == "exec_command")
+            .expect("exec_command definition");
+        let description = exec.description();
+
+        assert!(description.contains("exit_code"));
+        assert!(description.contains("Nonzero exit codes are returned as ordinary result data"));
+        assert!(description.contains("await shell.exec(...)?"));
+        assert!(description.contains("does not abort just because the process exited nonzero"));
+        assert!(description.contains("Timed-out commands are killed and returned as a tool failure"));
     }
 
     #[test]

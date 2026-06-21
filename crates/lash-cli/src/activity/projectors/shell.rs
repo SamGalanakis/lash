@@ -39,7 +39,7 @@ fn project_exec_command(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
         ctx.shell_handles.insert(handle_id.clone(), command.clone());
     }
     let exit_code = shell_result_exit_code(&ctx.result);
-    let status = if !ctx.success || exit_code.is_some_and(|value| value != 0) {
+    let status = if !ctx.success {
         ActivityStatus::Failed
     } else if running_handle.is_some() {
         ActivityStatus::Running
@@ -47,10 +47,10 @@ fn project_exec_command(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
         ActivityStatus::Completed
     };
     let mut detail_lines = Vec::new();
+    if let Some(exit_code) = exit_code.filter(|value| *value != 0) {
+        detail_lines.push(format!("Exited with {}", exit_code));
+    }
     if status == ActivityStatus::Failed {
-        if let Some(exit_code) = exit_code {
-            detail_lines.push(format!("Exited with {}", exit_code));
-        }
         if let Some(workdir) = tool_arg_str(&ctx.args, "workdir") {
             detail_lines.push(format!("In {}", workdir));
         }
@@ -104,7 +104,7 @@ fn project_write_stdin(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
             .entry(handle_id.clone())
             .or_insert_with(|| command.clone());
     }
-    let status = if !ctx.success || exit_code.is_some_and(|value| value != 0) {
+    let status = if !ctx.success {
         ActivityStatus::Failed
     } else if running {
         ActivityStatus::Running
@@ -277,7 +277,7 @@ fn should_suppress_shell_poll_activity(args: &Value, result: &Value, success: bo
 
 #[cfg(test)]
 mod tests {
-    use crate::activity::ActivityState;
+    use crate::activity::{ActivityState, ActivityStatus};
     use serde_json::json;
 
     #[test]
@@ -299,6 +299,61 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].call.summary, "date '+%Y-%m-%d %H:%M:%S %Z'");
+    }
+
+    #[test]
+    fn exec_command_nonzero_exit_is_completed_activity() {
+        let mut state = ActivityState::new();
+        let blocks = state.project_tool_call(
+            "exec_command",
+            json!({
+                "cmd": "test -f Cargo.lock",
+                "workdir": "/home/sam/code/lash"
+            }),
+            json!({
+                "output": "",
+                "status": "completed",
+                "exit_code": 1
+            }),
+            true,
+            13,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].result.status, ActivityStatus::Completed);
+        assert_eq!(blocks[0].call.summary, "test -f Cargo.lock");
+        assert!(
+            blocks[0]
+                .result
+                .detail_lines
+                .iter()
+                .any(|line| line == "Exited with 1")
+        );
+    }
+
+    #[test]
+    fn exec_command_timeout_remains_failed_activity() {
+        let mut state = ActivityState::new();
+        let blocks = state.project_tool_call(
+            "exec_command",
+            json!({
+                "cmd": "sleep 5",
+                "timeout_ms": 50,
+            }),
+            json!({
+                "output": "",
+                "status": "timed_out",
+                "timed_out": true,
+                "done": true,
+                "running": false
+            }),
+            false,
+            50,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
+        assert_eq!(blocks[0].call.summary, "failed sleep 5");
     }
 
     #[test]

@@ -69,7 +69,6 @@ pub(crate) struct CommonCommandParams {
     pub(crate) workdir: PathBuf,
     pub(crate) shell_path: String,
     pub(crate) login: bool,
-    pub(crate) allow_nonzero_exit: bool,
     pub(crate) max_output_tokens: Option<usize>,
 }
 
@@ -79,7 +78,6 @@ pub(crate) struct ExecCommandParams {
     pub(crate) workdir: PathBuf,
     pub(crate) shell_path: String,
     pub(crate) login: bool,
-    pub(crate) allow_nonzero_exit: bool,
     pub(crate) timeout_ms: u64,
     pub(crate) max_output_tokens: Option<usize>,
 }
@@ -90,7 +88,6 @@ pub(crate) struct StartCommandParams {
     pub(crate) workdir: PathBuf,
     pub(crate) shell_path: String,
     pub(crate) login: bool,
-    pub(crate) allow_nonzero_exit: bool,
     pub(crate) max_output_tokens: Option<usize>,
 }
 

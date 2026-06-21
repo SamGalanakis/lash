@@ -4,7 +4,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use lash_debug_cli_harness::{
-    ExecutionMode, HarnessConfig, LiveHarness, repo_root_from_manifest_dir,
+    ExecutionMode, HarnessConfig, LiveHarness, MouseHarnessEvent, repo_root_from_manifest_dir,
 };
 
 #[test]
@@ -88,6 +88,86 @@ fn cli_interactive_pty_smoke_runs_turn_and_exits() {
         "UI trace did not record the submitted turn\ntrace:\n{trace}\nvisible screen:\n{}",
         run.screen_text
     );
+}
+
+#[test]
+fn cli_interactive_pty_mouse_selection_copies_and_escape_keeps_draft() {
+    let lash_home = test_lash_home("standard-echo");
+    let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Standard, None);
+    let input = "abc123 selectable text";
+    harness.type_text(input).expect("type draft input");
+    let visible = harness
+        .wait_for_text(input, Duration::from_secs(10))
+        .expect("wait for draft input");
+    let (text_col, text_row) =
+        screen_cell_for(&visible, input).expect("draft input is visible on screen");
+    let selection_start = "abc123 ".len() as u16;
+    let selection_len = "selectab".len() as u16;
+    let start_col = text_col + selection_start;
+    let end_col = start_col + selection_len;
+    harness
+        .send_mouse(MouseHarnessEvent::Down {
+            col: start_col,
+            row: text_row,
+        })
+        .expect("mouse down on draft input");
+    harness
+        .send_mouse(MouseHarnessEvent::Drag {
+            col: end_col,
+            row: text_row,
+        })
+        .expect("mouse drag on draft input");
+    harness
+        .send_mouse(MouseHarnessEvent::Up {
+            col: end_col,
+            row: text_row,
+        })
+        .expect("mouse up on draft input");
+    harness
+        .wait_for_text("Copied to clipboard", Duration::from_secs(10))
+        .expect("wait for selection copy toast");
+    let selected_snapshot = harness
+        .screenshot("input-selection-copied")
+        .expect("selection copied screenshot");
+    assert!(
+        selected_snapshot.text.exists()
+            && selected_snapshot.svg.exists()
+            && selected_snapshot.png.exists(),
+        "selection screenshot artifacts were not written: {selected_snapshot:?}"
+    );
+
+    harness
+        .press_key("Esc")
+        .expect("clear selection with Escape");
+    std::thread::sleep(Duration::from_millis(200));
+    harness
+        .type_text("X")
+        .expect("type after clearing selection");
+    std::thread::sleep(Duration::from_millis(100));
+    let after_escape = harness.screen_text().expect("screen after typing");
+    let draft_line = after_escape
+        .lines()
+        .find(|line| line.contains("abc123"))
+        .unwrap_or_else(|| panic!("draft input disappeared\nscreen:\n{after_escape}"));
+    assert!(
+        draft_line.contains("selectable") && draft_line.contains('X'),
+        "Escape should clear the selection so typing inserts without deleting selected text\nscreen:\n{after_escape}"
+    );
+    assert!(
+        !draft_line.contains("abc123 selectable textX"),
+        "mouse selection should move the cursor before Escape clears it, not append at the end\nscreen:\n{after_escape}"
+    );
+    let cleared_snapshot = harness
+        .screenshot("selection-cleared")
+        .expect("selection-cleared screenshot");
+    assert!(
+        cleared_snapshot.text.exists()
+            && cleared_snapshot.svg.exists()
+            && cleared_snapshot.png.exists(),
+        "selection-cleared screenshot artifacts were not written: {cleared_snapshot:?}"
+    );
+    harness.press_key("Ctrl-C").expect("clear draft input");
+    harness.finish_cleanly().expect("finish harness");
 }
 
 #[test]
@@ -255,6 +335,13 @@ fn write_test_model_catalog(lash_home: &std::path::Path) {
         serde_json::to_vec_pretty(&catalog).expect("catalog json"),
     )
     .expect("write model catalog");
+}
+
+fn screen_cell_for(screen: &str, needle: &str) -> Option<(u16, u16)> {
+    screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| line.find(needle).map(|col| (col as u16, row as u16)))
 }
 
 fn run_lash_with_timeout(command: &mut Command, timeout: Duration) -> Output {

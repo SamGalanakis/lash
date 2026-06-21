@@ -8,6 +8,7 @@ use lash_core::{
 
 use super::helpers::SessionObservationBridge;
 use super::*;
+use crate::app::ToastKind;
 use crate::event::AppEventTx;
 use crate::input_items::build_items_from_editor_input;
 use crate::turn_runner::{
@@ -369,23 +370,39 @@ pub(crate) async fn generate_session_name(sessions_dir: &std::path::Path) -> Str
     }
 }
 
+/// Copy the current text selection only. Used by mouse-up copy-on-select.
+pub(super) fn copy_active_selection(app: &mut App, terminal_size: Option<(u16, u16)>) -> bool {
+    let input_text = app.selected_input_text();
+    let document_text = document_selection_text(app, terminal_size);
+    let history_text = history_selection_text(app, terminal_size);
+    tracing::debug!(
+        selection_visible = app.selection.visible,
+        selection_active = app.selection.active,
+        input_selected_chars = input_text.as_ref().map(|text| text.chars().count()),
+        document_selected_chars = document_text.as_ref().map(|text| text.chars().count()),
+        history_selected_chars = history_text.as_ref().map(|text| text.chars().count()),
+        has_terminal_size = terminal_size.is_some(),
+        "selection copy path invoked"
+    );
+    let text = input_text.or(document_text).or(history_text);
+    let Some(text) = text else {
+        return false;
+    };
+    copy_text_with_toast(app, &text);
+    app.clear_text_selection();
+    true
+}
+
 /// Copy the current input selection when present, otherwise the history
 /// selection, and finally the last assistant response.
-pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Option<(u16, u16)>) {
+pub(super) fn copy_selected_text_or_last_response(
+    app: &mut App,
+    terminal_size: Option<(u16, u16)>,
+) {
     let input_text = app.selected_input_text();
-    let document_text = terminal_size.and_then(|(width, height)| {
-        crate::render::extract_document_selection_text(app, width, height)
-    });
-    let history_text = terminal_size.and_then(|(width, height)| {
-        crate::render::extract_history_selection_text(app, width, height)
-    });
-    let last_text = app.timeline.iter().rev().find_map(|b| {
-        if let UiTimelineItem::AssistantText(text) = b {
-            Some(text.clone())
-        } else {
-            None
-        }
-    });
+    let document_text = document_selection_text(app, terminal_size);
+    let history_text = history_selection_text(app, terminal_size);
+    let last_text = last_assistant_response_text(app);
     tracing::debug!(
         selection_visible = app.selection.visible,
         selection_active = app.selection.active,
@@ -396,13 +413,113 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
         has_terminal_size = terminal_size.is_some(),
         "copy path invoked"
     );
-    if let Some(text) = input_text.or(document_text).or(history_text).or(last_text) {
-        let copied_chars = text.chars().count();
-        match crate::clipboard::copy_text_robustly(&text) {
-            Ok(method) => tracing::debug!(copied_chars, method, "clipboard write succeeded"),
-            Err(err) => tracing::warn!(error = %err, copied_chars, "clipboard write failed"),
-        }
+    if let Some(text) = copy_candidate_text(app, terminal_size) {
+        copy_text_with_toast(app, &text);
     } else {
         tracing::debug!("copy path had no selected or fallback text");
+    }
+}
+
+fn copy_text_with_toast(app: &mut App, text: &str) {
+    let copied_chars = text.chars().count();
+    match crate::clipboard::copy_text_robustly(text) {
+        Ok(method) => {
+            tracing::debug!(copied_chars, method, "clipboard write succeeded");
+            app.show_toast("Copied to clipboard", ToastKind::Info);
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, copied_chars, "clipboard write failed");
+            app.show_toast("Failed to copy to clipboard", ToastKind::Error);
+        }
+    }
+}
+
+fn copy_candidate_text(app: &App, terminal_size: Option<(u16, u16)>) -> Option<String> {
+    app.selected_input_text()
+        .or_else(|| document_selection_text(app, terminal_size))
+        .or_else(|| history_selection_text(app, terminal_size))
+        .or_else(|| last_assistant_response_text(app))
+}
+
+fn document_selection_text(app: &App, terminal_size: Option<(u16, u16)>) -> Option<String> {
+    terminal_size.and_then(|(width, height)| {
+        crate::render::extract_document_selection_text(app, width, height)
+    })
+}
+
+fn history_selection_text(app: &App, terminal_size: Option<(u16, u16)>) -> Option<String> {
+    terminal_size.and_then(|(width, height)| {
+        crate::render::extract_history_selection_text(app, width, height)
+    })
+}
+
+fn last_assistant_response_text(app: &App) -> Option<String> {
+    app.timeline.iter().rev().find_map(|block| {
+        if let UiTimelineItem::AssistantText(text) = block {
+            Some(text.clone())
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn copy_candidate_prefers_input_selection_over_history_and_fallback() {
+        let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+        app.timeline = vec![
+            UiTimelineItem::UserInput("history alpha".into()),
+            UiTimelineItem::AssistantText("assistant fallback".into()),
+        ]
+        .into();
+        app.selection.anchor = (2, 0);
+        app.selection.end = (9, 0);
+        app.selection.visible = true;
+        app.set_input("input beta".into());
+        app.start_input_selection(0);
+        app.update_input_selection(5);
+        app.finish_input_selection();
+
+        assert_eq!(
+            copy_candidate_text(&app, Some((80, 24))).as_deref(),
+            Some("input")
+        );
+    }
+
+    #[test]
+    fn copy_candidate_uses_history_selection_before_fallback() {
+        let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+        app.timeline = vec![
+            UiTimelineItem::UserInput("history alpha".into()),
+            UiTimelineItem::AssistantText("assistant fallback".into()),
+        ]
+        .into();
+        app.selection.anchor = (2, 0);
+        app.selection.end = (9, 0);
+        app.selection.visible = true;
+
+        assert_eq!(
+            copy_candidate_text(&app, Some((80, 24))).as_deref(),
+            Some("history")
+        );
+    }
+
+    #[test]
+    fn copy_candidate_falls_back_to_last_assistant_response_without_selection() {
+        let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+        app.timeline = vec![
+            UiTimelineItem::AssistantText("older".into()),
+            UiTimelineItem::UserInput("question".into()),
+            UiTimelineItem::AssistantText("newer".into()),
+        ]
+        .into();
+
+        assert_eq!(
+            copy_candidate_text(&app, Some((80, 24))).as_deref(),
+            Some("newer")
+        );
     }
 }

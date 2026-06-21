@@ -42,55 +42,12 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
 "#;
 
-pub const LASHLANG_COMMON_PATTERNS_SECTION: &str = r#"### Common patterns
+pub const LASHLANG_COMMON_MISTAKES_SECTION: &str = r#"### Common mistakes
 
-Operation-level errors are different from successful results that contain domain errors. `?` aborts the block only when the module operation itself failed:
-
-    <lashlang>
-    probe = await web.search({ query: "value" })?
-    submit format("Search returned {} characters.", len(to_string(probe)))
-    </lashlang>
-
-Build collections with explicit loops, not comprehensions:
-
-    <lashlang>
-    items = []
-    for key in ["a", "b"] {
-      items = push(items, { key: key, size: len(key) })
-    }
-    submit format("Built {} items.", len(items))
-    </lashlang>
-
-Print what you need to see. Pull in the parts relevant to your next step — a whole value when it is small and all useful, otherwise keys, lengths, selected fields, or slices of large ones:
-
-    <lashlang>
-    result = await web.search({ query: "value" })?
-    text = to_string(result)
-    print { chars: len(text), head: slice(text, 0, 1200) }
-    </lashlang>
-
-When `shell.exec` is available, shell command results are data. It returns completed commands with `exit_code`, even when it is nonzero; inspect that field instead of expecting `?` to abort. The shell command runs exactly as written, without added strict-mode prefixes. Let the shell tool capture output; if output is large, keep the result in a variable and print fields, slices, or the `full_output_path` it returns rather than adding `head`/`tail` just to make output smaller:
-
-    <lashlang>
-    check = await shell.exec({ cmd: "cargo check --workspace --all-targets" })?
-    if check.exit_code != 0 {
-      print { exit_code: check.exit_code, output: slice(check.output, 0, 4000), full: check.full_output_path }
-    } else {
-      submit "Validation passed."
-    }
-    </lashlang>
-
-For dependent multi-step work, inspect intermediate results before submitting success. Do not submit final results without observing and verifying the outcome. Reaching `submit` ends the turn even mid-block:
-
-    <lashlang>
-    first = await web.search({ query: "value" })?
-    second = await web.fetch({ url: first[0].url })?
-    if contains(to_string(second), "needs_more_work") {
-      print { first: first, second: second }
-    } else {
-      submit format("Fetched result: {}", slice(to_string(second), 0, 1200))
-    }
-    </lashlang>
+- Do not use comprehensions; build collections with explicit loops.
+- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Showcased Tools** or the **Host Surface**.
+- Do not submit final results that depend on operations, files, edits, validation, or generated artifacts before observing the relevant result.
+- Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters.
 "#;
 
 pub const LASHLANG_TYPE_LITERALS_SECTION: &str = r#"### Type literals
@@ -255,11 +212,11 @@ fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) 
 }
 
 fn render_execution_intro(has_operations: bool) -> String {
-    let mut section = String::from("**All actions go through `lashlang`.** ");
+    let mut section = String::from("### Operating contract\n\n");
     if has_operations {
-        section.push_str("Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.");
+        section.push_str("Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them.");
     } else {
-        section.push_str("Use paired `<lashlang>` blocks to compute values, inspect current variables, and submit final answers. No module operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
+        section.push_str("Use plain prose only for direct conversational replies that need no computation. Use Lashlang to compute values, inspect current variables, validate data, or return structured/computed results. No module operations are available in this turn, so do not invent tool calls.");
     }
     section.push_str(
         r#"
@@ -275,46 +232,9 @@ Do not submit final results that depend on operations, files, generated patches,
 
 ### Response shape
 
-Your response must be visible prose optionally followed by exactly one Lashlang block. The start tag line must trim to exactly `<lashlang>`; the closing tag line must trim to exactly `</lashlang>`.
-
-You may skip prose by starting with `<lashlang>`, or skip Lashlang by omitting the block, but not both.
-
-NEVER have multiple `<lashlang>` blocks in one response.
-
-In streaming, generation stops as soon as `</lashlang>` is emitted. Any text after it is ignored, so do not put explanations or results after the closing tag.
+Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose.
 "#,
     );
-    if has_operations {
-        section.push_str(
-            r#"
-Example — inspect with an available operation, then submit:
-
-Checking the available data.
-
-<lashlang>
-result = await web.search({ query: "value" })?
-print { summary: slice(to_string(result), 0, 200) }
-</lashlang>
-
-…then on the next turn, once you've seen what you need:
-
-<lashlang>
-submit "The bound version is 0.2.61."
-</lashlang>
-"#,
-        );
-    } else {
-        section.push_str(
-            r#"
-Example — compute and submit:
-
-<lashlang>
-items = ["alpha", "beta"]
-submit format("Found {} items; first item: {}.", len(items), items[0])
-</lashlang>
-"#,
-        );
-    }
     section
 }
 
@@ -392,43 +312,28 @@ fn render_language_section(
 
 fn render_common_patterns(has_operations: bool) -> String {
     if has_operations {
-        return LASHLANG_COMMON_PATTERNS_SECTION.to_string();
+        return LASHLANG_COMMON_MISTAKES_SECTION.to_string();
     }
-    r#"### Common patterns
+    r#"### Common mistakes
 
-Build collections with explicit loops, not comprehensions:
-
-    <lashlang>
-    items = []
-    for key in ["a", "b"] {
-      items = push(items, { key: key, size: len(key) })
-    }
-    submit format("Built {} items.", len(items))
-    </lashlang>
-
-Print what you need to see. Pull in the parts relevant to your next step — a whole value when it is small and all useful, otherwise keys, lengths, selected fields, or slices of large ones:
-
-    <lashlang>
-    text = to_string(input)
-    print { chars: len(text), head: slice(text, 0, 1200) }
-    </lashlang>
-
-For multi-step work, inspect intermediate results before submitting success. Do not submit final results without observing and verifying the outcome. Reaching `submit` ends the turn even mid-block:
-
-    <lashlang>
-    first = trim(input.question)
-    if empty(first) {
-      print { problem: "missing question" }
-    } else {
-      submit format("Question: {}", first)
-    }
-    </lashlang>"#
+- Do not use comprehensions; build collections with explicit loops.
+- Do not infer module operations from generic Lashlang syntax. No module operations are available in this turn.
+- Do not submit final results that depend on current variables or validation before inspecting the relevant value.
+- Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters."#
         .to_string()
 }
 
 fn render_decomposition_section(has_operations: bool, processes: bool) -> String {
     let mut section = String::from(
-        "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Two kinds of values need different handling: large transient artifacts (files, search results, long pages, raw tool dumps) stay in variables — `print` only the fields or slices you need, not the whole thing; small durable state you consult each turn (a map, plan, or checklist) should stay visible — small values show inline under **Bound Variables**, and you can `print` them whole when you need to reason over all of them. Do not add shell truncation pipelines just to reduce display size; use the tool's captured `output`, `full_output_path`, and Lashlang `slice(...)` instead.\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need → reason inline in lashlang.",
+        "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Large transient artifacts (files, search results, long pages, raw tool dumps) should stay in variables until you need a focused view; small durable state you consult each turn should stay visible.",
+    );
+    if has_operations {
+        section.push_str(
+            " Tool-specific lifecycle and output details live under **Showcased Tools**.",
+        );
+    }
+    section.push_str(
+        "\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need -> reason inline in lashlang.",
     );
     if has_operations {
         if processes {

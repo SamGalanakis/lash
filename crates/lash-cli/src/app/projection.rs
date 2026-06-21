@@ -855,9 +855,10 @@ fn is_internal_rlm_message(message: &Message) -> bool {
         // RLM assistant conversation nodes are loop machinery. The visible
         // answer is projected from the trajectory final_output instead.
         MessageRole::Assistant => true,
-        MessageRole::System => {
-            rendered_message_text(message).contains("Plain text outside a fence is not delivered.")
-        }
+        // RLM system nodes are protocol-loop prompts, such as submit reminders
+        // injected after prose-only responses. They are instructions to the
+        // model, not user-visible transcript content.
+        MessageRole::System => true,
         MessageRole::User | MessageRole::Event => false,
     }
 }

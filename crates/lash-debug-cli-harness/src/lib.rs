@@ -217,6 +217,10 @@ impl LiveHarness {
         self.pty.write_bytes(&key_sequence(key)?)
     }
 
+    pub fn send_mouse(&mut self, event: MouseHarnessEvent) -> Result<()> {
+        self.pty.write_bytes(&event.sequence())
+    }
+
     pub fn wait_for_text(&mut self, needle: &str, timeout: Duration) -> Result<String> {
         self.wait_until(needle, timeout, |visible| visible.contains(needle))
     }
@@ -813,6 +817,41 @@ pub fn key_sequence(name: &str) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseHarnessEvent {
+    Down { col: u16, row: u16 },
+    Drag { col: u16, row: u16 },
+    Up { col: u16, row: u16 },
+}
+
+impl MouseHarnessEvent {
+    pub fn sequence(self) -> Vec<u8> {
+        let (button, col, row, suffix) = match self {
+            Self::Down { col, row } => (0, col, row, 'M'),
+            Self::Drag { col, row } => (32, col, row, 'M'),
+            Self::Up { col, row } => (0, col, row, 'm'),
+        };
+        // Harness coordinates are zero-based screen cells. SGR mouse protocol
+        // uses one-based terminal positions.
+        format!(
+            "\x1b[<{button};{};{}{suffix}",
+            col.saturating_add(1),
+            row.saturating_add(1)
+        )
+        .into_bytes()
+    }
+}
+
+pub fn mouse_sequence(kind: &str, col: u16, row: u16) -> Result<Vec<u8>> {
+    let event = match kind.trim().to_ascii_lowercase().as_str() {
+        "down" | "press" => MouseHarnessEvent::Down { col, row },
+        "drag" | "move" => MouseHarnessEvent::Drag { col, row },
+        "up" | "release" => MouseHarnessEvent::Up { col, row },
+        other => bail!("unknown mouse event `{other}`"),
+    };
+    Ok(event.sequence())
+}
+
 fn safe_artifact_name(name: &str) -> String {
     let mut safe = String::new();
     for ch in name.chars() {
@@ -861,6 +900,14 @@ mod tests {
         assert_eq!(key_sequence("Ctrl-C").unwrap(), b"\x03");
         assert_eq!(key_sequence("Alt-Up").unwrap(), b"\x1b[1;3A");
         assert!(key_sequence("Nope").is_err());
+    }
+
+    #[test]
+    fn mouse_names_map_to_sgr_terminal_bytes() {
+        assert_eq!(mouse_sequence("down", 2, 3).unwrap(), b"\x1b[<0;3;4M");
+        assert_eq!(mouse_sequence("drag", 4, 5).unwrap(), b"\x1b[<32;5;6M");
+        assert_eq!(mouse_sequence("up", 6, 7).unwrap(), b"\x1b[<0;7;8m");
+        assert!(mouse_sequence("hover", 0, 0).is_err());
     }
 
     #[test]

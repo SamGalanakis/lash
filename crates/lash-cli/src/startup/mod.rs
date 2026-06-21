@@ -33,8 +33,8 @@ use serde_json::Value as JsonValue;
 use crate::autonomous::{AutonomousMode, AutonomousPersistenceContext, run_autonomous};
 use crate::config::LashConfig;
 use crate::execution_settings::{
-    ExecutionMode, OmOverrides, ensure_supported_execution_mode, parse_execution_mode,
-    parse_standard_context_approach,
+    ExecutionMode, OmOverrides, RlmTerminationMode, default_rlm_termination_for_mode,
+    ensure_supported_execution_mode, parse_execution_mode, parse_standard_context_approach,
 };
 use crate::info::{info_text, info_text_unconfigured};
 use crate::instructions::{FsInstructionSource, InstructionLoaderConfig};
@@ -127,6 +127,23 @@ fn resolve_rlm_projected_bindings(
         return Ok(None);
     }
     Ok(Some(bindings))
+}
+
+fn resolve_rlm_termination(
+    args: &Args,
+    execution_mode: ExecutionMode,
+    persisted_host_config: Option<&session::CliSessionHostConfig>,
+) -> Result<Option<RlmTerminationMode>, String> {
+    if args.rlm_termination.is_some() && !execution_mode.is_rlm() {
+        return Err("`--rlm-termination` requires `--execution-mode rlm`.".to_string());
+    }
+    if !execution_mode.is_rlm() {
+        return Ok(None);
+    }
+    Ok(args
+        .rlm_termination
+        .or_else(|| persisted_host_config.and_then(|config| config.rlm_termination))
+        .or_else(|| default_rlm_termination_for_mode(execution_mode)))
 }
 
 fn resolve_agent_model_specs(
@@ -224,6 +241,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
                 None => ExecutionMode::Standard,
             })
             .map_err(anyhow::Error::msg)?;
+        resolve_rlm_termination(&args, execution_mode, None).map_err(anyhow::Error::msg)?;
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
@@ -390,6 +408,14 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             "`--rlm-var` and `--rlm-vars-file` require `--execution-mode rlm`."
         ));
     }
+    let rlm_termination =
+        resolve_rlm_termination(&args, execution_mode, persisted_host_config.as_ref())
+            .map_err(anyhow::Error::msg)?;
+    let resolved_host_config = session::CliSessionHostConfig::new(
+        execution_mode,
+        configured_standard_context_approach.clone(),
+        rlm_termination,
+    );
 
     // ── Stage 5: plugin stack + prompt layer + session policy ──
     let instruction_source: Arc<dyn InstructionSource> =
@@ -467,8 +493,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         .open_prepared(
             session_bootstrap,
             session_policy.clone(),
-            execution_mode,
-            configured_standard_context_approach.clone(),
+            resolved_host_config,
         )
         .await?;
     let session = opened_session.session;
@@ -582,6 +607,7 @@ fn should_restore_terminal_for_panic(terminal_owner_thread: std::thread::ThreadI
 mod tests {
     use super::*;
     use crate::test_support::env_lock;
+    use clap::Parser as _;
 
     #[test]
     fn terminal_panic_cleanup_is_limited_to_owner_thread() {
@@ -608,5 +634,61 @@ mod tests {
 
         unsafe { std::env::set_var("LASH_LOG", "warn") };
         assert_eq!(effective_lash_log_filter(true), "debug");
+    }
+
+    #[test]
+    fn rlm_termination_defaults_to_prose_or_submit_in_rlm_mode() {
+        let args =
+            crate::Args::try_parse_from(["lash", "--execution-mode", "rlm"]).expect("parse args");
+
+        assert_eq!(
+            resolve_rlm_termination(&args, ExecutionMode::Rlm, None).expect("termination"),
+            Some(RlmTerminationMode::ProseOrSubmit)
+        );
+    }
+
+    #[test]
+    fn rlm_termination_honors_explicit_submit_required() {
+        let args = crate::Args::try_parse_from([
+            "lash",
+            "--execution-mode",
+            "rlm",
+            "--rlm-termination",
+            "submit-required",
+        ])
+        .expect("parse args");
+
+        assert_eq!(
+            resolve_rlm_termination(&args, ExecutionMode::Rlm, None).expect("termination"),
+            Some(RlmTerminationMode::SubmitRequired)
+        );
+    }
+
+    #[test]
+    fn rlm_termination_uses_persisted_value_when_flag_omitted() {
+        let args =
+            crate::Args::try_parse_from(["lash", "--execution-mode", "rlm"]).expect("parse args");
+        let persisted = session::CliSessionHostConfig::new(
+            ExecutionMode::Rlm,
+            None,
+            Some(RlmTerminationMode::SubmitRequired),
+        );
+
+        assert_eq!(
+            resolve_rlm_termination(&args, ExecutionMode::Rlm, Some(&persisted))
+                .expect("termination"),
+            Some(RlmTerminationMode::SubmitRequired)
+        );
+    }
+
+    #[test]
+    fn rlm_termination_flag_requires_rlm_mode() {
+        let args = crate::Args::try_parse_from(["lash", "--rlm-termination", "prose-or-submit"])
+            .expect("parse args");
+
+        let err = resolve_rlm_termination(&args, ExecutionMode::Standard, None)
+            .expect_err("standard mode should reject rlm termination flag");
+
+        assert!(err.contains("--execution-mode rlm"));
     }
 }

@@ -96,15 +96,18 @@ fn execution_section_makes_paired_lashlang_tag_contract_explicit() {
         &full_prompt_host_environment(),
     );
 
-    assert!(section.contains(
-        "Your response must be visible prose optionally followed by exactly one Lashlang block"
-    ));
-    assert!(section.contains("start tag line must trim to exactly `<lashlang>`"));
-    assert!(section.contains("closing tag line must trim to exactly `</lashlang>`"));
-    assert!(section.contains("skip prose by starting with `<lashlang>`"));
-    assert!(section.contains("skip Lashlang by omitting the block, but not both"));
-    assert!(section.contains("NEVER have multiple `<lashlang>` blocks in one response"));
-    assert!(section.contains("generation stops as soon as `</lashlang>` is emitted"));
+    assert!(section.contains("Use plain prose only for direct conversational replies"));
+    assert!(
+        section
+            .contains("Executable code must be inside paired `<lashlang>` and `</lashlang>` tags")
+    );
+    assert!(section.contains("tag lines must be standalone after trimming"));
+    assert!(
+        section.contains("When action is needed, place the Lashlang block after any visible prose")
+    );
+    assert!(!section.contains("exactly one Lashlang block"));
+    assert!(!section.contains("NEVER have multiple `<lashlang>` blocks"));
+    assert!(!section.contains("Any text after it is ignored"));
     assert!(
         section.contains("Only `submit` once you have observed and verified the relevant results")
     );
@@ -334,6 +337,10 @@ fn execution_section_keeps_tool_specific_examples_out_of_core_prompt() {
             "core RLM prompt should not mention tool-specific example `{tool_name}`"
         );
     }
+    assert!(!section.contains("shell.exec"));
+    assert!(!section.contains("exit_code"));
+    assert!(!section.contains("full_output_path"));
+    assert!(!section.contains("nonzero exit"));
 }
 
 #[test]
@@ -350,7 +357,7 @@ fn execution_section_can_disable_image_guidance() {
     assert!(!section.contains("image.size"));
     assert!(section.contains("### Language"));
     assert!(section.contains("### Builtins"));
-    assert!(section.contains("### Common patterns"));
+    assert!(section.contains("### Common mistakes"));
     assert!(section.contains("### Type literals"));
 }
 

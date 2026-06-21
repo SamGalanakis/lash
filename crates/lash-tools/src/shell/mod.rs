@@ -108,7 +108,6 @@ impl StandardShell {
             .unwrap_or(&self.runtime.shell_path)
             .to_string();
         let login = parse_optional_bool(args, "login", false)?;
-        let allow_nonzero_exit = parse_optional_bool(args, "allow_nonzero_exit", false)?;
         let max_output_tokens = parse_optional_usize_arg(args, "max_output_tokens", None, true, 1)?;
 
         Ok(CommonCommandParams {
@@ -116,7 +115,6 @@ impl StandardShell {
             workdir,
             shell_path,
             login,
-            allow_nonzero_exit,
             max_output_tokens,
         })
     }
@@ -135,7 +133,6 @@ impl StandardShell {
             workdir: common.workdir,
             shell_path: common.shell_path,
             login: common.login,
-            allow_nonzero_exit: common.allow_nonzero_exit,
             timeout_ms,
             max_output_tokens: common.max_output_tokens,
         })
@@ -152,7 +149,6 @@ impl StandardShell {
             workdir: common.workdir,
             shell_path: common.shell_path,
             login: common.login,
-            allow_nonzero_exit: common.allow_nonzero_exit,
             max_output_tokens: common.max_output_tokens,
         })
     }
@@ -193,7 +189,6 @@ impl StandardShell {
                 full_output_path.as_deref(),
                 started.elapsed().as_secs_f64(),
                 params.timeout_ms,
-                params.allow_nonzero_exit,
             ),
             Ok(PollOutcome::Exited {
                 output,
@@ -207,7 +202,6 @@ impl StandardShell {
                 original_token_count,
                 full_output_path.as_deref(),
                 started.elapsed().as_secs_f64(),
-                params.allow_nonzero_exit,
             ),
             Ok(PollOutcome::Cancelled) => ToolResult::cancelled("tool call cancelled"),
             Err(err) => ToolResult::err(json!(err)),
@@ -333,7 +327,6 @@ impl StandardShell {
                     original_token_count,
                     full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
-                    params.allow_nonzero_exit,
                 )
             }
             Ok(PollOutcome::Cancelled) => {
@@ -433,10 +426,6 @@ fn start_command_process_args(params: &StartCommandParams) -> serde_json::Value 
     );
     args.insert("shell".to_string(), json!(params.shell_path.clone()));
     args.insert("login".to_string(), json!(params.login));
-    args.insert(
-        "allow_nonzero_exit".to_string(),
-        json!(params.allow_nonzero_exit),
-    );
     if let Some(max_output_tokens) = params.max_output_tokens {
         args.insert("max_output_tokens".to_string(), json!(max_output_tokens));
     }
@@ -480,8 +469,8 @@ impl StaticToolExecute for StandardShell {
 
 impl StandardShell {
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. The command is executed exactly as written by the selected shell; the tool does not add strict-mode prefixes or rewrite pipelines. Completed commands always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`; nonzero exit codes are returned as ordinary result data, so inspect `exit_code` yourself. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default timeout still fails the tool. Use `shell.start` instead for interactive, TTY-dependent, or intentionally long-lived processes. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream; prefer that over shell-level `head`/`tail` truncation when you need to inspect more.";
-        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY as a durable background process. The command is executed exactly as written by the selected shell. The result is a process handle with `__handle__: \"process\"`, `id`, `process_id`, `status: \"running\"`, `done: false`, and `running: true`; use `processes.list` to see it and `processes.cancel` to stop it. When the process exits, nonzero exit codes are returned as ordinary result data with `exit_code`; inspect it yourself. Use `shell.exec` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
+        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. The command is executed exactly as written by the selected shell; the tool does not add strict-mode prefixes or rewrite pipelines. Completed commands always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Nonzero exit codes are returned as ordinary result data; in Lashlang, `await shell.exec(...)?` does not abort just because the process exited nonzero. Inspect `exit_code` yourself when it matters. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and returned as a tool failure with `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`. Use `shell.start` instead for interactive, TTY-dependent, or intentionally long-lived processes. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream; prefer that over shell-level `head`/`tail` truncation when you need to inspect more.";
+        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY as a durable background process. The command is executed exactly as written by the selected shell. The result is a process handle with `__handle__: \"process\"`, `id`, `process_id`, `status: \"running\"`, `done: false`, and `running: true`; use `processes.list` to see it and `processes.cancel` to stop it. When the process exits, nonzero exit codes are returned as ordinary result data with `exit_code`; in Lashlang, `?` does not abort just because the process exited nonzero. Inspect `exit_code` yourself. Use `shell.exec` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
         let command_common = |command_description: &str| {
             json!({
                 "cmd": {
@@ -501,11 +490,6 @@ impl StandardShell {
                     "default": false,
                     "description": "Whether to run the shell with -l semantics. Defaults to false to avoid startup prompts and shell init noise."
                 },
-                "allow_nonzero_exit": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Legacy shell-only flag. Nonzero exit codes are always returned as result data; this flag only makes timed-out commands return a successful tool result so you can inspect `timed_out`. Defaults to false."
-                },
                 "max_output_tokens": {
                     "type": "integer",
                     "minimum": 1,
@@ -524,7 +508,7 @@ impl StandardShell {
                         "type": "integer",
                         "minimum": 1,
                         "default": DEFAULT_EXEC_COMMAND_TIMEOUT_MS,
-                        "description": "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the result has `status: \"timed_out\"` and `timed_out: true`. By default this fails the tool; pass `allow_nonzero_exit: true` to receive the timed-out result without failure. Defaults to 600000 ms."
+                        "description": "Hard timeout in milliseconds. If reached before the command exits, the process is killed and returned as a tool failure with `status: \"timed_out\"` and `timed_out: true`. Defaults to 600000 ms."
                     });
                     object_schema(properties, &["cmd"])
                 },

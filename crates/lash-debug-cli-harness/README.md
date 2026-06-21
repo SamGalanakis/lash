@@ -51,6 +51,9 @@ Supported commands:
 - `type TEXT` or `paste TEXT`: write text bytes without pressing Enter
 - `key NAME`: press `Enter`, `Tab`, `Esc`, `Backspace`, arrows, `Home`, `End`,
   `PageUp`, `PageDown`, `Ctrl-C`, `Alt-Up`, etc.
+- `mouse down|drag|up COL ROW`: send a zero-based SGR mouse event
+- `mouse click COL ROW`: send mouse down then mouse up at a zero-based cell
+- `mouse select C1 R1 C2 R2`: send mouse down, drag, and up between zero-based cells
 - `idle`: wait until the submitted turn settles back to `Idle`
 - `wait TEXT`: wait until visible screen text contains `TEXT`
 - `screen`: print the current visible screen as text
