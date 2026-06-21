@@ -126,6 +126,7 @@ pub(crate) struct RuntimePerfAllocationRunResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RuntimePerfPhaseRunResult {
+    pub(crate) samples: usize,
     pub(crate) duration_ms: f64,
     pub(crate) allocations: RuntimePerfAllocationDelta,
     pub(crate) rss_growth_kb: Option<i64>,
@@ -133,6 +134,7 @@ pub(crate) struct RuntimePerfPhaseRunResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RuntimePerfPhaseSummary {
+    pub(crate) samples: RuntimePerfMetricSummary,
     pub(crate) duration_ms: RuntimePerfMetricSummary,
     pub(crate) alloc_bytes: RuntimePerfMetricSummary,
     pub(crate) live_bytes: RuntimePerfMetricSummary,

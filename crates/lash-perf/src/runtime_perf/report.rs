@@ -397,10 +397,10 @@ fn evaluate_budgets(
         push_max_budget(
             &mut budgets,
             summary,
-            "run_turn_alloc_bytes",
+            "steady_state_turn_alloc_bytes",
             "median",
-            summary.run_turn_alloc_bytes.median,
-            run_turn_allocation_budget_bytes(*scenario),
+            steady_state_turn_alloc_bytes(summary),
+            steady_state_turn_allocation_budget_bytes(*scenario),
         );
         push_max_budget(
             &mut budgets,
@@ -501,6 +501,18 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "rlm_lashlang.execute",
             "rlm_lashlang.print_project",
         ],
+        RuntimePerfScenario::RlmStreamedPairedLashlang => &[
+            "context_transform",
+            "before_turn_hooks",
+            "prompt_build",
+            "effect_loop",
+            "finalize_turn",
+            "persist_turn",
+            "final_commit",
+            "post_persist_hooks",
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.execute",
+        ],
         RuntimePerfScenario::RlmProcessHandles
         | RuntimePerfScenario::RlmProcessAsyncToolCompletion => &[
             "context_transform",
@@ -546,6 +558,7 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
         RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
         RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 1_000_000_000.0,
+        RuntimePerfScenario::RlmStreamedPairedLashlang => 128_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 128_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
         | RuntimePerfScenario::DirectLlmClient
@@ -554,19 +567,29 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     }
 }
 
-fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
+fn steady_state_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::RlmAsyncToolCompletion => 64_000_000.0,
         RuntimePerfScenario::RlmTriggerMailPipeline => 64_000_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 128_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 750_000_000.0,
+        RuntimePerfScenario::RlmStreamedPairedLashlang => 64_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 96_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
         | RuntimePerfScenario::DirectLlmClient
         | RuntimePerfScenario::TurnCheckpoint => 192_000_000.0,
         _ => 750_000_000.0,
     }
+}
+
+fn steady_state_turn_alloc_bytes(summary: &RuntimePerfScenarioSummary) -> f64 {
+    summary
+        .steady_state_turn
+        .as_ref()
+        .unwrap_or(&summary.last_turn)
+        .total_alloc_bytes
+        .median
 }
 
 fn wall_clock_budget_ms(scenario: RuntimePerfScenario) -> f64 {
@@ -596,6 +619,9 @@ fn summarize_phase_profiles(
         .into_iter()
         .map(|(phase, metrics)| {
             let summary = RuntimePerfPhaseSummary {
+                samples: summarize_metric(
+                    metrics.iter().map(|metric| metric.samples as f64).collect(),
+                ),
                 duration_ms: summarize_metric(
                     metrics.iter().map(|metric| metric.duration_ms).collect(),
                 ),
@@ -748,7 +774,7 @@ mod tests {
             allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion) < 100_000_000.0
         );
         assert!(
-            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion)
+            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion)
                 < 100_000_000.0
         );
         assert!(
@@ -756,8 +782,9 @@ mod tests {
                 < 200_000_000.0
         );
         assert!(
-            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmProcessAsyncToolCompletion)
-                < 200_000_000.0
+            steady_state_turn_allocation_budget_bytes(
+                RuntimePerfScenario::RlmProcessAsyncToolCompletion
+            ) < 200_000_000.0
         );
         assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmAsyncToolCompletion) < 10_000.0);
         assert!(
@@ -806,7 +833,7 @@ mod tests {
             allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline) < 200_000_000.0
         );
         assert!(
-            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline)
+            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline)
                 < 100_000_000.0
         );
         assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmTriggerMailPipeline) < 10_000.0);
@@ -827,7 +854,28 @@ mod tests {
         }
         assert!(allocation_budget_bytes(RuntimePerfScenario::RlmLargePrint) <= 1_000_000_000.0);
         assert!(
-            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmLargePrint) <= 750_000_000.0
+            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmLargePrint)
+                <= 750_000_000.0
+        );
+    }
+
+    #[test]
+    fn streamed_paired_lashlang_requires_lashlang_phase_metrics() {
+        let phases = required_phases(RuntimePerfScenario::RlmStreamedPairedLashlang);
+        for expected in ["rlm_lashlang.compile_link", "rlm_lashlang.execute"] {
+            assert!(
+                phases.contains(&expected),
+                "missing required phase {expected}"
+            );
+        }
+        assert!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmStreamedPairedLashlang)
+                <= 128_000_000.0
+        );
+        assert!(
+            steady_state_turn_allocation_budget_bytes(
+                RuntimePerfScenario::RlmStreamedPairedLashlang
+            ) <= 64_000_000.0
         );
     }
 

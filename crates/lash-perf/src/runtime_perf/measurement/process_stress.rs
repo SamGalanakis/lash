@@ -89,6 +89,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         phase_profile.insert(
             "process_list_stress.list_live".to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(phase_started),
                 allocations: alloc_delta(phase_before_alloc, allocator_stats()),
                 rss_growth_kb: diff_opt_i64(
@@ -108,6 +109,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         phase_profile.insert(
             "process_list_stress.list_all".to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(phase_started),
                 allocations: alloc_delta(phase_before_alloc, allocator_stats()),
                 rss_growth_kb: diff_opt_i64(
@@ -135,6 +137,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         phase_profile.insert(
             "process_list_stress.list_global".to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(phase_started),
                 allocations: alloc_delta(phase_before_alloc, allocator_stats()),
                 rss_growth_kb: diff_opt_i64(
@@ -172,6 +175,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         phase_profile.insert(
             "process_list_stress.signal_append".to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(phase_started),
                 allocations: alloc_delta(phase_before_alloc, allocator_stats()),
                 rss_growth_kb: diff_opt_i64(
@@ -208,6 +212,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         phase_profile.insert(
             "process_list_stress.wait_roundtrip".to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(phase_started),
                 allocations: alloc_delta(phase_before_alloc, allocator_stats()),
                 rss_growth_kb: diff_opt_i64(
@@ -244,6 +249,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
         phase_profile.insert(
             "process_list_stress.env_spec_hash".to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(phase_started),
                 allocations: alloc_delta(phase_before_alloc, allocator_stats()),
                 rss_growth_kb: diff_opt_i64(

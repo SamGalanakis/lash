@@ -95,6 +95,7 @@ fn record_completed_phase(
     let alloc_after = allocator_stats();
     let memory_after = process_memory_sample();
     let metrics = RuntimePerfPhaseRunResult {
+        samples: 1,
         duration_ms: elapsed_ms(start.started_at),
         allocations: alloc_delta(start.alloc_before, alloc_after),
         rss_growth_kb: diff_opt_i64(start.memory_before.rss_kb, memory_after.rss_kb),
@@ -102,10 +103,12 @@ fn record_completed_phase(
     let entry = completed
         .entry(name)
         .or_insert_with(|| RuntimePerfPhaseRunResult {
+            samples: 0,
             duration_ms: 0.0,
             allocations: zero_allocation_delta(),
             rss_growth_kb: Some(0),
         });
+    entry.samples += metrics.samples;
     entry.duration_ms = round3(entry.duration_ms + metrics.duration_ms);
     entry.allocations = sum_allocation_deltas([&entry.allocations, &metrics.allocations]);
     entry.rss_growth_kb = sum_optional_i64(entry.rss_growth_kb, metrics.rss_growth_kb);
@@ -147,6 +150,7 @@ pub(crate) async fn run_once(
         | RuntimePerfScenario::RlmLlmQuery
         | RuntimePerfScenario::RlmGlobals
         | RuntimePerfScenario::RlmLargePrint
+        | RuntimePerfScenario::RlmStreamedPairedLashlang
         | RuntimePerfScenario::RlmLargeToolCatalog
         | RuntimePerfScenario::ObservationalMemory
         | RuntimePerfScenario::ObservationalMemoryMaintenance
@@ -211,6 +215,7 @@ pub(crate) async fn run_once(
             extra_phase_profile.insert(
                 "store_reopen.store_factory_create".to_string(),
                 RuntimePerfPhaseRunResult {
+                    samples: 1,
                     duration_ms: elapsed_ms(store_factory_started),
                     allocations: alloc_delta(store_factory_before_alloc, allocator_stats()),
                     rss_growth_kb: diff_opt_i64(
@@ -232,6 +237,7 @@ pub(crate) async fn run_once(
             extra_phase_profile.insert(
                 "store_reopen.persisted_load".to_string(),
                 RuntimePerfPhaseRunResult {
+                    samples: 1,
                     duration_ms: elapsed_ms(load_started),
                     allocations: alloc_delta(load_before_alloc, allocator_stats()),
                     rss_growth_kb: diff_opt_i64(
@@ -248,6 +254,7 @@ pub(crate) async fn run_once(
             extra_phase_profile.insert(
                 "store_reopen.runtime_hydration".to_string(),
                 RuntimePerfPhaseRunResult {
+                    samples: 1,
                     duration_ms: elapsed_ms(hydrate_started),
                     allocations: alloc_delta(hydrate_before_alloc, allocator_stats()),
                     rss_growth_kb: diff_opt_i64(
@@ -265,6 +272,7 @@ pub(crate) async fn run_once(
             extra_phase_profile.insert(
                 "sqlite_store_reopen.runtime_reopen".to_string(),
                 RuntimePerfPhaseRunResult {
+                    samples: 1,
                     duration_ms: elapsed_ms(reopen_started),
                     allocations: alloc_delta(reopen_before_alloc, allocator_stats()),
                     rss_growth_kb: diff_opt_i64(

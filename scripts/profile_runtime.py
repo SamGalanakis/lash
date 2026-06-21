@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from profile_runtime_stack import KNOWN_RUNTIME_SCENARIOS
+
 PROFILE_DEFAULTS = {
     "quick": {
         "runs": 2,
@@ -61,21 +63,7 @@ def parse_args() -> argparse.Namespace:
         "--scenario",
         action="append",
         default=[],
-        help=(
-            "Limit to one or more runtime perf scenarios: standard, rlm, "
-            "standard_tool_calls, standard_async_tool_completion, "
-            "rlm_tool_calls, rlm_async_tool_completion, "
-            "rlm_process_handles, rlm_trigger_mail_pipeline, "
-            "rlm_process_async_tool_completion, "
-            "rlm_subagent_spawn, rlm_llm_query, rlm_globals, rlm_large_tool_catalog, "
-            "observational_memory, observational_memory_maintenance, "
-            "openai_compat_stream, standard_shell_output, "
-            "tool_discovery_search, openai_responses_sse_parse, "
-            "direct_llm_client, process_list_stress, embed_standard, embed_rlm, "
-            "scoped_effect_controller, store_reopen, sqlite_store_reopen, "
-            "turn_checkpoint, live_replay_pressure, trace_jsonl_standard, "
-            "trace_jsonl_extended, all."
-        ),
+        help=f"Limit to one or more runtime perf scenarios: {', '.join([*KNOWN_RUNTIME_SCENARIOS, 'all'])}.",
     )
     parser.add_argument(
         "--turns",

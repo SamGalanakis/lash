@@ -225,7 +225,7 @@ crash = await tools.crash_once({{ workflow_id: "{workflow_id}" }})?
         r#"
 Execute this program.
 
-```lashlang
+<lashlang>
 process child(tools: Tools, value: str) {{
   lookup = await tools.app_lookup({{ key: value }})?
   finish {{ child: value, lookup: lookup.value }}
@@ -283,7 +283,7 @@ submit {{
   process: process_result,
   final: "{EXPECTED_FINAL_TEXT}"
 }}
-```
+</lashlang>
 "#
     )
 }
@@ -292,7 +292,7 @@ fn trigger_setup_script() -> String {
     r#"
 Register this trigger.
 
-```lashlang
+<lashlang>
 process on_button(event: ui.button.Pressed) {
   finish { triggered: event.button, message: event.message }
 }
@@ -304,7 +304,7 @@ handle = await triggers.register({
   name: "button watcher"
 })?
 submit { registered: true, handle: handle }
-```
+</lashlang>
 "#
     .to_string()
 }
@@ -314,7 +314,7 @@ fn signal_suspend_script(workflow_id: &str) -> String {
         r#"
 Start the signal suspension process but do not await it.
 
-```lashlang
+<lashlang>
 process waiter(workflow_id: str) signals {{ first: any, second: any }} {{
   first = wait_signal("first")
   second = wait_signal("second")
@@ -331,7 +331,7 @@ submit {{
   process_id: handle.id,
   final: "signal-suspend-started"
 }}
-```
+</lashlang>
 "#
     )
 }
@@ -341,9 +341,9 @@ fn queued_wake_script() -> String {
         r#"
 Consume the queued wake.
 
-```lashlang
+<lashlang>
 submit {{ wake_consumed: true, final: "{EXPECTED_WAKE_TEXT}" }}
-```
+</lashlang>
 "#
     )
 }
@@ -353,7 +353,7 @@ fn async_completion_script(workflow_id: &str) -> String {
         r#"
 Exercise the async host tool completion path.
 
-```lashlang
+<lashlang>
 process async_child(tools: Tools, workflow_id: str) {{
   lookup = await tools.async_lookup({{ workflow_id: workflow_id, key: "detached" }})?
   finish lookup
@@ -366,7 +366,7 @@ submit {{
   async: result,
   final: "{EXPECTED_ASYNC_TEXT}"
 }}
-```
+</lashlang>
 "#
     )
 }
@@ -376,7 +376,7 @@ fn durable_input_request_script(workflow_id: &str) -> String {
         r#"
 Exercise a durable in-process tool that opens an input request and resumes through a custom await key.
 
-```lashlang
+<lashlang>
 process durable_child(tools: Tools, workflow_id: str) {{
   input = await tools.durable_input_request({{
     workflow_id: workflow_id,
@@ -392,7 +392,7 @@ submit {{
   durable: result,
   final: "{EXPECTED_DURABLE_INPUT_TEXT}"
 }}
-```
+</lashlang>
 "#
     )
 }
@@ -411,7 +411,7 @@ crash = await tools.crash_once({{ workflow_id: "{workflow_id}" }})?
         r#"
 Exercise direct aggregate resource batching.
 
-```lashlang
+<lashlang>
 {crash}
 batch = await {{
   slow: tools.batch_side_effect({{
@@ -431,7 +431,7 @@ submit {{
   batch: batch,
   final: "{EXPECTED_TOOL_BATCH_TEXT}"
 }}
-```
+</lashlang>
 "#
     )
 }
@@ -460,5 +460,29 @@ mod tests {
         let text = "workflow_id=e2e-tool-batch tool_batch=true fail_once=false";
 
         assert_eq!(latest_scenario_marker(text), Some(MockScenario::ToolBatch));
+    }
+
+    #[test]
+    fn mock_scripts_use_paired_lashlang_tags() {
+        let scripts = [
+            kitchen_sink_script("e2e-test", false),
+            kitchen_sink_script("e2e-test", true),
+            trigger_setup_script(),
+            signal_suspend_script("e2e-test"),
+            queued_wake_script(),
+            async_completion_script("e2e-test"),
+            durable_input_request_script("e2e-test"),
+            tool_batch_script("e2e-test", false),
+            tool_batch_script("e2e-test", true),
+        ];
+
+        for script in scripts {
+            assert!(
+                !script.contains("```lashlang"),
+                "mock script still uses markdown-fenced Lashlang:\n{script}"
+            );
+            assert_eq!(script.matches("<lashlang>").count(), 1);
+            assert_eq!(script.matches("</lashlang>").count(), 1);
+        }
     }
 }
