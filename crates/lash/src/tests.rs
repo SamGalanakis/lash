@@ -919,17 +919,24 @@ fn text_response(text: &str) -> LlmResponse {
     }
 }
 
-fn queued_text_provider(texts: Vec<&'static str>) -> ProviderHandle {
+fn lashlang_block(source: &str) -> String {
+    format!("<lashlang>\n{}\n</lashlang>", source.trim())
+}
+
+fn queued_text_provider(texts: Vec<impl Into<String>>) -> ProviderHandle {
     let responses = Arc::new(TokioMutex::new(VecDeque::from(
         texts
             .into_iter()
-            .map(|text| LlmResponse {
-                full_text: text.to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: text.to_string(),
-                    response_meta: None,
-                }],
-                ..LlmResponse::default()
+            .map(|text| {
+                let text = text.into();
+                LlmResponse {
+                    full_text: text.clone(),
+                    parts: vec![LlmOutputPart::Text {
+                        text,
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                }
             })
             .collect::<Vec<_>>(),
     )));
@@ -1115,7 +1122,7 @@ fn recording_request_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Provi
                 seen.lock()
                     .expect("seen prompts")
                     .push(request_text(&request));
-                Ok(text_response("```lashlang\nsubmit \"ok\"\n```"))
+                Ok(text_response(&lashlang_block("submit \"ok\"")))
             }
         })
         .build()

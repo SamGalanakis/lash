@@ -39,6 +39,7 @@ use super::{
 pub(crate) struct Compiler {
     module_context: Option<CompiledModuleContext>,
     lashlang_execution: Option<LashlangExecutionCompileContext>,
+    expression_source_spans: FxHashMap<usize, Span>,
     code: Vec<Instruction>,
     spans: Vec<Option<Span>>,
     constants: Vec<Value>,

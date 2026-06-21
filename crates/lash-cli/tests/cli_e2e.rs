@@ -1,9 +1,11 @@
 #![cfg(feature = "test-provider")]
 
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{io::Read, io::Write};
+
+use lash_debug_cli_harness::{
+    ExecutionMode, HarnessConfig, LiveHarness, repo_root_from_manifest_dir,
+};
 
 #[test]
 fn cli_short_rlm_mode_runs_subagent_spawn_with_test_provider() {
@@ -53,58 +55,132 @@ fn cli_short_rlm_mode_runs_subagent_spawn_with_test_provider() {
 
 #[test]
 fn cli_interactive_pty_smoke_runs_turn_and_exits() {
-    let temp = tempfile::tempdir().expect("temp lash home");
-    write_test_provider_config(temp.path(), "standard-echo");
-    write_test_model_catalog(temp.path());
-    let trace_path = temp.path().join("interactive-trace.json");
-    let snapshot_path = temp.path().join("interactive-trace.snap");
-
-    let mut session = PtySession::spawn(
-        &[
-            "--model",
-            "test/cli-e2e-model",
-            "--debug-ui-trace",
-            trace_path.to_str().expect("trace path is utf8"),
-        ],
-        temp.path(),
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    session.wait_for("Idle", Duration::from_secs(10));
-    session.write("hello from pty\r");
-    session.wait_for(
-        "test-provider echo: hello from pty",
-        Duration::from_secs(30),
-    );
-    session.write("/exit\r");
-    let (status, output) = session.finish(Duration::from_secs(10));
-
-    assert!(
-        status.success(),
-        "interactive lash exited unsuccessfully: {status:?}\npty output:\n{output}"
-    );
-    let snapshot = std::fs::read_to_string(&snapshot_path).unwrap_or_else(|err| {
+    let lash_home = test_lash_home("standard-echo");
+    let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Standard, None);
+    harness.send_line("hello from pty").expect("send prompt");
+    harness
+        .wait_for_text(
+            "test-provider echo: hello from pty",
+            Duration::from_secs(30),
+        )
+        .expect("wait for provider response");
+    let run = harness.finish_cleanly().expect("finish harness");
+    let trace = std::fs::read_to_string(&run.artifacts.ui_trace_json).unwrap_or_else(|err| {
         panic!(
-            "failed to read final UI snapshot {}: {err}\npty output:\n{output}",
-            snapshot_path.display()
+            "failed to read UI trace {}: {err}\nvisible screen:\n{}",
+            run.artifacts.ui_trace_json.display(),
+            run.screen_text
         )
     });
     assert!(
-        snapshot.contains("hello from pty"),
-        "final UI snapshot did not contain submitted prompt\nsnapshot:\n{snapshot}\npty output:\n{output}"
+        run.screen_text.contains("hello from pty"),
+        "final screen did not contain submitted prompt\nvisible screen:\n{}",
+        run.screen_text
     );
     assert!(
-        snapshot.contains("test-provider echo: hello from pty"),
-        "final UI snapshot did not contain provider response\nsnapshot:\n{snapshot}\npty output:\n{output}"
+        run.screen_text
+            .contains("test-provider echo: hello from pty"),
+        "final screen did not contain provider response\nvisible screen:\n{}",
+        run.screen_text
     );
-    let trace = std::fs::read_to_string(&trace_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read UI trace {}: {err}\npty output:\n{output}",
-            trace_path.display()
-        )
-    });
     assert!(
         trace.contains("\"user_turn\"") && trace.contains("hello from pty"),
-        "UI trace did not record the submitted turn\ntrace:\n{trace}\npty output:\n{output}"
+        "UI trace did not record the submitted turn\ntrace:\n{trace}\nvisible screen:\n{}",
+        run.screen_text
+    );
+}
+
+#[test]
+fn cli_interactive_pty_rlm_subagent_smoke_runs_turn_and_exits() {
+    let lash_home = test_lash_home("rlm-subagent-smoke");
+    let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Rlm, None);
+    harness
+        .send_line("Does your subagent tool work")
+        .expect("send prompt");
+    harness
+        .wait_for_text("■ subagent-ok", Duration::from_secs(45))
+        .expect("wait for subagent response");
+    let run = harness.finish_cleanly().expect("finish harness");
+    assert!(
+        run.screen_text.contains("■ subagent-ok"),
+        "interactive RLM screen did not show submitted subagent value\nscreen:\n{}\nartifacts: {}",
+        run.screen_text,
+        run.artifacts.output_dir.display()
+    );
+    let trace = std::fs::read_to_string(&run.artifacts.ui_trace_json).unwrap_or_else(|err| {
+        panic!(
+            "failed to read UI trace {}: {err}\nvisible screen:\n{}",
+            run.artifacts.ui_trace_json.display(),
+            run.screen_text
+        )
+    });
+    assert!(
+        trace.contains("lashlang_code") && trace.contains("spawn_agent"),
+        "interactive RLM trace did not include lashlang/subagent execution\ntrace:\n{trace}\nvisible screen:\n{}",
+        run.screen_text
+    );
+}
+
+#[test]
+fn cli_interactive_pty_rlm_uses_temporary_working_directory() {
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let lash_home = test_lash_home("rlm-workspace-smoke");
+    let mut harness =
+        start_interactive_harness(&lash_home, ExecutionMode::Rlm, Some(workspace.path()));
+    harness
+        .send_line("Exercise the temporary workspace")
+        .expect("send prompt");
+    harness
+        .wait_for_text("■ workspace-smoke-ok", Duration::from_secs(45))
+        .expect("wait for workspace response");
+    let run = harness.finish_cleanly().expect("finish harness");
+    assert!(
+        run.screen_text.contains("■ workspace-smoke-ok"),
+        "interactive RLM screen did not show workspace smoke result\nscreen:\n{}\nartifacts: {}",
+        run.screen_text,
+        run.artifacts.output_dir.display()
+    );
+    assert!(
+        run.screen_text
+            .contains(&workspace.path().display().to_string()),
+        "workspace smoke did not run from the requested cwd\nscreen:\n{}\nworkspace: {}",
+        run.screen_text,
+        workspace.path().display()
+    );
+    let written = std::fs::read_to_string(workspace.path().join("qc-workspace.txt"))
+        .expect("workspace smoke file");
+    assert_eq!(written, "workspace-smoke-ok\n");
+}
+
+#[test]
+fn cli_interactive_pty_rlm_treats_nonzero_shell_exit_as_data() {
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let lash_home = test_lash_home("rlm-nonzero-exit-smoke");
+    let mut harness =
+        start_interactive_harness(&lash_home, ExecutionMode::Rlm, Some(workspace.path()));
+    harness
+        .send_line("Exercise nonzero shell exit")
+        .expect("send prompt");
+    harness
+        .wait_for_text("■ nonzero-smoke-ok exit=7", Duration::from_secs(45))
+        .expect("wait for nonzero response");
+    let run = harness.finish_cleanly().expect("finish harness");
+    assert!(
+        run.screen_text.contains("■ nonzero-smoke-ok exit=7"),
+        "interactive RLM screen did not show nonzero exit as data\nscreen:\n{}\nartifacts: {}",
+        run.screen_text,
+        run.artifacts.output_dir.display()
+    );
+    let trace = std::fs::read_to_string(&run.artifacts.ui_trace_json).unwrap_or_else(|err| {
+        panic!(
+            "failed to read UI trace {}: {err}\nvisible screen:\n{}",
+            run.artifacts.ui_trace_json.display(),
+            run.screen_text
+        )
+    });
+    assert!(
+        !trace.contains("unwrapped failed module operation"),
+        "nonzero shell exit should not become a failed module operation\ntrace:\n{trace}"
     );
 }
 
@@ -114,6 +190,31 @@ fn lash_bin() -> std::path::PathBuf {
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/lash")
         })
+}
+
+fn start_interactive_harness(
+    lash_home: &tempfile::TempDir,
+    execution_mode: ExecutionMode,
+    working_dir: Option<&std::path::Path>,
+) -> LiveHarness {
+    let repo_root =
+        repo_root_from_manifest_dir(env!("CARGO_MANIFEST_DIR")).expect("derive repo root");
+    let mut config = HarnessConfig::new(repo_root);
+    config.lash_bin = Some(lash_bin());
+    config.lash_home = Some(lash_home.path().to_path_buf());
+    config.model = Some("test/cli-e2e-model".to_string());
+    config.execution_mode = execution_mode;
+    config.working_dir = working_dir.map(std::path::Path::to_path_buf);
+    config.build_lash = false;
+    config.timeout = Duration::from_secs(45);
+    LiveHarness::start(config).expect("start interactive PTY harness")
+}
+
+fn test_lash_home(scenario: &str) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().expect("temp lash home");
+    write_test_provider_config(temp.path(), scenario);
+    write_test_model_catalog(temp.path());
+    temp
 }
 
 fn write_test_provider_config(lash_home: &std::path::Path, scenario: &str) {
@@ -178,115 +279,5 @@ fn run_lash_with_timeout(command: &mut Command, timeout: Duration) -> Output {
             );
         }
         std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-struct PtySession {
-    child: Box<dyn portable_pty::Child + Send>,
-    writer: Box<dyn Write + Send>,
-    output: Arc<Mutex<Vec<u8>>>,
-    reader_thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl PtySession {
-    fn spawn(args: &[&str], lash_home: &std::path::Path, cwd: &str) -> Self {
-        let pty_system = portable_pty::native_pty_system();
-        let pair = pty_system
-            .openpty(portable_pty::PtySize {
-                rows: 24,
-                cols: 100,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("open pty");
-
-        let mut cmd = portable_pty::CommandBuilder::new(lash_bin());
-        cmd.args(args);
-        cmd.cwd(cwd);
-        cmd.env("LASH_HOME", lash_home.as_os_str());
-        cmd.env("LASH_LOG", "warn");
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("NO_COLOR", "1");
-
-        let child = pair.slave.spawn_command(cmd).expect("spawn lash in pty");
-        let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
-        let writer = pair.master.take_writer().expect("take pty writer");
-        drop(pair.slave);
-
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let reader_output = Arc::clone(&output);
-        let reader_thread = std::thread::spawn(move || {
-            let mut buf = [0_u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => reader_output
-                        .lock()
-                        .expect("pty output lock")
-                        .extend_from_slice(&buf[..n]),
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Self {
-            child,
-            writer,
-            output,
-            reader_thread: Some(reader_thread),
-        }
-    }
-
-    fn write(&mut self, input: &str) {
-        self.writer
-            .write_all(input.as_bytes())
-            .expect("write pty input");
-        self.writer.flush().expect("flush pty input");
-    }
-
-    fn wait_for(&mut self, needle: &str, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let output = self.output_string();
-            if output.contains(needle) {
-                return;
-            }
-            if let Some(status) = self.child.try_wait().expect("poll pty child") {
-                panic!("lash exited before `{needle}` appeared: {status:?}\npty output:\n{output}");
-            }
-            if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                panic!("timed out waiting for `{needle}`\npty output:\n{output}");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    fn finish(mut self, timeout: Duration) -> (portable_pty::ExitStatus, String) {
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().expect("poll pty child") {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let output = self.output_string();
-                panic!("timed out waiting for lash to exit\npty output:\n{output}");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        let output = Arc::clone(&self.output);
-        drop(self.writer);
-        if let Some(reader_thread) = self.reader_thread.take() {
-            let _ = reader_thread.join();
-        }
-        (
-            status,
-            String::from_utf8_lossy(&output.lock().expect("pty output lock")).to_string(),
-        )
-    }
-
-    fn output_string(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().expect("pty output lock")).to_string()
     }
 }

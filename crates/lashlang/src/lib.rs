@@ -48,20 +48,21 @@ pub use linker::{
 };
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    AbilityOp, AbilityResult, CompileStats, CompiledLinkedProgram, CompiledProcessCache,
-    CompiledProcessCacheKey, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
-    ExecutableProgram, ExecutionEnvironment, ExecutionHost, ExecutionHostError, ExecutionMode,
-    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_HOST_DESCRIPTOR_TYPE_KEY,
-    LASH_HOST_DESCRIPTOR_VALUE_KEY, LASH_HOST_REQUIREMENTS_REF_KEY, LASH_MODULE_REF_KEY,
-    LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_TYPE_KEY,
-    LinkedProgramCache, LinkedProgramCacheError, ListValue, ProcessEvent, ProcessEventKind,
-    ProcessSignal, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
-    ProjectedBindings, ProjectedFuture, ProjectedHostDescriptor, ProjectedReadRequest,
-    ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation,
-    ResourceOperationBatch, ResourceOperationBatchResult, ResourceOperationResult, RuntimeError,
-    RuntimeFailure, Sleep, SleepKind, Snapshot, State, Value, compile, compile_linked,
-    compile_linked_process, compile_module_artifact_process, compile_process, execute, from_json,
-    prewarm, unwrap_type_value,
+    AbilityOp, AbilityResult, BudgetedJsonProjectionConfig, BudgetedJsonProjector, CompileStats,
+    CompiledLinkedProgram, CompiledProcessCache, CompiledProcessCacheKey, CompiledProgram,
+    CompiledProgramCache, CompiledProgramCacheStats, ExecutableProgram, ExecutionEnvironment,
+    ExecutionHost, ExecutionHostError, ExecutionMode, ExecutionOutcome, ExecutionScratch,
+    ImageValue, LASH_HOST_DESCRIPTOR_TYPE_KEY, LASH_HOST_DESCRIPTOR_VALUE_KEY,
+    LASH_HOST_REQUIREMENTS_REF_KEY, LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY,
+    LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_TYPE_KEY, LinkedProgramCache,
+    LinkedProgramCacheError, ListValue, ProcessEvent, ProcessEventKind, ProcessSignal,
+    ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError, ProjectedBindings,
+    ProjectedFuture, ProjectedHostDescriptor, ProjectedReadRequest, ProjectedReadResponse,
+    ProjectedValue, Record, ResourceHandle, ResourceOperation, ResourceOperationBatch,
+    ResourceOperationBatchResult, ResourceOperationResult, RuntimeError, RuntimeFailure, Sleep,
+    SleepKind, Snapshot, State, Value, ValueProjectionContext, ValueProjector, compile,
+    compile_linked, compile_linked_process, compile_module_artifact_process, compile_process,
+    execute, from_json, prewarm, unwrap_type_value,
 };
 pub use source::{
     CanonicalSourceError, canonical_process_source, canonical_process_source_with_requirements,
@@ -81,38 +82,46 @@ pub use trigger::{
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
-    format_source_diagnostic(
-        source,
-        error.offset(),
-        &error.to_string(),
-        parse_hint(error),
-    )
+    let span = error.span().unwrap_or(Span {
+        start: error.offset(),
+        end: error.offset(),
+    });
+    format_source_diagnostic(source, span, &error.to_string(), parse_hint(error))
 }
 
 pub fn format_runtime_diagnostic(source: &str, error: &RuntimeError, span: Option<Span>) -> String {
     let Some(span) = span else {
         return format_message_with_hint(&error.to_string(), runtime_hint(error));
     };
-    format_source_diagnostic(source, span.start, &error.to_string(), runtime_hint(error))
+    format_source_diagnostic(source, span, &error.to_string(), runtime_hint(error))
 }
 
 pub fn format_link_diagnostic(source: &str, error: &LinkError) -> String {
     match error.span() {
-        Some(span) => format_source_diagnostic(source, span.start, &error.to_string(), None),
+        Some(span) => format_source_diagnostic(source, span, &error.to_string(), None),
         None => error.to_string(),
     }
 }
 
 fn format_source_diagnostic(
     source: &str,
-    offset: usize,
+    span: Span,
     message: &str,
     hint: Option<&'static str>,
 ) -> String {
-    let (line, column, source_line) = line_column_snippet(source, offset);
+    let start = span.start.min(source.len());
+    let (line, column, _line_start, line_end, source_line) = line_column_snippet(source, start);
     let caret_pad = " ".repeat(column.saturating_sub(1));
-    let mut diagnostic =
-        format!("{message}\n--> line {line}, column {column}\n{source_line}\n{caret_pad}^");
+    let underline_len = if start < line_end {
+        let underline_end = span.end.max(start.saturating_add(1)).min(line_end);
+        source[start..underline_end].chars().count().max(1)
+    } else {
+        1
+    };
+    let underline = format!("^{}", "~".repeat(underline_len.saturating_sub(1)));
+    let mut diagnostic = format!(
+        "{message}\n--> line {line}, column {column}\n{source_line}\n{caret_pad}{underline}"
+    );
     if let Some(hint) = hint {
         diagnostic.push_str("\nhint: ");
         diagnostic.push_str(hint);
@@ -167,7 +176,7 @@ fn runtime_hint(error: &RuntimeError) -> Option<&'static str> {
     }
 }
 
-fn line_column_snippet(source: &str, offset: usize) -> (usize, usize, String) {
+fn line_column_snippet(source: &str, offset: usize) -> (usize, usize, usize, usize, String) {
     let offset = offset.min(source.len());
     let mut line = 1usize;
     let mut line_start = 0usize;
@@ -188,6 +197,8 @@ fn line_column_snippet(source: &str, offset: usize) -> (usize, usize, String) {
     (
         line,
         column,
+        line_start,
+        line_end,
         source[line_start..line_end]
             .trim_end_matches('\r')
             .to_string(),

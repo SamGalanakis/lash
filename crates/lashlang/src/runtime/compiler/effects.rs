@@ -231,6 +231,7 @@ impl Compiler {
         });
         let instruction = self.code.len();
         self.code.push(Instruction::ResourceOperationBatch(batch));
+        self.mark_instruction_source_span(instruction, handle);
         self.mark_forced_lashlang_execution_site(instruction, forced_site);
         true
     }
@@ -265,7 +266,7 @@ impl Compiler {
                     unreachable!("aggregate await shape was pre-validated")
                 };
                 self.compile_aggregate_await_leaf(
-                    inner,
+                    expr,
                     receiver,
                     operation,
                     args,
@@ -320,6 +321,7 @@ impl Compiler {
         }
         let operation_index = self.push_name(operation);
         let site = self.lashlang_execution_site(site_expr, "resource_operation", operation);
+        let source_span = self.expression_source_span(site_expr);
         let leaf_index = leaves.len();
         leaves.push(CompiledResourceOperationBatchLeaf {
             operation: operation_index,
@@ -327,6 +329,7 @@ impl Compiler {
             receiver_stack_index,
             unwrap,
             site,
+            source_span,
         });
         *stack_value_count += args.len() + 1;
         CompiledAggregateAwaitShape::BatchLeaf(leaf_index)
@@ -352,6 +355,7 @@ impl Compiler {
     ) {
         let site = forced_site
             .or_else(|| self.lashlang_execution_site(site_expr, "resource_operation", operation));
+        self.mark_instruction_source_span(instruction, site_expr);
         self.mark_forced_lashlang_execution_site(instruction, site);
     }
 

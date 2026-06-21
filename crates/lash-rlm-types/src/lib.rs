@@ -4,8 +4,6 @@ use lash_sansio::{AttachmentRef, TurnProtocol};
 pub struct RlmTrajectoryEntry {
     pub id: String,
     pub protocol_iteration: usize,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub reasoning: String,
     pub code: String,
     /// One entry per `print` (and any raw stdout-style emission from the
     /// lashlang executor). Replaces the old split between a combined
@@ -70,11 +68,9 @@ pub enum RlmHistoryItem {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<RlmAttachmentRef>,
     },
-    RlmStep {
+    LashlangStep {
         id: String,
         protocol_iteration: usize,
-        #[serde(default, skip_serializing_if = "String::is_empty")]
-        reasoning: String,
         code: String,
         #[serde(default, alias = "observations")]
         output: Vec<String>,

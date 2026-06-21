@@ -48,6 +48,7 @@ impl<'module> Linker<'module> {
             main,
             declaration_spans: self.program.declaration_spans.clone(),
             expression_spans: self.program.expression_spans.clone(),
+            expression_source_spans: self.program.expression_source_spans.clone(),
         })
     }
 

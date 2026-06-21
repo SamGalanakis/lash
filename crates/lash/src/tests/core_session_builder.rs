@@ -97,6 +97,10 @@ fn compile_surface_tool_definition(name: &str) -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "object" }),
     )
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        name.to_string(),
+    ))
 }
 
 #[tokio::test]
@@ -401,7 +405,7 @@ async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result
                     seen.lock()
                         .expect("seen prompts")
                         .push(system_text(&request));
-                    Ok(text_response("```lashlang\nsubmit \"ok\"\n```"))
+                    Ok(text_response(&lashlang_block("submit \"ok\"")))
                 }
             }
         })
@@ -495,7 +499,7 @@ async fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options
         surface
             .host_environment
             .resources
-            .resolve_module_operation("Tools", "tools", "compile.core.tool")
+            .resolve_module_operation("Tools", "tools", "compile_core_tool")
             .is_some()
     );
     assert!(

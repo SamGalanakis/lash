@@ -6,6 +6,7 @@ impl Compiler {
             Rc::new(RefCell::new(SlotTable::default())),
             stats.clone(),
         );
+        compiler.expression_source_spans = expression_source_spans(program);
         compiler.compile_program_block(program);
         let chunk = compiler.finish();
         let compile_stats = *stats.borrow();
@@ -28,6 +29,7 @@ impl Compiler {
             paths: lashlang_execution_paths(program),
             sites: Vec::new(),
         });
+        compiler.expression_source_spans = expression_source_spans(program);
         compiler.compile_program_block(program);
         let chunk = compiler.finish();
         let compile_stats = *stats.borrow();
@@ -50,6 +52,7 @@ impl Compiler {
             paths: lashlang_execution_paths(program),
             sites: Vec::new(),
         });
+        compiler.expression_source_spans = expression_source_spans(program);
         compiler.compile_program_block(program);
         let chunk = compiler.finish();
         let compile_stats = *stats.borrow();
@@ -64,6 +67,7 @@ impl Compiler {
         Self {
             module_context,
             lashlang_execution: None,
+            expression_source_spans: FxHashMap::default(),
             code: Vec::new(),
             spans: Vec::new(),
             constants: Vec::new(),
@@ -352,8 +356,24 @@ impl Compiler {
             self.spans.resize(end, None);
         }
         for instruction_span in &mut self.spans[start..end] {
-            *instruction_span = Some(span);
+            if instruction_span.is_none() {
+                *instruction_span = Some(span);
+            }
         }
+    }
+
+    fn mark_instruction_source_span(&mut self, instruction: usize, expr: &Expr) {
+        let Some(span) = self.expression_source_span(expr) else {
+            return;
+        };
+        if self.spans.len() <= instruction {
+            self.spans.resize(instruction + 1, None);
+        }
+        self.spans[instruction] = Some(span);
+    }
+
+    fn expression_source_span(&self, expr: &Expr) -> Option<Span> {
+        self.expression_source_spans.get(&expr_key(expr)).copied()
     }
 
     fn mark_lashlang_execution_site(&mut self, instruction: usize, site: LashlangExecutionSite) {

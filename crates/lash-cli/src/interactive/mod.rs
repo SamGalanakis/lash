@@ -865,6 +865,13 @@ pub(crate) async fn run_app(
                 }
                 let ui_effects = ui_extensions.effects_for_turn_event(&activity.event);
                 app.handle_turn_activity(activity);
+                if let Err(err) =
+                    logger.append_ui_activity_records(app.pending_ui_activity_records())
+                {
+                    tracing::warn!(?err, "failed to persist CLI UI activity records");
+                } else {
+                    app.clear_pending_ui_activity_records();
+                }
                 apply_ui_host_effects(&mut app, ui_effects);
             }
             AppEvent::Prompt {

@@ -1,8 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use lash_core::SessionError;
-use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
-use lashlang::{ExecutionScratch, State as FlowState};
+use lashlang::{ExecutionScratch, State as FlowState, Value as FlowValue};
 use serde_json::json;
 
 use crate::projection::{prune_protected_bindings, prune_reserved_projected_bindings};
@@ -17,19 +16,17 @@ pub struct RlmExecutionState {
     pub(super) linked_programs: lashlang::LinkedProgramCache,
     pub(super) stored_lashlang_modules: BTreeSet<lashlang::ModuleRef>,
     pub(super) scratch_dir: tempfile::TempDir,
-    pub(super) observe_projection: ToolOutputBudgetConfig,
     pub(super) dirty: bool,
 }
 
 impl RlmExecutionState {
-    pub fn new(config: ToolOutputBudgetConfig) -> Result<Self, SessionError> {
+    pub fn new() -> Result<Self, SessionError> {
         Ok(Self {
             rlm: FlowState::new(),
             scratch: ExecutionScratch::new(),
             linked_programs: lashlang::LinkedProgramCache::new(),
             stored_lashlang_modules: BTreeSet::new(),
             scratch_dir: tempfile::TempDir::new()?,
-            observe_projection: config,
             dirty: true,
         })
     }
@@ -119,15 +116,13 @@ impl RlmExecutionState {
     pub(crate) fn bound_variable_values(
         &self,
         exclude: &BTreeSet<String>,
-    ) -> serde_json::Map<String, serde_json::Value> {
-        let mut out = serde_json::Map::new();
+    ) -> Vec<(String, FlowValue)> {
+        let mut out = Vec::new();
         for (name, value) in self.rlm.globals().iter() {
             if name == "history" || exclude.contains(name) || value.contains_projected() {
                 continue;
             }
-            if let Ok(value) = serde_json::to_value(value) {
-                out.insert(name.to_string(), value);
-            }
+            out.push((name.to_string(), value.clone()));
         }
         out
     }
@@ -146,7 +141,7 @@ mod bound_variable_value_tests {
 
     #[test]
     fn includes_globals_excludes_history_and_named() {
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).unwrap();
+        let mut state = RlmExecutionState::new().unwrap();
         let mut set_default = serde_json::Map::new();
         set_default.insert("inventory".to_string(), json!(["lantern"]));
         set_default.insert("secret".to_string(), json!(1));
@@ -159,17 +154,20 @@ mod bound_variable_value_tests {
 
         let exclude: BTreeSet<String> = ["secret".to_string()].into_iter().collect();
         let vars = state.bound_variable_values(&exclude);
-        assert!(vars.contains_key("inventory"), "{vars:?}");
+        assert!(vars.iter().any(|(name, _)| name == "inventory"), "{vars:?}");
         assert!(
-            !vars.contains_key("secret"),
+            !vars.iter().any(|(name, _)| name == "secret"),
             "excluded name leaked: {vars:?}"
         );
-        assert!(!vars.contains_key("history"), "history leaked: {vars:?}");
+        assert!(
+            !vars.iter().any(|(name, _)| name == "history"),
+            "history leaked: {vars:?}"
+        );
     }
 
     #[test]
     fn excludes_direct_projected_globals() {
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).unwrap();
+        let mut state = RlmExecutionState::new().unwrap();
         let mut snapshot = state.rlm.snapshot();
         snapshot.globals.insert(
             "projected".to_string(),
@@ -185,13 +183,18 @@ mod bound_variable_value_tests {
 
         let vars = state.bound_variable_values(&BTreeSet::new());
 
-        assert_eq!(vars.get("plain"), Some(&json!("local")));
-        assert!(!vars.contains_key("projected"), "{vars:?}");
+        assert!(vars.iter().any(
+            |(name, value)| name == "plain" && value == &FlowValue::String("local".into())
+        ));
+        assert!(
+            !vars.iter().any(|(name, _)| name == "projected"),
+            "{vars:?}"
+        );
     }
 
     #[test]
     fn excludes_top_level_globals_containing_nested_projected_values() {
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).unwrap();
+        let mut state = RlmExecutionState::new().unwrap();
         let mut record = FlowRecord::new();
         record.insert(
             "body".to_string(),
@@ -213,8 +216,8 @@ mod bound_variable_value_tests {
 
         let vars = state.bound_variable_values(&BTreeSet::new());
 
-        assert_eq!(vars.get("plain"), Some(&json!([1])));
-        assert!(!vars.contains_key("doc"), "{vars:?}");
+        assert!(vars.iter().any(|(name, _)| name == "plain"));
+        assert!(!vars.iter().any(|(name, _)| name == "doc"), "{vars:?}");
     }
 
     #[derive(Default)]
@@ -251,7 +254,7 @@ mod bound_variable_value_tests {
     #[test]
     fn excludes_custom_projected_globals_without_rendering_or_materializing() {
         let projected = Arc::new(CountingProjectedValue::default());
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).unwrap();
+        let mut state = RlmExecutionState::new().unwrap();
         let mut snapshot = state.rlm.snapshot();
         snapshot.globals.insert(
             "projected".to_string(),

@@ -28,7 +28,6 @@ pub(super) fn register_rlm_protocol_plugin(
 ) -> Result<(), PluginError> {
     let runtime_state = Arc::new(
         RlmRuntimeState::new(
-            config.clone(),
             projection_resolver,
             Arc::clone(&artifact_store),
             lashlang_surface.clone(),

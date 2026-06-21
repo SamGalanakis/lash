@@ -462,7 +462,7 @@ mod restate_tests {
         let provider = lash_core::testing::TestProvider::builder()
             .kind("mock-provider")
             .complete(|_request| async {
-                let text = r#"```lashlang
+                let text = r#"<lashlang>
 process play_center_once(board_tool: Board) {
   state = await board_tool.read({})?
   if state.turn == "O" and contains(state.legal_moves, 4) {
@@ -475,7 +475,7 @@ process play_center_once(board_tool: Board) {
 handle = start play_center_once(board_tool: board)
 result = (await handle)?
 submit "done via Restate E2E"
-```"#;
+</lashlang>"#;
                 Ok(LlmResponse {
                     full_text: text.to_string(),
                     parts: vec![LlmOutputPart::Text {

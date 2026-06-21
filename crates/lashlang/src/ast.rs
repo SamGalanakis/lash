@@ -15,6 +15,8 @@ pub struct Program {
     pub declaration_spans: Vec<Span>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expression_spans: Vec<Span>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expression_source_spans: Vec<ExpressionSourceSpan>,
 }
 
 impl Program {
@@ -24,6 +26,7 @@ impl Program {
             main: Expr::Block(expressions),
             declaration_spans: Vec::new(),
             expression_spans: Vec::new(),
+            expression_source_spans: Vec::new(),
         }
     }
 
@@ -32,12 +35,14 @@ impl Program {
         declaration_spans: Vec<Span>,
         expressions: Vec<Expr>,
         expression_spans: Vec<Span>,
+        expression_source_spans: Vec<ExpressionSourceSpan>,
     ) -> Self {
         Self {
             declarations,
             main: Expr::Block(expressions),
             declaration_spans,
             expression_spans,
+            expression_source_spans,
         }
     }
 
@@ -55,6 +60,12 @@ impl PartialEq for Program {
     fn eq(&self, other: &Self) -> bool {
         self.declarations == other.declarations && self.main == other.main
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpressionSourceSpan {
+    pub path: Vec<u32>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -171,11 +171,12 @@ impl TurnBoundary {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return Ok(());
         }
+
+        self.apply_prepared_messages(messages);
         let Some(store) = store else {
             return Ok(());
         };
 
-        self.apply_prepared_messages(messages);
         let plugins = session
             .as_deref()
             .map(|session| Arc::clone(session.plugins()));
@@ -319,14 +320,13 @@ impl TurnBoundary {
         event_delta: Vec<SessionEventRecord>,
     ) -> Vec<crate::ProtocolEvent> {
         let protocol_events = event_delta
-            .into_iter()
+            .iter()
             .filter_map(|event| match event {
-                SessionEventRecord::Protocol(event) => Some(event),
+                SessionEventRecord::Protocol(event) => Some(event.clone()),
                 SessionEventRecord::Conversation(_) => None,
             })
             .collect::<Vec<_>>();
-        self.draft_mut()
-            .append_protocol_events(protocol_events.iter().cloned());
+        self.draft_mut().append_events(event_delta);
         protocol_events
     }
 
@@ -740,6 +740,73 @@ mod tests {
         .as_ref()
     }
 
+    fn test_protocol_event(kind: &str) -> crate::ProtocolEvent {
+        crate::ProtocolEvent::typed(
+            "test_protocol",
+            serde_json::json!({
+                "kind": kind,
+                "payload": { "test": true },
+            }),
+        )
+        .expect("test protocol event serializes")
+    }
+
+    fn summarize_protocol_event(event: &crate::ProtocolEvent) -> String {
+        let Some(value) = event
+            .decode::<serde_json::Value>("test_protocol")
+            .expect("test protocol event decodes")
+        else {
+            return format!("protocol:{}", event.plugin_id);
+        };
+        let kind = value
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        format!("protocol:{kind}")
+    }
+
+    fn persisted_event_order(graph: &SessionGraph) -> Vec<String> {
+        graph
+            .nodes
+            .iter()
+            .filter_map(|node| match node.event()? {
+                crate::SessionEventRecord::Conversation(record) => {
+                    Some(format!("message:{}", record.id))
+                }
+                crate::SessionEventRecord::Protocol(event) => Some(summarize_protocol_event(event)),
+            })
+            .collect()
+    }
+
+    fn chronological_event_order(graph: &SessionGraph) -> Vec<String> {
+        let read_model = graph.read_model();
+        crate::chronological::ChronologicalProjection::from_read_model(&read_model)
+            .entries()
+            .iter()
+            .map(|entry| match &entry.payload {
+                crate::chronological::ChronologicalPayload::Message(message) => {
+                    format!("message:{}", message.id)
+                }
+                crate::chronological::ChronologicalPayload::ProtocolEvent(event) => {
+                    summarize_protocol_event(event)
+                }
+            })
+            .collect()
+    }
+
+    fn stored_graph_with_head_leaf(store: &RecordingStore) -> SessionGraph {
+        let mut graph = store.session_graph.lock().expect("lock graph").clone();
+        graph.set_leaf_node_id(
+            store
+                .session_head_meta
+                .lock()
+                .expect("lock head meta")
+                .as_ref()
+                .and_then(|meta| meta.leaf_node_id.clone()),
+        );
+        graph
+    }
+
     fn state_with_graph(graph: SessionGraph) -> RuntimeSessionState {
         RuntimeSessionState {
             session_id: "session-1".to_string(),
@@ -1043,6 +1110,81 @@ mod tests {
                 ))
                 .all(|node| !node.node_id.starts_with("plugin:"))
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_checkpoint_without_store_persists_user_before_protocol_event() {
+        let user = text_message("u0", MessageRole::User, "hello");
+        let diagnostic = test_protocol_event("diagnostic");
+        let store = RecordingStore::default();
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(SessionGraph::default()));
+
+        pipeline
+            .prepared_checkpoint(
+                None,
+                SessionPolicy::default(),
+                0,
+                &MessageSequence::from_base(vec![user.clone()].into()),
+                None,
+            )
+            .await
+            .expect("checkpoint without store");
+
+        let boundary = pipeline
+            .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
+                policy: SessionPolicy::default(),
+                turn_index: 1,
+                messages: MessageSequence::from_base(vec![user].into()),
+                event_delta: vec![crate::SessionEventRecord::Protocol(diagnostic)],
+                execution_state_snapshot: None,
+                plugins: None,
+                store: Some(&store),
+            })
+            .await;
+
+        assert!(boundary.persisted);
+        let stored_graph = stored_graph_with_head_leaf(&store);
+        let expected = vec!["message:u0", "protocol:diagnostic"];
+        assert_eq!(persisted_event_order(&stored_graph), expected);
+        assert_eq!(chronological_event_order(&stored_graph), expected);
+    }
+
+    #[tokio::test]
+    async fn progress_boundary_persists_assistant_before_protocol_entry() {
+        let user = text_message("u0", MessageRole::User, "hello");
+        let assistant = text_message("a0", MessageRole::Assistant, "hi");
+        let trajectory = test_protocol_event("trajectory");
+        let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph.clone()));
+        let store = RecordingStore::default();
+        store
+            .session_graph
+            .lock()
+            .expect("lock graph")
+            .extend_node_records(graph.nodes.iter().cloned());
+
+        let boundary = pipeline
+            .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
+                policy: SessionPolicy::default(),
+                turn_index: 1,
+                messages: MessageSequence::from_base(vec![user, assistant.clone()].into()),
+                event_delta: vec![
+                    crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
+                        assistant,
+                    )),
+                    crate::SessionEventRecord::Protocol(trajectory),
+                ],
+                execution_state_snapshot: None,
+                plugins: None,
+                store: Some(&store),
+            })
+            .await;
+
+        assert!(boundary.persisted);
+        let stored_graph = stored_graph_with_head_leaf(&store);
+        let expected = vec!["message:u0", "message:a0", "protocol:trajectory"];
+        assert_eq!(persisted_event_order(&stored_graph), expected);
+        assert_eq!(chronological_event_order(&stored_graph), expected);
     }
 
     #[tokio::test]

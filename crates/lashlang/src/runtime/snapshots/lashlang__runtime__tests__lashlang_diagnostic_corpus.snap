@@ -1,12 +1,13 @@
 ---
 source: crates/lashlang/src/runtime/tests.rs
+assertion_line: 446
 expression: "cases.join(\"\\n\\n---\\n\\n\")"
 ---
 parse_inline_if
 unexpected `if`
 --> line 1, column 8
 submit if true { 1 }
-       ^
+       ^~
 hint: use `cond ? yes : no` for inline conditionals
 
 ---
@@ -15,7 +16,7 @@ parse_inline_for
 unexpected `for`
 --> line 1, column 9
 submit [for x in [1] { x }]
-        ^
+        ^~~
 hint: `for` is a statement. Put it on its own line, not inside an expression or record literal.
 
 ---
@@ -24,7 +25,7 @@ parse_loop_control_outside_loop
 `break` can only be used inside a loop
 --> line 1, column 1
 break
-^
+^~~~~
 
 ---
 
@@ -32,7 +33,7 @@ parse_duplicate_type_field
 expected unique field name, found duplicate field `ok`
 --> line 1, column 38
 Payload = Type { nested: { ok: bool, ok: str } }
-                                     ^
+                                     ^~
 
 ---
 
@@ -40,7 +41,7 @@ parse_removed_parallel_keyword
 unexpected `parallel`
 --> line 1, column 1
 parallel {
-^
+^~~~~~~~
 
 ---
 
@@ -48,16 +49,16 @@ runtime_bad_wrapper_unwrap
 `?` unwrapped failed tool result: boom
 --> line 1, column 1
 submit ({ ok: false, error: "boom" })?
-^
+^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 hint: remove `?` and inspect `.ok` or `.error` when you need to handle failures
 
 ---
 
 runtime_failed_resource_operation_unwrap
 `?` unwrapped failed module operation: boom
---> line 1, column 1
+--> line 1, column 15
 submit (await tools.err({})?)
-^
+              ^~~~~~~~~~~~~
 
 ---
 
@@ -65,7 +66,7 @@ runtime_invalid_await_handle
 `?` unwrapped failed tool result: expected handle record
 --> line 1, column 1
 submit (await 1)?
-^
+^~~~~~~~~~~~~~~~~
 hint: remove `?` and inspect `.ok` or `.error` when you need to handle failures
 
 ---
@@ -74,7 +75,7 @@ runtime_read_only_projected_assignment
 `history` is a read-only projected binding
 --> line 1, column 1
 history = []
-^
+^~~~~~~~~~~~
 hint: copy the projected value into a new variable before changing it
 
 ---
@@ -83,7 +84,7 @@ runtime_invalid_validate_type_argument
 `validate` requires a Type literal as the second argument
 --> line 1, column 1
 submit validate({ ok: true }, "not a type")
-^
+^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 hint: pass `Type { ... }` or a variable that holds a Type literal
 
 ---
@@ -92,7 +93,7 @@ runtime_validation_failure
 validation failed: $.count: expected integer, got string
 --> line 1, column 1
 submit validate({ count: "x" }, Type { count: int })
-^
+^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ---
 
@@ -100,7 +101,7 @@ runtime_unknown_name
 unknown name `missing`
 --> line 1, column 1
 submit missing
-^
+^~~~~~~~~~~~~~
 
 ---
 
@@ -108,4 +109,4 @@ runtime_unknown_builtin
 unknown builtin `nope`
 --> line 1, column 1
 submit nope()
-^
+^~~~~~~~~~~~~

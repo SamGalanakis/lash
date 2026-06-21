@@ -1054,6 +1054,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
+        RuntimePerfScenario::RlmLargePrint => format!(
+            "Turn {} in RLM mode. Print a large structured tool result to exercise host-owned print projection, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
         RuntimePerfScenario::ObservationalMemory => format!(
             "Turn {} in observational memory mode. Continue the same longer benchmark conversation and reply with exactly: {}",
             turn_index + 1,

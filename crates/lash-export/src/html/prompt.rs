@@ -5,7 +5,7 @@ use lash_core::ChronologicalPayload;
 use lash_core::session_model::MessageRole;
 
 use crate::trace::LlmPromptSnapshot;
-use crate::transcript::{format_count, format_tokens, rlm_transcript_step_from_event};
+use crate::transcript::{format_count, format_tokens, lashlang_transcript_step_from_event};
 
 use super::escaping::{escape, escape_attr};
 use super::view_model::{
@@ -91,14 +91,14 @@ pub(crate) fn compute_prompt_insertions(
     let mut before_index = vec![Vec::new(); chronological.len()];
     let mut consumed = vec![false; prompts.len()];
 
-    let has_rlm_steps = chronological.iter().any(|e| {
+    let has_lashlang_steps = chronological.iter().any(|e| {
         matches!(
             &e.payload,
-            ChronologicalPayload::ProtocolEvent(event) if rlm_transcript_step_from_event(event).is_some()
+            ChronologicalPayload::ProtocolEvent(event) if lashlang_transcript_step_from_event(event).is_some()
         )
     });
 
-    if has_rlm_steps {
+    if has_lashlang_steps {
         let mut by_protocol_iteration: HashMap<u64, VecDeque<usize>> = HashMap::new();
         for (idx, prompt) in prompts.iter().enumerate() {
             if let Some(protocol_iteration) = prompt.protocol_iteration {
@@ -131,7 +131,7 @@ pub(crate) fn compute_prompt_insertions(
         for (i, entry) in chronological.iter().enumerate() {
             match &entry.payload {
                 ChronologicalPayload::ProtocolEvent(event) => {
-                    let Some(step) = rlm_transcript_step_from_event(event) else {
+                    let Some(step) = lashlang_transcript_step_from_event(event) else {
                         continue;
                     };
                     let protocol_iteration = step.protocol_iteration as u64;

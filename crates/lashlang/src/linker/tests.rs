@@ -986,7 +986,7 @@ mod tests {
     #[test]
     fn label_annotation_text_inside_strings_does_not_require_feature() {
         let linked = LinkedModule::link(
-            crate::parse(r####"submit r#"@label(title: "Plain text")"#"####)
+            crate::parse(r####"submit r"""@label(title: "Plain text")""""####)
                 .expect("parse string"),
             full_host_environment(),
         )

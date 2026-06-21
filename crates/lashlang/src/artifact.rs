@@ -419,6 +419,7 @@ impl From<&ModuleArtifact> for CompiledModuleContext {
 pub fn canonical_program_ir(mut program: Program) -> Program {
     program.declaration_spans.clear();
     program.expression_spans.clear();
+    program.expression_source_spans.clear();
     program
 }
 

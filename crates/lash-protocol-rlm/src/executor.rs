@@ -18,8 +18,6 @@ use lash_lashlang_runtime::{
     LashlangSurface, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangMap,
     TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangStatus,
 };
-#[cfg(test)]
-use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
 use lashlang::{ExecutionOutcome, State as FlowState};
 
 use self::host_bridge::{HostBridge, LashlangExecutionTrace};
@@ -214,7 +212,7 @@ async fn execute_code_inner(
     }
     let host = HostBridge::new(
         ctx.clone(),
-        state.observe_projection.clone(),
+        Arc::new(crate::rlm_support::print_history_projector()),
         tool_result_projectors,
         lashlang_execution_trace.clone(),
         host_environment,
@@ -601,7 +599,7 @@ mod tests {
         abilities: lashlang::LashlangAbilities,
         resources: lashlang::LashlangHostCatalog,
     ) -> ExecResponse {
-        let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let state = RlmExecutionState::new().expect("state");
         let ctx = if abilities.triggers {
             lash_core::testing::code_execution_context_with_trigger_store(Arc::new(
                 lash_core::InMemoryTriggerStore::default(),
@@ -636,7 +634,7 @@ mod tests {
     #[test]
     fn execute_code_reuses_linked_program_cache_for_repeat_source() {
         block_on(async {
-            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let state = RlmExecutionState::new().expect("state");
             let request = || ExecRequest {
                 language: "lashlang".to_string(),
                 code: "submit 1".to_string(),
@@ -694,7 +692,7 @@ mod tests {
     #[test]
     fn execute_code_stores_process_module_artifact_once() {
         block_on(async {
-            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let state = RlmExecutionState::new().expect("state");
             let request = || ExecRequest {
                 language: "lashlang".to_string(),
                 code: "process later() { finish 1 }\nsubmit 1".to_string(),
@@ -914,6 +912,38 @@ mod tests {
     }
 
     #[test]
+    fn print_observation_preserves_raw_output_and_records_projection_metadata() {
+        block_on(async {
+            let large = "x".repeat(60 * 1024);
+            let code = format!(
+                "print {{ output: {}, status: \"failed\", error: \"boom\", exit_code: 2, stderr: \"short\" }}",
+                serde_json::to_string(&large).expect("string literal")
+            );
+            let response =
+                execute_with_lashlang_abilities(&code, lashlang::LashlangAbilities::default())
+                    .await;
+
+            assert!(response.error.is_none(), "{:?}", response.error);
+            assert_eq!(response.observations.len(), 1);
+            assert!(
+                response.observations[0].contains(&large),
+                "raw observation should preserve full printed value"
+            );
+            assert_eq!(response.observation_truncation.len(), 1);
+            let metadata = &response.observation_truncation[0];
+            assert!(metadata.truncated, "{metadata:?}");
+            assert_eq!(
+                metadata.limit,
+                crate::rlm_support::PRINT_HISTORY_PROJECTION_CONFIG.max_bytes
+            );
+            assert_eq!(
+                metadata.max_lines,
+                crate::rlm_support::PRINT_HISTORY_PROJECTION_CONFIG.max_lines
+            );
+        });
+    }
+
+    #[test]
     fn executor_reports_rlm_bare_tool_call_diagnostic_at_link_time() {
         let mut resources = lashlang::LashlangHostCatalog::new();
         resources.add_module_operation(
@@ -1057,8 +1087,7 @@ mod tests {
     #[test]
     fn projected_history_is_available_without_clobbering_executor_globals() {
         block_on(async {
-            let mut state =
-                RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let mut state = RlmExecutionState::new().expect("state");
             let mut set_default = serde_json::Map::new();
             set_default.insert("diary".to_string(), serde_json::json!(["kept"]));
             state
@@ -1087,8 +1116,7 @@ mod tests {
     #[test]
     fn projected_history_defaults_to_empty_list_when_missing() {
         block_on(async {
-            let mut state =
-                RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let mut state = RlmExecutionState::new().expect("state");
 
             let projected = projected_history(Vec::new());
             let compiled =
@@ -1105,7 +1133,7 @@ mod tests {
 
     #[test]
     fn set_default_initializes_once_and_does_not_mutate_projected_globals() {
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let mut state = RlmExecutionState::new().expect("state");
         let projected = BTreeSet::from_iter(["current_query".to_string()]);
 
         state
@@ -1148,7 +1176,7 @@ mod tests {
 
     #[test]
     fn set_default_rejects_projected_host_bindings() {
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let mut state = RlmExecutionState::new().expect("state");
         let projected = BTreeSet::from_iter(["current_query".to_string()]);
 
         let err = state
@@ -1181,8 +1209,7 @@ mod tests {
     #[test]
     fn projected_scalar_bindings_are_read_only_and_not_snapshotted() {
         block_on(async {
-            let mut state =
-                RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let mut state = RlmExecutionState::new().expect("state");
             let mut projected = ProjectedBindings::new();
             projected.insert(
                 "current_query",
@@ -1224,7 +1251,7 @@ mod tests {
     #[test]
     fn executor_snapshot_does_not_materialize_projected_tool_result_globals() {
         let projected = Arc::new(SnapshotProjectedToolText::default());
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let mut state = RlmExecutionState::new().expect("state");
         let mut snapshot = state.rlm.snapshot();
         snapshot.globals.insert(
             "m".to_string(),
@@ -1260,7 +1287,7 @@ mod tests {
     #[test]
     fn bound_variables_prompt_renders_live_globals_after_execution() {
         block_on(async {
-            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let state = RlmExecutionState::new().expect("state");
             let ctx = lash_core::testing::code_execution_context();
             let (state, response) = execute_code(
                 state,
@@ -1287,12 +1314,12 @@ mod tests {
             let globals = state.bound_variable_values(&BTreeSet::new());
             let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
             let rendered =
-                crate::rlm_support::render_bound_variables(&mut cache, &globals, 0, 1024);
+                crate::rlm_support::render_bound_variables(&mut cache, &globals, 0).await;
 
             assert!(
                 rendered
                     .content
-                    .contains("- `scratch_note` = \"after execution\""),
+                    .contains("- `scratch_note` = after execution"),
                 "{}",
                 rendered.content
             );
@@ -1303,7 +1330,7 @@ mod tests {
     #[ignore = "microbenchmark; run with `-- --ignored --nocapture`"]
     fn bench_bound_variables_render_cost() {
         block_on(async {
-            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let state = RlmExecutionState::new().expect("state");
             let ctx = lash_core::testing::code_execution_context();
             // Realistic mid-game RLM state: a ~25-room map, a 67-entry notes
             // log, and a small inventory.
@@ -1352,11 +1379,12 @@ mod tests {
             let globals = state.bound_variable_values(&exclude);
 
             let mut warm = crate::rlm_support::BoundVariableRenderCache::default();
-            let _ = crate::rlm_support::render_bound_variables(&mut warm, &globals, 50, 1024);
+            let _ = crate::rlm_support::render_bound_variables(&mut warm, &globals, 50).await;
             let t2 = std::time::Instant::now();
             let mut s2 = 0usize;
             for _ in 0..n {
-                s2 += crate::rlm_support::render_bound_variables(&mut warm, &globals, 50, 1024)
+                s2 += crate::rlm_support::render_bound_variables(&mut warm, &globals, 50)
+                    .await
                     .content
                     .len();
             }
@@ -1366,7 +1394,8 @@ mod tests {
             let mut s3 = 0usize;
             for _ in 0..n {
                 let mut cold = crate::rlm_support::BoundVariableRenderCache::default();
-                s3 += crate::rlm_support::render_bound_variables(&mut cold, &globals, 50, 1024)
+                s3 += crate::rlm_support::render_bound_variables(&mut cold, &globals, 50)
+                    .await
                     .content
                     .len();
             }
@@ -1391,7 +1420,7 @@ mod tests {
     #[test]
     fn bound_variables_prompt_degrades_large_live_globals() {
         block_on(async {
-            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let state = RlmExecutionState::new().expect("state");
             let ctx = lash_core::testing::code_execution_context();
             // Same constructs the runtime-perf `rlm_globals` scenario seeds:
             // a large record and a large list that exceed the inline budget.
@@ -1428,18 +1457,20 @@ mod tests {
 
             let globals = state.bound_variable_values(&BTreeSet::new());
             let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
-            // Small budget forces the degradation path.
-            let rendered = crate::rlm_support::render_bound_variables(&mut cache, &globals, 0, 200);
+            let rendered =
+                crate::rlm_support::render_bound_variables(&mut cache, &globals, 0).await;
             let s = rendered.content.to_string();
 
-            // Large record -> type + keys=N + keys preview.
+            // Large record -> type + keys=N + projector preview.
             assert!(s.contains("`big_map`:"), "{s}");
             assert!(s.contains("keys=24"), "{s}");
             assert!(s.contains("≈ {") && s.contains("room_0"), "{s}");
-            // Large list -> type + len=N + head/tail preview.
+            assert!(s.contains("fields omitted"), "{s}");
+            // Large list -> type + len=N + projector preview.
             assert!(s.contains("`big_notes`:"), "{s}");
             assert!(s.contains("len=45"), "{s}");
             assert!(s.contains("≈ [") && s.contains("note 0:"), "{s}");
+            assert!(s.contains("items omitted"), "{s}");
         });
     }
 
@@ -1491,7 +1522,7 @@ mod tests {
     #[test]
     fn executor_snapshot_round_trips_projection_ref_metadata() {
         let reference = ProjectionRef::new("memory", serde_json::json!("doc"));
-        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let mut state = RlmExecutionState::new().expect("state");
         let mut snapshot = state.rlm.snapshot();
         snapshot.globals.insert(
             "doc".to_string(),

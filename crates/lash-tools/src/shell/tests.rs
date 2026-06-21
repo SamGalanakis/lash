@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_command_process_nonzero_exit_fails_by_default() {
+    async fn start_command_process_nonzero_exit_returns_result_data() {
         let shell = test_shell();
         let ctx = async_process_context("shell-exit-7", CancellationToken::new());
         let result = run_with_context(
@@ -648,12 +648,10 @@ mod tests {
         )
         .await;
 
-        assert!(!result.is_success(), "{}", result.value_for_projection());
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["status"], "completed");
         assert_eq!(result.value_for_projection()["exit_code"], 7);
-        assert_eq!(
-            result.value_for_projection()["error"].as_str(),
-            Some("Command exited with code 7")
-        );
+        assert!(result.value_for_projection()["error"].is_null());
     }
 
     #[tokio::test]
@@ -751,19 +749,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_command_pipeline_failure_uses_pipefail() {
+    async fn exec_command_does_not_add_strict_pipeline_semantics() {
         let shell = test_shell();
         let result = run(&shell, "exec_command", &json!({"cmd": "false | cat"})).await;
-        assert!(!result.is_success());
-        assert_ne!(result.value_for_projection()["exit_code"], 0);
-        assert_eq!(
-            result.value_for_projection()["error"].as_str(),
-            Some("Command exited with code 1")
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["exit_code"], 0);
+        assert!(result.value_for_projection()["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn exec_command_nonzero_exit_returns_result_data() {
+        let shell = test_shell();
+        let result = run(&shell, "exec_command", &json!({"cmd": "echo nope; exit 7"})).await;
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["exit_code"], 7);
+        assert!(result.value_for_projection()["error"].is_null());
+        assert!(
+            result.value_for_projection()["output"]
+                .as_str()
+                .unwrap()
+                .contains("nope")
         );
     }
 
     #[tokio::test]
-    async fn exec_command_allow_nonzero_exit_returns_nonzero_as_success() {
+    async fn exec_command_legacy_allow_nonzero_exit_still_returns_nonzero_as_success() {
         let shell = test_shell();
         let result = run(
             &shell,
@@ -779,6 +789,24 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("expected failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_command_head_style_pipeline_is_not_failed_by_sigpipe() {
+        let shell = test_shell();
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "yes line | head -n 3", "login": false}),
+        )
+        .await;
+
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["exit_code"], 0);
+        assert_eq!(
+            result.value_for_projection()["output"].as_str().unwrap(),
+            "line\nline\nline\n"
         );
     }
 

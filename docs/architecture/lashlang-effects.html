@@ -34,7 +34,7 @@
           <h3 id="binding-api">Binding API</h3>
           <dl class="def-list">
             <dt><code>ProjectedBindings</code></dt>
-            <dd>Low-level map of names to <code>ProjectedValue</code>s the Lashlang executor receives at the start of each fenced block. RLM builds it from public <code>RlmProjectedBindings</code>, restored projection refs, and the live <code>history</code> projection.</dd>
+            <dd>Low-level map of names to <code>ProjectedValue</code>s the Lashlang executor receives at the start of each paired <code>&lt;lashlang&gt;</code> block. RLM builds it from public <code>RlmProjectedBindings</code>, restored projection refs, and the live <code>history</code> projection.</dd>
             <dt><code>RlmProjectedBindings</code></dt>
             <dd>RLM's public binding API. <code>bind_json</code> and <code>bind_value</code> store inline values; <code>bind_lazy</code> accepts a stable <code>ProjectionRef</code>, not a raw host object. Duplicate names are errors.</dd>
           </dl>
@@ -58,7 +58,7 @@
           <h3 id="projection-serialization">Snapshots &amp; serialization</h3>
           <dl class="def-list">
             <dt>Snapshots</dt>
-            <dd>Lashlang snapshot JSON records projected globals as markers, optionally including <code>projection_ref</code>. Restore creates unresolved projected placeholders; RLM resolves ref-backed placeholders through its resolver before the next fenced block runs.</dd>
+            <dd>Lashlang snapshot JSON records projected globals as markers, optionally including <code>projection_ref</code>. Restore creates unresolved projected placeholders; RLM resolves ref-backed placeholders through its resolver before the next paired <code>&lt;lashlang&gt;</code> block runs.</dd>
             <dt>Operation arguments</dt>
             <dd>RLM serializes projected values with an internal <code>{"__projected__": ...}</code> marker, then normalizes operation arguments through the tool manifest's <code>ToolArgumentProjectionPolicy</code>. Tool implementations should parse the normalized arguments as plain JSON. The default policy materializes projected values. <code>continue_as</code> and <code>spawn_agent</code> declare a seed-preserving policy, so only root <code>seed:</code> entries remain projected; ref-backed values carry <code>{"__projection_ref__": ...}</code> so AgentFrames and child sessions re-resolve the same lazy source, while value-backed projections serialize as JSON.</dd>
           </dl>
@@ -282,7 +282,7 @@ core.triggers()
           </div>
           <dl class="def-list">
             <dt><code>AbilityOp::Submit(value)</code></dt>
-            <dd>Foreground program terminator. Runs once per fenced block when the program reaches <code>submit value</code>; the value returned by the handler becomes <code>ExecutionOutcome::Finished</code>. RLM's host bridge passes it through unchanged.</dd>
+            <dd>Foreground program terminator. Runs once per paired <code>&lt;lashlang&gt;</code> block when the program reaches <code>submit value</code>; the value returned by the handler becomes <code>ExecutionOutcome::Finished</code>. RLM's host bridge passes it through unchanged.</dd>
             <dt><code>AbilityOp::Finish(value)</code></dt>
             <dd>Process-mode terminator emitted by <code>finish value</code> inside a named <code>process</code> body. The handler-returned value becomes the process's terminal output.</dd>
             <dt><code>AbilityOp::Fail(value)</code></dt>

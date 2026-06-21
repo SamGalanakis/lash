@@ -53,6 +53,7 @@ testing = ["lash-core/testing"]
 lash-core = { workspace = true, features = ["testing"] }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 lash-subagents = { workspace = true }
+lash-tools = { workspace = true }
 lash-sqlite-store = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

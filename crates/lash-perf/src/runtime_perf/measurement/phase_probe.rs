@@ -146,6 +146,7 @@ pub(crate) async fn run_once(
         | RuntimePerfScenario::RlmSubagentSpawn
         | RuntimePerfScenario::RlmLlmQuery
         | RuntimePerfScenario::RlmGlobals
+        | RuntimePerfScenario::RlmLargePrint
         | RuntimePerfScenario::RlmLargeToolCatalog
         | RuntimePerfScenario::ObservationalMemory
         | RuntimePerfScenario::ObservationalMemoryMaintenance

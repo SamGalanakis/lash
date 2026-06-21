@@ -191,7 +191,6 @@ mod tests {
     fn test_session(config: RlmProtocolPluginConfig) -> RlmProtocolSession {
         let runtime_state = Arc::new(
             RlmRuntimeState::new(
-                config.clone(),
                 Arc::new(ProjectionRegistry::default()),
                 lashlang::global_in_memory_lashlang_artifact_store(),
                 lash_lashlang_runtime::LashlangSurface::default(),

@@ -476,7 +476,7 @@ async fn sync_steps_resume_correctly_after_tool_effects() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn traced_started_tool_errors_keep_original_instruction_span() {
+async fn traced_started_tool_errors_point_at_failing_tool_expression() {
     let source = r#"
         before = 1
         value = await tools.err({})?
@@ -493,11 +493,12 @@ async fn traced_started_tool_errors_keep_original_instruction_span() {
         message.contains("`?` unwrapped failed module operation: boom"),
         "{message}"
     );
-    assert!(message.contains("--> line 3, column 9"), "{message}");
+    assert!(message.contains("--> line 3, column 23"), "{message}");
     assert!(
         message.contains("value = await tools.err({})?"),
         "{message}"
     );
+    assert!(message.contains("                      ^~~~~~~~~~~~~"), "{message}");
 }
 
 #[tokio::test(flavor = "current_thread")]

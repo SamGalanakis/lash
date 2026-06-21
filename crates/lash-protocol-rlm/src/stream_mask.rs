@@ -1,6 +1,6 @@
-//! RLM stream mask: hooks that suppress the `lashlang` fence body as it
-//! streams in and raise `AssistantStreamTransform.abort_stream` the
-//! moment the fence closes, short-circuiting the LLM call.
+//! RLM stream mask: suppresses paired `<lashlang>` blocks from the visible
+//! assistant stream and aborts the provider stream as soon as the closing tag
+//! is complete.
 //!
 //! Registered from `RlmProtocolPlugin::register` via
 //! [`register_stream_mask`].
@@ -12,20 +12,22 @@ use lash_core::plugin::{
     AssistantStreamHookContext, AssistantStreamTransform, PluginError, PluginRegistrar,
 };
 
-use crate::fence_scan::{FENCE_LANG, body_has_closing_fence, first_lashlang_fence_span};
+use crate::cell_scan::{
+    complete_lashlang_end_tag_span, complete_lashlang_start_tag_span,
+    possible_lashlang_start_tag_suffix_len, render_lashlang_cell_text,
+};
 
-/// Install the stream-mask / fence-close-abort hooks on the given
-/// registrar. Called by [`crate::plugin::RlmProtocolPlugin::register`] when
-/// the session is active.
+/// Install the stream-mask hooks on the given registrar. Called by
+/// [`crate::plugin::RlmProtocolPlugin::register`] when the session is active.
 pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-    let state = Arc::new(Mutex::new(FenceDetector::new()));
+    let state = Arc::new(Mutex::new(CellDetector::new()));
 
     let stream_state = Arc::clone(&state);
     reg.output()
         .stream(Arc::new(move |ctx: AssistantStreamHookContext| {
             let state = Arc::clone(&stream_state);
             Box::pin(async move {
-                let mut detector = state.lock().expect("fence detector lock");
+                let mut detector = state.lock().expect("cell detector lock");
                 Ok(detector.process_chunk(&ctx.chunk))
             })
         }));
@@ -35,42 +37,12 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
         move |ctx: lash_core::plugin::AssistantResponseHookContext| {
             let state = Arc::clone(&response_state);
             Box::pin(async move {
-                let mut response = ctx.response;
-                // The stream hook suppresses the fence body from every
-                // delta chunk so the UI doesn't see the raw code scroll
-                // past. But the driver then inspects `response.full_text`
-                // to decide whether to execute a block — and a suppressed
-                // body leaves that text fence-free, so the driver would
-                // fall into the "no fence → finish turn" branch. Before
-                // we reset the detector for the next response, splice the
-                // captured fence body back into the response so the
-                // driver sees a complete ` ```lashlang … ``` ` block.
-                {
-                    let mut detector = state.lock().expect("fence detector lock");
-                    if detector.inside_fence {
-                        let spliced = detector.splice_into(&response.full_text);
-                        response.full_text = spliced.clone();
-                        // The RLM driver reads `response.parts` (not
-                        // `full_text`) when it builds the assistant_text
-                        // it parses for a fence. Mirror the spliced
-                        // content into parts so a fenced-only reply
-                        // (no prose lead-in) still carries a Text part;
-                        // otherwise the driver trips its
-                        // "Model returned no assistant text" guard on
-                        // turn 2+ responses that are just a fence.
-                        let needs_text_part = !response
-                            .parts
-                            .iter()
-                            .any(|part| matches!(part, lash_core::LlmOutputPart::Text { .. }));
-                        if needs_text_part {
-                            response.parts.push(lash_core::LlmOutputPart::Text {
-                                text: spliced,
-                                response_meta: None,
-                            });
-                        }
-                    }
+                let response = {
+                    let mut detector = state.lock().expect("cell detector lock");
+                    let response = transform_final_response(&detector, ctx.response);
                     detector.reset();
-                }
+                    response
+                };
                 Ok(lash_core::plugin::AssistantResponseTransform {
                     response,
                     events: Vec::new(),
@@ -82,108 +54,70 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
     Ok(())
 }
 
-/// Tracks whether the accumulated stream has entered a ` ```lashlang `
-/// fenced block. Only the `lashlang` opener is canonical — other
-/// labels (e.g. `rlm`, `lash`) stream through as plain prose so the
-/// prompt contract ("write one ` ```lashlang ` block") is unambiguous.
-/// Accumulates a pending buffer across streaming chunks to detect
-/// openers that are split across
-/// token boundaries (e.g. `` ``` `` → `lash` → `lang` → `\n`).
-/// The `AssistantResponseHook` calls `reset()` between LLM responses
-/// to prevent cross-response leakage.
-struct FenceDetector {
-    pending: String,
-    inside_fence: bool,
-    emitted_start: bool,
-    /// Number of backticks in the active opener (≥3). The closer must
-    /// be at least this long. Always 0 when not `inside_fence`.
-    opener_len: usize,
-    /// Accumulated fence body (everything after the opener), used to
-    /// detect a closing fence so we can raise `abort_stream` and end
-    /// the LLM call the moment the model finishes its one block.
-    fence_body: String,
-    fence_closed: bool,
+fn transform_final_response(
+    detector: &CellDetector,
+    mut response: lash_core::LlmResponse,
+) -> lash_core::LlmResponse {
+    if !detector.cell_closed {
+        return response;
+    }
+
+    let spliced = detector.spliced_response_text();
+    response.full_text = spliced.clone();
+    response
+        .parts
+        .retain(|part| !matches!(part, lash_core::LlmOutputPart::Text { .. }));
+    response.parts.push(lash_core::LlmOutputPart::Text {
+        text: spliced,
+        response_meta: None,
+    });
+    response
 }
 
-impl FenceDetector {
+struct CellDetector {
+    pending: String,
+    inside_cell: bool,
+    cell_closed: bool,
+    emitted_start: bool,
+    emitted_end: bool,
+    visible_prose: String,
+    cell_body: String,
+}
+
+impl CellDetector {
     fn new() -> Self {
         Self {
             pending: String::new(),
-            inside_fence: false,
+            inside_cell: false,
+            cell_closed: false,
             emitted_start: false,
-            opener_len: 0,
-            fence_body: String::new(),
-            fence_closed: false,
+            emitted_end: false,
+            visible_prose: String::new(),
+            cell_body: String::new(),
         }
     }
 
     fn reset(&mut self) {
         self.pending.clear();
-        self.inside_fence = false;
+        self.inside_cell = false;
+        self.cell_closed = false;
         self.emitted_start = false;
-        self.opener_len = 0;
-        self.fence_body.clear();
-        self.fence_closed = false;
+        self.emitted_end = false;
+        self.visible_prose.clear();
+        self.cell_body.clear();
     }
 
-    /// Reconstruct a complete ` ```lashlang … ``` ` block by splicing
-    /// the suppressed fence body back onto the visible text. The
-    /// streaming hook hides the body from every delta chunk, so the
-    /// driver — which re-parses the assistant text to decide whether to
-    /// execute — would otherwise see fence-free prose and fall into the
-    /// "no fence → finish turn" branch.
-    ///
-    /// The opener is rebuilt with exactly `opener_len` backticks (not a
-    /// hardcoded three): when the model opens a 4-backtick fence so its
-    /// body can contain a literal ` ``` `, downgrading the splice to
-    /// three backticks made the embedded triple prematurely close the
-    /// reconstructed block, truncating the executed code.
-    fn splice_into(&self, visible: &str) -> String {
-        debug_assert!(self.inside_fence);
-        let ticks = "`".repeat(self.opener_len.max(3));
-        let mut spliced = visible.to_string();
-        if !spliced.is_empty() && !spliced.ends_with('\n') {
-            spliced.push('\n');
-        }
-        spliced.push_str(&ticks);
-        spliced.push_str(FENCE_LANG);
-        spliced.push('\n');
-        spliced.push_str(&self.fence_body);
-        if !self.fence_closed {
-            // Stream aborted or ended before we saw a closing fence —
-            // append one ourselves (matching the opener length) so the
-            // driver can still parse and execute.
-            if !spliced.ends_with('\n') {
-                spliced.push('\n');
-            }
-            spliced.push_str(&ticks);
-        }
-        spliced
+    fn splice_into_visible(&self, visible: &str) -> String {
+        debug_assert!(self.cell_closed);
+        render_lashlang_cell_text(visible, &self.cell_body)
+    }
+
+    fn spliced_response_text(&self) -> String {
+        self.splice_into_visible(&self.visible_prose)
     }
 
     fn process_chunk(&mut self, chunk: &str) -> AssistantStreamTransform {
-        if self.inside_fence {
-            if self.fence_closed {
-                // Already raised abort_stream — just keep swallowing.
-                return AssistantStreamTransform {
-                    chunk: String::new(),
-                    reasoning_deltas: Vec::new(),
-                    events: Vec::new(),
-                    abort_stream: false,
-                };
-            }
-            self.fence_body.push_str(chunk);
-            if body_has_closing_fence(&self.fence_body, self.opener_len) {
-                self.fence_closed = true;
-                // Signal the runtime: stop the LLM stream, we have the
-                // full block.
-                return AssistantStreamTransform {
-                    chunk: String::new(),
-                    reasoning_deltas: Vec::new(),
-                    events: Vec::new(),
-                    abort_stream: true,
-                };
-            }
+        if self.cell_closed {
             return AssistantStreamTransform {
                 chunk: String::new(),
                 reasoning_deltas: Vec::new(),
@@ -192,53 +126,25 @@ impl FenceDetector {
             };
         }
 
-        self.pending.push_str(chunk);
-
-        if let Some((fence_start, body_start, opener_len)) = find_fence_opener(&self.pending) {
-            self.inside_fence = true;
-            self.opener_len = opener_len;
-            let prose_before = self.pending[..fence_start].to_string();
-            // Preserve any body content that arrived in the same chunk as
-            // the opener — `pending.clear()` would otherwise drop it.
-            let initial_body = self.pending[body_start..].to_string();
-            self.pending.clear();
-
-            let mut events = Vec::new();
-            if !self.emitted_start {
-                self.emitted_start = true;
-                events.push(PluginRuntimeEvent::Custom {
-                    name: "rlm_fence_start".to_string(),
-                    payload: serde_json::json!({}),
-                });
-            }
-
-            if !initial_body.is_empty() {
-                self.fence_body.push_str(&initial_body);
-                if body_has_closing_fence(&self.fence_body, self.opener_len) {
-                    self.fence_closed = true;
-                    return AssistantStreamTransform {
-                        chunk: String::new(),
-                        reasoning_deltas: non_empty_reasoning_delta(prose_before),
-                        events,
-                        abort_stream: true,
-                    };
-                }
-            }
-
-            return AssistantStreamTransform {
-                chunk: String::new(),
-                reasoning_deltas: non_empty_reasoning_delta(prose_before),
-                events,
-                abort_stream: false,
-            };
+        if self.inside_cell {
+            return self.capture_cell_body_chunk(chunk, String::new(), Vec::new());
         }
 
-        // Flush everything except a suffix that could still become a
-        // split ```lashlang opener. This keeps prose-only final replies
-        // from holding an arbitrary tail while still preserving cases
-        // like "`" -> "``" -> "```lash" -> "lang".
-        let safe_len = self.pending.len() - possible_fence_opener_suffix_len(&self.pending);
+        self.pending.push_str(chunk);
 
+        if let Some(span) = complete_lashlang_start_tag_span(&self.pending) {
+            self.inside_cell = true;
+            let prose_before = self.pending[..span.start_tag_start].to_string();
+            self.visible_prose.push_str(&prose_before);
+            let body_suffix = self.pending[span.body_start..span.body_end].to_string();
+            self.pending.clear();
+
+            let events = vec![self.start_event()];
+
+            return self.capture_cell_body_chunk(&body_suffix, prose_before, events);
+        }
+
+        let safe_len = self.pending.len() - possible_lashlang_start_tag_suffix_len(&self.pending);
         if safe_len == 0 {
             return AssistantStreamTransform {
                 chunk: String::new(),
@@ -250,357 +156,451 @@ impl FenceDetector {
 
         let flushed = self.pending[..safe_len].to_string();
         self.pending = self.pending[safe_len..].to_string();
+        self.visible_prose.push_str(&flushed);
         AssistantStreamTransform {
-            chunk: String::new(),
-            reasoning_deltas: non_empty_reasoning_delta(flushed),
+            chunk: flushed,
+            reasoning_deltas: Vec::new(),
             events: Vec::new(),
             abort_stream: false,
         }
     }
-}
 
-fn non_empty_reasoning_delta(text: String) -> Vec<String> {
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![text]
-    }
-}
+    fn capture_cell_body_chunk(
+        &mut self,
+        chunk: &str,
+        visible_chunk: String,
+        mut events: Vec<PluginRuntimeEvent>,
+    ) -> AssistantStreamTransform {
+        self.cell_body.push_str(chunk);
+        let abort_stream = if let Some(span) = complete_lashlang_end_tag_span(&self.cell_body, true)
+        {
+            self.cell_body = self.cell_body[..span.body_end].to_string();
+            self.cell_closed = true;
+            events.push(self.end_event());
+            true
+        } else {
+            false
+        };
 
-/// Locate a complete ` ```lashlang ` opener in `text`. Returns
-/// `(fence_start, body_start, opener_len)` where `fence_start` is the
-/// offset of the opening backtick run, `body_start` is the first byte
-/// after the language tag's terminating `\n` (or end-of-text if the
-/// tag isn't newline-terminated yet — in which case the body is still
-/// empty), and `opener_len` is the number of backticks in the opener
-/// (≥3, used to validate the closer length).
-///
-/// Delegates to [`first_lashlang_fence_span`] so the streaming mask and
-/// the finalize path recognize *exactly* the same openers — including
-/// an opener that sits at end-of-text with no trailing newline.
-fn find_fence_opener(text: &str) -> Option<(usize, usize, usize)> {
-    let span = first_lashlang_fence_span(text)?;
-    Some((span.open_start, span.body_start, span.opener_len))
-}
-
-fn possible_fence_opener_suffix_len(text: &str) -> usize {
-    text.char_indices()
-        .find_map(|(idx, _)| {
-            let suffix = &text[idx..];
-            suffix_can_be_fence_opener_prefix(suffix).then_some(suffix.len())
-        })
-        .unwrap_or(0)
-}
-
-fn suffix_can_be_fence_opener_prefix(suffix: &str) -> bool {
-    if suffix.is_empty() {
-        return false;
+        AssistantStreamTransform {
+            chunk: visible_chunk,
+            reasoning_deltas: Vec::new(),
+            events,
+            abort_stream,
+        }
     }
 
-    // Count leading backticks in the suffix. If everything in the
-    // suffix is backticks, it could still grow into a longer opener
-    // run — preserve it. Variable-length opener support means a run
-    // of any length ≥1 is a potential prefix.
-    let backtick_count = suffix.chars().take_while(|&c| c == '`').count();
-    let after_ticks: String = suffix.chars().skip(backtick_count).collect();
+    fn start_event(&mut self) -> PluginRuntimeEvent {
+        debug_assert!(!self.emitted_start);
+        self.emitted_start = true;
+        PluginRuntimeEvent::Custom {
+            name: "rlm_lashlang_cell_start".to_string(),
+            payload: serde_json::json!({}),
+        }
+    }
 
-    if after_ticks.is_empty() {
-        return backtick_count > 0;
+    fn end_event(&mut self) -> PluginRuntimeEvent {
+        debug_assert!(!self.emitted_end);
+        self.emitted_end = true;
+        PluginRuntimeEvent::Custom {
+            name: "rlm_lashlang_cell_end".to_string(),
+            payload: serde_json::json!({}),
+        }
     }
-    if backtick_count < 3 {
-        // Not enough backticks AND there's text after — not an opener.
-        return false;
-    }
-    let after_padding = after_ticks.trim_start_matches(' ');
-    after_padding.is_empty() || FENCE_LANG.starts_with(after_padding)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell_scan::first_lashlang_cell_span;
 
     #[test]
-    fn prose_streams_as_reasoning_before_fence() {
-        let mut d = FenceDetector::new();
+    fn prose_streams_as_assistant_text_before_cell() {
+        let mut d = CellDetector::new();
         let t = d.process_chunk("Hello, here's my plan.\n\n");
-        assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["Hello, here's my plan.\n\n"]);
+        assert_eq!(t.chunk, "Hello, here's my plan.\n\n");
+        assert!(t.reasoning_deltas.is_empty());
         assert!(t.events.is_empty());
+        assert!(!t.abort_stream);
     }
 
     #[test]
     fn short_prose_without_newline_streams_immediately() {
-        let mut d = FenceDetector::new();
+        let mut d = CellDetector::new();
         let t = d.process_chunk("Hi - what can I help with?");
-        assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["Hi - what can I help with?"]);
-        assert!(d.pending.is_empty());
-        assert!(t.events.is_empty());
-    }
-
-    #[test]
-    fn only_possible_fence_suffix_is_held() {
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("Plan. ```la");
-        assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["Plan. "]);
-        assert_eq!(d.pending, "```la");
-
-        let t = d.process_chunk("shlang\n");
-        assert_eq!(t.chunk, "");
-        assert!(t.reasoning_deltas.is_empty());
-        assert!(d.inside_fence);
-        assert_eq!(t.events.len(), 1);
-    }
-
-    #[test]
-    fn non_lashlang_fence_flushes_after_it_stops_matching() {
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("Example: ``");
-        assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["Example: "]);
-        assert_eq!(d.pending, "``");
-
-        let t = d.process_chunk("`python\n");
-        assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["```python\n"]);
-        assert!(!d.inside_fence);
+        assert_eq!(t.chunk, "Hi - what can I help with?");
         assert!(d.pending.is_empty());
     }
 
     #[test]
-    fn fence_in_single_chunk() {
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("Thinking...\n\n```lashlang\ncode\n```\n");
+    fn possible_start_tag_suffix_is_held() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Plan.\n<lash");
+        assert_eq!(t.chunk, "Plan.\n");
+        assert_eq!(d.pending, "<lash");
+
+        let t = d.process_chunk("lang>\n");
         assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["Thinking...\n\n"]);
+        assert!(d.inside_cell);
+        assert!(!d.cell_closed);
         assert_eq!(t.events.len(), 1);
-        assert!(matches!(
-            &t.events[0],
-            PluginRuntimeEvent::Custom { name, .. } if name == "rlm_fence_start"
-        ));
+        assert!(!t.abort_stream);
     }
 
     #[test]
-    fn fence_split_across_chunks() {
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("Plan.\n\n");
+    fn indented_start_tag_split_after_whitespace_is_held() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Plan.\n  ");
+        assert_eq!(t.chunk, "Plan.\n");
+        assert_eq!(d.pending, "  ");
+
+        let t = d.process_chunk("<lashlang>\nsubmit 1");
         assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["Plan.\n\n"]);
-        // ``` arrives alone — held as pending
-        assert_eq!(d.process_chunk("```").chunk, "");
-        // language tag arrives — now the opener is complete
-        let t = d.process_chunk("lashlang\n");
-        assert!(d.inside_fence);
-        assert_eq!(t.events.len(), 1);
-        // code body suppressed
-        assert_eq!(d.process_chunk("code\n```\n").chunk, "");
+        assert!(d.inside_cell);
+        assert!(!d.cell_closed);
+        assert_eq!(d.cell_body, "submit 1");
     }
 
     #[test]
-    fn token_by_token_streaming() {
-        let mut d = FenceDetector::new();
-        for tok in ["Let", " me", " check", ".\n\n"] {
-            let t = d.process_chunk(tok);
-            assert!(t.events.is_empty());
-        }
-        d.process_chunk("```");
-        d.process_chunk("lash");
-        // Fence detected as soon as the language tag completes (no need
-        // to wait for the trailing newline — find_fence_opener accepts
-        // end-of-buffer as the line boundary).
-        let t = d.process_chunk("lang");
-        assert!(d.inside_fence);
-        assert_eq!(t.events.len(), 1);
-        // Everything after is suppressed.
-        assert_eq!(d.process_chunk("\n").chunk, "");
-        assert_eq!(
-            d.process_chunk("result = await tools.exec({ cmd: \"date\" })\n")
-                .chunk,
-            ""
-        );
+    fn start_tag_and_body_in_same_chunk_preserves_body_and_does_not_abort_before_close() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Thinking...\n\n<lashlang>\ncode\n```markdown\ninside\n```\n");
+        assert_eq!(t.chunk, "Thinking...\n\n");
+        assert!(d.inside_cell);
+        assert_eq!(d.cell_body, "code\n```markdown\ninside\n```\n");
+        assert!(!t.abort_stream);
     }
 
     #[test]
-    fn non_lashlang_fence_streams_as_reasoning_without_masking() {
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("Example:\n\n```python\nprint('hi')\n```\n");
-        assert!(t.chunk.is_empty());
-        assert!(!t.reasoning_deltas.is_empty());
+    fn body_after_start_tag_is_suppressed_until_close() {
+        let mut d = CellDetector::new();
+        assert_eq!(d.process_chunk("<lashlang>\n").chunk, "");
+        let t = d.process_chunk("submit \"hi\"\n");
+        assert_eq!(t.chunk, "");
+        assert!(!t.abort_stream);
+        assert_eq!(d.cell_body, "submit \"hi\"\n");
+    }
+
+    #[test]
+    fn inline_start_tag_text_does_not_trigger() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Use <lashlang> here.\n");
+        assert_eq!(t.chunk, "Use <lashlang> here.\n");
+        assert!(!d.inside_cell);
         assert!(t.events.is_empty());
     }
 
     #[test]
-    fn rlm_alias_does_not_trigger_masking() {
-        // Only ` ```lashlang ` is the canonical fence. `rlm` / `lash`
-        // aliases were dropped so the prompt and the parser agree on
-        // exactly one opener.
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("Check:\n\n```rlm\nprint x\n```\n");
-        assert!(t.chunk.is_empty());
-        assert!(t.reasoning_deltas.join("").contains("```rlm"));
-        assert!(t.events.is_empty());
-    }
-
-    #[test]
-    fn inline_backticks_do_not_trigger() {
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("Use ```lashlang in your code.\n");
-        assert!(t.chunk.is_empty());
-        assert!(t.reasoning_deltas.join("").contains("lashlang"));
-        assert!(t.events.is_empty());
+    fn incomplete_start_tag_can_become_visible_prose() {
+        let mut d = CellDetector::new();
+        assert_eq!(d.process_chunk("<lashlang>").chunk, "");
+        let t = d.process_chunk(" here\n");
+        assert_eq!(t.chunk, "<lashlang> here\n");
+        assert!(!d.inside_cell);
     }
 
     #[test]
     fn reset_prevents_cross_response_leak() {
-        let mut d = FenceDetector::new();
+        let mut d = CellDetector::new();
         d.process_chunk("Hi! How can I help you?");
-        // Response hook fires between responses.
         d.reset();
 
-        let t = d.process_chunk("New response.\n\n```lashlang\ncode\n```\n");
+        let t = d.process_chunk("New response.\n\n<lashlang>\ncode\n");
+        assert_eq!(t.chunk, "New response.\n\n");
+        assert!(!t.chunk.contains("How can I help"));
+    }
+
+    #[test]
+    fn close_tag_split_across_chunks_aborts_stream() {
+        let mut d = CellDetector::new();
+        assert_eq!(d.process_chunk("<lashlang>\nsubmit 1\n</lash").chunk, "");
+
+        let t = d.process_chunk("lang>");
         assert_eq!(t.chunk, "");
-        let reasoning = t.reasoning_deltas.join("");
-        assert!(reasoning.starts_with("New response."));
-        assert!(!reasoning.contains("How can I help"));
-    }
-
-    #[test]
-    fn fence_opener_and_body_in_same_chunk_preserves_body() {
-        // Reproduces: a single chunk like "```lashlang\nnow = await ..."
-        // used to drop the part after the opener, so the spliced body
-        // started after the assignment target instead of preserving the
-        // full module operation.
-        let mut d = FenceDetector::new();
-        d.process_chunk(
-            "```lashlang\nnow = await tools.exec({ cmd: \"date\" })?\nprint now.output\n",
-        );
-        assert!(d.inside_fence);
-        assert!(
-            d.fence_body
-                .starts_with("now = await tools.exec({ cmd: \"date\" })?")
-        );
-    }
-
-    #[test]
-    fn fence_opener_with_body_and_close_in_same_chunk_aborts() {
-        let mut d = FenceDetector::new();
-        let t = d.process_chunk("```lashlang\nsubmit \"hi\"\n```");
-        assert!(d.inside_fence);
-        assert!(d.fence_closed);
         assert!(t.abort_stream);
-        assert!(d.fence_body.contains("submit \"hi\""));
+        assert!(d.cell_closed);
+        assert_eq!(d.cell_body, "submit 1");
+        assert_eq!(event_names(&t.events), vec!["rlm_lashlang_cell_end"]);
     }
 
     #[test]
-    fn reset_clears_fence_state() {
-        let mut d = FenceDetector::new();
-        d.process_chunk("Plan.\n\n```lashlang\ncode\n```\n");
-        assert!(d.inside_fence);
-
-        d.reset();
-        assert!(!d.inside_fence);
-        assert!(d.pending.is_empty());
-
-        let t = d.process_chunk("Result.\n");
-        assert_eq!(t.chunk, "");
-        assert_eq!(t.reasoning_deltas, vec!["Result.\n"]);
+    fn close_tag_plus_trailing_prose_in_same_chunk_aborts_and_drops_suffix() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Visible.\n<lashlang>\nsubmit 1\n</lashlang>\nTrailing prose.");
+        assert_eq!(t.chunk, "Visible.\n");
+        assert!(t.abort_stream);
+        assert!(d.cell_closed);
+        assert_eq!(d.cell_body, "submit 1");
+        assert_eq!(
+            event_names(&t.events),
+            vec!["rlm_lashlang_cell_start", "rlm_lashlang_cell_end"]
+        );
+        assert_eq!(
+            d.spliced_response_text(),
+            "Visible.\n<lashlang>\nsubmit 1\n</lashlang>"
+        );
     }
 
-    /// Drive a detector across `chunks` exactly as the stream hook
-    /// would, then run the response-hook splice. Returns the
-    /// reconstructed `full_text` the driver re-parses (the visible
-    /// stream stays empty because the mask suppresses every chunk once
-    /// inside the fence, so we accumulate the reasoning deltas as the
-    /// visible lead-in).
-    fn stream_and_splice(chunks: &[&str]) -> String {
-        let mut d = FenceDetector::new();
+    #[test]
+    fn incomplete_block_does_not_abort_and_does_not_close() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Visible.\n<lashlang>\nsubmit 1");
+        assert_eq!(t.chunk, "Visible.\n");
+        assert!(!t.abort_stream);
+        assert!(d.inside_cell);
+        assert!(!d.cell_closed);
+        assert_eq!(d.cell_body, "submit 1");
+    }
+
+    fn stream_chunks(chunks: &[&str]) -> (CellDetector, String) {
+        let mut d = CellDetector::new();
         let mut visible = String::new();
         for chunk in chunks {
             let t = d.process_chunk(chunk);
-            for delta in t.reasoning_deltas {
-                visible.push_str(&delta);
+            visible.push_str(&t.chunk);
+            assert!(t.reasoning_deltas.is_empty());
+            if t.abort_stream {
+                break;
             }
         }
-        if d.inside_fence {
-            d.splice_into(&visible)
-        } else {
-            visible
+        (d, visible)
+    }
+
+    fn response_with_text(text: &str) -> lash_core::LlmResponse {
+        lash_core::LlmResponse {
+            full_text: text.to_string(),
+            parts: vec![lash_core::LlmOutputPart::Text {
+                text: text.to_string(),
+                response_meta: None,
+            }],
+            ..lash_core::LlmResponse::default()
         }
     }
 
     #[test]
-    fn splice_reconstructs_plain_triple_backtick_block() {
-        // 3-backtick round-trip: the spliced text must re-parse to the
-        // exact code the model wrote.
-        let spliced = stream_and_splice(&["Quick check.\n\n```lashlang\nprint \"hi\"\n```\n"]);
-        let span = first_lashlang_fence_span(&spliced).expect("spliced block parses");
-        let code = spliced[span.body_start..span.body_end].trim_end_matches('\n');
-        assert_eq!(code, "print \"hi\"");
-        assert!(span.is_closed());
+    fn final_response_splice_reconstructs_cell_with_exact_body() {
+        let (d, visible) = stream_chunks(&[
+            "Quick check.\n\n<lashlang>\n",
+            "print \"hi\"\n",
+            "submit 1\n</lashlang>",
+        ]);
+        assert_eq!(visible, "Quick check.\n\n");
+        let spliced = d.spliced_response_text();
+        let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
+        let code = &spliced[span.body_start..span.body_end];
+        assert_eq!(code, "print \"hi\"\nsubmit 1");
     }
 
     #[test]
-    fn splice_preserves_four_backtick_fence_with_embedded_triple() {
-        // Regression: a 4-backtick opener lets the body carry a literal
-        // ``` run. The splice used to hardcode a 3-backtick opener, so
-        // re-parsing closed the block at the embedded triple and
-        // truncated the executed code to `print "`. The opener length
-        // must round-trip.
-        let spliced =
-            stream_and_splice(&["````lashlang\n", "print \"```\"\n", "submit 1\n", "````"]);
-        let span = first_lashlang_fence_span(&spliced).expect("spliced block parses");
-        assert_eq!(span.opener_len, 4, "opener length must survive the splice");
-        let code = spliced[span.body_start..span.body_end].trim_end_matches('\n');
+    fn final_response_splice_ignores_raw_provider_full_text_with_suffix() {
+        let raw_final = "Visible before code.\n<lashlang>\nsubmit \"ok\"\n</lashlang>\nignored";
+        let (d, visible) = stream_chunks(&[
+            "Visible before",
+            " code.\n<lash",
+            "lang>\nsubmit ",
+            "\"ok\"\n</lashlang>\nignored",
+        ]);
+        assert_eq!(visible, "Visible before code.\n");
+
+        // This is the production shape for streaming providers that return
+        // their original raw final text after the stream hook has already
+        // suppressed the cell body. Using `raw_final` as the splice base would
+        // keep suffix text that the stream abort intentionally dropped.
+        assert!(raw_final.contains("ignored"));
+        let spliced = d.spliced_response_text();
         assert_eq!(
-            code, "print \"```\"\nsubmit 1",
-            "embedded triple-backticks must not prematurely close the block"
+            spliced,
+            "Visible before code.\n<lashlang>\nsubmit \"ok\"\n</lashlang>"
+        );
+        let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
+        assert_eq!(&spliced[span.body_start..span.body_end], "submit \"ok\"");
+        assert!(!spliced.contains("ignored"));
+    }
+
+    #[test]
+    fn final_response_transform_never_splices_using_raw_provider_text() {
+        let raw_final = "Visible before code.\n<lashlang>\nsubmit \"ok\"\n</lashlang>\nignored";
+        let (d, visible) = stream_chunks(&[
+            "Visible before",
+            " code.\n%%",
+            " ordinary prose\n<lashlang>\nsubmit ",
+            "\"ok\"\n</lashlang>\nignored",
+        ]);
+        assert_eq!(visible, "Visible before code.\n%% ordinary prose\n");
+
+        let response = transform_final_response(&d, response_with_text(raw_final));
+        assert_eq!(
+            response.full_text,
+            "Visible before code.\n%% ordinary prose\n<lashlang>\nsubmit \"ok\"\n</lashlang>"
+        );
+        assert_eq!(response.full_text.matches("<lashlang>").count(), 1);
+        assert_eq!(response.full_text.matches("</lashlang>").count(), 1);
+        let span = first_lashlang_cell_span(&response.full_text).expect("cell parses");
+        assert_eq!(
+            &response.full_text[span.body_start..span.body_end],
+            "submit \"ok\""
+        );
+        assert!(
+            !response.full_text[span.end_tag_end..].contains("ignored"),
+            "suffix after the close tag must not survive streaming abort normalization"
+        );
+        let text_parts = response
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                lash_core::LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_parts, vec![response.full_text.as_str()]);
+    }
+
+    #[test]
+    fn final_response_transform_replaces_raw_text_parts_but_preserves_reasoning_parts() {
+        let raw_final = "Plan.\n<lashlang>\nsubmit \"ok\"\n</lashlang>\nignored";
+        let (d, visible) = stream_chunks(&["Plan.\n<lash", "lang>\nsubmit \"ok\"\n</lashlang>"]);
+        assert_eq!(visible, "Plan.\n");
+        let response = lash_core::LlmResponse {
+            full_text: raw_final.to_string(),
+            parts: vec![
+                lash_core::LlmOutputPart::Text {
+                    text: raw_final.to_string(),
+                    response_meta: None,
+                },
+                lash_core::LlmOutputPart::Reasoning {
+                    text: "brief reasoning summary".to_string(),
+                    replay: None,
+                },
+                lash_core::LlmOutputPart::Text {
+                    text: "stale provider text".to_string(),
+                    response_meta: None,
+                },
+            ],
+            ..lash_core::LlmResponse::default()
+        };
+
+        let response = transform_final_response(&d, response);
+        assert_eq!(
+            response.full_text,
+            "Plan.\n<lashlang>\nsubmit \"ok\"\n</lashlang>"
+        );
+        assert_eq!(response.full_text.matches("<lashlang>").count(), 1);
+        assert!(matches!(
+            response.parts.first(),
+            Some(lash_core::LlmOutputPart::Reasoning { text, .. })
+                if text == "brief reasoning summary"
+        ));
+        let text_parts = response
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                lash_core::LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_parts, vec![response.full_text.as_str()]);
+    }
+
+    #[test]
+    fn final_response_transform_is_noop_without_detected_cell() {
+        let mut d = CellDetector::new();
+        assert_eq!(d.process_chunk("Visible only").chunk, "Visible only");
+
+        let response = response_with_text("Visible only");
+        let transformed = transform_final_response(&d, response.clone());
+        assert_eq!(transformed.full_text, response.full_text);
+        assert_eq!(transformed.parts, response.parts);
+    }
+
+    #[test]
+    fn final_response_splice_also_handles_already_transformed_visible_text() {
+        let (d, visible) = stream_chunks(&["Visible.\n", "<lashlang>\nsubmit \"ok\"\n</lashlang>"]);
+        assert_eq!(visible, "Visible.\n");
+
+        let spliced = d.spliced_response_text();
+        assert_eq!(spliced, "Visible.\n<lashlang>\nsubmit \"ok\"\n</lashlang>");
+        let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
+        assert_eq!(&spliced[span.body_start..span.body_end], "submit \"ok\"");
+    }
+
+    #[test]
+    fn final_response_splice_preserves_start_tag_line_split_across_chunks() {
+        let (d, visible) = stream_chunks(&[
+            "Line one.",
+            "\n  ",
+            "<las",
+            "hlang>  \n",
+            "payload = r\"\"\"```markdown\nbody\n```\"\"\"\n",
+            "submit payload\n  </lash",
+            "lang>  ",
+        ]);
+        assert_eq!(visible, "Line one.\n");
+
+        let spliced = d.spliced_response_text();
+        assert_eq!(
+            spliced,
+            "Line one.\n<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload\n</lashlang>"
+        );
+        let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
+        assert_eq!(
+            &spliced[span.body_start..span.body_end],
+            "payload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload"
         );
     }
 
     #[test]
-    fn stream_and_finalize_agree_on_opener_at_end_of_text() {
-        // Before the scanner was unified the two paths disagreed on a
-        // language tag that sits at end-of-text with no trailing
-        // newline ("…```lashlang"): the streaming detector entered the
-        // fence, but the finalize extractor's `body_start > text.len()`
-        // guard returned None, so the same response was a block on one
-        // path and prose on the other. Both must now agree.
-        let opener_at_eof = "Plan.\n\n```lashlang";
-
-        // Streaming path: detector enters the fence.
-        let mut d = FenceDetector::new();
-        d.process_chunk(opener_at_eof);
-        assert!(
-            d.inside_fence,
-            "streaming path must detect the end-of-text opener"
-        );
-
-        // Finalize path: the shared scanner detects the same opener.
-        assert!(
-            first_lashlang_fence_span(opener_at_eof).is_some(),
-            "finalize path must detect the same end-of-text opener"
-        );
-
-        // And the spliced reconstruction is itself a valid block the
-        // driver can extract.
-        let spliced = d.splice_into("Plan.");
-        assert!(first_lashlang_fence_span(&spliced).is_some());
+    fn start_tag_only_without_newline_is_left_to_final_parser() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("<lashlang>");
+        assert_eq!(t.chunk, "");
+        assert!(!d.inside_cell);
+        assert_eq!(d.splice_or_visible_for_test(""), "<lashlang>");
     }
 
     #[test]
-    fn splice_closes_unterminated_fence_with_matching_opener_length() {
-        // Stream ended mid-block with a 4-backtick opener: the synthetic
-        // closer must also be 4 backticks, or the embedded triple would
-        // be mistaken for the closer.
-        let spliced = stream_and_splice(&["````lashlang\n", "print \"```\"\n", "submit 1\n"]);
-        let span = first_lashlang_fence_span(&spliced).expect("spliced block parses");
-        assert_eq!(span.opener_len, 4);
-        assert!(
-            span.is_closed(),
-            "unterminated stream gets a synthetic closer"
+    fn final_response_transform_is_noop_for_incomplete_streamed_block() {
+        let mut d = CellDetector::new();
+        assert_eq!(
+            d.process_chunk("Visible.\n<lashlang>\nsubmit 1").chunk,
+            "Visible.\n"
         );
-        let code = spliced[span.body_start..span.body_end].trim_end_matches('\n');
-        assert_eq!(code, "print \"```\"\nsubmit 1");
+        assert!(d.inside_cell);
+        assert!(!d.cell_closed);
+
+        let response = response_with_text("Visible.\n<lashlang>\nsubmit 1");
+        let transformed = transform_final_response(&d, response.clone());
+        assert_eq!(transformed.full_text, response.full_text);
+        assert_eq!(transformed.parts, response.parts);
+    }
+
+    #[test]
+    fn old_percent_marker_streams_as_plain_prose() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("%%lashlang\nsubmit 1\n");
+        assert_eq!(t.chunk, "%%lashlang\nsubmit 1\n");
+        assert!(!d.inside_cell);
+        assert!(!t.abort_stream);
+    }
+
+    impl CellDetector {
+        fn splice_or_visible_for_test(&self, visible: &str) -> String {
+            if self.inside_cell {
+                self.splice_into_visible(visible)
+            } else {
+                let mut out = visible.to_string();
+                out.push_str(&self.pending);
+                out
+            }
+        }
+    }
+
+    fn event_names(events: &[PluginRuntimeEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .map(|event| match event {
+                PluginRuntimeEvent::Custom { name, .. } => name.as_str(),
+                _ => panic!("unexpected event: {event:?}"),
+            })
+            .collect()
     }
 }

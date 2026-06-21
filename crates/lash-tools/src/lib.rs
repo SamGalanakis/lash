@@ -4,7 +4,7 @@
 //! [`lash_tool_support`] utility layer:
 //!
 //! - [`apply_patch`] — `files.patch` envelope-diff editing
-//! - [`files`] — `files.read` / `files.ls` / `files.glob`
+//! - [`files`] — `files.read` / `files.glob`
 //! - [`shell`] — `shell.exec` / `shell.start` / `shell.write`
 //! - [`web`] — `web.fetch` / `web.search`
 //!
@@ -24,7 +24,6 @@ mod tests {
         let mut manifests = Vec::new();
         manifests.extend(crate::apply_patch::apply_patch_provider().tool_manifests());
         manifests.extend(crate::files::read_file_provider().tool_manifests());
-        manifests.extend(crate::files::ls_provider().tool_manifests());
         manifests.extend(crate::files::glob_provider().tool_manifests());
         manifests.extend(
             crate::shell::shell_provider(crate::shell::StandardShell::new()).tool_manifests(),

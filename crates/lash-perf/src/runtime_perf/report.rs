@@ -488,6 +488,19 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "rlm_lashlang.store_module_artifact",
             "rlm_lashlang.execute",
         ],
+        RuntimePerfScenario::RlmLargePrint => &[
+            "context_transform",
+            "before_turn_hooks",
+            "prompt_build",
+            "effect_loop",
+            "finalize_turn",
+            "persist_turn",
+            "final_commit",
+            "post_persist_hooks",
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.execute",
+            "rlm_lashlang.print_project",
+        ],
         RuntimePerfScenario::RlmProcessHandles
         | RuntimePerfScenario::RlmProcessAsyncToolCompletion => &[
             "context_transform",
@@ -532,6 +545,7 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 160_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
         RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
+        RuntimePerfScenario::RlmLargePrint => 1_000_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 128_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
         | RuntimePerfScenario::DirectLlmClient
@@ -546,6 +560,7 @@ fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
         RuntimePerfScenario::RlmTriggerMailPipeline => 64_000_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 128_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
+        RuntimePerfScenario::RlmLargePrint => 750_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 96_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
         | RuntimePerfScenario::DirectLlmClient
@@ -795,6 +810,25 @@ mod tests {
                 < 100_000_000.0
         );
         assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmTriggerMailPipeline) < 10_000.0);
+    }
+
+    #[test]
+    fn rlm_large_print_requires_projector_phase_metrics() {
+        let phases = required_phases(RuntimePerfScenario::RlmLargePrint);
+        for expected in [
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.execute",
+            "rlm_lashlang.print_project",
+        ] {
+            assert!(
+                phases.contains(&expected),
+                "missing required phase {expected}"
+            );
+        }
+        assert!(allocation_budget_bytes(RuntimePerfScenario::RlmLargePrint) <= 1_000_000_000.0);
+        assert!(
+            run_turn_allocation_budget_bytes(RuntimePerfScenario::RlmLargePrint) <= 750_000_000.0
+        );
     }
 
     #[test]

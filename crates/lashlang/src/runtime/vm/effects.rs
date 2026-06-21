@@ -244,12 +244,8 @@ impl<H: ExecutionHost> Vm<'_, H> {
             }
             VmEffect::Print => {
                 let value = self.pop_stack()?;
-                let host_descriptor = match &value {
-                    Value::Projected(projected) => Value::String(projected.render().await.into()),
-                    _ => value.clone(),
-                };
                 self.host
-                    .perform(AbilityOp::Print(host_descriptor))
+                    .perform(AbilityOp::Print(value))
                     .await
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("print failed: {err}"),
@@ -390,7 +386,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 ResourceOperationResult::Error(error) => {
                     if leaf.unwrap {
                         if first_unwrapped_error.is_none() {
-                            first_unwrapped_error = Some(error.to_string());
+                            first_unwrapped_error = Some((error.to_string(), leaf.source_span));
                         }
                         if let Some(active) = active {
                             self.fail_lashlang_execution(active, error.to_string());
@@ -406,7 +402,8 @@ impl<H: ExecutionHost> Vm<'_, H> {
             }
         }
 
-        if let Some(error) = first_unwrapped_error {
+        if let Some((error, span)) = first_unwrapped_error {
+            self.pending_error_span = span;
             return Err(RuntimeError::ValueError {
                 message: format!("`?` unwrapped failed module operation: {error}"),
             });

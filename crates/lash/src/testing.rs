@@ -26,6 +26,7 @@ pub mod conformance {
     };
     use crate::testing::TestProvider;
     use crate::{LashCore, RlmCore};
+    use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 
     /// Stores + registry for one run of the
     /// [`runtime_rebuild_and_worker_recovery`] suite.
@@ -225,6 +226,10 @@ submit "registered"
             serde_json::json!({ "type": "object", "additionalProperties": true }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
+        .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+            ["tools"],
+            "rebuild_echo",
+        ))
     }
 
     #[async_trait::async_trait]
@@ -252,6 +257,10 @@ submit "registered"
             .expect("model spec")
     }
 
+    fn lashlang_block(source: &str) -> String {
+        format!("<lashlang>\n{}\n</lashlang>", source.trim())
+    }
+
     /// Provider used both to register the trigger route through a normal RLM
     /// turn and to finish the SessionTurn child. The child inherits this
     /// provider, exercising provider re-supply after rebuild.
@@ -261,11 +270,11 @@ submit "registered"
             .complete(|req| async move {
                 let rendered_messages = format!("{:?}", req.messages);
                 let text = if rendered_messages.contains("run child") {
-                    "```lashlang\nsubmit \"child done\"\n```".to_string()
+                    lashlang_block("submit \"child done\"")
                 } else if rendered_messages.contains("register rebuild button trigger") {
-                    format!("```lashlang\n{}\n```", BUTTON_TRIGGER_SOURCE.trim())
+                    lashlang_block(BUTTON_TRIGGER_SOURCE)
                 } else {
-                    format!("```lashlang\n{}\n```", TRIGGER_SOURCE.trim())
+                    lashlang_block(TRIGGER_SOURCE)
                 };
                 Ok(crate::direct::LlmResponse {
                     full_text: text.clone(),

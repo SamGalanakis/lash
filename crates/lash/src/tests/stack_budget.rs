@@ -4,8 +4,8 @@ use super::*;
 fn stack_budget_rlm_lashlang_process_turn() -> Result<()> {
     run_async_test_on_stack_budget("stack-budget-rlm-lashlang-process-turn", || async {
         let core = explicit_ephemeral_facets(RlmCore::builder())
-            .provider(queued_text_provider(vec![
-                r#"```lashlang
+            .provider(queued_text_provider(vec![lashlang_block(
+                r#"
 process child(tools: Tools, value: str) {
   lookup = await tools.app_lookup({})?
   finish { value: value, ok: lookup.ok }
@@ -18,9 +18,8 @@ submit {
   left: joined.left.value,
   right: joined.right.value,
   ok: joined.left.ok && joined.right.ok
-}
-```"#,
-            ]))
+}"#,
+            )]))
             .model(mock_model_spec())
             .tools(Arc::new(AppTools))
             .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))

@@ -104,17 +104,20 @@ Each account is projected into the RLM Lashlang host environment as a typed modu
 authority of type `Inbox` at `inbox.<slug>`, exposing three operations — a
 message is just a title and text, with no recipient address:
 
-```lashlang
+```text
+<lashlang>
 await inbox.work.send({ title: "Standup", text: "Notes attached." })?
 listed = await inbox.work.list({})?            // { account, messages: [{ id, title, text }] }
 await inbox.work.delete({ id: listed.messages[0].id })?
+</lashlang>
 ```
 
 Because every account shares the `Inbox` authority type, one account-parametric
 process can be started against any account, which is the point of the
 multi-account showcase:
 
-```lashlang
+```text
+<lashlang>
 process triage(box: Inbox) {
   items = await box.list({})?
   wake { kind: "triage", account: items.account, count: len(items.messages) }
@@ -124,6 +127,7 @@ process triage(box: Inbox) {
 work = start triage(box: inbox.work)
 personal = start triage(box: inbox.personal)
 results = await { work: work, personal: personal }
+</lashlang>
 ```
 
 Adding or removing an account enqueues a durable tool-catalog refresh that a
@@ -141,7 +145,8 @@ button, the emission runs inside a Restate execution scope
 (`WorkbenchMailReceivedWorkflow`) so any registered trigger starts a durable
 process. Register an inbox concierge once and it fires on every delivery:
 
-```lashlang
+```text
+<lashlang>
 process on_mail(event: mail.Received) {
   work = start inbox.work.list({})
   personal = start inbox.personal.list({})
@@ -157,6 +162,7 @@ handle = await triggers.register({
   name: "inbox concierge"
 })?
 submit format("Inbox concierge registered as `{}`.", handle)
+</lashlang>
 ```
 
 This gives the demo three kinds of trigger source — a UI button trigger
@@ -169,7 +175,8 @@ its trigger declaration.
 The button source config is `{}`. Red/blue selection arrives in the event
 payload:
 
-```lashlang
+```text
+<lashlang>
 process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
@@ -183,6 +190,7 @@ handle = await triggers.register({
 })?
 registrations = await triggers.list({ name: "button watcher" })?
 submit format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
+</lashlang>
 ```
 
 The cron card is the schedule reference integration: there is no Lashlang
@@ -190,7 +198,8 @@ The cron card is the schedule reference integration: there is no Lashlang
 policy. The workbench plugin declares the `cron.Schedule` source; Lashlang builds a
 `cron.Schedule` value and registers it with the runtime trigger registry:
 
-```lashlang
+```text
+<lashlang>
 process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
   finish true
@@ -205,6 +214,7 @@ handle = await triggers.register({
 })?
 registrations = await triggers.list({ target: daily_digest })?
 submit format("Registered daily digest `{}`. Active matching registrations: {}.", handle, len(registrations))
+</lashlang>
 ```
 
 After a Restate-backed turn registers an enabled `cron.Schedule`, the workbench

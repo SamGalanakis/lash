@@ -73,9 +73,9 @@ base64 = { workspace = true }
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
+lash-debug-cli-harness = { path = "../lash-debug-cli-harness" }
 lash-core = { workspace = true, features = ["testing"] }
 lashlang = { workspace = true }
-portable-pty = "0.9"
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

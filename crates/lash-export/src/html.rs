@@ -80,11 +80,30 @@ mod tests {
         }
     }
 
-    fn rlm_step(protocol_iteration: usize, id: &str) -> RlmTrajectoryEntry {
+    fn assistant_message(id: &str, text: &str) -> lash_core::session_model::Message {
+        lash_core::session_model::Message {
+            id: id.to_string(),
+            role: lash_core::session_model::MessageRole::Assistant,
+            parts: shared_parts(vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: text.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            origin: None,
+        }
+    }
+
+    fn lashlang_step(protocol_iteration: usize, id: &str) -> RlmTrajectoryEntry {
         RlmTrajectoryEntry {
             id: id.to_string(),
             protocol_iteration,
-            reasoning: "thinking".to_string(),
             code: "x = 1".to_string(),
             output: vec!["1".to_string()],
             images: Vec::new(),
@@ -100,16 +119,23 @@ mod tests {
     }
 
     #[test]
-    fn html_export_renders_chronological_message_and_rlm_step() {
+    fn html_export_renders_chronological_message_and_lashlang_step() {
         let session = LoadedSession {
             meta: None,
             chronological: vec![
                 ChronologicalEntry {
                     index: 0,
-                    payload: rlm_payload(rlm_step(0, "rlm_step_0")),
+                    payload: ChronologicalPayload::Message(assistant_message(
+                        "a1",
+                        "visible status",
+                    )),
                 },
                 ChronologicalEntry {
                     index: 1,
+                    payload: rlm_payload(lashlang_step(0, "lashlang_step_0")),
+                },
+                ChronologicalEntry {
+                    index: 2,
                     payload: ChronologicalPayload::Message(user_message("m1", "lookup result")),
                 },
             ],
@@ -119,7 +145,8 @@ mod tests {
         };
 
         let rendered = render(&session);
-        assert!(rendered.contains("RLM step 0"));
+        assert!(rendered.contains("lashlang step 0"));
+        assert!(rendered.contains("visible status"));
         assert!(rendered.contains("x = 1"));
         assert!(rendered.contains("lookup result"));
         assert!(rendered.contains("chronological entries"));
@@ -134,7 +161,7 @@ mod tests {
             },
             ChronologicalEntry {
                 index: 1,
-                payload: rlm_payload(rlm_step(0, "rlm_step_0")),
+                payload: rlm_payload(lashlang_step(0, "lashlang_step_0")),
             },
             ChronologicalEntry {
                 index: 2,
@@ -142,7 +169,7 @@ mod tests {
             },
             ChronologicalEntry {
                 index: 3,
-                payload: rlm_payload(rlm_step(0, "rlm_step_1")),
+                payload: rlm_payload(lashlang_step(0, "lashlang_step_1")),
             },
             ChronologicalEntry {
                 index: 4,
@@ -150,7 +177,7 @@ mod tests {
             },
             ChronologicalEntry {
                 index: 5,
-                payload: rlm_payload(rlm_step(0, "rlm_step_2")),
+                payload: rlm_payload(lashlang_step(0, "lashlang_step_2")),
             },
         ];
         let prompts = vec![
@@ -209,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn rlm_step_does_not_render_inline_hidden_tool_calls() {
+    fn lashlang_step_does_not_render_inline_hidden_tool_calls() {
         let session = LoadedSession {
             meta: None,
             chronological: vec![ChronologicalEntry {
@@ -217,7 +244,7 @@ mod tests {
                 payload: rlm_payload(RlmTrajectoryEntry {
                     code: "data = await tools.lookup({ q: \"x\" })?".to_string(),
                     output: Vec::new(),
-                    ..rlm_step(0, "rlm_step_0")
+                    ..lashlang_step(0, "lashlang_step_0")
                 }),
             }],
             trace_path: PathBuf::from("session.trace.jsonl"),

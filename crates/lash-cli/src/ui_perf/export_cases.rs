@@ -58,7 +58,7 @@ fn export_prompt_snapshots(turn_count: usize) -> Vec<LlmPromptSnapshot> {
                 )
             };
             let request_text = format!(
-                "Synthetic export request {index}. Inspect chronological entries, tool calls, prompt usage, and RLM steps."
+                "Synthetic export request {index}. Inspect chronological entries, tool calls, prompt usage, and lashlang steps."
             );
             LlmPromptSnapshot {
                 session_id: Some("ui-export-perf".to_string()),

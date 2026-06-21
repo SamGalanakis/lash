@@ -42,7 +42,7 @@ sequenceDiagram
   participant Host as HostBridge / CodeExecutionContext
   participant Commit as TurnCommitPipeline
 
-  Model-->>Driver: prose + ```lashlang fence
+  Model-->>Driver: prose + paired &lt;lashlang&gt; block
   Driver-->>Runtime: DriverAction::StartExec(code)
   Runtime->>Executor: execute_code(code, ProjectedBindings)
   Executor->>Host: resource operation / start / await / cancel
@@ -53,7 +53,7 @@ sequenceDiagram
             </div>
           </div>
           <p>An end-to-end fanout-and-merge program for a host surface that enables lowercase resource operations and background processes. It enumerates candidate files, starts per-file analyses as handles, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a new AgentFrame when the budget would be exceeded.</p>
-          <pre><code>```lashlang
+          <pre><code>&lt;lashlang&gt;
 process review_file(agent: Agents, path: str) {
   report = await agent.spawn({
     task: format("review {} for TODOs and panics", path),
@@ -101,7 +101,7 @@ if len(paths) > len(batch) {
   })?
 }
 submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
-```</code></pre>
+&lt;/lashlang&gt;</code></pre>
         </div>
 
         <div class="section" id="surface-build-and-dispatch">
@@ -165,7 +165,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3 id="parser">Parser</h3>
-                <p>The lexer tokenizes strings (including Rust-style raw strings such as <code>r#"..."#</code> and <code>r##"..."##</code>), <code>#</code> and <code>//</code> line comments, operators, annotation sigils, and keywords. The parser builds a module AST rooted at <code>Program</code>, with declarations, assignment targets, receiver operations, named process starts, blocks, control flow, type expressions, and optional <code>@label</code> metadata on process declarations or process-map node statements. Host ability and language-feature checks happen later in the linker, not in the grammar.</p>
+                <p>The lexer tokenizes strings (including single quotes, double quotes, triple quotes, and raw <code>r</code>-prefixed quote forms), <code>#</code> and <code>//</code> line comments, operators, annotation sigils, and keywords. The parser builds a module AST rooted at <code>Program</code>, with declarations, assignment targets, receiver operations, named process starts, blocks, control flow, type expressions, and optional <code>@label</code> metadata on process declarations or process-map node statements. Host ability and language-feature checks happen later in the linker, not in the grammar.</p>
               </div>
             </li>
             <li>
@@ -177,7 +177,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3 id="compilation-caching">Compilation caching</h3>
-                <p>Compilation is cached on two seams so repeated source and repeated processes skip the parse/link/lower pipeline. The foreground RLM executor holds a <code>LinkedProgramCache</code> on its <code>RlmExecutionState</code>; each fenced block calls <code>get_or_compile(code, surface)</code>, which returns a cached <code>CompiledLinkedProgram</code> (the <code>LinkedModule</code> plus its <code>Arc&lt;CompiledProgram&gt;</code>) when the source hash matches and the current <code>LashlangHostEnvironment</code> still satisfies the cached artifact's <code>host_requirements</code>; a miss parses, links, and compiles once, then stores it. A surface change that no longer satisfies the recorded requirement misses and recompiles, so cache reuse never weakens linker gating. The cache is a pure accelerator outside the snapshot, so it is rebuilt per session and never serialized. The durable side uses <code>CompiledProcessCache</code>, keyed by <code>(process_ref, host_requirements_ref, compiler_version, vm_abi_version)</code> so a process artifact compiles once per worker. Both caches are bounded LRU rings and report <code>CompiledProgramCacheStats</code> (hits, misses, evictions, entries, capacity).</p>
+                <p>Compilation is cached on two seams so repeated source and repeated processes skip the parse/link/lower pipeline. The foreground RLM executor holds a <code>LinkedProgramCache</code> on its <code>RlmExecutionState</code>; each paired <code>&lt;lashlang&gt;</code> block calls <code>get_or_compile(code, surface)</code>, which returns a cached <code>CompiledLinkedProgram</code> (the <code>LinkedModule</code> plus its <code>Arc&lt;CompiledProgram&gt;</code>) when the source hash matches and the current <code>LashlangHostEnvironment</code> still satisfies the cached artifact's <code>host_requirements</code>; a miss parses, links, and compiles once, then stores it. A surface change that no longer satisfies the recorded requirement misses and recompiles, so cache reuse never weakens linker gating. The cache is a pure accelerator outside the snapshot, so it is rebuilt per session and never serialized. The durable side uses <code>CompiledProcessCache</code>, keyed by <code>(process_ref, host_requirements_ref, compiler_version, vm_abi_version)</code> so a process artifact compiles once per worker. Both caches are bounded LRU rings and report <code>CompiledProgramCacheStats</code> (hits, misses, evictions, entries, capacity).</p>
               </div>
             </li>
             <li>

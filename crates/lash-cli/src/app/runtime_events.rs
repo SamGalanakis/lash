@@ -159,11 +159,8 @@ impl App {
                     return;
                 }
                 self.mark_first_token_arrived();
-                if self.live.assistant.has_renderable_output()
-                    && self.merge_into_trailing_reasoning_block(&text)
-                {
-                    self.scroll_to_bottom();
-                    return;
+                if self.live.assistant.has_renderable_output() {
+                    self.commit_live_assistant_block();
                 }
                 let had_output = self.live.reasoning.has_renderable_output();
                 self.live.reasoning.append(&text);
@@ -212,6 +209,10 @@ impl App {
             } => {
                 self.finalize_live_markdown();
                 self.clear_live_tool_output();
+                let journal_anchor = call_id
+                    .as_ref()
+                    .and_then(|call_id| self.lashlang_tool_call_anchors.get(call_id).copied())
+                    .or_else(|| self.active_lashlang_activity_anchor());
                 let mut activities =
                     self.activity_state
                         .project_tool_output(&name, args, output, duration_ms);
@@ -240,7 +241,11 @@ impl App {
                     self.set_status(CliRunState::RunningTool, Some(name.clone()), true);
                 }
                 for activity in activities {
+                    self.journal_lashlang_activity(journal_anchor, &activity);
                     self.push_activity_block(activity);
+                }
+                if let Some(call_id) = call_id.as_ref() {
+                    self.lashlang_tool_call_anchors.remove(call_id);
                 }
                 if !matches!(self.timeline.last(), Some(UiTimelineItem::Splash)) {
                     self.mark_visible_output();
@@ -254,12 +259,17 @@ impl App {
             } => {
                 self.finalize_live_markdown();
                 let title = live::live_tool_output_title(&name, &args);
+                let journal_anchor = self.active_lashlang_activity_anchor();
+                if let Some(anchor) = journal_anchor {
+                    self.remember_lashlang_tool_anchor(&call_id, anchor);
+                }
                 let activities =
                     self.activity_state
                         .project_tool_start(call_id.clone(), &name, args.clone());
                 self.live.tool_output.start(call_id, title);
                 self.set_status(CliRunState::RunningTool, Some(name), true);
                 for activity in activities {
+                    self.journal_lashlang_activity(journal_anchor, &activity);
                     self.push_activity_block(activity);
                 }
                 if !matches!(self.timeline.last(), Some(UiTimelineItem::Splash)) {
@@ -270,6 +280,10 @@ impl App {
             }
             TurnEvent::CodeBlockStarted { code, .. } => {
                 self.finalize_live_markdown();
+                let lashlang_block_ordinal = self.next_lashlang_block_ordinal;
+                self.next_lashlang_block_ordinal += 1;
+                self.active_ui_turn_ordinal = Some(self.current_ui_turn_ordinal());
+                self.active_lashlang_block_ordinal = Some(lashlang_block_ordinal);
                 let changed_idx = self.timeline.len();
                 let invalidate_from = self.append_invalidation_start();
                 self.timeline.push(UiTimelineItem::LashlangCode(code));
@@ -440,6 +454,7 @@ impl App {
                     self.mark_visible_output();
                     self.scroll_to_bottom();
                 }
+                self.active_lashlang_block_ordinal = None;
             }
             TurnEvent::ToolValue { .. } => {}
         }

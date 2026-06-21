@@ -142,8 +142,7 @@ impl ShellRuntime {
         }
     }
 
-    fn command_for_spawn(&self, command: &str, shell_path: &str, pty: bool) -> String {
-        let shell_name = Self::shell_name(shell_path);
+    fn command_for_spawn(&self, command: &str, _shell_path: &str, pty: bool) -> String {
         let echo_off = if pty {
             // Disable terminal echo so bytes delivered via `shell.write`
             // don't appear in the captured output stream. The PTY allocates
@@ -155,12 +154,7 @@ impl ShellRuntime {
         } else {
             ""
         };
-        let pipefail_prefix = if command.contains('|') && shell_supports_pipefail(shell_name) {
-            "set -o pipefail\n"
-        } else {
-            ""
-        };
-        format!("{echo_off}{pipefail_prefix}{command}")
+        format!("{echo_off}{command}")
     }
 
     fn shell_args(
@@ -698,10 +692,6 @@ async fn wait_for_pipe_readers(handles: &mut Vec<tokio::task::JoinHandle<()>>) {
     for handle in handles.drain(..) {
         let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
     }
-}
-
-fn shell_supports_pipefail(shell_name: &str) -> bool {
-    matches!(shell_name, "bash" | "zsh" | "ksh" | "mksh")
 }
 
 fn shell_supports_login(shell_name: &str) -> bool {

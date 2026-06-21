@@ -102,7 +102,7 @@ fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::typed::<ReadFileArgs, String>(
                 "tool:read_file",
                 "read_file",
-                "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `ls` for directories.",
+                "Read a known file or directory. Text returns lines prefixed as `LINE: text`, directories return concise paginated entry listings, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `files.glob` for discovery.",
             )
             .with_examples(vec![
                 r#"await files.read({ path: "Cargo.toml" })?"#.into(),
@@ -121,13 +121,14 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFi
     let path = Path::new(path_str);
     if !path.exists() {
         return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
-            "Path does not exist: {path_str}. Use `ls` or `glob` to locate the correct path."
+            "Path does not exist: {path_str}. Use `files.glob` to locate the correct path."
         )));
     }
 
-    // Directory — still works but nudges toward ls
+    // Directory reads are intentionally exact: use glob to discover paths,
+    // then read a known directory for an immediate paginated entry list.
     if path.is_dir() {
-        let mut output = match list_directory(path, offset, limit).into_done_output() {
+        let output = match read_directory(path, offset, limit).into_done_output() {
             Ok(output) => output,
             Err(_) => {
                 return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
@@ -135,12 +136,6 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFi
                 )));
             }
         };
-        if output.is_success()
-            && let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::String(s)) =
-                &mut output.outcome
-        {
-            s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
-        }
         return ReadFileBlockingResult::tool(ToolResult::from_output(output));
     }
 
@@ -192,7 +187,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFi
     ))))
 }
 
-fn list_directory(path: &Path, offset: usize, limit: usize) -> ToolResult {
+fn read_directory(path: &Path, offset: usize, limit: usize) -> ToolResult {
     match std::fs::read_dir(path) {
         Ok(entries) => {
             let mut items: Vec<String> = Vec::new();
@@ -568,6 +563,13 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[test]
+    fn read_file_contract_guides_directory_discovery_to_glob() {
+        let definition = read_file_tool_definition();
+        assert!(definition.manifest.description.contains("files.glob"));
+        assert!(!definition.manifest.description.contains("`ls`"));
+    }
+
     #[tokio::test]
     async fn test_read_file() {
         let dir = TempDir::new().unwrap();
@@ -641,6 +643,29 @@ mod tests {
         )
         .await;
         assert!(!result.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_read_directory_returns_paginated_listing_without_ls_hint() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "").unwrap();
+        let result = lash_core::testing::run_tool(
+            &read_file_provider(),
+            "read_file",
+            &json!({"path": dir.path().to_str().unwrap(), "limit": 2}),
+        )
+        .await;
+        assert!(result.is_success());
+        let value = result.value_for_projection();
+        let text = value.as_str().unwrap();
+        assert!(text.contains("a.txt"));
+        assert!(text.contains("b.txt"));
+        assert!(!text.contains("c.txt"));
+        assert!(text.contains("results truncated"));
+        assert!(text.contains("offset=3"));
+        assert!(!text.contains("ls"));
     }
 
     // ── PNG dimensions ──

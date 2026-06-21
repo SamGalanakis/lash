@@ -1507,6 +1507,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2495,6 +2501,7 @@ dependencies = [
  "image",
  "lash-autoresearch",
  "lash-core",
+ "lash-debug-cli-harness",
  "lash-export",
  "lash-file-index",
  "lash-llm-tools",
@@ -2517,7 +2524,6 @@ dependencies = [
  "lash-tui",
  "lash-tui-extensions",
  "lashlang",
- "portable-pty",
  "pulldown-cmark",
  "rand 0.9.4",
  "reqwest 0.13.3",
@@ -2555,6 +2561,21 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "lash-debug-cli-harness"
+version = "0.1.0-alpha.64"
+dependencies = [
+ "anyhow",
+ "clap",
+ "font8x8",
+ "image",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vt100",
 ]
 
 [[package]]
@@ -2788,7 +2809,6 @@ dependencies = [
  "jsonschema",
  "lash-core",
  "lash-lashlang-runtime",
- "lash-plugin-tool-output-budget",
  "lash-protocol-standard",
  "lash-rlm-types",
  "lash-sansio",
@@ -2960,6 +2980,7 @@ dependencies = [
  "lash-sqlite-store",
  "lash-subagents",
  "lash-tool-support",
+ "lash-tools",
  "lash-trace",
  "lashlang",
  "rusqlite",
@@ -6322,6 +6343,27 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vt100"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
+dependencies = [
+ "itoa",
+ "unicode-width",
+ "vte",
+]
+
+[[package]]
+name = "vte"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
+dependencies = [
+ "arrayvec",
+ "memchr",
+]
 
 [[package]]
 name = "wait-timeout"

@@ -8,10 +8,7 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     ToolResultProjectionContext,
 };
-use lash_core::{
-    ModelToolReturn, ModelToolReturnPart, PluginStack, TextProjectionMetadata, ToolCallOutcome,
-    ToolValue,
-};
+use lash_core::{ModelToolReturn, ModelToolReturnPart, PluginStack, ToolCallOutcome, ToolValue};
 
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 pub const DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES: usize = 16 * 1024;
@@ -462,48 +459,6 @@ fn needs_truncation(text: &str, config: &ToolOutputBudgetConfig) -> bool {
     }
 }
 
-pub fn truncate_observation_text(text: &str, config: &ToolOutputBudgetConfig) -> String {
-    if !needs_truncation(text, config) {
-        return text.to_string();
-    }
-    truncate_text_with_hint(
-        text,
-        config,
-        ProjectionDirection::Head,
-        observation_truncation_hint(text, config),
-    )
-}
-
-pub fn project_observation_text(
-    text: &str,
-    config: &ToolOutputBudgetConfig,
-) -> (String, TextProjectionMetadata) {
-    let projected = truncate_observation_text(text, config);
-    let metadata = observation_projection_metadata(text, &projected, config);
-    (projected, metadata)
-}
-
-pub fn observation_projection_metadata(
-    original: &str,
-    projected: &str,
-    config: &ToolOutputBudgetConfig,
-) -> TextProjectionMetadata {
-    let limit_mode = match config.mode {
-        ToolOutputBudgetMode::Bytes => "bytes",
-        ToolOutputBudgetMode::Tokens => "tokens",
-    };
-    TextProjectionMetadata {
-        truncated: original != projected,
-        original_chars: original.chars().count(),
-        projected_chars: projected.chars().count(),
-        original_lines: original.lines().count(),
-        projected_lines: projected.lines().count(),
-        limit: config.limit,
-        limit_mode: limit_mode.to_string(),
-        max_lines: config.max_lines,
-    }
-}
-
 fn truncate_text(
     text: &str,
     config: &ToolOutputBudgetConfig,
@@ -598,22 +553,6 @@ fn truncation_hint(ctx: Option<&ToolResultProjectionContext>, text: &str) -> Str
         ),
         None => "The tool output was truncated. Use `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.".to_string(),
     }
-}
-
-fn observation_truncation_hint(text: &str, config: &ToolOutputBudgetConfig) -> String {
-    let limit_unit = match config.mode {
-        ToolOutputBudgetMode::Bytes => "bytes",
-        ToolOutputBudgetMode::Tokens => "tokens",
-    };
-    let total_units = match config.mode {
-        ToolOutputBudgetMode::Bytes => text.len(),
-        ToolOutputBudgetMode::Tokens => approx_token_count(text),
-    };
-    let total_lines = text.lines().count();
-    format!(
-        "The print output was capped at {} {} and {} lines max; original size was {} {} across {} lines. Use a narrower `print` expression to inspect specific fields or slices instead of dumping the whole value at once.",
-        config.limit, limit_unit, config.max_lines, total_units, limit_unit, total_lines
-    )
 }
 
 fn existing_tool_output_path(ctx: &ToolResultProjectionContext) -> Option<PathBuf> {
@@ -1029,25 +968,5 @@ mod tests {
             .unwrap_or_default();
         assert!(child_result.contains("truncated"));
         assert_eq!(details[1].get("error"), Some(&json!("boom")));
-    }
-
-    #[test]
-    fn observation_truncation_uses_shared_limits_and_hint() {
-        let config = ToolOutputBudgetConfig {
-            mode: ToolOutputBudgetMode::Bytes,
-            limit: 12,
-            max_lines: 2,
-        };
-        let projected = truncate_observation_text("line one\nline two\nline three", &config);
-        assert!(projected.contains("truncated"));
-        assert!(projected.contains("print output was capped at 12 bytes and 2 lines max"));
-        assert!(projected.contains("Use a narrower `print` expression"));
-
-        let (_projected, metadata) =
-            project_observation_text("line one\nline two\nline three", &config);
-        assert!(metadata.truncated);
-        assert_eq!(metadata.original_lines, 3);
-        assert_eq!(metadata.limit, 12);
-        assert_eq!(metadata.limit_mode, "bytes");
     }
 }

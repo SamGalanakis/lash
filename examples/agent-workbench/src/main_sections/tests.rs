@@ -537,7 +537,7 @@ mod tests {
             .kind("workbench-test")
             .complete(|_| async {
                 Ok(text_response(
-                    "```lashlang\nresult = await inbox.test.send({ title: \"Hi\", text: \"Yo\" })?\nsubmit result.id\n```",
+                    "<lashlang>\nresult = await inbox.test.send({ title: \"Hi\", text: \"Yo\" })?\nsubmit result.id\n</lashlang>",
                 ))
             })
             .build()
@@ -1564,12 +1564,12 @@ mod tests {
                 async move {
                     if response_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                         Ok(text_response(&format!(
-                            "```lashlang\n{}\n```",
+                            "<lashlang>\n{}\n</lashlang>",
                             test_cron_trigger_source().trim()
                         )))
                     } else {
                         Ok(text_response(
-                            "```lashlang\nsubmit \"cron tick observed\"\n```",
+                            "<lashlang>\nsubmit \"cron tick observed\"\n</lashlang>",
                         ))
                     }
                 }
@@ -1952,7 +1952,7 @@ mod tests {
 
     fn trigger_registration_response() -> lash::direct::LlmResponse {
         text_response(&format!(
-            "```lashlang\n{}\n```",
+            "<lashlang>\n{}\n</lashlang>",
             test_button_trigger_source().trim()
         ))
     }

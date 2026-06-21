@@ -272,9 +272,10 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
         assert!(model_observation.contains("Full output saved to:"));
 
         let rlm_core = explicit_ephemeral_facets(RlmCore::builder())
-            .provider(queued_text_provider(vec![
-                "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
-            ]))
+            .provider(queued_text_provider(vec![lashlang_block(
+                r#"value = await tools.app_lookup({})?
+submit "done""#,
+            )]))
             .model(mock_model_spec())
             .tools(Arc::new(LongTextTools))
             .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))

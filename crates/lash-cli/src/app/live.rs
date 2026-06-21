@@ -1,7 +1,5 @@
 use super::*;
-use crate::assistant_text::{
-    merge_assistant_reasoning_text, push_assistant_reasoning_block, push_assistant_text_block,
-};
+use crate::assistant_text::{push_assistant_reasoning_block, push_assistant_text_block};
 
 #[cfg(test)]
 const STREAMING_OUTPUT_MAX_LINES: usize = 48;
@@ -152,6 +150,10 @@ impl App {
         self.run_state = CliRunState::Working;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
+        self.active_ui_turn_ordinal = Some(self.latest_ui_turn_ordinal());
+        self.active_lashlang_block_ordinal = None;
+        self.next_lashlang_block_ordinal = 0;
+        self.lashlang_tool_call_anchors.clear();
         self.iteration = 0;
         self.live.assistant.clear();
         self.live.reasoning.clear();
@@ -204,6 +206,10 @@ impl App {
         self.foreground_turn_active = false;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
+        self.active_ui_turn_ordinal = None;
+        self.active_lashlang_block_ordinal = None;
+        self.next_lashlang_block_ordinal = 0;
+        self.lashlang_tool_call_anchors.clear();
         self.live.reasoning.clear();
         self.live.assistant.clear();
         self.clear_live_tool_output();
@@ -493,19 +499,6 @@ impl App {
             self.invalidate_height_cache_from(changed_idx.min(self.timeline.len() - 1));
             self.mark_visible_output();
         }
-    }
-
-    pub(super) fn merge_into_trailing_reasoning_block(&mut self, text: &str) -> bool {
-        let Some(UiTimelineItem::AssistantReasoning(existing)) = self.timeline.last_mut() else {
-            return false;
-        };
-        let changed = merge_assistant_reasoning_text(existing, text);
-        if changed {
-            let idx = self.timeline.len().saturating_sub(1);
-            self.invalidate_height_cache_from(idx);
-            self.mark_visible_output();
-        }
-        true
     }
 
     pub(super) fn finalize_live_markdown(&mut self) {

@@ -28,6 +28,19 @@ fn plugin_text_message(id: &str, role: MessageRole, plugin_id: &str, content: &s
     }
 }
 
+fn assistant_reasoning_text_message(id: &str, reasoning: &str, content: &str) -> Message {
+    Message {
+        id: id.to_string(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            part(&format!("{id}.r"), PartKind::Reasoning, reasoning),
+            part(&format!("{id}.t"), PartKind::Text, content),
+        ]
+        .into(),
+        origin: None,
+    }
+}
+
 fn part(id: &str, kind: PartKind, content: &str) -> Part {
     Part {
         id: id.to_string(),

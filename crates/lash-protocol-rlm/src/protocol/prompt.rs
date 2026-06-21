@@ -46,40 +46,51 @@ pub const LASHLANG_COMMON_PATTERNS_SECTION: &str = r#"### Common patterns
 
 Operation-level errors are different from successful results that contain domain errors. `?` aborts the block only when the module operation itself failed:
 
-```lashlang
-probe = await web.search({ query: "value" })?
-submit format("Search returned {} characters.", len(to_string(probe)))
-```
+    <lashlang>
+    probe = await web.search({ query: "value" })?
+    submit format("Search returned {} characters.", len(to_string(probe)))
+    </lashlang>
 
 Build collections with explicit loops, not comprehensions:
 
-```lashlang
-items = []
-for key in ["a", "b"] {
-  items = push(items, { key: key, size: len(key) })
-}
-submit format("Built {} items.", len(items))
-```
+    <lashlang>
+    items = []
+    for key in ["a", "b"] {
+      items = push(items, { key: key, size: len(key) })
+    }
+    submit format("Built {} items.", len(items))
+    </lashlang>
 
 Print what you need to see. Pull in the parts relevant to your next step — a whole value when it is small and all useful, otherwise keys, lengths, selected fields, or slices of large ones:
 
-```lashlang
-result = await web.search({ query: "value" })?
-text = to_string(result)
-print { chars: len(text), head: slice(text, 0, 1200) }
-```
+    <lashlang>
+    result = await web.search({ query: "value" })?
+    text = to_string(result)
+    print { chars: len(text), head: slice(text, 0, 1200) }
+    </lashlang>
 
-For dependent multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
+When `shell.exec` is available, shell command results are data. It returns completed commands with `exit_code`, even when it is nonzero; inspect that field instead of expecting `?` to abort. The shell command runs exactly as written, without added strict-mode prefixes. Let the shell tool capture output; if output is large, keep the result in a variable and print fields, slices, or the `full_output_path` it returns rather than adding `head`/`tail` just to make output smaller:
 
-```lashlang
-first = await web.search({ query: "value" })?
-second = await web.fetch({ url: first[0].url })?
-if contains(to_string(second), "needs_more_work") {
-  print { first: first, second: second }
-} else {
-  submit format("Fetched result: {}", slice(to_string(second), 0, 1200))
-}
-```
+    <lashlang>
+    check = await shell.exec({ cmd: "cargo check --workspace --all-targets" })?
+    if check.exit_code != 0 {
+      print { exit_code: check.exit_code, output: slice(check.output, 0, 4000), full: check.full_output_path }
+    } else {
+      submit "Validation passed."
+    }
+    </lashlang>
+
+For dependent multi-step work, inspect intermediate results before submitting success. Do not submit final results without observing and verifying the outcome. Reaching `submit` ends the turn even mid-block:
+
+    <lashlang>
+    first = await web.search({ query: "value" })?
+    second = await web.fetch({ url: first[0].url })?
+    if contains(to_string(second), "needs_more_work") {
+      print { first: first, second: second }
+    } else {
+      submit format("Fetched result: {}", slice(to_string(second), 0, 1200))
+    }
+    </lashlang>
 "#;
 
 pub const LASHLANG_TYPE_LITERALS_SECTION: &str = r#"### Type literals
@@ -93,9 +104,9 @@ pub const LASHLANG_TYPE_LITERALS_SECTION: &str = r#"### Type literals
 - **Unions** — `a | b | c`, e.g. `status: str | int`, `value: str | null`.
 - Nested shapes require the `Type` keyword: `nested: Type { ok: bool }` (bare `{ ok: bool }` is rejected — that's a record value, not a type).
 
-```lashlang
-profile = validate(record, Type { name: str, email: str?, tags: list[str] })
-```
+    <lashlang>
+    profile = validate(record, Type { name: str, email: str?, tags: list[str] })
+    </lashlang>
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -246,9 +257,9 @@ fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) 
 fn render_execution_intro(has_operations: bool) -> String {
     let mut section = String::from("**All actions go through `lashlang`.** ");
     if has_operations {
-        section.push_str("Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a fenced `lashlang` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.");
+        section.push_str("Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.");
     } else {
-        section.push_str("Use fenced `lashlang` blocks to compute values, inspect current variables, and submit final answers. No module operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
+        section.push_str("Use paired `<lashlang>` blocks to compute values, inspect current variables, and submit final answers. No module operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
     }
     section.push_str(
         r#"
@@ -260,13 +271,17 @@ fn render_execution_intro(has_operations: bool) -> String {
 
 Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
 
-### Turn shape
+Do not submit final results that depend on operations, files, generated patches, or other current-state artifacts without inspecting first. Only `submit` once you have observed and verified the relevant results.
 
-**Exactly one ` ```lashlang ` fenced block per response.** Anything after the first block closes is dropped. Only ` ```lashlang ` is recognised — `rlm` and other labels are treated as plain prose.
+### Response shape
 
-- Write small blocks. Each should do one focused step.
-- Keep prose around the block to one or two sentences of reasoning. Don't describe an action in prose instead of executing it.
-- After each result, decide: another block (more work), or finish.
+Your response must be visible prose optionally followed by exactly one Lashlang block. The start tag line must trim to exactly `<lashlang>`; the closing tag line must trim to exactly `</lashlang>`.
+
+You may skip prose by starting with `<lashlang>`, or skip Lashlang by omitting the block, but not both.
+
+NEVER have multiple `<lashlang>` blocks in one response.
+
+In streaming, generation stops as soon as `</lashlang>` is emitted. Any text after it is ignored, so do not put explanations or results after the closing tag.
 "#,
     );
     if has_operations {
@@ -274,22 +289,18 @@ Never `submit` a raw tool-result dump. If you need to look at something, `print`
             r#"
 Example — inspect with an available operation, then submit:
 
-````
 Checking the available data.
 
-```lashlang
+<lashlang>
 result = await web.search({ query: "value" })?
 print { summary: slice(to_string(result), 0, 200) }
-```
-````
+</lashlang>
 
 …then on the next turn, once you've seen what you need:
 
-````
-```lashlang
+<lashlang>
 submit "The bound version is 0.2.61."
-```
-````
+</lashlang>
 "#,
         );
     } else {
@@ -297,12 +308,10 @@ submit "The bound version is 0.2.61."
             r#"
 Example — compute and submit:
 
-````
-```lashlang
+<lashlang>
 items = ["alpha", "beta"]
 submit format("Found {} items; first item: {}.", len(items), items[0])
-```
-````
+</lashlang>
 "#,
         );
     }
@@ -322,8 +331,8 @@ fn render_language_section(
     } else {
         bullets.push("- Values: null, booleans, numbers, strings, lists, and records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.".to_string());
     }
-    bullets.push("- Strings: `\"...\"` supports `\\n`, `\\r`, `\\t`, `\\\"`, and `\\\\`; `\"\"\"...\"\"\"` is multiline with the same escapes. Rust-style raw strings `r#\"...\"#`, `r##\"...\"##`, etc. preserve content exactly; add more `#` characters if the body contains the closing delimiter. Use raw strings for JSON, Markdown, patches, shell scripts, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.".to_string());
-    bullets.push("- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.".to_string());
+    bullets.push("- Strings: `\"...\"` and `'...'` support `\\n`, `\\r`, `\\t`, escaped matching quotes, and `\\\\`; `\"\"\"...\"\"\"` and `'''...'''` are multiline with the same escapes. Raw strings `r\"...\"`, `r'...'`, `r\"\"\"...\"\"\"`, and `r'''...'''` preserve content exactly. Use raw strings for JSON, Markdown, patches, shell scripts, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers. Use `format(...)` for interpolation; there are no f-strings.".to_string());
+    bullets.push("- Assign with `name = expr`. Variables persist across `<lashlang>` blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.".to_string());
     if has_operations {
         bullets.push("- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
     }
@@ -377,7 +386,7 @@ fn render_language_section(
     }
     bullets.push("- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
     bullets.push("- Bare expressions are valid statements in normal blocks.".to_string());
-    bullets.push("- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available read-only values may be listed separately without value previews. `print` a variable (or the part you need) to see contents it only summarizes.".to_string());
+    bullets.push("- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available read-only values may be listed separately without value previews. Variables keep their full runtime value; `print` a variable (or the part you need) to see contents the prompt only summarizes.".to_string());
     format!("### Language\n\n{}", bullets.join("\n"))
 }
 
@@ -389,37 +398,37 @@ fn render_common_patterns(has_operations: bool) -> String {
 
 Build collections with explicit loops, not comprehensions:
 
-```lashlang
-items = []
-for key in ["a", "b"] {
-  items = push(items, { key: key, size: len(key) })
-}
-submit format("Built {} items.", len(items))
-```
+    <lashlang>
+    items = []
+    for key in ["a", "b"] {
+      items = push(items, { key: key, size: len(key) })
+    }
+    submit format("Built {} items.", len(items))
+    </lashlang>
 
 Print what you need to see. Pull in the parts relevant to your next step — a whole value when it is small and all useful, otherwise keys, lengths, selected fields, or slices of large ones:
 
-```lashlang
-text = to_string(input)
-print { chars: len(text), head: slice(text, 0, 1200) }
-```
+    <lashlang>
+    text = to_string(input)
+    print { chars: len(text), head: slice(text, 0, 1200) }
+    </lashlang>
 
-For multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
+For multi-step work, inspect intermediate results before submitting success. Do not submit final results without observing and verifying the outcome. Reaching `submit` ends the turn even mid-block:
 
-```lashlang
-first = trim(input.question)
-if empty(first) {
-  print { problem: "missing question" }
-} else {
-  submit format("Question: {}", first)
-}
-```"#
+    <lashlang>
+    first = trim(input.question)
+    if empty(first) {
+      print { problem: "missing question" }
+    } else {
+      submit format("Question: {}", first)
+    }
+    </lashlang>"#
         .to_string()
 }
 
 fn render_decomposition_section(has_operations: bool, processes: bool) -> String {
     let mut section = String::from(
-        "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Two kinds of values need different handling: large transient artifacts (files, search results, long pages, raw tool dumps) stay in variables — `print` only the fields or slices you need, not the whole thing; small durable state you consult each turn (a map, plan, or checklist) should stay visible — small values show inline under **Bound Variables**, and you can `print` them whole when you need to reason over all of them.\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need → reason inline in lashlang.",
+        "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Two kinds of values need different handling: large transient artifacts (files, search results, long pages, raw tool dumps) stay in variables — `print` only the fields or slices you need, not the whole thing; small durable state you consult each turn (a map, plan, or checklist) should stay visible — small values show inline under **Bound Variables**, and you can `print` them whole when you need to reason over all of them. Do not add shell truncation pipelines just to reduce display size; use the tool's captured `output`, `full_output_path`, and Lashlang `slice(...)` instead.\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need → reason inline in lashlang.",
     );
     if has_operations {
         if processes {
@@ -430,7 +439,7 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations && processes {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n```lashlang\nresults = await {\n  one: web.search({ query: \"one\" })?,\n  two: web.search({ query: \"two\" })?\n}\nsubmit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n```");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: web.search({ query: \"one\" })?,\n      two: web.search({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
     } else if has_operations {
         section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.");
     } else {

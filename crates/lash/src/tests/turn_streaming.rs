@@ -1531,6 +1531,105 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 }
 
 #[test]
+fn rlm_streamed_lashlang_cell_uses_captured_body_when_final_text_is_raw() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-streamed-cell-raw-final-test", || async {
+        const RAW_FINAL: &str = "Visible before cell.\n<lashlang>\npayload = r\"\"\"```markdown\ninside\n```\"\"\"\nsubmit \"streamed raw final ok\"\n</lashlang>";
+        const EXPECTED_CODE: &str =
+            "payload = r\"\"\"```markdown\ninside\n```\"\"\"\nsubmit \"streamed raw final ok\"";
+
+        let provider = crate::testing::TestProvider::builder()
+            .kind("stream-raw-final-test")
+            .requires_streaming(true)
+            .complete(|request| async move {
+                let stream = request
+                    .stream_events
+                    .expect("RLM streaming turn should request provider stream events");
+                for chunk in [
+                    "Visible before",
+                    " cell.\n<lash",
+                    "lang>\npayload = r\"\"\"",
+                    "```markdown\ninside\n",
+                    "```\"\"\"\nsubmit ",
+                    "\"streamed raw final ok\"\n</lashlang>",
+                ] {
+                    stream.send(LlmStreamEvent::Delta(chunk.to_string()));
+                }
+                Ok(LlmResponse {
+                    full_text: RAW_FINAL.to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: RAW_FINAL.to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            })
+            .build()
+            .into_handle();
+
+        let core = explicit_ephemeral_facets(RlmCore::builder())
+            .provider(provider)
+            .model(mock_model_spec())
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+            .build()?;
+        let session = core.session("rlm-streamed-raw-final-cell").open().await?;
+        let events = Arc::new(RecordingEvents::default());
+
+        let result = session
+            .turn(TurnInput::text("say hi"))
+            .stream_to(events.as_ref())
+            .await?;
+
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+        ));
+        assert_eq!(
+            result.submitted_value(),
+            Some(&serde_json::json!("streamed raw final ok"))
+        );
+
+        let events = events.snapshot().await;
+        let prose = assistant_prose(&events);
+        assert_eq!(prose, "Visible before cell.\n");
+        assert!(!prose.contains("<lashlang>"));
+        assert!(!prose.contains("submit"));
+        assert!(!prose.contains("```markdown"));
+
+        let code_started = events
+            .iter()
+            .find(|event| matches!(&event.event, TurnEvent::CodeBlockStarted { .. }))
+            .expect("code started");
+        let TurnEvent::CodeBlockStarted { language, code, .. } = &code_started.event else {
+            unreachable!();
+        };
+        assert_eq!(language, "lashlang");
+        assert_eq!(code, EXPECTED_CODE);
+        assert!(!code.contains("<lashlang>"));
+
+        let code_completed = events
+            .iter()
+            .find(|event| matches!(&event.event, TurnEvent::CodeBlockCompleted { .. }))
+            .expect("code completed");
+        let TurnEvent::CodeBlockCompleted { success, error, .. } = &code_completed.event else {
+            unreachable!();
+        };
+        assert!(*success);
+        assert!(error.is_none());
+
+        let terminal_output = events
+            .iter()
+            .find(|event| matches!(&event.event, TurnEvent::SubmittedValue { .. }))
+            .expect("terminal output");
+        let TurnEvent::SubmittedValue { value } = &terminal_output.event else {
+            unreachable!();
+        };
+        assert_eq!(value, &serde_json::json!("streamed raw final ok"));
+        Ok(())
+    })
+}
+
+#[test]
 fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     run_async_test_on_stack_budget("rlm-live-exec-boundary-test", || {
         rlm_tool_calls_stream_from_live_exec_boundary_inner()
@@ -1539,9 +1638,10 @@ fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
 
 async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
     let core = explicit_ephemeral_facets(RlmCore::builder())
-        .provider(queued_text_provider(vec![
-            "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
-        ]))
+        .provider(queued_text_provider(vec![lashlang_block(
+            r#"value = await tools.app_lookup({})?
+submit "done""#,
+        )]))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -1665,9 +1765,9 @@ async fn rlm_pending_host_tool_completion_resumes_lashlang_await_inner() -> Resu
     let (key_tx, key_rx) = oneshot::channel();
     let events = Arc::new(RecordingEvents::default());
     let core = explicit_ephemeral_facets(RlmCore::builder())
-        .provider(queued_text_provider(vec![
-            "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit value\n```",
-        ]))
+        .provider(queued_text_provider(vec![lashlang_block(
+            "value = await tools.app_lookup({})?\nsubmit value",
+        )]))
         .model(mock_model_spec())
         .tools(Arc::new(PendingAppTools::new(key_tx)))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -1739,17 +1839,16 @@ async fn rlm_process_pending_host_tool_completion_resumes_process_await_inner() 
     let (key_tx, key_rx) = oneshot::channel();
     let events = Arc::new(RecordingEvents::default());
     let core = explicit_ephemeral_facets(RlmCore::builder())
-        .provider(queued_text_provider(vec![
-            r#"```lashlang
+        .provider(queued_text_provider(vec![lashlang_block(
+            r#"
 process lookup(tools: Tools) {
   value = await tools.app_lookup({})?
   finish value
 }
 handle = start lookup(tools: tools)
 result = (await handle)?
-submit result
-```"#,
-        ]))
+submit result"#,
+        )]))
         .model(mock_model_spec())
         .tools(Arc::new(PendingAppTools::new(key_tx)))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -1820,8 +1919,8 @@ fn continue_as_observation_emits_frame_switch_then_commit() -> Result<()> {
 async fn continue_as_observation_emits_frame_switch_then_commit_inner() -> Result<()> {
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
-            "```lashlang\nawait control.continue_as({ task: \"finish in a fresh frame\" })?\n```",
-            "```lashlang\nsubmit \"done after continue_as\"\n```",
+            lashlang_block(r#"await control.continue_as({ task: "finish in a fresh frame" })?"#),
+            lashlang_block(r#"submit "done after continue_as""#),
         ]))
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -1949,17 +2048,16 @@ async fn processes_lists_started_lashlang_process_until_awaited_inner() -> Resul
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let core = explicit_ephemeral_facets(RlmCore::builder())
-        .provider(queued_text_provider(vec![
-            r#"```lashlang
+        .provider(queued_text_provider(vec![lashlang_block(
+            r#"
 process lookup(tools: Tools) {
   value = await tools.app_lookup({})?
   finish value
 }
 h = start lookup(tools: tools)
 value = await h
-submit value
-```"#,
-        ]))
+submit value"#,
+        )]))
         .model(mock_model_spec())
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
         // A started (`start lookup(...)`) process runs in the lease-protected
@@ -2020,17 +2118,16 @@ async fn lashlang_execution_graph_store_observes_lashlang_process_from_facade_in
     let (release_tx, release_rx) = oneshot::channel();
     let graph_store = Arc::new(crate::tracing::TraceLashlangGraphStore::default());
     let core = explicit_ephemeral_facets(RlmCore::builder())
-        .provider(queued_text_provider(vec![
-            r#"```lashlang
+        .provider(queued_text_provider(vec![lashlang_block(
+            r#"
 process lookup(tools: Tools) {
   value = await tools.app_lookup({})?
   finish value
 }
 h = start lookup(tools: tools)
 value = await h
-submit value
-```"#,
-        ]))
+submit value"#,
+        )]))
         .model(mock_model_spec())
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -2120,9 +2217,9 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
 #[tokio::test]
 async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
     let core = explicit_ephemeral_facets(RlmCore::builder())
-        .provider(queued_text_provider(vec![
-            "```lashlang\nsubmit \"done via submit\"\n```",
-        ]))
+        .provider(queued_text_provider(vec![lashlang_block(
+            r#"submit "done via submit""#,
+        )]))
         .model(mock_model_spec())
         .build()?;
     let session = core
@@ -2161,8 +2258,8 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
 async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Result<()> {
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
-            "```lashlang\nthis is not valid lashlang\n```",
-            "```lashlang\nsubmit \"recovered\"\n```",
+            lashlang_block("this is not valid lashlang"),
+            lashlang_block(r#"submit "recovered""#),
         ]))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))

@@ -55,24 +55,24 @@
   // contextual keywords (process / start / finish / yield / wake / signal /
   // wait / run / with / trigger / while / break / continue / let /
   // enum), the builtins.rs registry, and the primitive type names. Comments
-  // are `#` and `//`; strings are quoted, triple-quoted ("""…"""), or
-  // Rust-style raw strings (r#"…"#, r##"…"##). There are no /* */ block
+  // are `#` and `//`; strings are quoted, triple-quoted ("""…""" or '''…'''), or
+  // Python-shaped raw strings (r"…", r'…', r"""…""", r'''…'''). There are no /* */ block
   // comments in lashlang.
   function defineLashlang(Prism) {
     if (!Prism || !Prism.languages || Prism.languages.lashlang) return;
     Prism.languages.lashlang = {
       "raw-string": {
-        pattern: /r"[\s\S]*?"|r(#+)"[\s\S]*?"\1/,
+        pattern: /[rR](?:"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/,
         alias: "string",
         greedy: true,
       },
       "triple-string": {
-        pattern: /"""[\s\S]*?"""/,
+        pattern: /"""[\s\S]*?"""|'''[\s\S]*?'''/,
         alias: "string",
         greedy: true,
       },
       "string": {
-        pattern: /"(?:[^"\\]|\\.)*"/,
+        pattern: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/,
         greedy: true,
       },
       "comment": {
@@ -88,7 +88,7 @@
       "operator": /=>|->|::|[+\-*/%=<>!?:&|]+/,
       "punctuation": /[{}[\];(),.]/,
     };
-    // shorthand alias used in fenced blocks
+    // shorthand alias used by older docs and snippets
     Prism.languages.lash = Prism.languages.lashlang;
   }
 
@@ -111,7 +111,7 @@
     const t = text || "";
     // Most-distinctive cues first.
     if (/^\s*\$\s/m.test(t) || /^\s*#\s*!.+/.test(t)) return "bash";
-    if (/\bprocess\s+\w|\btrigger\s+\w|\bawait\s+[A-Z][A-Z0-9_]*\.\w+\.|\bstart\s+\w+\s*\(|```lashlang/.test(t)) return "lashlang";
+    if (/\bprocess\s+\w|\btrigger\s+\w|\bawait\s+[A-Z][A-Z0-9_]*\.\w+\.|\bstart\s+\w+\s*\(|<\/?lashlang>/.test(t)) return "lashlang";
     if (/^\s*[#/]{0,2}\[(?:dev-)?dependencies\]/m.test(t)) return "toml";
     if (/(?:^|\n)\s*\[[\w.\-]+\]\s*(?:\n|$)/.test(t) && /=\s*["'\d{[]/.test(t)) return "toml";
     if (/\bfn\s+\w|\bpub\s+(?:fn|struct|enum|use|mod|trait|type|const|static)\b|\buse\s+[a-z_][\w:]*::|#\[\w|\bimpl\s+\w/.test(t)) return "rust";

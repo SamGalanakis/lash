@@ -19,7 +19,7 @@ pub(super) struct ExpectedContracts {
 pub(super) struct LashE2eCase {
     pub(super) name: &'static str,
     pub(super) session_id: &'static str,
-    pub(super) scripted_provider_responses: Vec<&'static str>,
+    pub(super) scripted_provider_responses: Vec<String>,
     pub(super) root_prompt: &'static str,
     pub(super) expected_submitted_value: Option<serde_json::Value>,
     pub(super) tool_provider: Option<Arc<dyn ToolProvider>>,
@@ -34,6 +34,10 @@ pub(super) struct LashE2eRun {
     pub(super) graph_snapshots: Vec<crate::tracing::TraceLashlangGraph>,
     pub(super) prompt_captures: Vec<LlmRequest>,
     pub(super) final_process_list: Vec<lash_core::ProcessHandleSummary>,
+}
+
+pub(super) fn lashlang_block(source: &str) -> String {
+    format!("<lashlang>\n{}\n</lashlang>", source.trim())
 }
 
 pub(super) async fn run_turn_case(case: LashE2eCase) -> Result<LashE2eRun> {
@@ -272,7 +276,7 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
     let process_registry = Arc::new(TestLocalProcessRegistry::default());
     let prompt_captures = Arc::new(StdMutex::new(Vec::new()));
     let provider = scripted_provider(
-        vec!["```lashlang\nsubmit { child: \"done\", scoped: true }\n```"],
+        vec![lashlang_block(r#"submit { child: "done", scoped: true }"#)],
         Arc::clone(&prompt_captures),
     );
     let core = explicit_ephemeral_facets(RlmCore::builder())
@@ -369,16 +373,17 @@ pub(super) async fn run_durable_input_request_case() -> Result<()> {
     let prompt_captures = Arc::new(StdMutex::new(Vec::new()));
     let provider = scripted_provider(
         vec![
-            r#"```lashlang
+            lashlang_block(
+                r#"
 process request_answer(tools: Tools) {
   result = await tools.mock_input_request({ question: "Need input?" })?
   finish result
 }
 handle = start request_answer(tools: tools)
 result = (await handle)?
-submit result.answer
-```"#,
-            "```lashlang\nsubmit { recovered: true }\n```",
+submit result.answer"#,
+            ),
+            lashlang_block("submit { recovered: true }"),
         ],
         Arc::clone(&prompt_captures),
     );
@@ -490,15 +495,10 @@ submit result.answer
 }
 
 fn scripted_provider(
-    responses: Vec<&'static str>,
+    responses: Vec<String>,
     prompt_captures: Arc<StdMutex<Vec<LlmRequest>>>,
 ) -> ProviderHandle {
-    let responses = Arc::new(TokioMutex::new(VecDeque::from(
-        responses
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>(),
-    )));
+    let responses = Arc::new(TokioMutex::new(VecDeque::from(responses)));
     crate::testing::TestProvider::builder()
         .kind("lash-e2e")
         .complete(move |request| {

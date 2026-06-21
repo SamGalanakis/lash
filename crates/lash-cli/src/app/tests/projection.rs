@@ -228,7 +228,44 @@ fn finish_turn_from_read_view_uses_authoritative_reasoning_and_text() {
 }
 
 #[test]
-fn read_view_timeline_places_reasoning_before_text() {
+fn live_reasoning_and_prose_deltas_are_committed_chronologically() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let turn = PreparedTurn::new("Inspect".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
+    app.start_turn();
+
+    app.handle_session_event(SessionEvent::ReasoningDelta {
+        content: "first reasoning".into(),
+    });
+    app.handle_session_event(SessionEvent::TextDelta {
+        content: "visible prose".into(),
+    });
+    app.handle_session_event(SessionEvent::ReasoningDelta {
+        content: "second reasoning".into(),
+    });
+    app.finalize_live_markdown();
+
+    let lane_blocks: Vec<(&str, &str)> = app
+        .timeline
+        .iter()
+        .filter_map(|block| match block {
+            UiTimelineItem::AssistantReasoning(text) => Some(("reasoning", text.as_str())),
+            UiTimelineItem::AssistantText(text) => Some(("prose", text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lane_blocks,
+        vec![
+            ("reasoning", "first reasoning"),
+            ("prose", "visible prose"),
+            ("reasoning", "second reasoning"),
+        ]
+    );
+}
+
+#[test]
+fn read_view_timeline_preserves_assistant_part_order() {
     let message = Message {
         id: "a1".into(),
         role: MessageRole::Assistant,
@@ -244,7 +281,7 @@ fn read_view_timeline_places_reasoning_before_text() {
     let blocks =
         timeline_items_from_test_read_view(&events, &[message], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
-    assert_eq!(variants, vec!["AssistantReasoning", "AssistantText"]);
+    assert_eq!(variants, vec!["AssistantText", "AssistantReasoning"]);
 }
 
 #[test]
@@ -339,24 +376,29 @@ fn read_view_timeline_round_trips_to_existing_display_blocks() {
 
 #[test]
 fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
+    let assistant = assistant_reasoning_text_message("a1", "I'll reply directly.", "");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_0".to_string(),
+        id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"hi\"\n```".to_string(),
         code: "submit \"hi\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: None,
     };
-    let events = vec![lash_core::SessionEventRecord::Protocol(
-        lash_protocol_rlm::rlm_protocol_event(
+    let events = vec![
+        conversation_event(assistant.clone()),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
             lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
-        ),
-    )];
+        )),
+    ];
 
-    let blocks =
-        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
+    let blocks = timeline_items_from_test_read_view(
+        &events,
+        &[assistant],
+        &[],
+        &UiProjectionState::default(),
+    );
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 
@@ -368,25 +410,83 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
 }
 
 #[test]
-fn rlm_trajectory_final_output_projects_as_assistant_text() {
+fn rlm_trajectory_projects_reasoning_prose_code_and_error_in_order() {
+    let assistant = assistant_reasoning_text_message("a1", "private planning", "visible status");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_0".to_string(),
+        id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
+        code: "missing_name".to_string(),
+        output: Vec::new(),
+        images: Vec::new(),
+        error: Some("unknown variable `missing_name`".to_string()),
+        final_output: None,
+    };
+    let events = vec![
+        conversation_event(assistant.clone()),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        )),
+    ];
+
+    let blocks = timeline_items_from_test_read_view(
+        &events,
+        &[assistant],
+        &[],
+        &UiProjectionState::default(),
+    );
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(
+        variants,
+        vec![
+            "AssistantReasoning",
+            "AssistantText",
+            "LashlangCode",
+            "Error"
+        ]
+    );
+    assert!(matches!(
+        &blocks[0],
+        UiTimelineItem::AssistantReasoning(text) if text == "private planning"
+    ));
+    assert!(matches!(
+        &blocks[1],
+        UiTimelineItem::AssistantText(text) if text == "visible status"
+    ));
+    assert!(matches!(
+        &blocks[2],
+        UiTimelineItem::LashlangCode(text) if text == "missing_name"
+    ));
+    assert!(matches!(
+        &blocks[3],
+        UiTimelineItem::Error(text) if text == "unknown variable `missing_name`"
+    ));
+}
+
+#[test]
+fn rlm_trajectory_final_output_projects_as_assistant_text() {
+    let assistant = assistant_reasoning_text_message("a1", "I'll reply directly.", "");
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "lashlang_step_0".to_string(),
+        protocol_iteration: 0,
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
     };
-    let events = vec![lash_core::SessionEventRecord::Protocol(
-        lash_protocol_rlm::rlm_protocol_event(
+    let events = vec![
+        conversation_event(assistant.clone()),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
             lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
-        ),
-    )];
+        )),
+    ];
 
-    let blocks =
-        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
+    let blocks = timeline_items_from_test_read_view(
+        &events,
+        &[assistant],
+        &[],
+        &UiProjectionState::default(),
+    );
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(
         variants,
@@ -402,11 +502,11 @@ fn rlm_trajectory_final_output_projects_as_assistant_text() {
 #[test]
 fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     let user = text_message("u1", MessageRole::User, "hi");
+    let assistant_reasoning = assistant_reasoning_text_message("a0", "I'll answer directly.", "");
     let assistant = plugin_text_message("a1", MessageRole::Assistant, "rlm_protocol", "Hi!");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_0".to_string(),
+        id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        reasoning: "I'll answer directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
@@ -415,6 +515,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     };
     let events = vec![
         conversation_event(user.clone()),
+        conversation_event(assistant_reasoning.clone()),
         lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
             lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
         )),
@@ -423,7 +524,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
 
     let blocks = timeline_items_from_test_read_view(
         &events,
-        &[user, assistant],
+        &[user, assistant_reasoning, assistant],
         &[],
         &UiProjectionState::default(),
     );
@@ -460,11 +561,8 @@ fn finish_turn_replaces_live_submitted_value_with_projection() {
 
     let user = text_message("u1", MessageRole::User, "What time is it");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_0".to_string(),
+        id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        reasoning:
-            "```lashlang\nsubmit \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"\n```"
-                .to_string(),
         code: "submit \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
@@ -511,24 +609,29 @@ fn submitted_value_turn_event_projects_as_assistant_text() {
 
 #[test]
 fn rlm_trajectory_projects_reasoning_and_code_without_hidden_tool_calls() {
+    let assistant = assistant_reasoning_text_message("a1", "I'll inspect the environment.", "");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_0".to_string(),
+        id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        reasoning: "I'll inspect the environment.".to_string(),
         code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["2026-04-25 20:05:57 UTC".to_string()],
         images: Vec::new(),
         error: None,
         final_output: None,
     };
-    let events = vec![lash_core::SessionEventRecord::Protocol(
-        lash_protocol_rlm::rlm_protocol_event(
+    let events = vec![
+        conversation_event(assistant.clone()),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
             lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
-        ),
-    )];
+        )),
+    ];
 
-    let blocks =
-        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
+    let blocks = timeline_items_from_test_read_view(
+        &events,
+        &[assistant],
+        &[],
+        &UiProjectionState::default(),
+    );
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 }
@@ -536,9 +639,8 @@ fn rlm_trajectory_projects_reasoning_and_code_without_hidden_tool_calls() {
 #[test]
 fn rlm_trajectory_final_output_does_not_inline_hidden_tool_call_projection() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_0".to_string(),
+        id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        reasoning: "I'll check the system time.".to_string(),
         code: "now = await shell.exec({ cmd: \"date\" })?\nsubmit trim(now.output)".to_string(),
         output: Vec::new(),
         images: Vec::new(),
@@ -554,10 +656,7 @@ fn rlm_trajectory_final_output_does_not_inline_hidden_tool_call_projection() {
     let blocks =
         timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
-    assert_eq!(
-        variants,
-        vec!["AssistantReasoning", "LashlangCode", "AssistantText"]
-    );
+    assert_eq!(variants, vec!["LashlangCode", "AssistantText"]);
     assert_eq!(
         blocks
             .iter()
@@ -568,11 +667,148 @@ fn rlm_trajectory_final_output_does_not_inline_hidden_tool_call_projection() {
 }
 
 #[test]
+fn rlm_activity_journal_projects_tool_rows_after_matching_lashlang_block() {
+    let user = text_message("u1", MessageRole::User, "What time is it?");
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "lashlang_step_0".to_string(),
+        protocol_iteration: 0,
+        code: "now = await shell.exec({ cmd: \"date\" })?\nsubmit trim(now.output)".to_string(),
+        output: Vec::new(),
+        images: Vec::new(),
+        error: None,
+        final_output: Some(serde_json::json!("Sunday, June 21, 2026")),
+    };
+    let events = vec![
+        conversation_event(user.clone()),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        )),
+    ];
+    let mut activity_journal = UiActivityJournal::default();
+    activity_journal.apply_record(UiActivityRecord::new(
+        0,
+        0,
+        ActivityBlock::new(
+            ActivityKind::GenericTool,
+            "exec_command",
+            serde_json::json!({"cmd": "date"}),
+            "Run date",
+            ActivityStatus::Completed,
+            serde_json::json!({"exit_code": 0, "stdout": "Sunday, June 21, 2026\n"}),
+            8,
+        )
+        .with_call_id(Some("lashlang:tool-0".to_string())),
+    ));
+
+    let blocks = timeline_items_from_test_read_view(
+        &events,
+        &[user],
+        &[],
+        &UiProjectionState {
+            activity_journal,
+            ..UiProjectionState::default()
+        },
+    );
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(
+        variants,
+        vec![
+            "TurnStart",
+            "UserInput",
+            "LashlangCode",
+            "Activity",
+            "AssistantText",
+        ]
+    );
+    assert!(matches!(
+        &blocks[3],
+        UiTimelineItem::Activity(activity)
+            if activity.call.tool_name == "exec_command"
+                && activity.result.status == ActivityStatus::Completed
+    ));
+}
+
+#[test]
+fn finish_turn_from_read_view_preserves_live_lashlang_tool_activity_from_cli_journal() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let turn = PreparedTurn::new("What time is it?".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
+    app.start_turn();
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::CodeBlockStarted {
+        language: "lashlang".to_string(),
+        code: "now = await tools.exec_command({ cmd: \"date\" })?\nsubmit trim(now.output)"
+            .to_string(),
+        graph_key: None,
+    }));
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::ToolCallStarted {
+        call_id: Some("lashlang:tool-0".to_string()),
+        name: "exec_command".to_string(),
+        args: serde_json::json!({"cmd": "date"}),
+    }));
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::ToolCallCompleted {
+        call_id: Some("lashlang:tool-0".to_string()),
+        name: "exec_command".to_string(),
+        args: serde_json::json!({"cmd": "date"}),
+        output: lash_core::ToolCallOutput::success(serde_json::json!({
+            "exit_code": 0,
+            "stdout": "Sunday, June 21, 2026\n"
+        })),
+        duration_ms: 8,
+    }));
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::CodeBlockCompleted {
+        language: "lashlang".to_string(),
+        output: String::new(),
+        graph_key: None,
+        success: true,
+        error: None,
+        duration_ms: 8,
+        tool_call_ids: vec!["lashlang:tool-0".to_string()],
+    }));
+
+    let user = text_message("u1", MessageRole::User, "What time is it?");
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "lashlang_step_0".to_string(),
+        protocol_iteration: 0,
+        code: "now = await tools.exec_command({ cmd: \"date\" })?\nsubmit trim(now.output)"
+            .to_string(),
+        output: Vec::new(),
+        images: Vec::new(),
+        error: None,
+        final_output: Some(serde_json::json!("Sunday, June 21, 2026")),
+    };
+    let events = vec![
+        conversation_event(user.clone()),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        )),
+    ];
+
+    app.finish_turn_from_read_view(&test_read_view(&events, &[user], &[]));
+
+    let variants: Vec<&str> = app.timeline.iter().map(other_variant_name).collect();
+    assert_eq!(
+        variants,
+        vec![
+            "TurnStart",
+            "UserInput",
+            "LashlangCode",
+            "Activity",
+            "AssistantText",
+        ]
+    );
+    assert!(matches!(
+        app.timeline.get(3),
+        Some(UiTimelineItem::Activity(activity))
+            if activity.call.call_id.as_deref() == Some("lashlang:tool-0")
+                && activity.result.status == ActivityStatus::Completed
+    ));
+}
+
+#[test]
 fn rlm_trajectory_steps_project_chronologically_without_hidden_tool_results() {
     let first = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_0".to_string(),
+        id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        reasoning: "First check the time.".to_string(),
         code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["time".to_string()],
         images: Vec::new(),
@@ -580,20 +816,23 @@ fn rlm_trajectory_steps_project_chronologically_without_hidden_tool_results() {
         final_output: None,
     };
     let second = lash_rlm_types::RlmTrajectoryEntry {
-        id: "rlm_step_1".to_string(),
+        id: "lashlang_step_1".to_string(),
         protocol_iteration: 1,
-        reasoning: "Then check files.".to_string(),
-        code: "files = await tools.ls({ path: \".\" })?\nprint files".to_string(),
+        code: "files = await tools.glob({ pattern: \"*\", path: \".\" })?\nprint files".to_string(),
         output: vec!["files".to_string()],
         images: Vec::new(),
         error: None,
         final_output: None,
     };
     let assistant = text_message("a1", MessageRole::Assistant, "Done.");
+    let first_reasoning = assistant_reasoning_text_message("a-first", "First check the time.", "");
+    let second_reasoning = assistant_reasoning_text_message("a-second", "Then check files.", "");
     let events = vec![
+        conversation_event(first_reasoning.clone()),
         lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
             lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(first),
         )),
+        conversation_event(second_reasoning.clone()),
         lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
             lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(second),
         )),
@@ -602,7 +841,7 @@ fn rlm_trajectory_steps_project_chronologically_without_hidden_tool_results() {
 
     let blocks = timeline_items_from_test_read_view(
         &events,
-        &[assistant],
+        &[first_reasoning, second_reasoning, assistant],
         &[],
         &UiProjectionState::default(),
     );

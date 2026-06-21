@@ -139,9 +139,8 @@ impl<'a> Lexer<'a> {
                 '|' => self.double_or_single('|', TokenKind::OrOr, TokenKind::Pipe),
                 '<' => self.double_or_single('=', TokenKind::LessEqual, TokenKind::Less),
                 '>' => self.double_or_single('=', TokenKind::GreaterEqual, TokenKind::Greater),
-                '"' if self.starts_with_at(offset, "\"\"\"") => self.triple_string()?,
-                '"' => self.string()?,
-                'r' if self.raw_string_hash_count(offset).is_some() => self.raw_string()?,
+                '"' | '\'' => self.quoted_string(ch)?,
+                'r' | 'R' if self.raw_string_delimiter(offset).is_some() => self.raw_string()?,
                 c if is_ident_start(c) => self.ident_or_keyword(),
                 c if c.is_ascii_digit() => self.number()?,
                 _ => return Err(LexError::UnexpectedChar { ch, offset }),
@@ -190,60 +189,25 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn string(&mut self) -> Result<Token, LexError> {
-        let (start, _) = self.bump().expect("string requires quote");
-        let content_start = start + 1;
-        let mut value: Option<String> = None;
-        while let Some((offset, ch)) = self.bump() {
-            match ch {
-                '"' => {
-                    let value = match value {
-                        Some(value) => CompactString::from(value),
-                        None => CompactString::from(&self.source[content_start..offset]),
-                    };
-                    return Ok(Token {
-                        kind: TokenKind::String(value),
-                        span: Span {
-                            start,
-                            end: offset + 1,
-                        },
-                    });
-                }
-                '\\' => {
-                    let value =
-                        value.get_or_insert_with(|| self.source[content_start..offset].to_string());
-                    let Some((_, escaped)) = self.bump() else {
-                        return Err(LexError::UnterminatedString { offset: start });
-                    };
-                    let translated = match escaped {
-                        '"' => '"',
-                        '\\' => '\\',
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        other => other,
-                    };
-                    value.push(translated);
-                }
-                other => {
-                    if let Some(value) = &mut value {
-                        value.push(other);
-                    }
-                }
-            }
-        }
-        Err(LexError::UnterminatedString { offset: start })
-    }
-
-    fn triple_string(&mut self) -> Result<Token, LexError> {
-        let (start, _) = self.peek().expect("triple string requires input");
-        let delimiter = "\"\"\"";
+    fn quoted_string(&mut self, quote: char) -> Result<Token, LexError> {
+        let (start, _) = self.peek().expect("string requires quote");
+        let delimiter = string_delimiter(quote, self.starts_with_triple_quote_at(start, quote));
         let content_start = start + delimiter.len();
         self.consume_until_byte(content_start);
 
         let mut value = String::new();
         while let Some((offset, ch)) = self.bump() {
-            if self.starts_with_at(offset, delimiter) {
+            if delimiter.len() == 1 {
+                if ch == quote {
+                    return Ok(Token {
+                        kind: TokenKind::String(value.into()),
+                        span: Span {
+                            start,
+                            end: offset + quote.len_utf8(),
+                        },
+                    });
+                }
+            } else if self.starts_with_at(offset, &delimiter) {
                 self.consume_until_byte(offset + delimiter.len());
                 return Ok(Token {
                     kind: TokenKind::String(value.into()),
@@ -253,59 +217,49 @@ impl<'a> Lexer<'a> {
                     },
                 });
             }
+
             if ch == '\\' {
                 let Some((_, escaped)) = self.bump() else {
                     return Err(LexError::UnterminatedString { offset: start });
                 };
-                let translated = match escaped {
-                    '"' => '"',
-                    '\\' => '\\',
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    other => other,
-                };
-                value.push(translated);
+                value.push(translate_escape(escaped, quote));
             } else {
                 value.push(ch);
             }
         }
-
         Err(LexError::UnterminatedString { offset: start })
     }
 
-    fn raw_string_hash_count(&self, offset: usize) -> Option<usize> {
+    fn raw_string_delimiter(&self, offset: usize) -> Option<String> {
         let rest = self.source.get(offset..)?;
-        let mut chars = rest.char_indices();
-        match chars.next() {
-            Some((_, 'r')) => {}
+        let mut chars = rest.chars();
+        match chars.next()? {
+            'r' | 'R' => {}
             _ => return None,
         }
-        let mut hashes = 0usize;
-        for (_, ch) in chars {
-            match ch {
-                '#' => hashes += 1,
-                '"' => return Some(hashes),
-                _ => return None,
-            }
+        let quote = chars.next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
         }
-        None
+        let after_prefix = offset + 1;
+        Some(string_delimiter(
+            quote,
+            self.starts_with_triple_quote_at(after_prefix, quote),
+        ))
     }
 
     fn raw_string(&mut self) -> Result<Token, LexError> {
         let (start, _) = self.peek().expect("raw string requires input");
-        let hashes = self
-            .raw_string_hash_count(start)
+        let delimiter = self
+            .raw_string_delimiter(start)
             .expect("raw string branch requires valid opener");
-        let opener_len = 1 + hashes + 1;
-        let content_start = start + opener_len;
-        let closing = format!("\"{}", "#".repeat(hashes));
+        let content_start = start + 1 + delimiter.len();
 
-        let Some(relative_end) = self.source[content_start..].find(&closing) else {
+        let Some(relative_end) = self.source[content_start..].find(&delimiter) else {
             return Err(LexError::UnterminatedString { offset: start });
         };
         let content_end = content_start + relative_end;
-        let end = content_end + closing.len();
+        let end = content_end + delimiter.len();
         let value = CompactString::from(&self.source[content_start..content_end]);
         self.consume_until_byte(end);
         Ok(Token {
@@ -417,6 +371,14 @@ impl<'a> Lexer<'a> {
         self.source[offset..].starts_with(needle)
     }
 
+    fn starts_with_triple_quote_at(&self, offset: usize, quote: char) -> bool {
+        let mut delimiter = String::with_capacity(3);
+        delimiter.push(quote);
+        delimiter.push(quote);
+        delimiter.push(quote);
+        self.starts_with_at(offset, &delimiter)
+    }
+
     fn consume_until_byte(&mut self, end: usize) {
         while let Some((offset, _)) = self.peek() {
             if offset >= end {
@@ -443,6 +405,22 @@ fn is_ident_start(ch: char) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     is_ident_start(ch) || ch.is_ascii_digit()
+}
+
+fn string_delimiter(quote: char, triple: bool) -> String {
+    let count = if triple { 3 } else { 1 };
+    std::iter::repeat(quote).take(count).collect()
+}
+
+fn translate_escape(escaped: char, quote: char) -> char {
+    match escaped {
+        '\\' => '\\',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        other if other == quote => quote,
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -524,14 +502,19 @@ mod tests {
     }
 
     #[test]
-    fn lexes_multiline_and_rust_style_raw_strings() {
+    fn lexes_python_shaped_string_literals() {
         let tokens = lex(r####"
-            normal = """line1\n"quoted"
+            double = "hi\n\t\"\\\r\q"
+            single = 'it\'s ok\n'
+            triple_double = """line1\n"quoted"
 line2"""
-            raw = r#"*** Begin Patch
+            triple_single = '''line1\n'quoted'
+line2'''
+            raw_double = r"*** Begin Patch
 @@
 \n { untouched }
-*** End Patch"#
+*** End Patch"
+            raw_single = r'path\to\file'
             "####)
         .expect("lexing should succeed");
 
@@ -545,21 +528,25 @@ line2"""
         assert_eq!(
             strings,
             vec![
+                CompactString::from("hi\n\t\"\\\rq"),
+                CompactString::from("it's ok\n"),
                 CompactString::from("line1\n\"quoted\"\nline2"),
+                CompactString::from("line1\n'quoted'\nline2"),
                 CompactString::from("*** Begin Patch\n@@\n\\n { untouched }\n*** End Patch"),
+                CompactString::from("path\\to\\file"),
             ]
         );
     }
 
     #[test]
-    fn lexes_rust_style_raw_strings_with_hash_delimiters() {
+    fn lexes_raw_triple_strings() {
         let tokens = lex(r#####"
-            script = r##"python3 - <<'PY'
+            script = r'''python3 - <<'PY'
 print("""double quotes are preserved""")
 \n { braces stay raw }
-PY"##
-            markdown = r###"This body can mention "## without ending.
-It ends only at quote plus three hashes."###
+PY'''
+            markdown = R"""This body can mention " and ' without escaping.
+It ends only at three double quotes."""
             "#####)
         .expect("lexing should succeed");
 
@@ -577,7 +564,7 @@ It ends only at quote plus three hashes."###
                     "python3 - <<'PY'\nprint(\"\"\"double quotes are preserved\"\"\")\n\\n { braces stay raw }\nPY",
                 ),
                 CompactString::from(
-                    "This body can mention \"## without ending.\nIt ends only at quote plus three hashes.",
+                    "This body can mention \" and ' without escaping.\nIt ends only at three double quotes.",
                 ),
             ]
         );
@@ -589,8 +576,8 @@ It ends only at quote plus three hashes."###
             regular = "@label(title: \"plain\")"
             multiline = """@label(title: "plain")
 finish null"""
-            raw = r#"@label(title: "plain")
-@label(title: "still plain") finish null"#
+            raw = r"""@label(title: "plain")
+@label(title: "still plain") finish null"""
             "####)
         .expect("lexing should succeed");
 
@@ -655,11 +642,31 @@ finish null"""
         let err = lex("\"\"\"abc").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
 
-        let err = lex("r#\"abc").expect_err("lexing should fail");
+        let err = lex("'abc").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
 
-        let err = lex("r##\"abc\"#").expect_err("lexing should fail");
+        let err = lex("'''abc").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
+
+        let err = lex("r\"abc").expect_err("lexing should fail");
+        assert_eq!(err, LexError::UnterminatedString { offset: 0 });
+
+        let err = lex("r'''abc").expect_err("lexing should fail");
+        assert_eq!(err, LexError::UnterminatedString { offset: 0 });
+    }
+
+    #[test]
+    fn rust_style_raw_strings_are_not_recognized() {
+        let tokens = lex("submit r#\"abc\"#").expect("lexing treats hash as comment");
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Submit,
+                TokenKind::Ident("r".into()),
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

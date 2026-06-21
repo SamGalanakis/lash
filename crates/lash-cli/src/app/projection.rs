@@ -1,13 +1,22 @@
 use super::*;
-use crate::assistant_text::{merge_assistant_reasoning_text, normalize_assistant_text};
+use crate::assistant_text::normalize_assistant_text;
+use crate::skill_prompt::strip_appended_skill_blocks;
 use lash_export::transcript::{
     TranscriptEntryKind, projection_transcript_entries, submitted_value_display_text,
 };
 use std::collections::HashMap;
 
+use crate::activity::{ActivityCall, ActivityExtra, ActivityResult};
+
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
 const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
+const UI_ACTIVITY_SUMMARY_CHAR_LIMIT: usize = 512;
+const UI_ACTIVITY_DETAIL_LINE_LIMIT: usize = 24;
+const UI_ACTIVITY_DETAIL_CHAR_LIMIT: usize = 320;
+const UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT: usize = 16 * 1024;
+const UI_ACTIVITY_ARTIFACT_ITEM_LIMIT: usize = 64;
+const UI_ACTIVITY_CHILD_LIMIT: usize = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct UiTimeline {
@@ -109,11 +118,305 @@ pub(crate) enum UiTimelineItem {
     /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
     PluginPanel(PluginPanelBlock),
-    /// The fenced `lashlang` source from an RLM turn, captured so the
+    /// The source from a paired `<lashlang>` RLM block, captured so the
     /// transcript can reveal the code that produced the subsequent tool
     /// activities. Hidden by default; shown at full expansion.
     LashlangCode(String),
     Splash,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiActivityJournal {
+    #[serde(default)]
+    entries: Vec<UiActivityJournalEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiActivityRecord {
+    pub turn_ordinal: usize,
+    pub lashlang_block_ordinal: usize,
+    pub activity: UiReplayActivity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiReplayActivity {
+    pub call: UiReplayActivityCall,
+    pub result: UiReplayActivityResult,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<UiReplayActivity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiReplayActivityCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    pub kind: ActivityKind,
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<ActivityExtra>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiReplayActivityResult {
+    pub status: ActivityStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ActivityArtifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiActivityJournalEntry {
+    pub turn_ordinal: usize,
+    pub lashlang_block_ordinal: usize,
+    pub items: Vec<UiTimelineItem>,
+}
+
+impl UiActivityJournal {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn entries(&self) -> &[UiActivityJournalEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn apply_record(&mut self, record: UiActivityRecord) {
+        let entry = match self.entries.iter_mut().find(|entry| {
+            entry.turn_ordinal == record.turn_ordinal
+                && entry.lashlang_block_ordinal == record.lashlang_block_ordinal
+        }) {
+            Some(entry) => entry,
+            None => {
+                self.entries.push(UiActivityJournalEntry {
+                    turn_ordinal: record.turn_ordinal,
+                    lashlang_block_ordinal: record.lashlang_block_ordinal,
+                    items: Vec::new(),
+                });
+                self.entries
+                    .last_mut()
+                    .expect("entry was just pushed into journal")
+            }
+        };
+        let mut timeline = UiTimeline::from(std::mem::take(&mut entry.items));
+        ActivityState::append_projected_activity_to_timeline(
+            &mut timeline,
+            record.activity.into_activity_block(),
+        );
+        entry.items = timeline.items;
+    }
+}
+
+impl UiActivityRecord {
+    pub(crate) fn new(
+        turn_ordinal: usize,
+        lashlang_block_ordinal: usize,
+        activity: ActivityBlock,
+    ) -> Self {
+        Self {
+            turn_ordinal,
+            lashlang_block_ordinal,
+            activity: UiReplayActivity::from_activity(compact_activity_for_replay(activity)),
+        }
+    }
+}
+
+impl UiReplayActivity {
+    fn from_activity(activity: ActivityBlock) -> Self {
+        Self {
+            call: UiReplayActivityCall {
+                call_id: activity.call.call_id,
+                kind: activity.call.kind,
+                tool_name: activity.call.tool_name,
+                tag: activity.call.tag,
+                summary: activity.call.summary,
+                extra: activity.call.extra,
+            },
+            result: UiReplayActivityResult {
+                status: activity.result.status,
+                detail_lines: activity.result.detail_lines,
+                artifact: activity.result.artifact,
+            },
+            duration_ms: activity.duration_ms,
+            children: activity
+                .children
+                .into_iter()
+                .map(UiReplayActivity::from_activity)
+                .collect(),
+        }
+    }
+
+    fn into_activity_block(self) -> ActivityBlock {
+        ActivityBlock {
+            call: ActivityCall {
+                call_id: self.call.call_id,
+                kind: self.call.kind,
+                tool_name: self.call.tool_name,
+                args: serde_json::Value::Null,
+                tag: self.call.tag,
+                summary: self.call.summary,
+                extra: self.call.extra,
+            },
+            result: ActivityResult {
+                status: self.result.status,
+                raw: serde_json::Value::Null,
+                detail_lines: self.result.detail_lines,
+                artifact: self.result.artifact,
+            },
+            duration_ms: self.duration_ms,
+            children: self
+                .children
+                .into_iter()
+                .map(UiReplayActivity::into_activity_block)
+                .collect(),
+        }
+    }
+}
+
+fn compact_activity_for_replay(mut activity: ActivityBlock) -> ActivityBlock {
+    activity.call.args = serde_json::Value::Null;
+    activity.call.tool_name =
+        truncate_chars(activity.call.tool_name, UI_ACTIVITY_SUMMARY_CHAR_LIMIT);
+    activity.call.summary = truncate_chars(activity.call.summary, UI_ACTIVITY_SUMMARY_CHAR_LIMIT);
+    activity.call.tag = activity
+        .call
+        .tag
+        .map(|tag| truncate_chars(tag, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+    if let Some(ActivityExtra::Exploration(ops)) = activity.call.extra.as_mut() {
+        ops.truncate(UI_ACTIVITY_ARTIFACT_ITEM_LIMIT);
+        for op in ops {
+            op.subject = truncate_chars(
+                std::mem::take(&mut op.subject),
+                UI_ACTIVITY_SUMMARY_CHAR_LIMIT,
+            );
+        }
+    }
+    activity.result.raw = serde_json::Value::Null;
+    let detail_lines = std::mem::take(&mut activity.result.detail_lines);
+    activity.result.detail_lines = compact_strings(
+        detail_lines,
+        UI_ACTIVITY_DETAIL_LINE_LIMIT,
+        UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+    );
+    activity.result.artifact = activity.result.artifact.map(compact_activity_artifact);
+    activity.children.truncate(UI_ACTIVITY_CHILD_LIMIT);
+    activity.children = activity
+        .children
+        .into_iter()
+        .map(compact_activity_for_replay)
+        .collect();
+    activity
+}
+
+fn compact_activity_artifact(artifact: ActivityArtifact) -> ActivityArtifact {
+    match artifact {
+        ActivityArtifact::QuestionPanel(mut panel) => {
+            panel.prompt_lines = compact_strings(
+                panel.prompt_lines,
+                UI_ACTIVITY_DETAIL_LINE_LIMIT,
+                UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+            );
+            panel.options.truncate(UI_ACTIVITY_ARTIFACT_ITEM_LIMIT);
+            for option in &mut panel.options {
+                option.label = truncate_chars(
+                    std::mem::take(&mut option.label),
+                    UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+                );
+            }
+            panel.answer = panel
+                .answer
+                .map(|answer| truncate_chars(answer, UI_ACTIVITY_DETAIL_CHAR_LIMIT));
+            panel.note = panel
+                .note
+                .map(|note| truncate_chars(note, UI_ACTIVITY_DETAIL_CHAR_LIMIT));
+            ActivityArtifact::QuestionPanel(panel)
+        }
+        ActivityArtifact::DiffPreview { title, diff } => ActivityArtifact::DiffPreview {
+            title: truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT),
+            diff: truncate_chars(diff, UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT),
+        },
+        ActivityArtifact::PatchPreview {
+            mut files,
+            total_added,
+            total_removed,
+        } => {
+            files.truncate(UI_ACTIVITY_ARTIFACT_ITEM_LIMIT);
+            for file in &mut files {
+                file.path = truncate_chars(
+                    std::mem::take(&mut file.path),
+                    UI_ACTIVITY_SUMMARY_CHAR_LIMIT,
+                );
+                file.from_path = file
+                    .from_path
+                    .take()
+                    .map(|path| truncate_chars(path, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+                file.status = truncate_chars(
+                    std::mem::take(&mut file.status),
+                    UI_ACTIVITY_SUMMARY_CHAR_LIMIT,
+                );
+                file.diff = truncate_chars(
+                    std::mem::take(&mut file.diff),
+                    UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT,
+                );
+            }
+            ActivityArtifact::PatchPreview {
+                files,
+                total_added,
+                total_removed,
+            }
+        }
+        ActivityArtifact::TextPreview { title, text } => ActivityArtifact::TextPreview {
+            title: title.map(|title| truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT)),
+            text: truncate_chars(text, UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT),
+        },
+        ActivityArtifact::SourceList { title, items } => ActivityArtifact::SourceList {
+            title: truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT),
+            items: compact_strings(
+                items,
+                UI_ACTIVITY_ARTIFACT_ITEM_LIMIT,
+                UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+            ),
+        },
+        ActivityArtifact::SnippetPreview(mut snippet) => {
+            snippet.title = snippet
+                .title
+                .map(|title| truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+            snippet.path = truncate_chars(snippet.path, UI_ACTIVITY_SUMMARY_CHAR_LIMIT);
+            snippet.content = truncate_chars(snippet.content, UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT);
+            snippet.language = snippet
+                .language
+                .map(|language| truncate_chars(language, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+            ActivityArtifact::SnippetPreview(snippet)
+        }
+    }
+}
+
+fn compact_strings(values: Vec<String>, item_limit: usize, char_limit: usize) -> Vec<String> {
+    values
+        .into_iter()
+        .take(item_limit)
+        .map(|value| truncate_chars(value, char_limit))
+        .collect()
+}
+
+fn truncate_chars(value: String, limit: usize) -> String {
+    let cut_at = {
+        let mut chars = value.char_indices();
+        for _ in 0..limit {
+            if chars.next().is_none() {
+                return value;
+            }
+        }
+        chars.next().map(|(idx, _)| idx)
+    };
+    match cut_at {
+        Some(idx) => value[..idx].to_string(),
+        None => value,
+    }
 }
 
 pub(crate) fn timeline_from_read_view(
@@ -122,6 +425,7 @@ pub(crate) fn timeline_from_read_view(
 ) -> UiTimeline {
     let projection = read_view.chronological_projection();
     let mut timeline = timeline_from_chronological(&projection);
+    apply_activity_journal(&mut timeline, &ui_state.activity_journal);
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
         ui_state
@@ -131,6 +435,63 @@ pub(crate) fn timeline_from_read_view(
             .map(UiTimelineItem::PluginPanel),
     );
     timeline
+}
+
+fn apply_activity_journal(timeline: &mut UiTimeline, journal: &UiActivityJournal) {
+    if journal.is_empty() {
+        return;
+    }
+    let mut insertions = journal
+        .entries()
+        .iter()
+        .filter(|entry| !entry.items.is_empty())
+        .filter_map(|entry| {
+            activity_journal_insert_position(timeline.items(), entry)
+                .map(|position| (position, entry.items.clone()))
+        })
+        .collect::<Vec<_>>();
+    insertions.sort_by_key(|(position, _)| *position);
+    let mut offset = 0usize;
+    for (position, items) in insertions {
+        let position = position + offset;
+        let item_count = items.len();
+        timeline.items.splice(position..position, items);
+        offset += item_count;
+    }
+}
+
+fn activity_journal_insert_position(
+    items: &[UiTimelineItem],
+    entry: &UiActivityJournalEntry,
+) -> Option<usize> {
+    let turn_starts = user_turn_start_indices(items);
+    let (turn_start, turn_end) = if turn_starts.is_empty() {
+        if entry.turn_ordinal == 0 {
+            (0, items.len())
+        } else {
+            return None;
+        }
+    } else {
+        let turn_start = *turn_starts.get(entry.turn_ordinal)?;
+        let turn_end = turn_starts
+            .get(entry.turn_ordinal + 1)
+            .copied()
+            .unwrap_or(items.len());
+        (turn_start, turn_end)
+    };
+
+    let mut seen_lashlang_blocks = 0usize;
+    for (idx, item) in items[turn_start..turn_end].iter().enumerate() {
+        if !matches!(item, UiTimelineItem::LashlangCode(_)) {
+            continue;
+        }
+        if seen_lashlang_blocks == entry.lashlang_block_ordinal {
+            return Some(turn_start + idx + 1);
+        }
+        seen_lashlang_blocks += 1;
+    }
+
+    Some(turn_end)
 }
 
 #[cfg(test)]
@@ -160,8 +521,14 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                     false,
                 );
             }
-            TranscriptEntryKind::RlmStep(step) => {
-                append_rlm_step_items(&mut timeline, &step);
+            TranscriptEntryKind::AssistantReasoning(text) => {
+                let _ = push_assistant_reasoning_item(&mut timeline, &text);
+            }
+            TranscriptEntryKind::AssistantText(text) => {
+                let _ = push_assistant_text_item(&mut timeline, &text);
+            }
+            TranscriptEntryKind::LashlangStep(step) => {
+                append_lashlang_step_items(&mut timeline, &step);
             }
         }
     }
@@ -169,13 +536,10 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
     timeline
 }
 
-fn append_rlm_step_items(
+fn append_lashlang_step_items(
     timeline: &mut UiTimeline,
-    step: &lash_export::transcript::RlmTranscriptStep,
+    step: &lash_export::transcript::LashlangTranscriptStep,
 ) {
-    if let Some(reasoning) = step.reasoning.as_deref() {
-        let _ = push_assistant_reasoning_item(timeline, reasoning);
-    }
     timeline.push(UiTimelineItem::LashlangCode(step.code.clone()));
     // Mirror the live path (`CodeBlockCompleted`): a failed block keeps its
     // code on screen with the error rendered after it, so scrollback shows the
@@ -559,22 +923,24 @@ fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool 
     if cleaned.is_empty() {
         return false;
     }
-    if let Some(UiTimelineItem::AssistantReasoning(existing)) = timeline.last_mut() {
-        return merge_assistant_reasoning_text(existing, &cleaned);
-    }
     timeline.push(UiTimelineItem::AssistantReasoning(cleaned));
     true
 }
 
 pub(crate) fn rendered_message_text(message: &Message) -> String {
-    message
+    let text = message
         .parts
         .iter()
         .filter_map(|part| rendered_part_text(&part.kind, &part.content))
         .collect::<Vec<_>>()
         .join("\n\n")
         .trim()
-        .to_string()
+        .to_string();
+    if matches!(message.role, MessageRole::User) {
+        strip_appended_skill_blocks(&text)
+    } else {
+        text
+    }
 }
 
 fn rendered_part_text(kind: &PartKind, content: &str) -> Option<String> {

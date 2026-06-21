@@ -252,7 +252,12 @@ impl MockHost {
                 record.insert("status".into(), Value::String("completed".into()));
                 record.insert("done".into(), Value::Bool(true));
                 record.insert("running".into(), Value::Bool(false));
-                record.insert("output".into(), Value::String(format!("ran: {cmd}").into()));
+                let output = if cmd == "large-output" {
+                    format!("{}TAIL", "x".repeat(4096))
+                } else {
+                    format!("ran: {cmd}")
+                };
+                record.insert("output".into(), Value::String(output.into()));
                 record.insert("exit_code".into(), Value::Number(exit_code.into()));
                 Ok(Value::Record(record.into()))
             }
@@ -376,15 +381,15 @@ async fn prompt_claim_value_literals_parse_and_evaluate() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_rust_style_raw_strings_parse_and_evaluate() {
+async fn prompt_claim_raw_triple_strings_parse_and_evaluate() {
     let host = MockHost::default();
     assert_eq!(
         run(
             &host,
-            r#####"submit r##"python3 - <<'PY'
+            r#####"submit r'''python3 - <<'PY'
 print("""hello""")
 \n { braces stay raw }
-PY"##"#####
+PY'''"#####
         ),
         Value::String(
             "python3 - <<'PY'\nprint(\"\"\"hello\"\"\")\n\\n { braces stay raw }\nPY".into()
@@ -394,7 +399,7 @@ PY"##"#####
 
 // ─────────────────────────────────────────────────────────────────────
 // Prompt claim: "Assign with `name = expr`. Variables persist across
-// fenced blocks within the turn."
+// a Lashlang block within the turn."
 // (Within-block persistence is covered here; cross-block persistence
 // is tested at the RLM-runtime level, not at the lashlang level.)
 // ─────────────────────────────────────────────────────────────────────
@@ -1085,6 +1090,30 @@ async fn prompt_claim_builtin_format_positional_placeholders() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_format_handles_markdown_raw_templates() {
+    let host = MockHost::default();
+    assert_eq!(
+        run(
+            &host,
+            r####"
+        submit format(r"""## {0}
+
+```json
+{{"status":"{1}","exit_code":{2}}}
+```
+
+{3}""", "cargo-machete", "timed_out", 124, "The install command exceeded the timeout.")
+        "####
+        ),
+        Value::String(
+            "## cargo-machete\n\n```json\n{\"status\":\"timed_out\",\"exit_code\":124}\n```\n\nThe install command exceeded the timeout."
+                .to_string()
+                .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
     let host = MockHost::default();
     let value = run(
@@ -1159,16 +1188,31 @@ submit [a_result.claim, b_result.claim]"#,
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_example_allow_nonzero_exit_inspects_shell_exit_code() {
+async fn prompt_example_shell_nonzero_exit_is_result_data() {
     let host = MockHost::default();
     assert_eq!(
         run(
             &host,
-            r#"probe = await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?
+            r#"probe = await shell.exec({ cmd: "test -f Cargo.lock" })?
 submit probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing""#,
         ),
         Value::String("Cargo.lock is missing".into())
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_example_tool_output_stays_full_in_variables() {
+    let host = MockHost::default();
+    let Value::Record(record) = run(
+        &host,
+        r#"check = await shell.exec({ cmd: "large-output" })?
+submit { chars: len(check.output), tail: slice(check.output, 4096, null) }"#,
+    ) else {
+        panic!("expected record");
+    };
+
+    assert_eq!(record["chars"], Value::Number(4100.0));
+    assert_eq!(record["tail"], Value::String("TAIL".into()));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1218,14 +1262,14 @@ async fn prompt_example_validates_nontrivial_edit_before_submit() {
     assert_eq!(
         run(
             &host,
-            r##"patch = r#"*** Begin Patch
+            r##"patch = r"""*** Begin Patch
 *** Update File: src/lib.rs
 @@
 -old
 +new
-*** End Patch"#
+*** End Patch"""
 await files.patch({ input: patch })?
-check = await shell.exec({ cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
+check = await shell.exec({ cmd: "cargo check --workspace --all-targets" })?
 if check.exit_code != 0 {
   print slice(check.output, 0, 4000)
 } else {

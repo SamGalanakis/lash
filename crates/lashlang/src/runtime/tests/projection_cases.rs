@@ -509,7 +509,7 @@ async fn projected_children_can_be_lazy_inside_ordinary_records() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn print_projected_uses_render_and_submit_materializes() {
+async fn print_projected_leaves_projection_to_host_and_submit_materializes() {
     let list = TestProjectedValue::new(vec![Value::String("entry".into())]);
     let projected = projected_list_bindings("history", Arc::clone(&list));
 
@@ -518,7 +518,7 @@ async fn print_projected_uses_render_and_submit_materializes() {
         .expect("projected print and submit");
     let _ = to_json(&value);
 
-    assert_eq!(list.render_count.load(Ordering::SeqCst), 1);
+    assert_eq!(list.render_count.load(Ordering::SeqCst), 0);
     assert_eq!(list.materialize_count.load(Ordering::SeqCst), 1);
 }
 

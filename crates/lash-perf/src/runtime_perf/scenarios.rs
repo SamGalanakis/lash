@@ -32,6 +32,7 @@ pub(crate) enum RuntimePerfScenario {
     RlmSubagentSpawn,
     RlmLlmQuery,
     RlmGlobals,
+    RlmLargePrint,
     RlmLargeToolCatalog,
     ObservationalMemory,
     ObservationalMemoryMaintenance,
@@ -53,7 +54,7 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 30] = [
+    pub(crate) const DEFAULTS: [Self; 31] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -66,6 +67,7 @@ impl RuntimePerfScenario {
         Self::RlmSubagentSpawn,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
+        Self::RlmLargePrint,
         Self::RlmLargeToolCatalog,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
@@ -85,7 +87,7 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
     ];
-    pub(crate) const KNOWN: [Self; 30] = [
+    pub(crate) const KNOWN: [Self; 31] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -98,6 +100,7 @@ impl RuntimePerfScenario {
         Self::RlmSubagentSpawn,
         Self::RlmLlmQuery,
         Self::RlmGlobals,
+        Self::RlmLargePrint,
         Self::RlmLargeToolCatalog,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
@@ -132,6 +135,7 @@ impl RuntimePerfScenario {
             "rlm_subagent_spawn" => Some(Self::RlmSubagentSpawn),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
             "rlm_globals" => Some(Self::RlmGlobals),
+            "rlm_large_print" => Some(Self::RlmLargePrint),
             "rlm_large_tool_catalog" => Some(Self::RlmLargeToolCatalog),
             "observational_memory" => Some(Self::ObservationalMemory),
             "observational_memory_maintenance" => Some(Self::ObservationalMemoryMaintenance),
@@ -168,6 +172,7 @@ impl RuntimePerfScenario {
             Self::RlmSubagentSpawn => "rlm_subagent_spawn",
             Self::RlmLlmQuery => "rlm_llm_query",
             Self::RlmGlobals => "rlm_globals",
+            Self::RlmLargePrint => "rlm_large_print",
             Self::RlmLargeToolCatalog => "rlm_large_tool_catalog",
             Self::ObservationalMemory => "observational_memory",
             Self::ObservationalMemoryMaintenance => "observational_memory_maintenance",
@@ -218,6 +223,7 @@ impl RuntimePerfScenario {
             | Self::RlmSubagentSpawn
             | Self::RlmLlmQuery
             | Self::RlmGlobals
+            | Self::RlmLargePrint
             | Self::RlmLargeToolCatalog
             | Self::EmbedRlm
             | Self::TraceJsonlExtended => ExecutionMode::Rlm,

@@ -1,6 +1,6 @@
-//! Exploration projector: `read_file`, `grep`, `glob`, `ls`.
+//! Exploration projector: `read_file`, `grep`, `glob`.
 //!
-//! All four produce an `ActivityKind::Exploration` block with one
+//! All three produce an `ActivityKind::Exploration` block with one
 //! `ExplorationOp`. Consecutive explorations merge into a single
 //! `Explored` block via the `ActivityState` timeline append path.
 
@@ -16,7 +16,7 @@ pub(crate) struct ExplorationProjector;
 
 impl ToolProjector for ExplorationProjector {
     fn tool_names(&self) -> &'static [&'static str] {
-        &["read_file", "grep", "glob", "ls"]
+        &["read_file", "grep", "glob"]
     }
 
     fn project(&self, ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
@@ -63,10 +63,6 @@ pub(crate) fn exploration_op_for(
         "glob" => Some(ExplorationOp {
             kind: ExplorationOpKind::Glob,
             subject: glob_label(args),
-        }),
-        "ls" => Some(ExplorationOp {
-            kind: ExplorationOpKind::List,
-            subject: compact_path_display(tool_arg_str(args, "path").unwrap_or(".")),
         }),
         _ => None,
     }
@@ -139,7 +135,7 @@ fn exploration_step_line(op: &ExplorationOp) -> String {
 /// (on construction or after a merge). Two modes:
 ///
 /// - **Single op**: promote the op straight onto the call line, no
-///   detail lines. Visually `· Read README.md`. A solo read/search/glob/ls
+///   detail lines. Visually `· Read README.md`. A solo read/search/glob
 ///   reads cleaner as one line than as a wrapper + indented body —
 ///   the old `EXPLORE · 1 step` layout doubled the line count for a
 ///   single operation and duplicated the op text.

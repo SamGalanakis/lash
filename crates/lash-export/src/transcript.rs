@@ -4,17 +4,16 @@ use lash_core::session_model::{Message, MessageRole, PartKind, ProtocolEvent};
 use lash_core::{ChronologicalEntry, ChronologicalPayload, ChronologicalProjection};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RlmTranscriptStep {
+pub struct LashlangTranscriptStep {
     pub id: String,
     pub protocol_iteration: usize,
-    pub reasoning: Option<String>,
     pub code: String,
     pub output: Vec<String>,
     pub error: Option<String>,
     pub final_output: Option<serde_json::Value>,
 }
 
-impl RlmTranscriptStep {
+impl LashlangTranscriptStep {
     pub fn output_chars(&self) -> usize {
         self.output.iter().map(|item| item.chars().count()).sum()
     }
@@ -29,7 +28,9 @@ pub struct TranscriptEntry<'a> {
 #[derive(Clone, Debug)]
 pub enum TranscriptEntryKind<'a> {
     Message(&'a Message),
-    RlmStep(RlmTranscriptStep),
+    AssistantReasoning(String),
+    AssistantText(String),
+    LashlangStep(LashlangTranscriptStep),
 }
 
 pub fn projection_transcript_entries<'a>(
@@ -41,35 +42,99 @@ pub fn projection_transcript_entries<'a>(
 pub fn chronological_transcript_entries<'a>(
     chronological: &'a [ChronologicalEntry],
 ) -> Vec<TranscriptEntry<'a>> {
+    let suppressed = suppressed_rlm_final_output_message_ids(chronological);
     chronological
         .iter()
-        .filter_map(project_chronological_entry)
+        .filter(|entry| match &entry.payload {
+            ChronologicalPayload::Message(message) => !suppressed.contains(&message.id),
+            ChronologicalPayload::ProtocolEvent(_) => true,
+        })
+        .flat_map(project_chronological_entries)
         .collect()
 }
 
-pub fn project_chronological_entry(entry: &ChronologicalEntry) -> Option<TranscriptEntry<'_>> {
-    let kind = match &entry.payload {
-        ChronologicalPayload::Message(message) => TranscriptEntryKind::Message(message),
+pub fn project_chronological_entries(entry: &ChronologicalEntry) -> Vec<TranscriptEntry<'_>> {
+    match &entry.payload {
+        ChronologicalPayload::Message(message) => project_message_entries(entry.index, message),
         ChronologicalPayload::ProtocolEvent(event) => {
-            TranscriptEntryKind::RlmStep(rlm_transcript_step_from_event(event)?)
+            rlm_transcript_entries_from_event(entry.index, event)
         }
-    };
-    Some(TranscriptEntry {
-        index: entry.index,
-        kind,
-    })
+    }
 }
 
-pub fn rlm_transcript_step_from_event(event: &ProtocolEvent) -> Option<RlmTranscriptStep> {
+fn project_message_entries<'a>(index: usize, message: &'a Message) -> Vec<TranscriptEntry<'a>> {
+    if !matches!(message.role, MessageRole::Assistant) {
+        return vec![TranscriptEntry {
+            index,
+            kind: TranscriptEntryKind::Message(message),
+        }];
+    }
+
+    let simple_assistant_parts = message.parts.iter().all(|part| {
+        matches!(
+            part.kind,
+            PartKind::Reasoning | PartKind::Text | PartKind::Prose
+        ) && part.attachment.is_none()
+            && part.tool_call_id.is_none()
+            && part.tool_name.is_none()
+    });
+    if !simple_assistant_parts {
+        return vec![TranscriptEntry {
+            index,
+            kind: TranscriptEntryKind::Message(message),
+        }];
+    }
+
+    message
+        .parts
+        .iter()
+        .filter_map(|part| match part.kind {
+            PartKind::Reasoning => display_text(&part.content).map(|text| TranscriptEntry {
+                index,
+                kind: TranscriptEntryKind::AssistantReasoning(text),
+            }),
+            PartKind::Text | PartKind::Prose => {
+                display_text(&part.content).map(|text| TranscriptEntry {
+                    index,
+                    kind: TranscriptEntryKind::AssistantText(text),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn rlm_transcript_entries_from_event(
+    index: usize,
+    event: &ProtocolEvent,
+) -> Vec<TranscriptEntry<'_>> {
+    let step = match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+        Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step)) => step,
+        Some(_) | None => return Vec::new(),
+    };
+    vec![TranscriptEntry {
+        index,
+        kind: TranscriptEntryKind::LashlangStep(LashlangTranscriptStep {
+            id: step.id,
+            protocol_iteration: step.protocol_iteration,
+            code: step.code,
+            output: step.output,
+            error: step.error,
+            final_output: step.final_output,
+        }),
+    }]
+}
+
+pub fn lashlang_transcript_step_from_event(
+    event: &ProtocolEvent,
+) -> Option<LashlangTranscriptStep> {
     let step = match lash_protocol_rlm::decode_rlm_protocol_event(event)? {
         lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step) => step,
         _ => return None,
     };
-    let reasoning = rlm_reasoning_display_text(&step.reasoning);
-    Some(RlmTranscriptStep {
+    Some(LashlangTranscriptStep {
         id: step.id,
         protocol_iteration: step.protocol_iteration,
-        reasoning,
         code: step.code,
         output: step.output,
         error: step.error,
@@ -77,8 +142,8 @@ pub fn rlm_transcript_step_from_event(event: &ProtocolEvent) -> Option<RlmTransc
     })
 }
 
-pub fn rlm_reasoning_display_text(text: &str) -> Option<String> {
-    let cleaned = strip_first_lashlang_fence(text).trim().to_string();
+pub fn display_text(text: &str) -> Option<String> {
+    let cleaned = text.trim().to_string();
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
@@ -90,7 +155,7 @@ pub fn suppressed_rlm_final_output_message_ids(
     for entry in chronological {
         match &entry.payload {
             ChronologicalPayload::ProtocolEvent(event) => {
-                last_final_output = rlm_transcript_step_from_event(event)
+                last_final_output = lashlang_transcript_step_from_event(event)
                     .and_then(|step| step.final_output)
                     .map(|value| submitted_value_match_text(&value));
             }
@@ -161,56 +226,6 @@ pub fn format_tokens(n: i64) -> String {
     }
 }
 
-pub fn strip_first_lashlang_fence(text: &str) -> String {
-    let Some(open_rel) = text.find("```") else {
-        return text.to_string();
-    };
-    let opener_len = text.as_bytes()[open_rel..]
-        .iter()
-        .take_while(|&&b| b == b'`')
-        .count();
-    let after_open = open_rel + opener_len;
-    let rest = &text[after_open..];
-    let Some(lang_end_rel) = rest.find('\n') else {
-        return text[..open_rel].to_string();
-    };
-    let lang = rest[..lang_end_rel].trim();
-    if !matches!(lang, "lashlang" | "rlm" | "lash") {
-        return text.to_string();
-    }
-    let body_start = after_open + lang_end_rel + 1;
-    let body_bytes = &text.as_bytes()[body_start..];
-    let mut close = text.len();
-    let mut consumed = 0usize;
-    let mut i = 0;
-    while i < body_bytes.len() {
-        if body_bytes[i] == b'`' {
-            let start = i;
-            while i < body_bytes.len() && body_bytes[i] == b'`' {
-                i += 1;
-            }
-            if i - start >= opener_len {
-                close = body_start + start;
-                consumed = opener_len;
-                break;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    let after_close = (close + consumed).min(text.len());
-    let mut out = String::new();
-    out.push_str(text[..open_rel].trim_end());
-    let tail = text[after_close..].trim_start();
-    if !tail.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(tail);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -239,17 +254,52 @@ mod tests {
         }
     }
 
+    fn assistant_message(id: &str, reasoning: &str, text: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role: MessageRole::Assistant,
+            parts: Arc::new(vec![
+                Part {
+                    id: format!("{id}.r"),
+                    kind: PartKind::Reasoning,
+                    content: reasoning.to_string(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_replay: None,
+                    prune_state: PruneState::Intact,
+                    reasoning_meta: None,
+                    response_meta: None,
+                },
+                Part {
+                    id: format!("{id}.t"),
+                    kind: PartKind::Text,
+                    content: text.to_string(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_replay: None,
+                    prune_state: PruneState::Intact,
+                    reasoning_meta: None,
+                    response_meta: None,
+                },
+            ]),
+            origin: None,
+        }
+    }
+
     fn rlm_payload(step: lash_rlm_types::RlmTrajectoryEntry) -> ChronologicalPayload {
         ChronologicalPayload::ProtocolEvent(lash_protocol_rlm::rlm_protocol_event(
             lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step),
         ))
     }
 
-    fn rlm_step(final_output: Option<serde_json::Value>) -> lash_rlm_types::RlmTrajectoryEntry {
+    fn lashlang_step(
+        final_output: Option<serde_json::Value>,
+    ) -> lash_rlm_types::RlmTrajectoryEntry {
         lash_rlm_types::RlmTrajectoryEntry {
             id: "step-1".to_string(),
             protocol_iteration: 3,
-            reasoning: "think\n```lashlang\nanswer = 1\n```\nthen submit".to_string(),
             code: "answer = 1".to_string(),
             output: vec!["1".to_string()],
             images: Vec::new(),
@@ -259,33 +309,74 @@ mod tests {
     }
 
     #[test]
-    fn strips_first_lashlang_fence_without_losing_surrounding_reasoning() {
-        assert_eq!(
-            strip_first_lashlang_fence("before\n````lashlang\nx = `1`\n````\nafter"),
-            "before\n\nafter"
-        );
-        assert_eq!(
-            strip_first_lashlang_fence("before\n```rust\nx\n```\nafter"),
-            "before\n```rust\nx\n```\nafter"
-        );
-    }
-
-    #[test]
-    fn projects_rlm_steps_with_display_reasoning() {
-        let chronological = vec![ChronologicalEntry {
-            index: 0,
-            payload: rlm_payload(rlm_step(None)),
-        }];
+    fn projects_rlm_trajectory_as_generic_assistant_entries_then_lashlang_step() {
+        let chronological = vec![
+            ChronologicalEntry {
+                index: 0,
+                payload: ChronologicalPayload::Message(assistant_message(
+                    "a1",
+                    "think",
+                    "visible note",
+                )),
+            },
+            ChronologicalEntry {
+                index: 1,
+                payload: rlm_payload(lashlang_step(None)),
+            },
+        ];
 
         let entries = chronological_transcript_entries(&chronological);
 
-        assert_eq!(entries.len(), 1);
-        let TranscriptEntryKind::RlmStep(step) = &entries[0].kind else {
-            panic!("expected rlm step");
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(
+            &entries[0].kind,
+            TranscriptEntryKind::AssistantReasoning(text) if text == "think"
+        ));
+        assert!(matches!(
+            &entries[1].kind,
+            TranscriptEntryKind::AssistantText(text) if text == "visible note"
+        ));
+        let TranscriptEntryKind::LashlangStep(step) = &entries[2].kind else {
+            panic!("expected lashlang step");
         };
         assert_eq!(step.protocol_iteration, 3);
-        assert_eq!(step.reasoning.as_deref(), Some("think\n\nthen submit"));
         assert_eq!(step.code, "answer = 1");
+    }
+
+    #[test]
+    fn assistant_entries_from_rlm_do_not_duplicate_lashlang_code() {
+        let mut step = lashlang_step(None);
+        step.code = "secret = await tools.hidden({})?\nprint secret".to_string();
+        let chronological = vec![
+            ChronologicalEntry {
+                index: 0,
+                payload: ChronologicalPayload::Message(assistant_message(
+                    "a1",
+                    "think",
+                    "visible before\n\nvisible after",
+                )),
+            },
+            ChronologicalEntry {
+                index: 1,
+                payload: rlm_payload(step),
+            },
+        ];
+
+        let entries = chronological_transcript_entries(&chronological);
+
+        for entry in &entries {
+            match &entry.kind {
+                TranscriptEntryKind::AssistantReasoning(text)
+                | TranscriptEntryKind::AssistantText(text) => {
+                    assert!(!text.contains("secret = await"));
+                    assert!(!text.contains("<lashlang>"));
+                }
+                TranscriptEntryKind::LashlangStep(step) => {
+                    assert!(step.code.contains("secret = await"));
+                }
+                TranscriptEntryKind::Message(_) => {}
+            }
+        }
     }
 
     #[test]
@@ -293,7 +384,7 @@ mod tests {
         let chronological = vec![
             ChronologicalEntry {
                 index: 0,
-                payload: rlm_payload(rlm_step(Some(serde_json::json!("done")))),
+                payload: rlm_payload(lashlang_step(Some(serde_json::json!("done")))),
             },
             ChronologicalEntry {
                 index: 1,

@@ -297,7 +297,7 @@ impl RlmProjectionExtension {
         }
         names.sort();
         let mut lines = vec![
-            "These read-only values are already in scope. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
+            "These read-only values are already in scope. Access them directly in `<lashlang>` blocks; do not recreate them manually.".to_string(),
             String::new(),
             "Read-only variables:".to_string(),
         ];

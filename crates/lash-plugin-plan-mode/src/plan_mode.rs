@@ -44,7 +44,6 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "fetch_url",
         "glob",
         "grep",
-        "ls",
         "read_file",
         "search_tools",
         "search_web",

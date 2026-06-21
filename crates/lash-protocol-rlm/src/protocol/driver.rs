@@ -3,8 +3,8 @@ use lash_core::sansio::{
     WaitingLlmState,
 };
 use lash_core::session_model::{
-    ConversationRecord, Message, SessionEvent, SessionEventRecord, fresh_message_id,
-    make_error_event,
+    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+    SessionEventRecord, fresh_message_id, make_error_event, shared_parts,
 };
 use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart, LlmResponse,
@@ -18,7 +18,7 @@ use crate::projection::rlm_protocol_event;
 use crate::rlm_support::decode_rlm_termination_options;
 
 use super::actions::{invalid_driver_state_actions, invalid_turn_options_actions};
-use super::fence::extract_first_lashlang_fence;
+use super::cell::{CellExtraction, extract_lashlang_cell};
 use super::finish::{
     internal_assistant_prose_message, submit_required_reminder_message,
     submit_schema_mismatch_message, turn_limit_final_message, validate_finish_value,
@@ -86,22 +86,21 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
             return actions;
         }
 
-        let extraction = extract_first_lashlang_fence(&assistant_text);
-        let Some(fence) = extraction else {
-            let termination = match decode_rlm_termination_options(ctx.termination()) {
-                Ok(termination) => termination,
-                Err(err) => return invalid_turn_options_actions(err),
-            };
+        let termination = match decode_rlm_termination_options(ctx.termination()) {
+            Ok(termination) => termination,
+            Err(err) => return invalid_turn_options_actions(err),
+        };
+
+        let extraction = extract_lashlang_cell(&assistant_text);
+        let Some(cell) = extraction else {
             if matches!(termination, RlmTermination::ProseOrSubmit) {
                 actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
                     "llm_extraction",
-                    serde_json::json!({
-                        "found_lashlang_fence": false,
-                        "prose_only_ends_turn": true,
-                        "assistant_text_chars": assistant_text.chars().count(),
-                        "reasoning_chars": reasoning_text.chars().count(),
-                        "finalization_reason": "prose_or_submit",
-                    }),
+                    llm_extraction_payload(
+                        "finish_prose",
+                        &termination,
+                        LlmExtractionCounts::prose_only(&assistant_text, &reasoning_text),
+                    ),
                 )]));
                 actions.push(DriverAction::StartCheckpoint {
                     checkpoint: CheckpointKind::BeforeCompletion,
@@ -113,18 +112,16 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                 });
                 return actions;
             }
-            let RlmTermination::SubmitRequired { schema } = termination else {
+            let RlmTermination::SubmitRequired { ref schema } = termination else {
                 unreachable!("ProseOrSubmit returned above");
             };
             actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
                 "llm_extraction",
-                serde_json::json!({
-                    "found_lashlang_fence": false,
-                    "prose_only_ends_turn": false,
-                    "assistant_text_chars": assistant_text.chars().count(),
-                    "reasoning_chars": reasoning_text.chars().count(),
-                    "finalization_reason": "submit_required",
-                }),
+                llm_extraction_payload(
+                    "request_submit",
+                    &termination,
+                    LlmExtractionCounts::prose_only(&assistant_text, &reasoning_text),
+                ),
             )]));
             let mut events = Vec::new();
             if !assistant_text.trim().is_empty() {
@@ -145,14 +142,11 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
 
         actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
             "llm_extraction",
-            serde_json::json!({
-                "found_lashlang_fence": true,
-                "had_extra_fences": fence.had_extra_fences,
-                "code_chars": fence.code.chars().count(),
-                "assistant_text_chars": assistant_text.chars().count(),
-                "reasoning_chars": reasoning_text.chars().count(),
-                "decision": "execute_lashlang",
-            }),
+            llm_extraction_payload(
+                "execute_lashlang",
+                &termination,
+                LlmExtractionCounts::cell(&assistant_text, &reasoning_text, &cell),
+            ),
         )]));
 
         let Some(raw_state) = waiting.take_driver_state() else {
@@ -162,19 +156,20 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
             Ok(state) => state,
             Err(err) => return invalid_driver_state_actions(err),
         };
-        state.executed_code = Some(fence.code.clone());
-        state.reasoning = combine_reasoning_and_text(&reasoning_text, &assistant_text);
+        state.executed_code = Some(cell.code.clone());
+        state.reasoning = reasoning_text;
+        state.prose = cell.prose.clone();
 
         // Emit the raw lashlang source as a `Message` with kind
         // `lashlang_code` so the CLI can reveal it in the full-expand
         // view (Alt+O) above the tool activities it produced.
         actions.push(DriverAction::Emit(SessionEvent::Message {
-            text: fence.code.clone(),
+            text: cell.code.clone(),
             kind: "lashlang_code".to_string(),
         }));
         actions.push(DriverAction::StartExec {
             language: "lashlang".to_string(),
-            code: fence.code,
+            code: cell.code,
             driver_state: rlm_driver_state(state),
         });
         actions
@@ -219,9 +214,12 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                     state.terminal_finish = Some(finish_value);
                 }
                 if let Some(outcome) = terminal_outcome {
-                    actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-                        trajectory_entry(ctx.protocol_iteration(), &state, None, None),
-                    )]));
+                    actions.push(DriverAction::AppendEvents(trajectory_events(
+                        ctx.protocol_iteration(),
+                        &state,
+                        None,
+                        None,
+                    )));
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
                         on_empty: CheckpointResumeAction::Finish(outcome),
@@ -250,12 +248,12 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                 if let Err(err) = continue_or_stop_after_nonterminal(
                     &ctx,
                     &mut actions,
-                    vec![trajectory_event(trajectory_entry(
+                    trajectory_events(
                         ctx.protocol_iteration(),
                         &state,
                         Some(error_text.clone()),
                         None,
-                    ))],
+                    ),
                     vec![conversation_event(submit_schema_mismatch_message(
                         &error_text,
                     ))],
@@ -265,14 +263,12 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                 return actions;
             }
 
-            actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-                trajectory_entry(
-                    ctx.protocol_iteration(),
-                    &state,
-                    None,
-                    Some(finish_value.clone()),
-                ),
-            )]));
+            actions.push(DriverAction::AppendEvents(trajectory_events(
+                ctx.protocol_iteration(),
+                &state,
+                None,
+                Some(finish_value.clone()),
+            )));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
@@ -287,12 +283,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
         if let Err(err) = continue_or_stop_after_nonterminal(
             &ctx,
             &mut actions,
-            vec![trajectory_event(trajectory_entry(
-                ctx.protocol_iteration(),
-                &state,
-                None,
-                None,
-            ))],
+            trajectory_events(ctx.protocol_iteration(), &state, None, None),
             Vec::new(),
         ) {
             return invalid_turn_options_actions(err);
@@ -388,15 +379,77 @@ fn trajectory_entry(
     final_output: Option<Value>,
 ) -> RlmTrajectoryEntry {
     RlmTrajectoryEntry {
-        id: format!("rlm_step_{protocol_iteration}"),
+        id: format!("lashlang_step_{protocol_iteration}"),
         protocol_iteration,
-        reasoning: state.reasoning.clone(),
         code: state.executed_code.clone().unwrap_or_default(),
         output: state.output.clone(),
         images: state.images.clone(),
         error: validation_error.or_else(|| state.exec_error.clone()),
         final_output,
     }
+}
+
+fn trajectory_events(
+    protocol_iteration: usize,
+    state: &RlmDriverState,
+    validation_error: Option<String>,
+    final_output: Option<Value>,
+) -> Vec<SessionEventRecord> {
+    let mut events = Vec::new();
+    if let Some(message) = assistant_content_message(&state.reasoning, &state.prose) {
+        events.push(conversation_event(message));
+    }
+    events.push(trajectory_event(trajectory_entry(
+        protocol_iteration,
+        state,
+        validation_error,
+        final_output,
+    )));
+    events
+}
+
+fn assistant_content_message(reasoning: &str, prose: &str) -> Option<Message> {
+    let mut parts = Vec::new();
+    let id = fresh_message_id();
+    let reasoning = reasoning.trim();
+    if !reasoning.is_empty() {
+        parts.push(Part {
+            id: format!("{id}.r"),
+            kind: PartKind::Reasoning,
+            content: reasoning.to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        });
+    }
+    let prose = prose.trim();
+    if !prose.is_empty() {
+        parts.push(Part {
+            id: format!("{id}.t"),
+            kind: PartKind::Text,
+            content: prose.to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        });
+    }
+    (!parts.is_empty()).then(|| Message {
+        id,
+        role: MessageRole::Assistant,
+        parts: shared_parts(parts),
+        origin: Some(lash_core::MessageOrigin::Plugin {
+            plugin_id: "rlm_protocol".to_string(),
+            transient: false,
+        }),
+    })
 }
 
 fn conversation_event(message: Message) -> SessionEventRecord {
@@ -418,11 +471,57 @@ fn diagnostic_event(phase: &str, payload: Value) -> SessionEventRecord {
     )))
 }
 
-fn combine_reasoning_and_text(reasoning: &str, text: &str) -> String {
-    match (reasoning.trim().is_empty(), text.trim().is_empty()) {
-        (true, true) => String::new(),
-        (true, false) => text.to_string(),
-        (false, true) => reasoning.to_string(),
-        (false, false) => format!("{reasoning}\n\n{text}"),
+struct LlmExtractionCounts {
+    full_text_chars: usize,
+    prose_chars: usize,
+    code_chars: usize,
+    reasoning_chars: usize,
+    lashlang_cell_count: usize,
+}
+
+impl LlmExtractionCounts {
+    fn prose_only(assistant_text: &str, reasoning_text: &str) -> Self {
+        Self {
+            full_text_chars: assistant_text.chars().count(),
+            prose_chars: assistant_text.chars().count(),
+            code_chars: 0,
+            reasoning_chars: reasoning_text.chars().count(),
+            lashlang_cell_count: 0,
+        }
+    }
+
+    fn cell(assistant_text: &str, reasoning_text: &str, cell: &CellExtraction) -> Self {
+        Self {
+            full_text_chars: assistant_text.chars().count(),
+            prose_chars: cell.prose.chars().count(),
+            code_chars: cell.code.chars().count(),
+            reasoning_chars: reasoning_text.chars().count(),
+            lashlang_cell_count: cell.lashlang_cell_count,
+        }
+    }
+}
+
+fn llm_extraction_payload(
+    decision: &str,
+    termination: &RlmTermination,
+    counts: LlmExtractionCounts,
+) -> Value {
+    serde_json::json!({
+        "decision": decision,
+        "termination": termination_diagnostic_name(termination),
+        "counts": {
+            "full_text_chars": counts.full_text_chars,
+            "prose_chars": counts.prose_chars,
+            "code_chars": counts.code_chars,
+            "reasoning_chars": counts.reasoning_chars,
+            "lashlang_cell_count": counts.lashlang_cell_count,
+        },
+    })
+}
+
+fn termination_diagnostic_name(termination: &RlmTermination) -> &'static str {
+    match termination {
+        RlmTermination::SubmitRequired { .. } => "submit_required",
+        RlmTermination::ProseOrSubmit => "prose_or_submit",
     }
 }

@@ -31,13 +31,11 @@ use crate::stream_markdown::LiveMarkdown;
 use self::cache::BlockRenderCacheEntry;
 pub(super) use self::live::{LiveToolOutput, LiveTurnState};
 pub(crate) use self::projection::{
-    UiTimeline, UiTimelineItem, interrupted_assistant_tail, preview_text_lines,
-    timeline_from_read_view,
+    UiActivityJournal, UiActivityRecord, UiTimeline, UiTimelineItem, interrupted_assistant_tail,
+    preview_text_lines, smart_truncate_preview_line, timeline_from_read_view,
 };
 #[cfg(test)]
-pub(crate) use self::projection::{
-    interrupted_blocks_from_read_view, smart_truncate_preview_line, strip_ansi_escape_sequences,
-};
+pub(crate) use self::projection::{interrupted_blocks_from_read_view, strip_ansi_escape_sequences};
 
 fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
     blocks
@@ -403,6 +401,8 @@ pub struct UiProjectionState {
     pub live_assistant_text: Option<String>,
     #[serde(default)]
     pub live_reasoning_text: Option<String>,
+    #[serde(default)]
+    pub activity_journal: UiActivityJournal,
 }
 
 impl UiProjectionState {
@@ -421,6 +421,7 @@ impl UiProjectionState {
             live_tool_output: app.live.tool_output.clone(),
             live_assistant_text: app.live_assistant_normalized_text(),
             live_reasoning_text: app.live_reasoning_normalized_text(),
+            activity_journal: app.ui_activity_journal.clone(),
         }
     }
 }
@@ -611,6 +612,13 @@ pub struct App {
     pub cwd: String,
     /// Handle state used to derive semantic activity rows from raw tool calls.
     pub activity_state: ActivityState,
+    /// CLI-owned replay of UI rows that came from live Lashlang tool activity.
+    pub ui_activity_journal: UiActivityJournal,
+    pending_ui_activity_records: Vec<UiActivityRecord>,
+    active_ui_turn_ordinal: Option<usize>,
+    active_lashlang_block_ordinal: Option<usize>,
+    next_lashlang_block_ordinal: usize,
+    lashlang_tool_call_anchors: HashMap<String, (usize, usize)>,
     /// Set only when this local UI requested cancellation via Esc.
     manual_interrupt_requested: bool,
     /// Retry details to keep visible once the retry request is in flight.
@@ -628,6 +636,60 @@ pub struct App {
 impl App {
     pub fn ui_projection_state(&self) -> UiProjectionState {
         UiProjectionState::from_app(self)
+    }
+
+    pub(crate) fn replace_ui_activity_journal(&mut self, journal: UiActivityJournal) {
+        self.ui_activity_journal = journal;
+    }
+
+    pub(crate) fn pending_ui_activity_records(&self) -> &[UiActivityRecord] {
+        &self.pending_ui_activity_records
+    }
+
+    pub(crate) fn clear_pending_ui_activity_records(&mut self) {
+        self.pending_ui_activity_records.clear();
+    }
+
+    fn latest_ui_turn_ordinal(&self) -> usize {
+        user_turn_start_indices(self.timeline.items())
+            .len()
+            .saturating_sub(1)
+    }
+
+    fn current_ui_turn_ordinal(&mut self) -> usize {
+        match self.active_ui_turn_ordinal {
+            Some(ordinal) => ordinal,
+            None => {
+                let ordinal = self.latest_ui_turn_ordinal();
+                self.active_ui_turn_ordinal = Some(ordinal);
+                ordinal
+            }
+        }
+    }
+
+    fn active_lashlang_activity_anchor(&mut self) -> Option<(usize, usize)> {
+        let lashlang_block_ordinal = self.active_lashlang_block_ordinal?;
+        Some((self.current_ui_turn_ordinal(), lashlang_block_ordinal))
+    }
+
+    fn remember_lashlang_tool_anchor(&mut self, call_id: &Option<String>, anchor: (usize, usize)) {
+        if let Some(call_id) = call_id.as_ref() {
+            self.lashlang_tool_call_anchors
+                .insert(call_id.clone(), anchor);
+        }
+    }
+
+    fn journal_lashlang_activity(
+        &mut self,
+        anchor: Option<(usize, usize)>,
+        activity: &ActivityBlock,
+    ) {
+        let Some((turn_ordinal, lashlang_block_ordinal)) = anchor else {
+            return;
+        };
+        let record = UiActivityRecord::new(turn_ordinal, lashlang_block_ordinal, activity.clone());
+        self.ui_activity_journal.apply_record(record.clone());
+        self.pending_ui_activity_records.push(record);
     }
 
     fn local_system_messages(&self) -> Vec<String> {
@@ -793,6 +855,12 @@ impl App {
             chrome_state: Arc::new(Mutex::new(crate::chrome_ui::ChromeUiState::default())),
             cwd,
             activity_state: ActivityState::default(),
+            ui_activity_journal: UiActivityJournal::default(),
+            pending_ui_activity_records: Vec::new(),
+            active_ui_turn_ordinal: None,
+            active_lashlang_block_ordinal: None,
+            next_lashlang_block_ordinal: 0,
+            lashlang_tool_call_anchors: HashMap::new(),
             manual_interrupt_requested: false,
             pending_retry_status: None,
             selection: TextSelection::default(),

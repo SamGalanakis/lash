@@ -114,11 +114,8 @@ pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
             graph.append_protocol_event(lash_protocol_rlm::rlm_protocol_event(
                 lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(
                     lash_rlm_types::RlmTrajectoryEntry {
-                        id: format!("rlm_step_{turn}"),
+                        id: format!("lashlang_step_{turn}"),
                         protocol_iteration: turn,
-                        reasoning: format!(
-                            "Check runtime state {turn}.\n\n```lashlang\nsubmit \"ok\"\n```"
-                        ),
                         code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now"
                             .to_string(),
                         output: vec!["time".to_string()],
