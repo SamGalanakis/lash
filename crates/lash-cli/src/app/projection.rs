@@ -6,9 +6,17 @@ use lash_export::transcript::{
 };
 use std::collections::HashMap;
 
+use crate::activity::{ActivityCall, ActivityExtra, ActivityResult};
+
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
 const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
+const UI_ACTIVITY_SUMMARY_CHAR_LIMIT: usize = 512;
+const UI_ACTIVITY_DETAIL_LINE_LIMIT: usize = 24;
+const UI_ACTIVITY_DETAIL_CHAR_LIMIT: usize = 320;
+const UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT: usize = 16 * 1024;
+const UI_ACTIVITY_ARTIFACT_ITEM_LIMIT: usize = 64;
+const UI_ACTIVITY_CHILD_LIMIT: usize = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct UiTimeline {
@@ -124,6 +132,44 @@ pub(crate) struct UiActivityJournal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiActivityRecord {
+    pub turn_ordinal: usize,
+    pub lashlang_block_ordinal: usize,
+    pub activity: UiReplayActivity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiReplayActivity {
+    pub call: UiReplayActivityCall,
+    pub result: UiReplayActivityResult,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<UiReplayActivity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiReplayActivityCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    pub kind: ActivityKind,
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<ActivityExtra>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiReplayActivityResult {
+    pub status: ActivityStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ActivityArtifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct UiActivityJournalEntry {
     pub turn_ordinal: usize,
     pub lashlang_block_ordinal: usize,
@@ -139,21 +185,16 @@ impl UiActivityJournal {
         &self.entries
     }
 
-    pub(crate) fn record_lashlang_activity(
-        &mut self,
-        turn_ordinal: usize,
-        lashlang_block_ordinal: usize,
-        activity: ActivityBlock,
-    ) {
+    pub(crate) fn apply_record(&mut self, record: UiActivityRecord) {
         let entry = match self.entries.iter_mut().find(|entry| {
-            entry.turn_ordinal == turn_ordinal
-                && entry.lashlang_block_ordinal == lashlang_block_ordinal
+            entry.turn_ordinal == record.turn_ordinal
+                && entry.lashlang_block_ordinal == record.lashlang_block_ordinal
         }) {
             Some(entry) => entry,
             None => {
                 self.entries.push(UiActivityJournalEntry {
-                    turn_ordinal,
-                    lashlang_block_ordinal,
+                    turn_ordinal: record.turn_ordinal,
+                    lashlang_block_ordinal: record.lashlang_block_ordinal,
                     items: Vec::new(),
                 });
                 self.entries
@@ -162,8 +203,219 @@ impl UiActivityJournal {
             }
         };
         let mut timeline = UiTimeline::from(std::mem::take(&mut entry.items));
-        ActivityState::append_projected_activity_to_timeline(&mut timeline, activity);
+        ActivityState::append_projected_activity_to_timeline(
+            &mut timeline,
+            record.activity.into_activity_block(),
+        );
         entry.items = timeline.items;
+    }
+}
+
+impl UiActivityRecord {
+    pub(crate) fn new(
+        turn_ordinal: usize,
+        lashlang_block_ordinal: usize,
+        activity: ActivityBlock,
+    ) -> Self {
+        Self {
+            turn_ordinal,
+            lashlang_block_ordinal,
+            activity: UiReplayActivity::from_activity(compact_activity_for_replay(activity)),
+        }
+    }
+}
+
+impl UiReplayActivity {
+    fn from_activity(activity: ActivityBlock) -> Self {
+        Self {
+            call: UiReplayActivityCall {
+                call_id: activity.call.call_id,
+                kind: activity.call.kind,
+                tool_name: activity.call.tool_name,
+                tag: activity.call.tag,
+                summary: activity.call.summary,
+                extra: activity.call.extra,
+            },
+            result: UiReplayActivityResult {
+                status: activity.result.status,
+                detail_lines: activity.result.detail_lines,
+                artifact: activity.result.artifact,
+            },
+            duration_ms: activity.duration_ms,
+            children: activity
+                .children
+                .into_iter()
+                .map(UiReplayActivity::from_activity)
+                .collect(),
+        }
+    }
+
+    fn into_activity_block(self) -> ActivityBlock {
+        ActivityBlock {
+            call: ActivityCall {
+                call_id: self.call.call_id,
+                kind: self.call.kind,
+                tool_name: self.call.tool_name,
+                args: serde_json::Value::Null,
+                tag: self.call.tag,
+                summary: self.call.summary,
+                extra: self.call.extra,
+            },
+            result: ActivityResult {
+                status: self.result.status,
+                raw: serde_json::Value::Null,
+                detail_lines: self.result.detail_lines,
+                artifact: self.result.artifact,
+            },
+            duration_ms: self.duration_ms,
+            children: self
+                .children
+                .into_iter()
+                .map(UiReplayActivity::into_activity_block)
+                .collect(),
+        }
+    }
+}
+
+fn compact_activity_for_replay(mut activity: ActivityBlock) -> ActivityBlock {
+    activity.call.args = serde_json::Value::Null;
+    activity.call.tool_name =
+        truncate_chars(activity.call.tool_name, UI_ACTIVITY_SUMMARY_CHAR_LIMIT);
+    activity.call.summary = truncate_chars(activity.call.summary, UI_ACTIVITY_SUMMARY_CHAR_LIMIT);
+    activity.call.tag = activity
+        .call
+        .tag
+        .map(|tag| truncate_chars(tag, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+    if let Some(ActivityExtra::Exploration(ops)) = activity.call.extra.as_mut() {
+        ops.truncate(UI_ACTIVITY_ARTIFACT_ITEM_LIMIT);
+        for op in ops {
+            op.subject = truncate_chars(
+                std::mem::take(&mut op.subject),
+                UI_ACTIVITY_SUMMARY_CHAR_LIMIT,
+            );
+        }
+    }
+    activity.result.raw = serde_json::Value::Null;
+    let detail_lines = std::mem::take(&mut activity.result.detail_lines);
+    activity.result.detail_lines = compact_strings(
+        detail_lines,
+        UI_ACTIVITY_DETAIL_LINE_LIMIT,
+        UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+    );
+    activity.result.artifact = activity.result.artifact.map(compact_activity_artifact);
+    activity.children.truncate(UI_ACTIVITY_CHILD_LIMIT);
+    activity.children = activity
+        .children
+        .into_iter()
+        .map(compact_activity_for_replay)
+        .collect();
+    activity
+}
+
+fn compact_activity_artifact(artifact: ActivityArtifact) -> ActivityArtifact {
+    match artifact {
+        ActivityArtifact::QuestionPanel(mut panel) => {
+            panel.prompt_lines = compact_strings(
+                panel.prompt_lines,
+                UI_ACTIVITY_DETAIL_LINE_LIMIT,
+                UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+            );
+            panel.options.truncate(UI_ACTIVITY_ARTIFACT_ITEM_LIMIT);
+            for option in &mut panel.options {
+                option.label = truncate_chars(
+                    std::mem::take(&mut option.label),
+                    UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+                );
+            }
+            panel.answer = panel
+                .answer
+                .map(|answer| truncate_chars(answer, UI_ACTIVITY_DETAIL_CHAR_LIMIT));
+            panel.note = panel
+                .note
+                .map(|note| truncate_chars(note, UI_ACTIVITY_DETAIL_CHAR_LIMIT));
+            ActivityArtifact::QuestionPanel(panel)
+        }
+        ActivityArtifact::DiffPreview { title, diff } => ActivityArtifact::DiffPreview {
+            title: truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT),
+            diff: truncate_chars(diff, UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT),
+        },
+        ActivityArtifact::PatchPreview {
+            mut files,
+            total_added,
+            total_removed,
+        } => {
+            files.truncate(UI_ACTIVITY_ARTIFACT_ITEM_LIMIT);
+            for file in &mut files {
+                file.path = truncate_chars(
+                    std::mem::take(&mut file.path),
+                    UI_ACTIVITY_SUMMARY_CHAR_LIMIT,
+                );
+                file.from_path = file
+                    .from_path
+                    .take()
+                    .map(|path| truncate_chars(path, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+                file.status = truncate_chars(
+                    std::mem::take(&mut file.status),
+                    UI_ACTIVITY_SUMMARY_CHAR_LIMIT,
+                );
+                file.diff = truncate_chars(
+                    std::mem::take(&mut file.diff),
+                    UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT,
+                );
+            }
+            ActivityArtifact::PatchPreview {
+                files,
+                total_added,
+                total_removed,
+            }
+        }
+        ActivityArtifact::TextPreview { title, text } => ActivityArtifact::TextPreview {
+            title: title.map(|title| truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT)),
+            text: truncate_chars(text, UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT),
+        },
+        ActivityArtifact::SourceList { title, items } => ActivityArtifact::SourceList {
+            title: truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT),
+            items: compact_strings(
+                items,
+                UI_ACTIVITY_ARTIFACT_ITEM_LIMIT,
+                UI_ACTIVITY_DETAIL_CHAR_LIMIT,
+            ),
+        },
+        ActivityArtifact::SnippetPreview(mut snippet) => {
+            snippet.title = snippet
+                .title
+                .map(|title| truncate_chars(title, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+            snippet.path = truncate_chars(snippet.path, UI_ACTIVITY_SUMMARY_CHAR_LIMIT);
+            snippet.content = truncate_chars(snippet.content, UI_ACTIVITY_ARTIFACT_TEXT_CHAR_LIMIT);
+            snippet.language = snippet
+                .language
+                .map(|language| truncate_chars(language, UI_ACTIVITY_SUMMARY_CHAR_LIMIT));
+            ActivityArtifact::SnippetPreview(snippet)
+        }
+    }
+}
+
+fn compact_strings(values: Vec<String>, item_limit: usize, char_limit: usize) -> Vec<String> {
+    values
+        .into_iter()
+        .take(item_limit)
+        .map(|value| truncate_chars(value, char_limit))
+        .collect()
+}
+
+fn truncate_chars(value: String, limit: usize) -> String {
+    let cut_at = {
+        let mut chars = value.char_indices();
+        for _ in 0..limit {
+            if chars.next().is_none() {
+                return value;
+            }
+        }
+        chars.next().map(|(idx, _)| idx)
+    };
+    match cut_at {
+        Some(idx) => value[..idx].to_string(),
+        None => value,
     }
 }
 

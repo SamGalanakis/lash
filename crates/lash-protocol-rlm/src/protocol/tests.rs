@@ -105,6 +105,9 @@ fn execution_section_makes_paired_lashlang_tag_contract_explicit() {
     assert!(section.contains("skip Lashlang by omitting the block, but not both"));
     assert!(section.contains("NEVER have multiple `<lashlang>` blocks in one response"));
     assert!(section.contains("generation stops as soon as `</lashlang>` is emitted"));
+    assert!(
+        section.contains("Only `submit` once you have observed and verified the relevant results")
+    );
 }
 
 #[test]

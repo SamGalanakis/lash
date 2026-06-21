@@ -26,6 +26,11 @@ bench/**/results/
 /*.png
 __pycache__/
 *.pyc
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage/
 .DS_Store
 Thumbs.db
 *.swp
@@ -45,6 +50,9 @@ Thumbs.db
 /skills/harness-opt/
 /.tmp/
 /tmp/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 autoresearch.jsonl
 autoresearch.md
 autoresearch.html

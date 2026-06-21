@@ -80,7 +80,7 @@ When `shell.exec` is available, shell command results are data. It returns compl
     }
     </lashlang>
 
-For dependent multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
+For dependent multi-step work, inspect intermediate results before submitting success. Do not submit final results without observing and verifying the outcome. Reaching `submit` ends the turn even mid-block:
 
     <lashlang>
     first = await web.search({ query: "value" })?
@@ -271,6 +271,8 @@ fn render_execution_intro(has_operations: bool) -> String {
 
 Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
 
+Do not submit final results that depend on operations, files, generated patches, or other current-state artifacts without inspecting first. Only `submit` once you have observed and verified the relevant results.
+
 ### Response shape
 
 Your response must be visible prose optionally followed by exactly one Lashlang block. The start tag line must trim to exactly `<lashlang>`; the closing tag line must trim to exactly `</lashlang>`.
@@ -411,7 +413,7 @@ Print what you need to see. Pull in the parts relevant to your next step — a w
     print { chars: len(text), head: slice(text, 0, 1200) }
     </lashlang>
 
-For multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
+For multi-step work, inspect intermediate results before submitting success. Do not submit final results without observing and verifying the outcome. Reaching `submit` ends the turn even mid-block:
 
     <lashlang>
     first = trim(input.question)

@@ -31,8 +31,8 @@ use crate::stream_markdown::LiveMarkdown;
 use self::cache::BlockRenderCacheEntry;
 pub(super) use self::live::{LiveToolOutput, LiveTurnState};
 pub(crate) use self::projection::{
-    UiActivityJournal, UiTimeline, UiTimelineItem, interrupted_assistant_tail, preview_text_lines,
-    smart_truncate_preview_line, timeline_from_read_view,
+    UiActivityJournal, UiActivityRecord, UiTimeline, UiTimelineItem, interrupted_assistant_tail,
+    preview_text_lines, smart_truncate_preview_line, timeline_from_read_view,
 };
 #[cfg(test)]
 pub(crate) use self::projection::{interrupted_blocks_from_read_view, strip_ansi_escape_sequences};
@@ -614,6 +614,7 @@ pub struct App {
     pub activity_state: ActivityState,
     /// CLI-owned replay of UI rows that came from live Lashlang tool activity.
     pub ui_activity_journal: UiActivityJournal,
+    pending_ui_activity_records: Vec<UiActivityRecord>,
     active_ui_turn_ordinal: Option<usize>,
     active_lashlang_block_ordinal: Option<usize>,
     next_lashlang_block_ordinal: usize,
@@ -637,12 +638,16 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
-    pub(crate) fn ui_activity_journal(&self) -> &UiActivityJournal {
-        &self.ui_activity_journal
-    }
-
     pub(crate) fn replace_ui_activity_journal(&mut self, journal: UiActivityJournal) {
         self.ui_activity_journal = journal;
+    }
+
+    pub(crate) fn pending_ui_activity_records(&self) -> &[UiActivityRecord] {
+        &self.pending_ui_activity_records
+    }
+
+    pub(crate) fn clear_pending_ui_activity_records(&mut self) {
+        self.pending_ui_activity_records.clear();
     }
 
     fn latest_ui_turn_ordinal(&self) -> usize {
@@ -682,11 +687,9 @@ impl App {
         let Some((turn_ordinal, lashlang_block_ordinal)) = anchor else {
             return;
         };
-        self.ui_activity_journal.record_lashlang_activity(
-            turn_ordinal,
-            lashlang_block_ordinal,
-            activity.clone(),
-        );
+        let record = UiActivityRecord::new(turn_ordinal, lashlang_block_ordinal, activity.clone());
+        self.ui_activity_journal.apply_record(record.clone());
+        self.pending_ui_activity_records.push(record);
     }
 
     fn local_system_messages(&self) -> Vec<String> {
@@ -853,6 +856,7 @@ impl App {
             cwd,
             activity_state: ActivityState::default(),
             ui_activity_journal: UiActivityJournal::default(),
+            pending_ui_activity_records: Vec::new(),
             active_ui_turn_ordinal: None,
             active_lashlang_block_ordinal: None,
             next_lashlang_block_ordinal: 0,

@@ -685,7 +685,7 @@ fn rlm_activity_journal_projects_tool_rows_after_matching_lashlang_block() {
         )),
     ];
     let mut activity_journal = UiActivityJournal::default();
-    activity_journal.record_lashlang_activity(
+    activity_journal.apply_record(UiActivityRecord::new(
         0,
         0,
         ActivityBlock::new(
@@ -698,7 +698,7 @@ fn rlm_activity_journal_projects_tool_rows_after_matching_lashlang_block() {
             8,
         )
         .with_call_id(Some("lashlang:tool-0".to_string())),
-    );
+    ));
 
     let blocks = timeline_items_from_test_read_view(
         &events,

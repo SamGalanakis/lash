@@ -851,10 +851,6 @@ pub(crate) async fn run_app(
                     continue;
                 }
                 let activity = *activity;
-                let should_record_ui_activity_journal = matches!(
-                    activity.event,
-                    TurnEvent::ToolCallStarted { .. } | TurnEvent::ToolCallCompleted { .. }
-                );
                 if matches!(activity.event, TurnEvent::AssistantProseDelta { .. }) {
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_turn_activity(&activity);
@@ -869,10 +865,12 @@ pub(crate) async fn run_app(
                 }
                 let ui_effects = ui_extensions.effects_for_turn_event(&activity.event);
                 app.handle_turn_activity(activity);
-                if should_record_ui_activity_journal
-                    && let Err(err) = logger.record_ui_activity_journal(app.ui_activity_journal())
+                if let Err(err) =
+                    logger.append_ui_activity_records(app.pending_ui_activity_records())
                 {
-                    tracing::warn!(?err, "failed to persist CLI UI activity journal");
+                    tracing::warn!(?err, "failed to persist CLI UI activity records");
+                } else {
+                    app.clear_pending_ui_activity_records();
                 }
                 apply_ui_host_effects(&mut app, ui_effects);
             }
