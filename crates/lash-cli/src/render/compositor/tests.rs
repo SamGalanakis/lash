@@ -274,6 +274,60 @@ mod tests {
     }
 
     #[test]
+    fn system_command_palette_uses_readable_list_selection_styles() {
+        theme::set_active_theme(ThemeName::System);
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "current-session-id".into());
+        app.show_command_palette(vec![
+            CommandPaletteItem::new(
+                "Conversation",
+                "/clear",
+                "Reset conversation",
+                CommandPaletteAction::Builtin(crate::command::Command::Clear),
+            ),
+            CommandPaletteItem::new(
+                "Conversation",
+                "/compact",
+                "Open a compaction frame seeded by a summary",
+                CommandPaletteAction::Builtin(crate::command::Command::Compact),
+            ),
+        ]);
+
+        let snapshot = lash_tui::render_snapshot(100, 24, |frame| draw(frame, &mut app));
+        let clear_row = (0..snapshot.height)
+            .find(|y| snapshot.visible_line(*y).contains("/clear"))
+            .expect("selected command row");
+        let compact_row = (0..snapshot.height)
+            .find(|y| snapshot.visible_line(*y).contains("/compact"))
+            .expect("unselected command row");
+
+        assert!(
+            (0..snapshot.width).any(|x| {
+                snapshot
+                    .cell(x, clear_row)
+                    .is_some_and(|cell| cell.style.bg == Some(theme::selected_row_bg()))
+            }),
+            "selected command row should use selected-row background"
+        );
+        assert!(
+            (0..snapshot.width).all(|x| {
+                snapshot
+                    .cell(x, clear_row)
+                    .map_or(true, |cell| cell.style.bg != Some(theme::selection_bg()))
+            }),
+            "menu selection should not reuse text selection background in System theme"
+        );
+        assert!(
+            (0..snapshot.width).any(|x| {
+                snapshot
+                    .cell(x, compact_row)
+                    .is_some_and(|cell| cell.style.fg == Some(theme::text_muted()))
+            }),
+            "unselected command rows should use readable list text"
+        );
+        theme::set_active_theme(ThemeName::Lash);
+    }
+
+    #[test]
     fn system_theme_idle_chrome_does_not_paint_background_cells() {
         theme::set_active_theme(ThemeName::System);
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
@@ -290,6 +344,24 @@ mod tests {
             }
         }
         theme::set_active_theme(ThemeName::Lash);
+    }
+
+    #[test]
+    fn lash_theme_idle_chrome_keeps_background_under_text_and_rules() {
+        theme::set_active_theme(ThemeName::Lash);
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+
+        let snapshot = lash_tui::render_snapshot(100, 28, |frame| draw(frame, &mut app));
+
+        for y in 0..snapshot.height {
+            for x in 0..snapshot.width {
+                let cell = snapshot.cell(x, y).expect("cell exists");
+                assert!(
+                    cell.style.bg.is_some(),
+                    "lash idle chrome left terminal background visible at ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]

@@ -45,10 +45,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     let match_count = filtered_indices.len();
     let max_list_height = history_area.height.saturating_sub(5).max(1) as usize;
     let render_rows = command_palette_render_rows(palette, &filtered_indices);
-    let list_height = render_rows
-        .len()
-        .clamp(1, 18)
-        .min(max_list_height) as u16;
+    let list_height = render_rows.len().clamp(1, 18).min(max_list_height) as u16;
     let height = list_height + 4;
 
     draw_overlay_scrim(frame, history_area);
@@ -133,19 +130,12 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                     let item = &palette.items[*idx];
                     let selected = *idx == selected_item_idx;
                     let row_style = if selected {
-                        fg(theme::text_primary())
-                            .bg(theme::selection_bg())
-                            .add_modifier(Modifier::Bold)
+                        theme::selected_row()
                     } else {
-                        theme::surface_deep().apply(fg(theme::text_subtle()))
+                        theme::surface_deep().apply(theme::list_item())
                     };
                     frame.fill(
-                        Rect::new(
-                            popup.x + 1,
-                            y,
-                            popup.width.saturating_sub(2),
-                            1,
-                        ),
+                        Rect::new(popup.x + 1, y, popup.width.saturating_sub(2), 1),
                         ' ',
                         row_style,
                     );
@@ -165,13 +155,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                     } else {
                         truncate_display_forced(&left, left_width)
                     };
-                    frame.write_text(
-                        popup.x + 2,
-                        y,
-                        &line,
-                        row_style,
-                        left_width as u16,
-                    );
+                    frame.write_text(popup.x + 2, y, &line, row_style, left_width as u16);
                     if !footer.is_empty() && inner_width > footer_width {
                         let footer_style = if selected {
                             row_style
@@ -317,7 +301,7 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
             } else if session.message_count == 0 && picker.showing_empty_sessions {
                 theme::text_faint_style()
             } else {
-                fg(theme::text_subtle())
+                theme::list_item()
             };
             frame.write_text(
                 popup.x + 1,
@@ -447,7 +431,7 @@ fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
             } else if row.active {
                 fg(theme::brand())
             } else {
-                fg(theme::text_subtle())
+                theme::list_item()
             };
             frame.write_text(
                 popup.x + 1,
@@ -526,7 +510,7 @@ fn draw_skill_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
             let style = if selected {
                 theme::selected_row()
             } else {
-                fg(theme::text_subtle())
+                theme::list_item()
             };
             frame.write_text(
                 popup.x + 1,

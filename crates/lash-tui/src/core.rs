@@ -675,6 +675,26 @@ impl Terminal {
         })
     }
 
+    pub fn set_default_background(&mut self, background: Option<Color>) -> anyhow::Result<()> {
+        match background {
+            Some(Color::Rgb { r, g, b }) => {
+                self.stdout
+                    .execute(Print(format!("\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\")))
+                    .context("set terminal default background")?;
+            }
+            Some(Color::AnsiValue(_) | Color::DefaultForeground | Color::DefaultBackground)
+            | None => {
+                self.stdout
+                    .execute(Print("\x1b]111\x1b\\"))
+                    .context("reset terminal default background")?;
+            }
+        }
+        self.stdout
+            .flush()
+            .context("flush terminal default background")?;
+        Ok(())
+    }
+
     pub fn restore(&mut self) {
         if !self.entered {
             return;
@@ -972,6 +992,7 @@ fn write_char_to_row(
     }
 
     if ch.is_ascii() {
+        let style = style_preserving_background(row[x as usize].style, style);
         row[x as usize] = Cell {
             ch,
             style,
@@ -985,6 +1006,7 @@ fn write_char_to_row(
         return x;
     }
     if width == 1 {
+        let style = style_preserving_background(row[x as usize].style, style);
         row[x as usize] = Cell {
             ch,
             style,
@@ -996,17 +1018,26 @@ fn write_char_to_row(
         return x;
     }
 
+    let primary_style = style_preserving_background(row[x as usize].style, style);
+    let continuation_style = style_preserving_background(row[x as usize + 1].style, style);
     row[x as usize] = Cell {
         ch,
-        style,
+        style: primary_style,
         continuation: false,
     };
     row[x as usize + 1] = Cell {
         ch: ' ',
-        style,
+        style: continuation_style,
         continuation: true,
     };
     x.saturating_add(width)
+}
+
+fn style_preserving_background(existing: Style, mut next: Style) -> Style {
+    if next.bg.is_none() {
+        next.bg = existing.bg;
+    }
+    next
 }
 
 #[cfg(test)]
@@ -1066,6 +1097,40 @@ mod tests {
         assert_eq!(cell.ch, 'x');
         assert_eq!(cell.style.fg, Some(Color::rgb(9, 8, 7)));
         assert_eq!(cell.style.bg, Some(Color::rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn write_text_preserves_existing_cell_background_when_style_has_none() {
+        let snapshot = render_snapshot(4, 1, |frame| {
+            frame.fill(frame.area(), ' ', Style::default().bg(Color::rgb(1, 2, 3)));
+            frame.write_text(0, 0, "ab", Style::default().fg(Color::rgb(9, 8, 7)), 4);
+        });
+
+        let cell = snapshot.cell(0, 0).expect("cell");
+        assert_eq!(cell.ch, 'a');
+        assert_eq!(cell.style.fg, Some(Color::rgb(9, 8, 7)));
+        assert_eq!(cell.style.bg, Some(Color::rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn write_text_explicit_background_overrides_existing_cell_background() {
+        let snapshot = render_snapshot(4, 1, |frame| {
+            frame.fill(frame.area(), ' ', Style::default().bg(Color::rgb(1, 2, 3)));
+            frame.write_text(
+                0,
+                0,
+                "ab",
+                Style::default()
+                    .fg(Color::rgb(9, 8, 7))
+                    .bg(Color::rgb(4, 5, 6)),
+                4,
+            );
+        });
+
+        let cell = snapshot.cell(0, 0).expect("cell");
+        assert_eq!(cell.ch, 'a');
+        assert_eq!(cell.style.fg, Some(Color::rgb(9, 8, 7)));
+        assert_eq!(cell.style.bg, Some(Color::rgb(4, 5, 6)));
     }
 
     #[test]

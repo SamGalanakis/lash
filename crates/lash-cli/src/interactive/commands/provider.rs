@@ -267,6 +267,7 @@ pub(super) async fn handle_change_provider(
     let existing_cfg = LashConfig::load(&crate::paths::config_file());
     let setup_result = onboarding::run_setup_with_existing(existing_cfg.as_ref()).await;
     *terminal = Terminal::enter()?;
+    terminal.set_default_background(crate::theme::terminal_background())?;
     paused.store(false, Ordering::Relaxed);
 
     match setup_result {

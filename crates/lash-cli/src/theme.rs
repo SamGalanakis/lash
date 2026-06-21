@@ -118,7 +118,7 @@ pub fn text_faint() -> Color {
 }
 
 pub fn brand() -> Color {
-    themed(SODIUM, Color::ansi(3))
+    brand_for(active_theme())
 }
 
 pub fn state_ok() -> Color {
@@ -162,6 +162,10 @@ pub fn surface_deep() -> Surface {
     surface_deep_for(active_theme())
 }
 
+pub fn terminal_background() -> Option<Color> {
+    terminal_background_for(active_theme())
+}
+
 pub fn rule() -> Color {
     themed(ASH_LIGHT, Color::ansi(8))
 }
@@ -176,6 +180,10 @@ pub fn border_faint() -> Color {
 
 pub fn selection_bg() -> Color {
     selection_bg_for(active_theme())
+}
+
+pub fn selected_row_bg() -> Color {
+    selected_row_bg_for(active_theme())
 }
 
 pub fn empty_state_logo_enabled() -> bool {
@@ -198,6 +206,17 @@ fn surface_deep_for(theme: ThemeName) -> Surface {
     surface_for(theme, FORM_DEEP)
 }
 
+fn terminal_background_for(theme: ThemeName) -> Option<Color> {
+    match theme {
+        ThemeName::Lash => Some(FORM),
+        ThemeName::System => None,
+    }
+}
+
+fn brand_for(theme: ThemeName) -> Color {
+    themed_for(theme, SODIUM, Color::ansi(6))
+}
+
 fn surface_for(theme: ThemeName, lash: Color) -> Surface {
     match theme {
         ThemeName::Lash => Surface {
@@ -209,6 +228,10 @@ fn surface_for(theme: ThemeName, lash: Color) -> Surface {
 
 fn selection_bg_for(theme: ThemeName) -> Color {
     themed_for(theme, SELECTION_BG, Color::ansi(6))
+}
+
+fn selected_row_bg_for(theme: ThemeName) -> Color {
+    themed_for(theme, SELECTION_BG, Color::ansi(8))
 }
 
 fn empty_state_logo_enabled_for(_theme: ThemeName) -> bool {
@@ -456,8 +479,15 @@ pub fn turn_separator() -> Style {
 pub fn selected_row() -> Style {
     Style::default()
         .fg(text_primary())
-        .bg(selection_bg())
+        .bg(selected_row_bg())
         .add_modifier(Modifier::Bold)
+}
+
+pub fn list_item() -> Style {
+    match active_theme() {
+        ThemeName::Lash => Style::default().fg(text_subtle()),
+        ThemeName::System => Style::default().fg(text_muted()),
+    }
 }
 
 pub fn edit_lane_bold() -> Style {
@@ -554,11 +584,13 @@ mod tests {
             None
         );
         assert_eq!(selection_bg_for(ThemeName::System), Color::ansi(6));
+        assert_eq!(selected_row_bg_for(ThemeName::System), Color::ansi(8));
         assert_ne!(
             selection_bg_for(ThemeName::System),
             Color::default_background()
         );
         assert!(empty_state_logo_enabled_for(ThemeName::System));
+        assert_eq!(terminal_background_for(ThemeName::System), None);
     }
 
     #[test]
@@ -580,7 +612,15 @@ mod tests {
             Some(FORM_RAISED)
         );
         assert_eq!(selection_bg_for(ThemeName::Lash), SELECTION_BG);
+        assert_eq!(selected_row_bg_for(ThemeName::Lash), SELECTION_BG);
         assert!(empty_state_logo_enabled_for(ThemeName::Lash));
+        assert_eq!(terminal_background_for(ThemeName::Lash), Some(FORM));
+    }
+
+    #[test]
+    fn system_theme_uses_terminal_cyan_for_brand_accent() {
+        assert_eq!(brand_for(ThemeName::System), Color::ansi(6));
+        assert_eq!(brand_for(ThemeName::Lash), SODIUM);
     }
 
     #[test]

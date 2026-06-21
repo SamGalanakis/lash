@@ -31,6 +31,7 @@ use crate::render::compositor;
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
 use crate::startup::session::CliSessionOpener;
+use crate::theme;
 use crate::turn_has_visible_output;
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
 use crate::ui_effects::{apply_ui_host_effects, push_system_message};
@@ -238,6 +239,7 @@ pub(crate) async fn run_app(
     let mut last_turn: Option<TurnReplayPayload> = None;
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
+    let mut applied_terminal_theme = None;
     let mut last_ui_sync = tokio::time::Instant::now();
 
     let _ = app_tx.send(AppEvent::RequestUiSnapshot);
@@ -561,6 +563,11 @@ pub(crate) async fn run_app(
         // Draw only when dirty
         if app.dirty {
             let render_started = std::time::Instant::now();
+            let active_theme = theme::active_theme();
+            if applied_terminal_theme != Some(active_theme) {
+                terminal.set_default_background(theme::terminal_background())?;
+                applied_terminal_theme = Some(active_theme);
+            }
             // Pre-compute height cache before immutable borrow in draw
             let (width, height) = terminal.size()?;
             compositor::sync_chrome_turn_status(&app);
