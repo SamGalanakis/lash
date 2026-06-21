@@ -100,7 +100,7 @@ fn fit_slots_fallback(slots: &[StatusSlot], budget: usize) -> Vec<Span<'static>>
 }
 
 fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    frame.fill(area, ' ', bg(theme::surface_raised()));
+    frame.fill(area, ' ', theme::surface_raised().fill());
     if area.width == 0 {
         return;
     }

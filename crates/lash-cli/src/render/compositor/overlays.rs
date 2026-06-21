@@ -56,7 +56,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     frame.draw_box(
         popup,
         fg(theme::border_faint()),
-        Some(bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
 
     let title = match palette.selected_position() {
@@ -137,7 +137,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                             .bg(theme::selection_bg())
                             .add_modifier(Modifier::Bold)
                     } else {
-                        fg(theme::text_subtle()).bg(theme::surface_deep())
+                        theme::surface_deep().apply(fg(theme::text_subtle()))
                     };
                     frame.fill(
                         Rect::new(
@@ -176,7 +176,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                         let footer_style = if selected {
                             row_style
                         } else {
-                            theme::text_faint_style().bg(theme::surface_deep())
+                            theme::surface_deep().apply(theme::text_faint_style())
                         };
                         frame.write_text(
                             popup.x + popup.width.saturating_sub(2 + footer_width as u16),
@@ -222,7 +222,7 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     frame.draw_box(
         popup,
         fg(theme::border_faint()),
-        Some(bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
     frame.write_text(
         popup.x + 2,
@@ -387,7 +387,7 @@ fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     frame.draw_box(
         popup,
         fg(theme::border_faint()),
-        Some(bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
     frame.write_text(
         popup.x + 2,
@@ -487,7 +487,7 @@ fn draw_skill_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     frame.draw_box(
         popup,
         fg(theme::border_faint()),
-        Some(bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
     frame.write_text(
         popup.x + 2,
@@ -567,7 +567,7 @@ fn draw_process_overview(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
     frame.draw_box(
         popup,
         fg(theme::border_faint()),
-        Some(bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
     frame.write_text(
         popup.x + 2,
@@ -630,7 +630,7 @@ fn draw_document_overlay(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
     frame.draw_box(
         popup,
         fg(theme::border_faint()),
-        Some(bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
     frame.write_text(
         popup.x + 2,

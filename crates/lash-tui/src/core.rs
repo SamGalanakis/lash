@@ -633,6 +633,7 @@ impl Terminal {
         stdout
             .execute(EnterAlternateScreen)
             .context("enter alternate screen")?;
+        stdout.execute(Print("\x1b]111\x1b\\")).ok();
         stdout.execute(Hide).context("hide cursor")?;
         stdout
             .execute(PushKeyboardEnhancementFlags(

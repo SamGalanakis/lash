@@ -21,7 +21,3 @@ fn draw_top_bottom_rule(frame: &mut Frame<'_>, area: Rect, style: Style) {
 fn fg(color: lash_tui::Color) -> Style {
     Style::default().fg(color)
 }
-
-fn bg(color: lash_tui::Color) -> Style {
-    Style::default().bg(color)
-}

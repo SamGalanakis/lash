@@ -12,7 +12,7 @@ pub fn draw_with_capabilities(
         return;
     }
 
-    frame.clear(bg(theme::surface_base()));
+    frame.clear(theme::surface_base().fill());
 
     // One layout pass for the whole frame; the `render::*_area` accessors each
     // recompute `chrome_layout`, so calling them per region would repeat that
@@ -49,7 +49,7 @@ pub fn draw_with_capabilities(
         );
     }
     if queue_area.height > 0 {
-        draw_lines_region(frame, queue_area, &queue_lines, bg(theme::surface_raised()));
+        draw_lines_region(frame, queue_area, &queue_lines, theme::surface_raised().fill());
     }
     if footer_area.height > 0 {
         draw_surface_stack(
@@ -96,25 +96,25 @@ fn draw_toast(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let x = area.x + area.width.saturating_sub(width + 2);
     let y = area.y + 2.min(area.height.saturating_sub(height));
     let toast_area = Rect::new(x, y, width, height);
-    let panel = bg(theme::surface_raised());
+    let surface = theme::surface_raised();
+    let panel = surface.fill();
     frame.fill(toast_area, ' ', panel);
 
     let border_color = match toast.kind {
         ToastKind::Info => theme::brand(),
         ToastKind::Error => theme::state_error(),
     };
-    let border = Style::default()
-        .fg(border_color)
-        .bg(theme::surface_raised())
-        .add_modifier(Modifier::Bold);
+    let border = surface.apply(
+        Style::default()
+            .fg(border_color)
+            .add_modifier(Modifier::Bold),
+    );
     for row in 0..height {
         frame.write_text(x, y + row, "│", border, 1);
         frame.write_text(x + width.saturating_sub(1), y + row, "│", border, 1);
     }
 
-    let text_style = Style::default()
-        .fg(theme::text_primary())
-        .bg(theme::surface_raised());
+    let text_style = surface.apply(Style::default().fg(theme::text_primary()));
     let line_y = if height >= 3 { y + 1 } else { y };
     frame.write_line(
         x + 2,
@@ -228,7 +228,7 @@ fn draw_surface_stack(
             continue;
         };
         let mut viewport = frame.viewport(surface_area);
-        viewport.clear(bg(theme::surface_raised()));
+        viewport.clear(theme::surface_raised().fill());
         app.ui_extensions().render_mounted_surface(
             surface,
             TuiRenderContext {
@@ -257,7 +257,7 @@ fn draw_overlay_surface(
     };
     draw_overlay_scrim(frame, area);
     let mut viewport = frame.viewport(surface_area);
-    viewport.clear(bg(theme::surface_base()));
+    viewport.clear(theme::surface_base().fill());
     app.ui_extensions().render_mounted_surface(
         surface,
         TuiRenderContext {

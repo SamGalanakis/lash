@@ -572,7 +572,7 @@ async fn start_provider_flow(app: &mut SetupApp, kind: &str, existing: Option<&L
 
 fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
     let area = frame.area();
-    frame.clear(Style::default().bg(theme::surface_base()));
+    frame.clear(theme::surface_base().fill());
     if area.width < 24 || area.height < 10 {
         frame.write_text(
             2,
@@ -593,7 +593,7 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
     frame.draw_box(
         panel,
         Style::default().fg(theme::rule()),
-        Some(Style::default().bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
 
     match &app.step {
@@ -898,7 +898,7 @@ fn draw_input_panel(frame: &mut Frame<'_>, panel: Rect, view: InputPanelView<'_>
     frame.draw_box(
         field,
         Style::default().fg(theme::border_faint()),
-        Some(Style::default().bg(theme::surface_base())),
+        Some(theme::surface_base().fill()),
     );
     let inner_width = field.width.saturating_sub(4) as usize;
     let visible = visible_slice(view.input, inner_width, view.cursor);

@@ -1,5 +1,5 @@
 fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    frame.fill(area, ' ', bg(theme::surface_base()));
+    frame.fill(area, ' ', theme::surface_base().fill());
     let viewport_height = area.height as usize;
     let viewport_width = area.width as usize;
     let scroll = app.scroll_offset;
@@ -164,7 +164,7 @@ fn draw_process_dock(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(lines) = render::process_lines_snapshot(app, area.width) else {
         return;
     };
-    draw_lines_region(frame, area, &lines, bg(theme::surface_raised()));
+    draw_lines_region(frame, area, &lines, theme::surface_raised().fill());
 }
 
 fn apply_selection_highlight(frame: &mut Frame<'_>, app: &App, history_area: Rect) {

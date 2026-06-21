@@ -1,10 +1,20 @@
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::config::ThemeName;
 use lash_tui::{Color, Modifier, Style};
 
+#[cfg(not(test))]
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(ThemeName::Lash as u8);
 
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_THEME: Cell<ThemeName> = const { Cell::new(ThemeName::Lash) };
+}
+
+#[cfg(not(test))]
 pub fn active_theme() -> ThemeName {
     match ACTIVE_THEME.load(Ordering::Relaxed) {
         value if value == ThemeName::System as u8 => ThemeName::System,
@@ -12,8 +22,19 @@ pub fn active_theme() -> ThemeName {
     }
 }
 
+#[cfg(test)]
+pub fn active_theme() -> ThemeName {
+    ACTIVE_THEME.with(Cell::get)
+}
+
+#[cfg(not(test))]
 pub fn set_active_theme(theme: ThemeName) {
     ACTIVE_THEME.store(theme as u8, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub fn set_active_theme(theme: ThemeName) {
+    ACTIVE_THEME.with(|active| active.set(theme));
 }
 
 fn themed_for(theme: ThemeName, lash: Color, system: Color) -> Color {
@@ -108,15 +129,36 @@ pub fn state_error() -> Color {
     themed(ERROR, Color::ansi(1))
 }
 
-pub fn surface_base() -> Color {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Surface {
+    background: Option<Color>,
+}
+
+impl Surface {
+    pub fn fill(self) -> Style {
+        match self.background {
+            Some(background) => Style::default().bg(background),
+            None => Style::default(),
+        }
+    }
+
+    pub fn apply(self, style: Style) -> Style {
+        match self.background {
+            Some(background) => style.bg(background),
+            None => style,
+        }
+    }
+}
+
+pub fn surface_base() -> Surface {
     surface_base_for(active_theme())
 }
 
-pub fn surface_raised() -> Color {
+pub fn surface_raised() -> Surface {
     surface_raised_for(active_theme())
 }
 
-pub fn surface_deep() -> Color {
+pub fn surface_deep() -> Surface {
     surface_deep_for(active_theme())
 }
 
@@ -144,16 +186,25 @@ pub fn input_rules_enabled() -> bool {
     matches!(active_theme(), ThemeName::Lash)
 }
 
-fn surface_base_for(theme: ThemeName) -> Color {
-    themed_for(theme, FORM, Color::default_background())
+fn surface_base_for(theme: ThemeName) -> Surface {
+    surface_for(theme, FORM)
 }
 
-fn surface_raised_for(theme: ThemeName) -> Color {
-    themed_for(theme, FORM_RAISED, Color::default_background())
+fn surface_raised_for(theme: ThemeName) -> Surface {
+    surface_for(theme, FORM_RAISED)
 }
 
-fn surface_deep_for(theme: ThemeName) -> Color {
-    themed_for(theme, FORM_DEEP, Color::default_background())
+fn surface_deep_for(theme: ThemeName) -> Surface {
+    surface_for(theme, FORM_DEEP)
+}
+
+fn surface_for(theme: ThemeName, lash: Color) -> Surface {
+    match theme {
+        ThemeName::Lash => Surface {
+            background: Some(lash),
+        },
+        ThemeName::System => Surface { background: None },
+    }
 }
 
 fn selection_bg_for(theme: ThemeName) -> Color {
@@ -492,17 +543,15 @@ mod tests {
 
     #[test]
     fn system_theme_keeps_structural_surfaces_on_terminal_background() {
+        assert_eq!(surface_base_for(ThemeName::System).background, None);
+        assert_eq!(surface_raised_for(ThemeName::System).background, None);
+        assert_eq!(surface_deep_for(ThemeName::System).background, None);
+        assert_eq!(surface_base_for(ThemeName::System).fill().bg, None);
         assert_eq!(
-            surface_base_for(ThemeName::System),
-            Color::default_background()
-        );
-        assert_eq!(
-            surface_raised_for(ThemeName::System),
-            Color::default_background()
-        );
-        assert_eq!(
-            surface_deep_for(ThemeName::System),
-            Color::default_background()
+            surface_raised_for(ThemeName::System)
+                .apply(Style::default().fg(Color::ansi(7)))
+                .bg,
+            None
         );
         assert_eq!(selection_bg_for(ThemeName::System), Color::ansi(6));
         assert_ne!(
@@ -514,9 +563,22 @@ mod tests {
 
     #[test]
     fn lash_theme_keeps_custom_structural_surfaces() {
-        assert_eq!(surface_base_for(ThemeName::Lash), FORM);
-        assert_eq!(surface_raised_for(ThemeName::Lash), FORM_RAISED);
-        assert_eq!(surface_deep_for(ThemeName::Lash), FORM_DEEP);
+        assert_eq!(surface_base_for(ThemeName::Lash).background, Some(FORM));
+        assert_eq!(
+            surface_raised_for(ThemeName::Lash).background,
+            Some(FORM_RAISED)
+        );
+        assert_eq!(
+            surface_deep_for(ThemeName::Lash).background,
+            Some(FORM_DEEP)
+        );
+        assert_eq!(surface_base_for(ThemeName::Lash).fill().bg, Some(FORM));
+        assert_eq!(
+            surface_raised_for(ThemeName::Lash)
+                .apply(Style::default().fg(Color::ansi(7)))
+                .bg,
+            Some(FORM_RAISED)
+        );
         assert_eq!(selection_bg_for(ThemeName::Lash), SELECTION_BG);
         assert!(empty_state_logo_enabled_for(ThemeName::Lash));
     }

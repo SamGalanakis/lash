@@ -48,7 +48,7 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if area.width < 2 || area.height < 1 {
         return;
     }
-    frame.fill(area, ' ', bg(theme::surface_deep()));
+    frame.fill(area, ' ', theme::surface_deep().fill());
     let inner_width = area
         .width
         .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
@@ -142,7 +142,7 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
     frame.draw_box(
         popup,
         fg(theme::border_faint()),
-        Some(bg(theme::surface_deep())),
+        Some(theme::surface_deep().fill()),
     );
     let is_indexing = app.suggestion_kind() == SuggestionKind::Indexing;
     for (idx, suggestion) in app.suggestions().iter().take(max_visible).enumerate() {

@@ -274,6 +274,25 @@ mod tests {
     }
 
     #[test]
+    fn system_theme_idle_chrome_does_not_paint_background_cells() {
+        theme::set_active_theme(ThemeName::System);
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+
+        let snapshot = lash_tui::render_snapshot(100, 28, |frame| draw(frame, &mut app));
+
+        for y in 0..snapshot.height {
+            for x in 0..snapshot.width {
+                let cell = snapshot.cell(x, y).expect("cell exists");
+                assert_eq!(
+                    cell.style.bg, None,
+                    "system idle chrome painted a background at ({x}, {y})"
+                );
+            }
+        }
+        theme::set_active_theme(ThemeName::Lash);
+    }
+
+    #[test]
     fn idle_footer_stays_idle_when_background_processes_exist() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();
