@@ -10,6 +10,200 @@ fn draw_overlay_scrim(frame: &mut Frame<'_>, area: Rect) {
     }
 }
 
+enum CommandPaletteRenderRow {
+    Category(String),
+    Item(usize),
+}
+
+fn command_palette_render_rows(
+    palette: &crate::overlay::CommandPaletteState,
+    filtered_indices: &[usize],
+) -> Vec<CommandPaletteRenderRow> {
+    let mut rows = Vec::new();
+    let mut last_category: Option<&str> = None;
+    for idx in filtered_indices {
+        let item = &palette.items[*idx];
+        if last_category != Some(item.category.as_str()) {
+            rows.push(CommandPaletteRenderRow::Category(item.category.clone()));
+            last_category = Some(item.category.as_str());
+        }
+        rows.push(CommandPaletteRenderRow::Item(*idx));
+    }
+    rows
+}
+
+fn draw_command_palette(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
+    let Some(palette) = app.command_palette_state() else {
+        return;
+    };
+    let width = 92u16.min(history_area.width.saturating_sub(4));
+    if width < 36 || history_area.height < 8 {
+        return;
+    }
+
+    let filtered_indices = palette.filtered_indices();
+    let match_count = filtered_indices.len();
+    let max_list_height = history_area.height.saturating_sub(5).max(1) as usize;
+    let render_rows = command_palette_render_rows(palette, &filtered_indices);
+    let list_height = render_rows
+        .len()
+        .clamp(1, 18)
+        .min(max_list_height) as u16;
+    let height = list_height + 4;
+
+    draw_overlay_scrim(frame, history_area);
+    let popup = centered_rect(history_area, width, height);
+    frame.draw_box(
+        popup,
+        fg(theme::border_faint()),
+        Some(bg(theme::surface_deep())),
+    );
+
+    let title = match palette.selected_position() {
+        Some((pos, total)) => format!("{} ({pos}/{total})", palette.title),
+        None => format!("{} (0/{})", palette.title, palette.items.len()),
+    };
+    frame.write_text(
+        popup.x + 2,
+        popup.y,
+        &title,
+        fg(theme::brand()).add_modifier(Modifier::Bold),
+        popup.width.saturating_sub(10),
+    );
+    frame.write_text(
+        popup.x + popup.width.saturating_sub(7),
+        popup.y,
+        "esc",
+        theme::text_faint_style(),
+        3,
+    );
+
+    let query_text = if palette.query.is_empty() {
+        "Search".to_string()
+    } else {
+        format!("Search  {}█", palette.query)
+    };
+    let query_style = if palette.query.is_empty() {
+        theme::text_faint_style()
+    } else {
+        fg(theme::text_primary())
+    };
+    frame.write_text(
+        popup.x + 2,
+        popup.y + 1,
+        &query_text,
+        query_style,
+        popup.width.saturating_sub(4),
+    );
+
+    if match_count == 0 {
+        frame.write_text(
+            popup.x + 2,
+            popup.y + 2,
+            "No matching commands",
+            theme::text_faint_style(),
+            popup.width.saturating_sub(4),
+        );
+    } else {
+        let selected_filtered = palette.selected.min(match_count - 1);
+        let selected_item_idx = filtered_indices[selected_filtered];
+        let selected_row = render_rows
+            .iter()
+            .position(|row| matches!(row, CommandPaletteRenderRow::Item(idx) if *idx == selected_item_idx))
+            .unwrap_or(0);
+        let scroll = selected_row.saturating_sub(list_height as usize - 1);
+        for (visible_row, row) in render_rows
+            .iter()
+            .skip(scroll)
+            .take(list_height as usize)
+            .enumerate()
+        {
+            let y = popup.y + 2 + visible_row as u16;
+            match row {
+                CommandPaletteRenderRow::Category(category) => {
+                    frame.write_text(
+                        popup.x + 2,
+                        y,
+                        category,
+                        fg(theme::brand()).add_modifier(Modifier::Bold),
+                        popup.width.saturating_sub(4),
+                    );
+                }
+                CommandPaletteRenderRow::Item(idx) => {
+                    let item = &palette.items[*idx];
+                    let selected = *idx == selected_item_idx;
+                    let row_style = if selected {
+                        fg(theme::text_primary())
+                            .bg(theme::selection_bg())
+                            .add_modifier(Modifier::Bold)
+                    } else {
+                        fg(theme::text_subtle()).bg(theme::surface_deep())
+                    };
+                    frame.fill(
+                        Rect::new(
+                            popup.x + 1,
+                            y,
+                            popup.width.saturating_sub(2),
+                            1,
+                        ),
+                        ' ',
+                        row_style,
+                    );
+                    let marker = if item.current { "●" } else { " " };
+                    let footer = item.footer.as_deref().unwrap_or_default();
+                    let footer_width = display_width(footer);
+                    let inner_width = popup.width.saturating_sub(4) as usize;
+                    let left_width = inner_width.saturating_sub(footer_width.saturating_add(2));
+                    let left = format!("{marker} {}", item.title);
+                    let line = if left_width > display_width(&left) + 3 {
+                        let desc_width = left_width.saturating_sub(display_width(&left) + 2);
+                        format!(
+                            "{}  {}",
+                            left,
+                            truncate_display_forced(&item.description, desc_width)
+                        )
+                    } else {
+                        truncate_display_forced(&left, left_width)
+                    };
+                    frame.write_text(
+                        popup.x + 2,
+                        y,
+                        &line,
+                        row_style,
+                        left_width as u16,
+                    );
+                    if !footer.is_empty() && inner_width > footer_width {
+                        let footer_style = if selected {
+                            row_style
+                        } else {
+                            theme::text_faint_style().bg(theme::surface_deep())
+                        };
+                        frame.write_text(
+                            popup.x + popup.width.saturating_sub(2 + footer_width as u16),
+                            y,
+                            footer,
+                            footer_style,
+                            footer_width as u16,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let hint = "type search · ↑↓ choose · enter run · esc close";
+    let hint_width = display_width(hint) as u16;
+    if popup.width > hint_width + 4 {
+        frame.write_text(
+            popup.x + popup.width - hint_width - 2,
+            popup.y + popup.height - 1,
+            hint,
+            theme::text_faint_style(),
+            hint_width,
+        );
+    }
+}
+
 fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     let Some(picker) = app.session_picker_state() else {
         return;
@@ -547,7 +741,7 @@ fn apply_document_selection_highlight(
         let span_width = col_end.saturating_sub(col_start);
         if span_width > 0 {
             frame.patch_row_style_range(col_start, screen_y, span_width, |style| {
-                style.bg(theme::SELECTION_BG)
+                style.bg(theme::selection_bg())
             });
         }
     }

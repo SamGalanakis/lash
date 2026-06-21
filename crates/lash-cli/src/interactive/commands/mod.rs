@@ -244,7 +244,7 @@ pub(super) async fn handle_parsed_slash_command(
     ctx: SlashCommandCtx<'_>,
 ) -> anyhow::Result<bool> {
     match command {
-        ParsedSlashCommand::Builtin(command) => handle_slash_command(command, ctx).await,
+        ParsedSlashCommand::Builtin(command) => handle_builtin_command(command, ctx).await,
         ParsedSlashCommand::Ui(command) => {
             handle_ui_command(command, ctx.app, ctx.ui_extensions, ctx.runtime).await;
             Ok(false)
@@ -252,7 +252,7 @@ pub(super) async fn handle_parsed_slash_command(
     }
 }
 
-async fn handle_slash_command(
+pub(super) async fn handle_builtin_command(
     cmd: command::Command,
     ctx: SlashCommandCtx<'_>,
 ) -> anyhow::Result<bool> {

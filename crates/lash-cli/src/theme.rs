@@ -1,4 +1,27 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use crate::config::ThemeName;
 use lash_tui::{Color, Modifier, Style};
+
+static ACTIVE_THEME: AtomicU8 = AtomicU8::new(ThemeName::Lash as u8);
+
+pub fn active_theme() -> ThemeName {
+    match ACTIVE_THEME.load(Ordering::Relaxed) {
+        value if value == ThemeName::System as u8 => ThemeName::System,
+        _ => ThemeName::Lash,
+    }
+}
+
+pub fn set_active_theme(theme: ThemeName) {
+    ACTIVE_THEME.store(theme as u8, Ordering::Relaxed);
+}
+
+fn themed(lash: Color, system: Color) -> Color {
+    match active_theme() {
+        ThemeName::Lash => lash,
+        ThemeName::System => system,
+    }
+}
 
 // ─── Pigments ────────────────────────────────────────────────────────────────
 // Raw paints named by their physical source. Do not reach for these when you
@@ -54,55 +77,59 @@ pub const PROMPT_CHAR: &str = "❯";
 // (headings, inline code, every bold word).
 
 pub fn text_primary() -> Color {
-    CHALK
+    themed(CHALK, Color::default_foreground())
 }
 
 pub fn text_muted() -> Color {
-    CHALK_MID
+    themed(CHALK_MID, Color::ansi(7))
 }
 
 pub fn text_subtle() -> Color {
-    CHALK_DIM
+    themed(CHALK_DIM, Color::ansi(8))
 }
 
 pub fn text_faint() -> Color {
-    ASH_TEXT
+    themed(ASH_TEXT, Color::ansi(8))
 }
 
 pub fn brand() -> Color {
-    SODIUM
+    themed(SODIUM, Color::ansi(3))
 }
 
 pub fn state_ok() -> Color {
-    LICHEN
+    themed(LICHEN, Color::ansi(2))
 }
 
 pub fn state_error() -> Color {
-    ERROR
+    themed(ERROR, Color::ansi(1))
 }
 
 pub fn surface_base() -> Color {
-    FORM
+    themed(FORM, Color::default_background())
 }
 
 pub fn surface_raised() -> Color {
-    FORM_RAISED
+    themed(FORM_RAISED, Color::ansi(8))
 }
 
 pub fn surface_deep() -> Color {
-    FORM_DEEP
+    themed(FORM_DEEP, Color::default_background())
 }
 
 pub fn rule() -> Color {
-    ASH_LIGHT
+    themed(ASH_LIGHT, Color::ansi(8))
 }
 
 pub fn border_dim() -> Color {
-    ASH_MID
+    themed(ASH_MID, Color::ansi(8))
 }
 
 pub fn border_faint() -> Color {
-    ASH
+    themed(ASH, Color::ansi(8))
+}
+
+pub fn selection_bg() -> Color {
+    themed(SELECTION_BG, Color::ansi(4))
 }
 
 // ─── Semantic styles ─────────────────────────────────────────────────────────
@@ -190,7 +217,7 @@ pub fn code_chrome() -> Style {
 
 pub fn explore_marker() -> Style {
     Style::default()
-        .fg(Color::rgb(122, 94, 48))
+        .fg(themed(Color::rgb(122, 94, 48), Color::ansi(3)))
         .add_modifier(Modifier::Bold)
 }
 
@@ -243,7 +270,7 @@ pub fn inline_code() -> Style {
 }
 
 pub fn patch_frame() -> Style {
-    Style::default().fg(PATCH_FRAME)
+    Style::default().fg(themed(PATCH_FRAME, Color::ansi(3)))
 }
 
 pub fn patch_label() -> Style {
@@ -251,7 +278,7 @@ pub fn patch_label() -> Style {
 }
 
 pub fn patch_add() -> Style {
-    Style::default().fg(PATCH_ADD)
+    Style::default().fg(themed(PATCH_ADD, Color::ansi(2)))
 }
 
 pub fn patch_remove() -> Style {
@@ -261,43 +288,51 @@ pub fn patch_remove() -> Style {
 pub fn patch_diff_add_gutter() -> Style {
     Style::default()
         .fg(state_ok())
-        .bg(PATCH_ADD_GUTTER_BG)
+        .bg(themed(PATCH_ADD_GUTTER_BG, Color::ansi(2)))
         .add_modifier(Modifier::Bold)
 }
 
 pub fn patch_diff_add_line() -> Style {
-    Style::default().fg(text_primary()).bg(PATCH_ADD_LINE_BG)
+    Style::default()
+        .fg(text_primary())
+        .bg(themed(PATCH_ADD_LINE_BG, Color::default_background()))
 }
 
 pub fn patch_diff_remove_gutter() -> Style {
     Style::default()
         .fg(state_error())
-        .bg(PATCH_REMOVE_GUTTER_BG)
+        .bg(themed(PATCH_REMOVE_GUTTER_BG, Color::ansi(1)))
         .add_modifier(Modifier::Bold)
 }
 
 pub fn patch_diff_remove_line() -> Style {
-    Style::default().fg(text_primary()).bg(PATCH_REMOVE_LINE_BG)
+    Style::default()
+        .fg(text_primary())
+        .bg(themed(PATCH_REMOVE_LINE_BG, Color::default_background()))
 }
 
 pub fn patch_diff_context_gutter() -> Style {
     Style::default()
         .fg(text_faint())
-        .bg(PATCH_CONTEXT_GUTTER_BG)
+        .bg(themed(PATCH_CONTEXT_GUTTER_BG, Color::default_background()))
 }
 
 pub fn patch_diff_context_line() -> Style {
-    Style::default().fg(text_subtle()).bg(PATCH_CONTEXT_LINE_BG)
+    Style::default()
+        .fg(text_subtle())
+        .bg(themed(PATCH_CONTEXT_LINE_BG, Color::default_background()))
 }
 
 pub fn patch_diff_hunk_gutter() -> Style {
-    Style::default().fg(PATCH_HUNK).bg(PATCH_HUNK_GUTTER_BG)
+    Style::default()
+        .fg(themed(PATCH_HUNK, Color::ansi(3)))
+        .bg(themed(PATCH_HUNK_GUTTER_BG, Color::default_background()))
 }
 
 pub fn patch_diff_hunk_line() -> Style {
     Style::default()
-        .fg(PATCH_HUNK)
-        .bg(PATCH_HUNK_LINE_BG)
+        .fg(themed(PATCH_HUNK, Color::ansi(3)))
+        .bg(themed(PATCH_HUNK_LINE_BG, Color::default_background()))
         .add_modifier(Modifier::Bold)
 }
 
@@ -344,27 +379,27 @@ pub fn turn_status_elapsed() -> Style {
 }
 
 pub fn process_selected_chrome() -> Style {
-    Style::default().bg(SELECTION_BG)
+    Style::default().bg(selection_bg())
 }
 
 pub fn process_selected_indicator() -> Style {
     Style::default()
         .fg(brand())
-        .bg(SELECTION_BG)
+        .bg(selection_bg())
         .add_modifier(Modifier::Bold)
 }
 
 pub fn process_selected_badge() -> Style {
     Style::default()
         .fg(text_primary())
-        .bg(SELECTION_BG)
+        .bg(selection_bg())
         .add_modifier(Modifier::Bold)
 }
 
 pub fn process_selected_label() -> Style {
     Style::default()
         .fg(text_primary())
-        .bg(SELECTION_BG)
+        .bg(selection_bg())
         .add_modifier(Modifier::Bold)
 }
 

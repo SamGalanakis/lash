@@ -193,7 +193,7 @@ fn apply_selection_highlight(frame: &mut Frame<'_>, app: &App, history_area: Rec
         let span_width = col_end.saturating_sub(col_start);
         if span_width > 0 {
             frame.patch_row_style_range(col_start, screen_y, span_width, |style| {
-                style.bg(theme::SELECTION_BG)
+                style.bg(theme::selection_bg())
             });
         }
     }

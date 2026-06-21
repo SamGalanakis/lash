@@ -69,6 +69,7 @@ pub fn draw_with_capabilities(
         draw_suggestions(frame, app, input_area);
     }
     draw_process_dock(frame, app, process_area);
+    draw_command_palette(frame, app, history);
     draw_session_picker(frame, app, history);
     draw_tree(frame, app, history);
     draw_skill_picker(frame, app, history);

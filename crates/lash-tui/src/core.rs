@@ -23,23 +23,36 @@ use unicode_width::UnicodeWidthChar;
 use crate::input::TermCapabilities;
 use crate::prof::{PerfCounters, PerfPhase};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Color {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Color {
+    Rgb { r: u8, g: u8, b: u8 },
+    AnsiValue(u8),
+    DefaultForeground,
+    DefaultBackground,
 }
 
 impl Color {
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
+        Self::Rgb { r, g, b }
+    }
+
+    pub const fn ansi(value: u8) -> Self {
+        Self::AnsiValue(value)
+    }
+
+    pub const fn default_foreground() -> Self {
+        Self::DefaultForeground
+    }
+
+    pub const fn default_background() -> Self {
+        Self::DefaultBackground
     }
 
     fn to_term(self) -> TermColor {
-        TermColor::Rgb {
-            r: self.r,
-            g: self.g,
-            b: self.b,
+        match self {
+            Self::Rgb { r, g, b } => TermColor::Rgb { r, g, b },
+            Self::AnsiValue(value) => TermColor::AnsiValue(value),
+            Self::DefaultForeground | Self::DefaultBackground => TermColor::Reset,
         }
     }
 }

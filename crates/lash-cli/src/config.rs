@@ -15,6 +15,41 @@ use lash_provider_openai::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeName {
+    #[default]
+    Lash,
+    System,
+}
+
+impl ThemeName {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lash => "lash",
+            Self::System => "system",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Lash => "Lash",
+            Self::System => "System",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Lash => "Use Lash's high-contrast dark palette.",
+            Self::System => "Use terminal defaults and ANSI palette colors.",
+        }
+    }
+
+    pub const fn all() -> [Self; 2] {
+        [Self::Lash, Self::System]
+    }
+}
+
 /// Auxiliary service secrets that are independent of LLM provider auth.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AuxiliarySecrets {
@@ -42,6 +77,8 @@ pub struct ModelDefault {
 #[serde(deny_unknown_fields)]
 pub struct LashConfig {
     pub active_provider: String,
+    #[serde(default)]
+    pub theme: ThemeName,
     pub providers: BTreeMap<String, ProviderSpec>,
     #[serde(default, skip_serializing_if = "AuxiliarySecrets::is_empty")]
     pub auxiliary_secrets: AuxiliarySecrets,
@@ -68,6 +105,7 @@ impl LashConfig {
         providers.insert(kind.clone(), spec);
         Self {
             active_provider: kind,
+            theme: ThemeName::default(),
             providers,
             auxiliary_secrets: AuxiliarySecrets::default(),
             mcp_servers: BTreeMap::new(),
@@ -401,11 +439,32 @@ mod tests {
         });
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config");
         assert_eq!(cfg.active_provider, "openai");
+        assert_eq!(cfg.theme, ThemeName::Lash);
         let spec = cfg.active_provider_spec();
         assert_eq!(spec.kind, "openai");
         assert_eq!(spec.config["api_key"], serde_json::json!("direct-k"));
         let compatible = cfg.provider_spec("openai-compatible").expect("compatible");
         assert_eq!(compatible.config["base_url"], "https://example.com/v1");
+    }
+
+    #[test]
+    fn theme_preference_roundtrips() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-compatible",
+            "theme": "system",
+            "providers": {
+                "openai-compatible": {
+                    "type": "openai-compatible",
+                    "api_key": "k",
+                    "base_url": "https://example.com/v1"
+                }
+            }
+        });
+        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
+        assert_eq!(cfg.theme, ThemeName::System);
+
+        let rendered = serde_json::to_value(&cfg).expect("serialize config");
+        assert_eq!(rendered["theme"], serde_json::json!("system"));
     }
 
     #[test]

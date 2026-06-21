@@ -7,13 +7,88 @@ use lash::LashSession;
 use lash_core::runtime::ExecutionScope;
 
 use crate::app::{App, UiTimelineItem};
+use crate::config::{LashConfig, ThemeName};
+use crate::overlay::CommandPaletteAction;
 use crate::render;
+use crate::theme;
 use crate::ui_effects::push_system_message;
 
 use super::SessionCtx;
 use super::mouse::viewport_metrics;
 
 use crate::interactive::commands::switch_to_session_identifier;
+
+pub(super) async fn handle_command_palette_key(
+    key: KeyEvent,
+    ctx: &mut SessionCtx<'_>,
+) -> anyhow::Result<bool> {
+    let viewport_height = ctx
+        .terminal
+        .size()
+        .map(|(_, height)| height.saturating_sub(8).max(4) as usize)
+        .unwrap_or(10);
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => ctx.app.command_palette_up(),
+        KeyCode::Down | KeyCode::Char('j') => ctx.app.command_palette_down(),
+        KeyCode::PageUp => ctx.app.command_palette_page_up(viewport_height),
+        KeyCode::PageDown => ctx.app.command_palette_page_down(viewport_height),
+        KeyCode::Home => ctx.app.command_palette_home(),
+        KeyCode::End => ctx.app.command_palette_end(),
+        KeyCode::Backspace => ctx.app.command_palette_backspace_query(),
+        KeyCode::Char(ch)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            ctx.app.command_palette_insert_query_char(ch);
+        }
+        KeyCode::Enter => {
+            let Some(action) = ctx.app.take_command_palette_action() else {
+                return Ok(false);
+            };
+            return execute_command_palette_action(action, ctx).await;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+async fn execute_command_palette_action(
+    action: CommandPaletteAction,
+    ctx: &mut SessionCtx<'_>,
+) -> anyhow::Result<bool> {
+    match action {
+        CommandPaletteAction::Builtin(command) => {
+            let slash_ctx = ctx.slash_ctx();
+            super::super::commands::handle_builtin_command(command, slash_ctx).await
+        }
+        CommandPaletteAction::InsertDraft(draft) => {
+            ctx.app.set_input(draft);
+            ctx.app.update_suggestions();
+            Ok(false)
+        }
+        CommandPaletteAction::Theme(choice) => {
+            apply_theme_choice(choice, ctx.app, ctx.provider);
+            Ok(false)
+        }
+    }
+}
+
+fn apply_theme_choice(choice: ThemeName, app: &mut App, provider: &lash::provider::ProviderHandle) {
+    theme::set_active_theme(choice);
+    let mut config =
+        LashConfig::load(&crate::paths::config_file()).unwrap_or_else(|| LashConfig::new(provider));
+    config.upsert_provider(provider);
+    config.theme = choice;
+    match config.save(&crate::paths::config_file()) {
+        Ok(()) => app.show_toast(
+            format!("Theme set to {}", choice.label()),
+            crate::app::ToastKind::Info,
+        ),
+        Err(err) => push_system_message(app, format!("Theme changed, but saving failed: {err}")),
+    }
+    app.dirty = true;
+}
 
 pub(super) fn can_focus_process_dock(app: &App) -> bool {
     app.input().trim().is_empty() && !app.has_suggestions() && !app.processes.is_empty()

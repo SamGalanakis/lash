@@ -112,6 +112,99 @@ impl App {
         matches!(&self.overlay, Some(OverlayState::SessionPicker(state)) if !state.items.is_empty())
     }
 
+    pub fn has_command_palette(&self) -> bool {
+        matches!(&self.overlay, Some(OverlayState::CommandPalette(state)) if !state.items.is_empty())
+    }
+
+    pub fn show_command_palette(&mut self, items: Vec<crate::overlay::CommandPaletteItem>) {
+        self.clear_selection();
+        self.clear_input_selection();
+        self.overlay = Some(OverlayState::CommandPalette(
+            crate::overlay::CommandPaletteState::new(items),
+        ));
+        self.dirty = true;
+    }
+
+    pub fn command_palette_state(&self) -> Option<&crate::overlay::CommandPaletteState> {
+        match &self.overlay {
+            Some(OverlayState::CommandPalette(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn command_palette_up(&mut self) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.up();
+            self.dirty = true;
+        }
+    }
+
+    pub fn command_palette_down(&mut self) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.down();
+            self.dirty = true;
+        }
+    }
+
+    pub fn command_palette_page_up(&mut self, amount: usize) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.page_up(amount);
+            self.dirty = true;
+        }
+    }
+
+    pub fn command_palette_page_down(&mut self, amount: usize) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.page_down(amount);
+            self.dirty = true;
+        }
+    }
+
+    pub fn command_palette_home(&mut self) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.home();
+            self.dirty = true;
+        }
+    }
+
+    pub fn command_palette_end(&mut self) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.end();
+            self.dirty = true;
+        }
+    }
+
+    pub fn command_palette_insert_query_char(&mut self, ch: char) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.push_query_char(ch);
+            self.dirty = true;
+        }
+    }
+
+    pub fn command_palette_backspace_query(&mut self) {
+        if let Some(OverlayState::CommandPalette(state)) = &mut self.overlay {
+            state.pop_query_char();
+            self.dirty = true;
+        }
+    }
+
+    pub fn take_command_palette_action(&mut self) -> Option<crate::overlay::CommandPaletteAction> {
+        match self.overlay.take() {
+            Some(OverlayState::CommandPalette(state)) => state.selected_action(),
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
+    }
+
+    pub fn dismiss_command_palette(&mut self) {
+        if matches!(self.overlay, Some(OverlayState::CommandPalette(_))) {
+            self.overlay = None;
+            self.dirty = true;
+        }
+    }
+
     pub fn has_document(&self) -> bool {
         matches!(self.overlay, Some(OverlayState::Document(_)))
     }

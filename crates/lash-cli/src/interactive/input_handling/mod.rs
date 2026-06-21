@@ -37,6 +37,8 @@ use super::helpers::{TurnReplayPayload, key_chord_from_event};
 
 pub(super) use mouse::handle_mouse_event;
 #[cfg(test)]
+pub(crate) use shortcuts::command_palette_items;
+#[cfg(test)]
 pub(super) use turns::selected_slash_command_suggestion;
 #[cfg(test)]
 pub(super) use turns::slash_command_blocked_while_working_message;
@@ -112,6 +114,7 @@ impl SessionCtx<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveModal {
     None,
+    CommandPalette,
     Document,
     SkillPicker,
     SessionPicker,
@@ -121,7 +124,9 @@ enum ActiveModal {
 }
 
 fn active_modal(app: &App) -> ActiveModal {
-    if app.has_document() {
+    if app.has_command_palette() {
+        ActiveModal::CommandPalette
+    } else if app.has_document() {
         ActiveModal::Document
     } else if app.has_skill_picker() {
         ActiveModal::SkillPicker
@@ -142,6 +147,7 @@ fn active_modal(app: &App) -> ActiveModal {
 /// modal is active.
 fn dismiss_active_modal(app: &mut App, ui_trace: &mut Option<UiTraceRecorder>) -> bool {
     match active_modal(app) {
+        ActiveModal::CommandPalette => app.dismiss_command_palette(),
         ActiveModal::Document => app.dismiss_document(),
         ActiveModal::Prompt => {
             if let Some(recorder) = ui_trace.as_mut() {
@@ -199,6 +205,9 @@ pub(super) async fn dispatch_key_event(
         ActiveModal::Document => {
             modals::handle_document_key(key, ctx)?;
             return Ok(false);
+        }
+        ActiveModal::CommandPalette => {
+            return modals::handle_command_palette_key(key, ctx).await;
         }
         ActiveModal::SkillPicker => {
             modals::handle_skill_picker_key(key, ctx);

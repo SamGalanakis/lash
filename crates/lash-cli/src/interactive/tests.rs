@@ -311,6 +311,64 @@ fn active_turn_slash_command_block_message_is_command_not_queue_language() {
 }
 
 #[test]
+fn command_palette_items_include_current_settings_and_theme_choices() {
+    crate::theme::set_active_theme(crate::config::ThemeName::Lash);
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("codex")
+        .supported_variants(|_| &["low", "xhigh"])
+        .build()
+        .into_handle();
+    let mut app = App::new("gpt-5.5".into(), "test".into(), "test-session-id".into());
+    app.set_model_variant(Some("xhigh".to_string()));
+    app.set_execution_mode_label(&crate::execution_settings::ExecutionMode::Rlm);
+
+    let items = super::input_handling::command_palette_items(&app, &provider);
+
+    assert!(items.iter().any(|item| {
+        item.title == "Theme: Lash"
+            && item.current
+            && matches!(
+                item.action,
+                crate::overlay::CommandPaletteAction::Theme(crate::config::ThemeName::Lash)
+            )
+    }));
+    assert!(items.iter().any(|item| {
+        item.title == "Theme: System"
+            && matches!(
+                item.action,
+                crate::overlay::CommandPaletteAction::Theme(crate::config::ThemeName::System)
+            )
+    }));
+    assert!(items.iter().any(|item| {
+        item.title == "Model"
+            && item.description.contains("gpt-5.5")
+            && matches!(
+                item.action,
+                crate::overlay::CommandPaletteAction::InsertDraft(ref draft) if draft == "/model "
+            )
+    }));
+    assert!(items.iter().any(|item| {
+        item.title == "Variant: xhigh"
+            && item.current
+            && matches!(
+                item.action,
+                crate::overlay::CommandPaletteAction::Builtin(crate::command::Command::Variant(Some(ref variant)))
+                    if variant == "xhigh"
+            )
+    }));
+    assert!(items.iter().any(|item| {
+        item.title == "Provider"
+            && item.description.contains("Codex")
+            && matches!(
+                item.action,
+                crate::overlay::CommandPaletteAction::Builtin(
+                    crate::command::Command::ChangeProvider
+                )
+            )
+    }));
+}
+
+#[test]
 fn manual_interrupt_keeps_durable_queue_snapshot_out_of_history() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline.push(UiTimelineItem::UserInput(

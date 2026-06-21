@@ -171,6 +171,36 @@ fn cli_interactive_pty_mouse_selection_copies_and_escape_keeps_draft() {
 }
 
 #[test]
+fn cli_interactive_pty_ctrl_p_opens_command_palette() {
+    let lash_home = test_lash_home("standard-echo");
+    let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Standard, None);
+
+    harness.press_key("Ctrl-P").expect("open command palette");
+    let screen = harness
+        .wait_for_text("Theme: Lash", Duration::from_secs(10))
+        .expect("wait for command palette");
+
+    assert!(
+        screen.contains("Commands") && screen.contains("Model") && screen.contains("Provider"),
+        "command palette did not show expected settings\nscreen:\n{screen}"
+    );
+    harness.type_text("system").expect("filter command palette");
+    harness
+        .press_key("Enter")
+        .expect("select system theme from command palette");
+    harness
+        .wait_for_text("Theme set to System", Duration::from_secs(10))
+        .expect("wait for theme toast");
+
+    let config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(lash_home.path().join("config.json")).expect("read config"),
+    )
+    .expect("parse config");
+    assert_eq!(config["theme"], serde_json::json!("system"));
+    harness.finish_cleanly().expect("finish harness");
+}
+
+#[test]
 fn cli_interactive_pty_rlm_subagent_smoke_runs_turn_and_exits() {
     let lash_home = test_lash_home("rlm-subagent-smoke");
     let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Rlm, None);

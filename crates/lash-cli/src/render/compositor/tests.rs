@@ -10,7 +10,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::mpsc;
 
-    use crate::overlay::{PromptFocus, PromptState};
+    use crate::config::ThemeName;
+    use crate::overlay::{CommandPaletteAction, CommandPaletteItem, PromptFocus, PromptState};
 
     #[test]
     fn animated_lash_word_cycles_slash_through_wordmark() {
@@ -220,6 +221,56 @@ mod tests {
         assert!(visible.contains("Resume Session (1/2)"));
         assert!(visible.contains("write release notes"));
         assert!(!visible.contains("debug the resume picker"));
+    }
+
+    #[test]
+    fn command_palette_renders_grouped_settings_with_current_marker() {
+        theme::set_active_theme(ThemeName::Lash);
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "current-session-id".into());
+        app.show_command_palette(vec![
+            CommandPaletteItem::new(
+                "Settings",
+                "Theme: Lash",
+                "Use Lash's high-contrast dark palette.",
+                CommandPaletteAction::Theme(ThemeName::Lash),
+            )
+            .footer("lash")
+            .current(true),
+            CommandPaletteItem::new(
+                "Settings",
+                "Theme: System",
+                "Use terminal defaults and ANSI palette colors.",
+                CommandPaletteAction::Theme(ThemeName::System),
+            )
+            .footer("system"),
+            CommandPaletteItem::new(
+                "Session",
+                "Resume Session",
+                "Search previous sessions.",
+                CommandPaletteAction::Builtin(crate::command::Command::Resume(None)),
+            )
+            .footer("/resume"),
+        ]);
+
+        let snapshot = lash_tui::render_snapshot(100, 24, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+
+        assert!(visible.contains("Commands (1/3)"), "{visible}");
+        assert!(visible.contains("Settings"), "{visible}");
+        assert!(visible.contains("● Theme: Lash"), "{visible}");
+        assert!(visible.contains("Theme: System"), "{visible}");
+        assert!(visible.contains("Session"), "{visible}");
+        assert!(visible.contains("esc"), "{visible}");
+        assert!(
+            (0..snapshot.height).any(|y| {
+                (0..snapshot.width).any(|x| {
+                    snapshot
+                        .cell(x, y)
+                        .is_some_and(|cell| cell.style.bg == Some(theme::selection_bg()))
+                })
+            }),
+            "selected command row should use semantic selection background"
+        );
     }
 
     #[test]
