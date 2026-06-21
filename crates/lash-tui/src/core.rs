@@ -645,9 +645,6 @@ impl Terminal {
         stdout.execute(EnableFocusChange).ok();
         stdout.execute(EnableMouseCapture).ok();
         stdout
-            .execute(Print("\x1b]11;rgb:0e/0d/0b\x1b\\"))
-            .context("set background")?;
-        stdout
             .execute(SetCursorStyle::SteadyBar)
             .context("set cursor style")?;
         let (width, height) = terminal::size().context("read terminal size")?;

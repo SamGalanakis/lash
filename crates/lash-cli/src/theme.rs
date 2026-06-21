@@ -160,8 +160,8 @@ fn selection_bg_for(theme: ThemeName) -> Color {
     themed_for(theme, SELECTION_BG, Color::ansi(6))
 }
 
-fn empty_state_logo_enabled_for(theme: ThemeName) -> bool {
-    matches!(theme, ThemeName::Lash)
+fn empty_state_logo_enabled_for(_theme: ThemeName) -> bool {
+    true
 }
 
 // ─── Semantic styles ─────────────────────────────────────────────────────────
@@ -509,7 +509,7 @@ mod tests {
             selection_bg_for(ThemeName::System),
             Color::default_background()
         );
-        assert!(!empty_state_logo_enabled_for(ThemeName::System));
+        assert!(empty_state_logo_enabled_for(ThemeName::System));
     }
 
     #[test]
