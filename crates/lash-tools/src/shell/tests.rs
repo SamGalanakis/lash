@@ -458,11 +458,11 @@ mod tests {
         let result = run(
             &shell,
             "exec_command",
-            &json!({"cmd": cmd, "timeout_ms": 50, "allow_nonzero_exit": true}),
+            &json!({"cmd": cmd, "timeout_ms": 50}),
         )
         .await;
 
-        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert!(!result.is_success(), "{}", result.value_for_projection());
         assert_eq!(result.value_for_projection()["status"], "timed_out");
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(!marker.exists(), "timed-out child process wrote marker");
@@ -769,26 +769,6 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("nope")
-        );
-    }
-
-    #[tokio::test]
-    async fn exec_command_legacy_allow_nonzero_exit_still_returns_nonzero_as_success() {
-        let shell = test_shell();
-        let result = run(
-            &shell,
-            "exec_command",
-            &json!({"cmd": "echo expected failure; exit 7", "allow_nonzero_exit": true}),
-        )
-        .await;
-        assert!(result.is_success(), "{}", result.value_for_projection());
-        assert_eq!(result.value_for_projection()["exit_code"], 7);
-        assert!(result.value_for_projection()["error"].is_null());
-        assert!(
-            result.value_for_projection()["output"]
-                .as_str()
-                .unwrap()
-                .contains("expected failure")
         );
     }
 

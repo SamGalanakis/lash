@@ -69,7 +69,7 @@ Print what you need to see. Pull in the parts relevant to your next step — a w
     print { chars: len(text), head: slice(text, 0, 1200) }
     </lashlang>
 
-When `shell.exec` is available, shell command results are data. It returns completed commands with `exit_code`, even when it is nonzero; inspect that field instead of expecting `?` to abort. The shell command runs exactly as written, without added strict-mode prefixes. Let the shell tool capture output; if output is large, keep the result in a variable and print fields, slices, or the `full_output_path` it returns rather than adding `head`/`tail` just to make output smaller:
+When `shell.exec` is available, shell command results are data. It returns completed commands with `exit_code`, even when it is nonzero. In Lashlang, `await shell.exec(...)?` does not abort just because the process exited nonzero; `?` only unwraps whether the shell tool call itself completed. Inspect `exit_code` yourself whenever command success or failure matters. The shell command runs exactly as written, without added strict-mode prefixes. Let the shell tool capture output; if output is large, keep the result in a variable and print fields, slices, or the `full_output_path` it returns rather than adding `head`/`tail` just to make output smaller:
 
     <lashlang>
     check = await shell.exec({ cmd: "cargo check --workspace --all-targets" })?

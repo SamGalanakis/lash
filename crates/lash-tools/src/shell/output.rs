@@ -493,7 +493,6 @@ pub(crate) fn shell_io_result(
     original_token_count: Option<usize>,
     full_output_path: Option<&Path>,
     wall_time_seconds: f64,
-    _allow_nonzero_exit: bool,
 ) -> ToolResult {
     let record = standard_shell_io_record(
         id,
@@ -513,7 +512,6 @@ pub(crate) fn timed_out_shell_io_result(
     full_output_path: Option<&Path>,
     wall_time_seconds: f64,
     timeout_ms: u64,
-    allow_nonzero_exit: bool,
 ) -> ToolResult {
     let mut record = standard_shell_io_record(
         id,
@@ -534,15 +532,11 @@ pub(crate) fn timed_out_shell_io_result(
             json!(format!("Command timed out after {timeout_ms} ms")),
         );
     }
-    if allow_nonzero_exit {
-        ToolResult::ok(record)
-    } else {
-        shell_failure(
-            "shell_timeout",
-            format!("Command timed out after {timeout_ms} ms"),
-            record,
-        )
-    }
+    shell_failure(
+        "shell_timeout",
+        format!("Command timed out after {timeout_ms} ms"),
+        record,
+    )
 }
 
 fn shell_failure(code: &str, message: impl Into<String>, raw: serde_json::Value) -> ToolResult {
