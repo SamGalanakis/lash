@@ -25,6 +25,7 @@ use super::envelope::{
 use super::outcome::llm_call_error_from_transport;
 
 type HmacSha256 = Hmac<sha2::Sha256>;
+type AwaitEventOptions = (CancellationToken, Option<Instant>, Arc<dyn crate::Clock>);
 
 fn inline_await_events() -> &'static AwaitEventRegistry {
     static REGISTRY: OnceLock<AwaitEventRegistry> = OnceLock::new();
@@ -596,6 +597,19 @@ pub trait RuntimeEffectController: Send + Sync {
         false
     }
 
+    /// Whether this controller can safely accept overlapping `execute_effect`
+    /// calls from one runtime coordinator.
+    ///
+    /// Local and store-backed controllers can usually fan out independent
+    /// effects. Some workflow substrates expose a single ordered journal
+    /// context where native operations must be awaited immediately before the
+    /// next context call is issued. Those controllers should return `false` so
+    /// coordinators serialize child effects while still replaying each child by
+    /// its own stable key.
+    fn supports_concurrent_effects(&self) -> bool {
+        true
+    }
+
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
@@ -1012,12 +1026,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
-    fn into_await_event_options(
-        self,
-    ) -> Result<
-        (CancellationToken, Option<Instant>, Arc<dyn crate::Clock>),
-        RuntimeEffectControllerError,
-    > {
+    fn into_await_event_options(self) -> Result<AwaitEventOptions, RuntimeEffectControllerError> {
         match self.state {
             RuntimeEffectLocalExecutorState::ExternalWaitOptions {
                 cancellation,
@@ -1083,10 +1092,31 @@ impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
                     triggers: outcome.triggers,
                 })
             }
+            RuntimeEffectCommand::ToolAttempt {
+                call,
+                attempt,
+                max_attempts,
+            } => {
+                let child_execution_trace_hook = self.child_trace_hooks.get(&call.call_id).cloned();
+                let outcome = self
+                    .context
+                    .execute_prepared_tool_attempt_effect(
+                        call,
+                        attempt,
+                        max_attempts,
+                        envelope.invocation,
+                        child_execution_trace_hook,
+                    )
+                    .await?;
+                Ok(RuntimeEffectOutcome::ToolAttempt {
+                    launch: outcome.launch,
+                    triggers: outcome.triggers,
+                })
+            }
             command => Err(RuntimeEffectControllerError::new(
                 "runtime_effect_local_executor_mismatch",
                 format!(
-                    "local tool-batch executor cannot execute {} command",
+                    "local tool executor cannot execute {} command",
                     command.kind().as_str()
                 ),
             )),
@@ -1117,27 +1147,6 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 Ok(RuntimeEffectOutcome::LlmCall {
                     result,
                     text_streamed,
-                })
-            }
-            RuntimeEffectCommand::ToolCall { call } => {
-                let tool_name = call.tool_name.clone();
-                let mut outcome = runner
-                    .driver
-                    .run_tool_calls(
-                        vec![(call, envelope.invocation)],
-                        &runner.event_tx,
-                        &runner.cancellation,
-                    )
-                    .await?;
-                let launch = outcome.launches.pop().ok_or_else(|| {
-                    RuntimeEffectControllerError::new(
-                        "tool_result_missing",
-                        format!("tool `{tool_name}` completed without a launch result"),
-                    )
-                })?;
-                Ok(RuntimeEffectOutcome::ToolCall {
-                    launch,
-                    triggers: outcome.triggers,
                 })
             }
             RuntimeEffectCommand::ToolBatch { batch } => {

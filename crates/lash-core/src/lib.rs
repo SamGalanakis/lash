@@ -305,7 +305,8 @@ pub use runtime::{
     LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimeSessionState, ToolBatchEffectOutcome,
+    RuntimeInvocation, RuntimeSessionState, ToolAttemptEffectOutcome, ToolAttemptLaunch,
+    ToolBatchEffectOutcome,
 };
 pub use schemars::JsonSchema;
 pub use session::{
@@ -321,7 +322,9 @@ pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
 pub use session_model::{RuntimeSessionPolicy, SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
-    RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
+    RuntimePersistence, SessionExecutionLease, SessionExecutionLeaseCompletion,
+    SessionExecutionLeaseFence, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError,
+    VacuumReport,
 };
 #[allow(unused_imports)]
 pub(crate) use store::{

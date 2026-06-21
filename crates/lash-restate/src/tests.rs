@@ -17,13 +17,13 @@ fn restate_effect_name_uses_lash_replay_key() {
     let invocation = RuntimeInvocation::effect(
         lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 2),
         "effect",
-        RuntimeEffectKind::ToolCall,
-        "session:turn:1:2:tool_call:effect",
+        RuntimeEffectKind::ToolAttempt,
+        "session:turn:1:2:tool_attempt:effect",
     );
 
     assert_eq!(
         restate_effect_name(&invocation),
-        "lash:session:turn:1:2:tool_call:effect"
+        "lash:session:turn:1:2:tool_attempt:effect"
     );
 }
 
@@ -53,10 +53,42 @@ async fn restate_handler_controller_satisfies_concurrent_replay_conformance() {
     )
     .await;
 
+    let tool_context = Arc::new(ReplayableRecordingContext::default());
+    let tool_controller = RestateRuntimeEffectController::new(Arc::clone(&tool_context));
+    let tool_replay_context = Arc::clone(&tool_context);
+    lash_core::testing::conformance::effect_controller_tool_attempt_fanout_replay_deterministic(
+        &tool_controller,
+        move || tool_replay_context.start_replay(),
+    )
+    .await;
+
     let runs = context.runs();
     assert_eq!(runs.len(), 4);
     assert!(runs.iter().any(|name| name.ends_with(":effect-slow")));
     assert!(runs.iter().any(|name| name.ends_with(":effect-fast")));
+
+    let tool_runs = tool_context.runs();
+    assert_eq!(tool_runs.len(), 4);
+    assert!(
+        tool_runs
+            .iter()
+            .any(|name| name.ends_with(":tool-attempt-slow"))
+    );
+    assert!(
+        tool_runs
+            .iter()
+            .any(|name| name.ends_with(":tool-attempt-fast"))
+    );
+}
+
+#[test]
+fn restate_handler_controller_disallows_concurrent_effect_calls() {
+    let controller = RestateRuntimeEffectController::new(Arc::new(RecordingContext::default()));
+
+    assert!(
+        !controller.supports_concurrent_effects(),
+        "Restate handler context calls such as ctx.run must be awaited before the next effect call"
+    );
 }
 
 #[test]
@@ -121,20 +153,13 @@ fn prepared_tool_call_with(call_id: &str, tool_name: &str) -> lash_core::Prepare
     )
 }
 
-fn completed_tool_call(call_id: &str, tool_name: &str) -> lash_core::sansio::CompletedToolCall {
-    let output = lash_core::ToolCallOutput::success(serde_json::json!({ "call": call_id }));
-    lash_core::sansio::CompletedToolCall {
-        call_id: call_id.to_string(),
-        tool_name: tool_name.to_string(),
+fn completed_tool_record(call_id: &str, tool_name: &str) -> lash_core::ToolCallRecord {
+    lash_core::ToolCallRecord {
+        call_id: Some(call_id.to_string()),
+        tool: tool_name.to_string(),
         args: serde_json::json!({ "call": call_id }),
-        model_return: lash_core::ModelToolReturn::from_output(
-            call_id.to_string(),
-            tool_name.to_string(),
-            &output,
-        ),
-        output,
+        output: lash_core::ToolCallOutput::success(serde_json::json!({ "call": call_id })),
         duration_ms: 1,
-        replay: None,
     }
 }
 
@@ -268,6 +293,34 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
         self.inner.commit_runtime_state(commit).await
     }
 
+    async fn try_claim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<lash_core::SessionExecutionLease>, lash_core::StoreError> {
+        self.inner
+            .try_claim_session_execution_lease(session_id, owner_id, lease_ttl_ms)
+            .await
+    }
+
+    async fn renew_session_execution_lease(
+        &self,
+        fence: &lash_core::SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<lash_core::SessionExecutionLease, lash_core::StoreError> {
+        self.inner
+            .renew_session_execution_lease(fence, lease_ttl_ms)
+            .await
+    }
+
+    async fn release_session_execution_lease(
+        &self,
+        completion: &lash_core::SessionExecutionLeaseCompletion,
+    ) -> Result<(), lash_core::StoreError> {
+        self.inner.release_session_execution_lease(completion).await
+    }
+
     async fn enqueue_queued_work(
         &self,
         batch: lash_core::runtime::QueuedWorkBatchDraft,
@@ -278,13 +331,21 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
+        session_execution_lease: &lash_core::SessionExecutionLeaseFence,
         owner_id: &str,
         boundary: lash_core::runtime::QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
         max_batches: usize,
     ) -> Result<Option<lash_core::runtime::QueuedWorkClaim>, lash_core::StoreError> {
         self.inner
-            .claim_ready_queued_work(session_id, owner_id, boundary, lease_ttl_ms, max_batches)
+            .claim_ready_queued_work(
+                session_id,
+                session_execution_lease,
+                owner_id,
+                boundary,
+                lease_ttl_ms,
+                max_batches,
+            )
             .await
     }
 
@@ -480,8 +541,10 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
             RestateEffectExecution::JournaledRun,
         ),
         (
-            RuntimeEffectCommand::ToolCall {
+            RuntimeEffectCommand::ToolAttempt {
                 call: prepared_tool_call(),
+                attempt: 1,
+                max_attempts: 1,
             },
             RestateEffectExecution::JournaledRun,
         ),
@@ -489,7 +552,7 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
             RuntimeEffectCommand::ToolBatch {
                 batch: lash_core::PreparedToolBatch::new("batch", vec![prepared_tool_call()]),
             },
-            RestateEffectExecution::JournaledRun,
+            RestateEffectExecution::DirectLocal,
         ),
         (
             RuntimeEffectCommand::ExecCode {
@@ -1017,19 +1080,17 @@ async fn restate_controller_executes_non_sleep_effect_inside_run() {
 }
 
 #[tokio::test]
-async fn restate_positional_replay_records_tool_batch_as_one_command() {
+async fn restate_positional_replay_records_tool_attempt_as_one_command() {
     let context = Arc::new(PositionalReplayContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
-    let batch = lash_core::PreparedToolBatch::new(
-        "batch-fast-slow",
-        vec![
-            prepared_tool_call_with("call-slow", "slow_tool"),
-            prepared_tool_call_with("call-fast", "fast_tool"),
-        ],
-    );
+    let call = prepared_tool_call_with("call-fast", "fast_tool");
     let envelope = RuntimeEffectEnvelope::new(
-        runtime_invocation(RuntimeEffectKind::ToolBatch, "tool-batch"),
-        RuntimeEffectCommand::ToolBatch { batch },
+        runtime_invocation(RuntimeEffectKind::ToolAttempt, "tool-attempt"),
+        RuntimeEffectCommand::ToolAttempt {
+            call,
+            attempt: 1,
+            max_attempts: 1,
+        },
     );
     let local_runs = Arc::new(AtomicUsize::new(0));
 
@@ -1040,39 +1101,24 @@ async fn restate_positional_replay_records_tool_batch_as_one_command() {
                 let local_runs = Arc::clone(&local_runs);
                 |_envelope| async move {
                     local_runs.fetch_add(1, Ordering::SeqCst);
-                    let slow = async {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                        completed_tool_call("call-slow", "slow_tool")
-                    };
-                    let fast = async {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                        completed_tool_call("call-fast", "fast_tool")
-                    };
-                    let (slow, fast) = tokio::join!(slow, fast);
-                    Ok(RuntimeEffectOutcome::ToolBatch {
-                        launches: vec![
-                            lash_core::ToolCallLaunch::Done { result: slow },
-                            lash_core::ToolCallLaunch::Done { result: fast },
-                        ],
+                    Ok(RuntimeEffectOutcome::ToolAttempt {
+                        launch: lash_core::ToolAttemptLaunch::Done {
+                            record: completed_tool_record("call-fast", "fast_tool"),
+                        },
                         triggers: Vec::new(),
                     })
                 }
             }),
         )
         .await
-        .expect("first batch run");
+        .expect("first attempt run");
 
-    let RuntimeEffectOutcome::ToolBatch { launches, .. } = first else {
-        panic!("expected tool batch outcome");
+    let RuntimeEffectOutcome::ToolAttempt { launch, .. } = first else {
+        panic!("expected tool attempt outcome");
     };
-    assert_eq!(launches.len(), 2);
     assert!(matches!(
-        &launches[0],
-        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-slow"
-    ));
-    assert!(matches!(
-        &launches[1],
-        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-fast"
+        &launch,
+        lash_core::ToolAttemptLaunch::Done { record } if record.call_id.as_deref() == Some("call-fast")
     ));
     assert_eq!(context.record_count(), 1);
     assert_eq!(context.runs().len(), 1);
@@ -1083,23 +1129,18 @@ async fn restate_positional_replay_records_tool_batch_as_one_command() {
         .execute_effect(
             envelope,
             RuntimeEffectLocalExecutor::testing(|_| async {
-                panic!("positional replay should not rerun the ToolBatch executor")
+                panic!("positional replay should not rerun the ToolAttempt executor")
             }),
         )
         .await
-        .expect("replayed batch run");
+        .expect("replayed attempt run");
 
-    let RuntimeEffectOutcome::ToolBatch { launches, .. } = replayed else {
-        panic!("expected replayed tool batch outcome");
+    let RuntimeEffectOutcome::ToolAttempt { launch, .. } = replayed else {
+        panic!("expected replayed tool attempt outcome");
     };
-    assert_eq!(launches.len(), 2);
     assert!(matches!(
-        &launches[0],
-        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-slow"
-    ));
-    assert!(matches!(
-        &launches[1],
-        lash_core::ToolCallLaunch::Done { result } if result.call_id == "call-fast"
+        &launch,
+        lash_core::ToolAttemptLaunch::Done { record } if record.call_id.as_deref() == Some("call-fast")
     ));
     assert_eq!(context.record_count(), 1);
     assert_eq!(context.runs().len(), 2);
@@ -1854,7 +1895,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
     let registration = external_registration("task-smoke")
         .with_wake_target(Some(lash_core::SessionScope::new("wake-smoke")));
     let execution_context = ProcessExecutionContext::default().with_causal_invocation(Some(
-        runtime_invocation(RuntimeEffectKind::ToolCall, "tool-smoke"),
+        runtime_invocation(RuntimeEffectKind::ToolAttempt, "tool-smoke"),
     ));
 
     let outcome = host
@@ -2854,7 +2895,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
         .await
         .expect("register workflow process");
     let execution_context = ProcessExecutionContext::default().with_causal_invocation(Some(
-        runtime_invocation(RuntimeEffectKind::ToolCall, "tool-effect"),
+        runtime_invocation(RuntimeEffectKind::ToolAttempt, "tool-effect"),
     ));
 
     let output = workflow

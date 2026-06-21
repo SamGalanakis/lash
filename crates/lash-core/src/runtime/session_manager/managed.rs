@@ -14,10 +14,14 @@ impl ManagedSessionCapability {
             super::normalize_session_graph(&mut persisted_state);
             persisted_state.graph_replace_required = true;
             let commit = crate::store::RuntimeCommit::persisted_state(&persisted_state, &[]);
-            let result = store
-                .commit_runtime_state(commit)
-                .await
-                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+            let result = commit_runtime_state_with_fresh_session_execution_lease(
+                Arc::clone(store),
+                commit,
+                "session_manager.register_materialized_session",
+                Arc::clone(&materialized.runtime.host.core.clock),
+            )
+            .await
+            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
             persisted_state.apply_persisted_commit_result(result);
         }
         self.registry.lock().await.insert(

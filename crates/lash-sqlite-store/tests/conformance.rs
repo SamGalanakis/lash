@@ -511,6 +511,18 @@ async fn sqlite_effect_controller_satisfies_replay_conformance() {
     )
     .await;
 
+    let tool_controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn(
+        "tool-attempt-conformance-session",
+        "tool-attempt-conformance-turn",
+    ))
+    .await
+    .expect("tool attempt controller");
+    lash_core::testing::conformance::effect_controller_tool_attempt_fanout_replay_deterministic(
+        &tool_controller,
+        || tool_controller.start_replay(),
+    )
+    .await;
+
     let durable_controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn(
         "durable-step-session",
         "durable-step-turn",

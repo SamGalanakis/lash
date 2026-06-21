@@ -53,6 +53,15 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             PRIMARY KEY (session_id, turn_id)
         );
 
+        CREATE TABLE IF NOT EXISTS lash_session_execution_leases (
+            session_id TEXT PRIMARY KEY,
+            lease_owner_id TEXT,
+            lease_token TEXT,
+            lease_fencing_token BIGINT NOT NULL DEFAULT 0,
+            lease_claimed_at_ms BIGINT NOT NULL DEFAULT 0,
+            lease_expires_at_ms BIGINT NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS lash_queued_work_batches (
             enqueue_seq BIGSERIAL PRIMARY KEY,
             batch_id TEXT NOT NULL UNIQUE,

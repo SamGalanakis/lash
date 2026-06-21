@@ -616,11 +616,11 @@ impl Parser {
                     start: token.span.start,
                     end: expr.span.end,
                 };
-                return Ok(ParsedExpr::node(
+                Ok(ParsedExpr::node(
                     Expr::Yield(Box::new(expr.expr.clone())),
                     span,
                     [(0, expr)],
-                ));
+                ))
             }
             "wake" => {
                 let expr = self.parse_expr()?;
@@ -628,11 +628,11 @@ impl Parser {
                     start: token.span.start,
                     end: expr.span.end,
                 };
-                return Ok(ParsedExpr::node(
+                Ok(ParsedExpr::node(
                     Expr::Wake(Box::new(expr.expr.clone())),
                     span,
                     [(0, expr)],
-                ));
+                ))
             }
             "finish" => {
                 let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
@@ -649,10 +649,10 @@ impl Parser {
                     end,
                 };
                 let value_expr = expr.as_ref().map(|expr| Box::new(expr.expr.clone()));
-                return Ok(match expr {
+                Ok(match expr {
                     Some(expr) => ParsedExpr::node(Expr::Finish(value_expr), span, [(0, expr)]),
                     None => ParsedExpr::leaf(Expr::Finish(None), span),
-                });
+                })
             }
             "fail" => {
                 let expr = self.parse_expr()?;
@@ -660,11 +660,11 @@ impl Parser {
                     start: token.span.start,
                     end: expr.span.end,
                 };
-                return Ok(ParsedExpr::node(
+                Ok(ParsedExpr::node(
                     Expr::Fail(Box::new(expr.expr.clone())),
                     span,
                     [(0, expr)],
-                ));
+                ))
             }
             _ => unreachable!("unknown process admin keyword"),
         }

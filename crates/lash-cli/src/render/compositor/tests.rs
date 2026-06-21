@@ -288,7 +288,7 @@ mod tests {
                 "Conversation",
                 "/compact",
                 "Open a compaction frame seeded by a summary",
-                CommandPaletteAction::Builtin(crate::command::Command::Compact),
+                CommandPaletteAction::Builtin(crate::command::Command::Compact(None)),
             ),
         ]);
 
@@ -312,7 +312,7 @@ mod tests {
             (0..snapshot.width).all(|x| {
                 snapshot
                     .cell(x, clear_row)
-                    .map_or(true, |cell| cell.style.bg != Some(theme::selection_bg()))
+                    .is_none_or(|cell| cell.style.bg != Some(theme::selection_bg()))
             }),
             "menu selection should not reuse text selection background in System theme"
         );

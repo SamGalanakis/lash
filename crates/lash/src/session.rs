@@ -386,6 +386,7 @@ impl PromptLayerSink for RlmSessionBuilder {
 }
 
 #[cfg(feature = "rlm")]
+#[allow(clippy::large_enum_variant)]
 enum RlmOpenState {
     Resume,
     Fresh,
@@ -398,7 +399,7 @@ fn apply_rlm_session_options(
     explicit_format: Option<lash_rlm_types::RlmFinalAnswerFormat>,
     state: &mut RuntimeSessionState,
 ) -> Result<()> {
-    let final_answer_format = explicit_format.unwrap_or_else(|| {
+    let final_answer_format = explicit_format.unwrap_or({
         if is_root_session {
             lash_rlm_types::RlmFinalAnswerFormat::Markdown
         } else {
@@ -425,12 +426,13 @@ mod tests {
 
     #[test]
     fn apply_rlm_session_options_preserves_existing_termination() -> Result<()> {
-        let mut state = RuntimeSessionState::default();
-        state.protocol_turn_options =
-            ProtocolTurnOptions::typed(lash_rlm_types::RlmCreateExtras {
+        let mut state = RuntimeSessionState {
+            protocol_turn_options: ProtocolTurnOptions::typed(lash_rlm_types::RlmCreateExtras {
                 termination: lash_rlm_types::RlmTermination::ProseOrSubmit,
                 final_answer_format: None,
-            })?;
+            })?,
+            ..Default::default()
+        };
 
         apply_rlm_session_options(true, None, &mut state)?;
 

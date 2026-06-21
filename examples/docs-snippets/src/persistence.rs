@@ -105,6 +105,10 @@ fn retry_or_report(_err: lash::runtime::RuntimeError, _session: LashSession) -> 
     Ok(())
 }
 
+fn retry_later(_err: lash::runtime::RuntimeError) -> anyhow::Result<()> {
+    Ok(())
+}
+
 async fn commit_conflict_retry(
     core: &LashCore,
     session: &LashSession,
@@ -116,8 +120,20 @@ async fn commit_conflict_retry(
 
     match session.turn(input).run().await {
         Ok(turn) => persist(turn)?,
+        Err(lash::EmbedError::Runtime(err))
+            if err.code == RuntimeErrorCode::SessionExecutionBusy =>
+        {
+            retry_later(err)?;
+        }
+        Err(lash::EmbedError::Runtime(err))
+            if err.code == RuntimeErrorCode::SessionExecutionLeaseLost =>
+        {
+            // The durable lane moved to another owner before commit: reopen and retry.
+            let session = core.session(chat_id).open().await?;
+            retry_or_report(err, session)?;
+        }
         Err(lash::EmbedError::Runtime(err)) if err.code == RuntimeErrorCode::StoreCommitFailed => {
-            // Another writer won the head-revision race: reload and retry.
+            // The CAS backstop fired: reload and retry.
             let session = core.session(chat_id).open().await?;
             retry_or_report(err, session)?;
         }

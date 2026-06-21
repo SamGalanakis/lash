@@ -674,9 +674,8 @@ impl<'a> SourceFormatter<'a> {
         let paths = requirements
             .resources
             .value_constructors()
-            .filter_map(|(_, constructor)| {
-                (constructor.type_name == type_name).then(|| constructor.path.clone())
-            })
+            .filter(|(_, constructor)| constructor.type_name == type_name)
+            .map(|(_, constructor)| constructor.path.clone())
             .collect::<Vec<_>>();
         match paths.as_slice() {
             [path] => Ok(path.clone()),

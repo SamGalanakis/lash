@@ -297,9 +297,14 @@ impl LashRuntime {
         let policy = self.policy.clone();
         // Flush any dirty resident state to the store before dropping.
         let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
-        let result = store.commit_runtime_state(commit).await.map_err(|err| {
-            SessionError::Protocol(format!("failed to persist runtime state: {err}"))
-        })?;
+        let result = commit_runtime_state_with_fresh_session_execution_lease(
+            Arc::clone(&store),
+            commit,
+            "runtime.park",
+            Arc::clone(&self.host.core.clock),
+        )
+        .await
+        .map_err(|err| SessionError::Protocol(format!("failed to persist runtime state: {err}")))?;
         self.state.apply_persisted_commit_result(result);
         // Drain pending tombstones if any. Under KeepHistory this is a
         // no-op (tombstones never get added). Under DropOrphans, a future

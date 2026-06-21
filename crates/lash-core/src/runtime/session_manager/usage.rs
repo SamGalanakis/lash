@@ -116,10 +116,14 @@ impl UsageCapability {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }
         let commit = crate::store::RuntimeCommit::persisted_state(&state, &drained);
-        let result = store
-            .commit_runtime_state(commit)
-            .await
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        let result = commit_runtime_state_with_fresh_session_execution_lease(
+            Arc::clone(store),
+            commit,
+            "session_manager.persist_usage_ledger",
+            Arc::clone(&current.host.core.clock),
+        )
+        .await
+        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         state.apply_persisted_commit_result(result);
         Ok(())
     }

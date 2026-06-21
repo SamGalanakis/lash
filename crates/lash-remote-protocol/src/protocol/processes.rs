@@ -194,6 +194,7 @@ impl RemoteProcessStartGrant {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum RemoteProcessInput {
     ToolCall {
         #[serde(default)]
@@ -259,19 +260,14 @@ impl RemoteProcessLifecycleStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RemoteProcessStatus {
+    #[default]
     Running,
     Completed { await_output: RemoteProcessAwaitOutput },
     Failed { await_output: RemoteProcessAwaitOutput },
     Cancelled { await_output: RemoteProcessAwaitOutput },
-}
-
-impl Default for RemoteProcessStatus {
-    fn default() -> Self {
-        Self::Running
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -876,7 +872,7 @@ impl RemoteRuntimeSubject {
 pub enum RemoteRuntimeEffectKind {
     LlmCall,
     Direct,
-    ToolCall,
+    ToolAttempt,
     ToolBatch,
     Process,
     ExecCode,

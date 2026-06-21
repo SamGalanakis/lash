@@ -592,6 +592,156 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     );
 }
 
+/// Run the tool-attempt replay conformance case for a handler-scoped durable
+/// controller.
+///
+/// Store-backed controllers that support overlapping effect calls record two
+/// child attempts concurrently and replay them in reverse order. Ordered
+/// workflow-context controllers record them sequentially, then still replay in
+/// reverse order. In both modes, outcomes must resolve by stable `replay.key`
+/// rather than request position, completion order, or source order.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
+    controller: &dyn RuntimeEffectController,
+    start_replay: impl FnOnce(),
+) {
+    let slow =
+        replay_conformance_tool_attempt_envelope("tool-attempt-slow", "call-slow", "slow_tool");
+    let fast =
+        replay_conformance_tool_attempt_envelope("tool-attempt-fast", "call-fast", "fast_tool");
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
+
+    let first_pass = if controller.supports_concurrent_effects() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let release_slow = Arc::new(tokio::sync::Notify::new());
+        let first_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                controller.execute_effect(
+                    slow.clone(),
+                    replay_conformance_tool_attempt_recording_executor(
+                        "tool-attempt-slow",
+                        "call-slow",
+                        "slow_tool",
+                        Some((
+                            Arc::clone(&barrier),
+                            Arc::clone(&release_slow),
+                            Arc::clone(&completion_order),
+                        )),
+                    ),
+                ),
+                controller.execute_effect(
+                    fast.clone(),
+                    replay_conformance_tool_attempt_recording_executor(
+                        "tool-attempt-fast",
+                        "call-fast",
+                        "fast_tool",
+                        Some((
+                            Arc::clone(&barrier),
+                            Arc::clone(&release_slow),
+                            Arc::clone(&completion_order),
+                        )),
+                    ),
+                ),
+            )
+        })
+        .await
+        .expect("concurrent tool-attempt first pass must enter both local executors");
+        assert_eq!(
+            completion_order
+                .lock()
+                .expect("tool-attempt completion order")
+                .as_slice(),
+            &[
+                "tool-attempt-fast".to_string(),
+                "tool-attempt-slow".to_string()
+            ],
+            "first pass must prove tool-attempt completion order can differ from source order"
+        );
+        first_pass
+    } else {
+        let slow_first = controller
+            .execute_effect(
+                slow.clone(),
+                replay_conformance_tool_attempt_recording_executor(
+                    "tool-attempt-slow",
+                    "call-slow",
+                    "slow_tool",
+                    None,
+                ),
+            )
+            .await;
+        let fast_first = controller
+            .execute_effect(
+                fast.clone(),
+                replay_conformance_tool_attempt_recording_executor(
+                    "tool-attempt-fast",
+                    "call-fast",
+                    "fast_tool",
+                    None,
+                ),
+            )
+            .await;
+        assert_eq!(
+            completion_order
+                .lock()
+                .expect("tool-attempt completion order")
+                .as_slice(),
+            &[] as &[String],
+            "serial conformance path must not use the concurrent completion-order probe"
+        );
+        (slow_first, fast_first)
+    };
+
+    let slow_first = first_pass.0.expect("slow tool-attempt first pass");
+    let fast_first = first_pass.1.expect("fast tool-attempt first pass");
+    assert_replay_conformance_tool_attempt_marker(slow_first, "call-slow", "slow_tool");
+    assert_replay_conformance_tool_attempt_marker(fast_first, "call-fast", "fast_tool");
+
+    start_replay();
+    let replay_local_calls = Arc::new(Mutex::new(Vec::new()));
+    let replay_pass = if controller.supports_concurrent_effects() {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                controller.execute_effect(
+                    fast,
+                    replay_conformance_failing_executor(Arc::clone(&replay_local_calls)),
+                ),
+                controller.execute_effect(
+                    slow,
+                    replay_conformance_failing_executor(Arc::clone(&replay_local_calls)),
+                ),
+            )
+        })
+        .await
+        .expect("concurrent tool-attempt replay must resolve from host history")
+    } else {
+        let fast_replay = controller
+            .execute_effect(
+                fast,
+                replay_conformance_failing_executor(Arc::clone(&replay_local_calls)),
+            )
+            .await;
+        let slow_replay = controller
+            .execute_effect(
+                slow,
+                replay_conformance_failing_executor(Arc::clone(&replay_local_calls)),
+            )
+            .await;
+        (fast_replay, slow_replay)
+    };
+    let fast_replay = replay_pass.0.expect("fast tool-attempt replay");
+    let slow_replay = replay_pass.1.expect("slow tool-attempt replay");
+    assert_replay_conformance_tool_attempt_marker(fast_replay, "call-fast", "fast_tool");
+    assert_replay_conformance_tool_attempt_marker(slow_replay, "call-slow", "slow_tool");
+    assert!(
+        replay_local_calls
+            .lock()
+            .expect("tool-attempt replay local calls")
+            .is_empty(),
+        "tool-attempt replay must return recorded outcomes without invoking local executors"
+    );
+}
+
 #[cfg(any(test, feature = "testing"))]
 fn durable_step_conformance_envelope(
     step_id: &'static str,
@@ -649,6 +799,39 @@ fn replay_conformance_exec_envelope(effect_id: &'static str) -> RuntimeEffectEnv
 }
 
 #[cfg(any(test, feature = "testing"))]
+fn replay_conformance_tool_attempt_envelope(
+    effect_id: &'static str,
+    call_id: &'static str,
+    tool_name: &'static str,
+) -> RuntimeEffectEnvelope {
+    RuntimeEffectEnvelope::new(
+        RuntimeInvocation::effect(
+            RuntimeScope::for_turn(
+                "tool-attempt-conformance-session",
+                "tool-attempt-conformance-turn",
+                7,
+                0,
+            ),
+            effect_id,
+            RuntimeEffectKind::ToolAttempt,
+            format!("tool-attempt-conformance:tool-attempt-conformance-turn:{effect_id}"),
+        ),
+        RuntimeEffectCommand::ToolAttempt {
+            call: crate::PreparedToolCall::from_parts(
+                call_id,
+                crate::ToolId::from(format!("tool:{tool_name}")),
+                tool_name,
+                serde_json::json!({ "call": call_id }),
+                None,
+                serde_json::json!({ "prepared": effect_id }),
+            ),
+            attempt: 1,
+            max_attempts: 1,
+        },
+    )
+}
+
+#[cfg(any(test, feature = "testing"))]
 fn replay_conformance_recording_executor(
     effect_id: &'static str,
     barrier: Arc<tokio::sync::Barrier>,
@@ -678,6 +861,44 @@ fn replay_conformance_recording_executor(
 }
 
 #[cfg(any(test, feature = "testing"))]
+type ReplayConformanceProbe = (
+    Arc<tokio::sync::Barrier>,
+    Arc<tokio::sync::Notify>,
+    Arc<Mutex<Vec<String>>>,
+);
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_tool_attempt_recording_executor(
+    effect_id: &'static str,
+    call_id: &'static str,
+    tool_name: &'static str,
+    concurrent_probe: Option<ReplayConformanceProbe>,
+) -> RuntimeEffectLocalExecutor<'static> {
+    RuntimeEffectLocalExecutor::testing(move |envelope| async move {
+        assert_eq!(envelope.invocation.effect_id(), Some(effect_id));
+        if let Some((barrier, release_slow, completion_order)) = concurrent_probe {
+            barrier.wait().await;
+            if effect_id == "tool-attempt-slow" {
+                release_slow.notified().await;
+            } else {
+                completion_order
+                    .lock()
+                    .expect("tool-attempt completion order")
+                    .push(effect_id.to_string());
+                release_slow.notify_one();
+            }
+            if effect_id == "tool-attempt-slow" {
+                completion_order
+                    .lock()
+                    .expect("tool-attempt completion order")
+                    .push(effect_id.to_string());
+            }
+        }
+        Ok(replay_conformance_tool_attempt_outcome(call_id, tool_name))
+    })
+}
+
+#[cfg(any(test, feature = "testing"))]
 fn replay_conformance_failing_executor(
     replay_local_calls: Arc<Mutex<Vec<String>>>,
 ) -> RuntimeEffectLocalExecutor<'static> {
@@ -691,6 +912,28 @@ fn replay_conformance_failing_executor(
             "recorded replay must not invoke local effect execution",
         ))
     })
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_tool_attempt_outcome(
+    call_id: &'static str,
+    tool_name: &'static str,
+) -> RuntimeEffectOutcome {
+    RuntimeEffectOutcome::ToolAttempt {
+        launch: crate::ToolAttemptLaunch::Done {
+            record: crate::ToolCallRecord {
+                call_id: Some(call_id.to_string()),
+                tool: tool_name.to_string(),
+                args: serde_json::json!({ "call": call_id }),
+                output: crate::ToolCallOutput::success(serde_json::json!({
+                    "call": call_id,
+                    "tool": tool_name,
+                })),
+                duration_ms: 0,
+            },
+        },
+        triggers: Vec::new(),
+    }
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -719,5 +962,29 @@ fn assert_replay_conformance_exec_marker(outcome: RuntimeEffectOutcome, expected
         response.terminal_finish,
         Some(serde_json::json!(expected)),
         "replayed outcome must come from the matching replay key"
+    );
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn assert_replay_conformance_tool_attempt_marker(
+    outcome: RuntimeEffectOutcome,
+    expected_call_id: &str,
+    expected_tool_name: &str,
+) {
+    let RuntimeEffectOutcome::ToolAttempt { launch, .. } = outcome else {
+        panic!("expected tool-attempt effect outcome");
+    };
+    let crate::ToolAttemptLaunch::Done { record } = launch else {
+        panic!("expected completed tool-attempt launch");
+    };
+    assert_eq!(record.call_id.as_deref(), Some(expected_call_id));
+    assert_eq!(record.tool, expected_tool_name);
+    assert_eq!(
+        record.output.value_for_projection(),
+        serde_json::json!({
+            "call": expected_call_id,
+            "tool": expected_tool_name,
+        }),
+        "replayed tool-attempt outcome must come from the matching replay key"
     );
 }

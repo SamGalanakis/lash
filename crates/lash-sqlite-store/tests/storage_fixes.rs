@@ -65,20 +65,33 @@ fn commit_at(session_id: &str, expected_head_revision: Option<u64>) -> RuntimeCo
 #[test]
 fn head_revision_cas_holds_across_two_connections() {
     let path = unique_db_path("cas");
+    let session_fence = {
+        let store = block_on(Store::open(&path)).expect("lease store");
+        block_on(store.try_claim_session_execution_lease("root", "session-owner", 60_000))
+            .expect("claim session execution lease")
+            .expect("session execution lease")
+            .fence()
+    };
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
-    let run = |path: std::path::PathBuf, barrier: Arc<std::sync::Barrier>| {
+    let run = |path: std::path::PathBuf,
+               session_fence: lash_core::SessionExecutionLeaseFence,
+               barrier: Arc<std::sync::Barrier>| {
         std::thread::spawn(move || {
             block_on(async move {
                 let store = Store::open(&path).await.expect("open store");
                 barrier.wait();
-                store.commit_runtime_state(commit_at("root", Some(0))).await
+                store
+                    .commit_runtime_state(
+                        commit_at("root", Some(0)).with_session_execution_lease(session_fence),
+                    )
+                    .await
             })
         })
     };
 
-    let handle_a = run(path.clone(), Arc::clone(&barrier));
-    let handle_b = run(path.clone(), Arc::clone(&barrier));
+    let handle_a = run(path.clone(), session_fence.clone(), Arc::clone(&barrier));
+    let handle_b = run(path.clone(), session_fence, Arc::clone(&barrier));
     let result_a = handle_a.join().expect("thread a");
     let result_b = handle_b.join().expect("thread b");
 
@@ -133,13 +146,18 @@ async fn gc_keeps_live_committed_checkpoint_blobs() {
         execution_state_snapshot: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         ..RuntimeSessionState::default()
     };
-    let result = store
-        .commit_runtime_state(RuntimeCommit {
-            expected_head_revision: Some(0),
-            ..RuntimeCommit::persisted_state(&state, &[])
-        })
+    let session_lease = store
+        .try_claim_session_execution_lease("root", "gc-test", 60_000)
         .await
-        .expect("commit");
+        .expect("claim session execution lease")
+        .expect("session execution lease");
+    let commit = RuntimeCommit {
+        expected_head_revision: Some(0),
+        ..RuntimeCommit::persisted_state(&state, &[])
+    }
+    .with_session_execution_lease(session_lease.fence())
+    .releasing_session_execution_lease(session_lease.completion());
+    let result = store.commit_runtime_state(commit).await.expect("commit");
 
     let report = store.gc_unreachable().await;
     assert!(
@@ -196,16 +214,36 @@ async fn second_claim_on_held_batch_is_not_won() {
         .enqueue_queued_work(exclusive_draft("root", "work"))
         .await
         .expect("enqueue");
+    let session_lease = store
+        .try_claim_session_execution_lease("root", "session-owner", 60_000)
+        .await
+        .expect("claim session execution lease")
+        .expect("session execution lease");
+    let session_fence = session_lease.fence();
 
     let claim_a = store
-        .claim_ready_queued_work("root", "owner-a", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .claim_ready_queued_work(
+            "root",
+            &session_fence,
+            "owner-a",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            10,
+        )
         .await
         .expect("claim a")
         .expect("owner a wins the only batch");
     assert_eq!(claim_a.batches.len(), 1);
 
     let claim_b = store
-        .claim_ready_queued_work("root", "owner-b", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .claim_ready_queued_work(
+            "root",
+            &session_fence,
+            "owner-b",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            10,
+        )
         .await
         .expect("claim b");
     assert!(
@@ -234,9 +272,19 @@ fn concurrent_claims_never_double_own_a_batch() {
             .await
             .expect("enqueue");
     });
+    let session_fence = {
+        let store = block_on(Store::open(&path)).expect("lease store");
+        block_on(store.try_claim_session_execution_lease("root", "session-owner", 60_000))
+            .expect("claim session execution lease")
+            .expect("session execution lease")
+            .fence()
+    };
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
-    let run = |owner: &'static str, path: std::path::PathBuf, barrier: Arc<std::sync::Barrier>| {
+    let run = |owner: &'static str,
+               path: std::path::PathBuf,
+               session_fence: lash_core::SessionExecutionLeaseFence,
+               barrier: Arc<std::sync::Barrier>| {
         std::thread::spawn(move || {
             block_on(async move {
                 let store = Store::open(&path).await.expect("open store");
@@ -244,6 +292,7 @@ fn concurrent_claims_never_double_own_a_batch() {
                 store
                     .claim_ready_queued_work(
                         "root",
+                        &session_fence,
                         owner,
                         QueuedWorkClaimBoundary::Idle,
                         60_000,
@@ -254,8 +303,13 @@ fn concurrent_claims_never_double_own_a_batch() {
         })
     };
 
-    let handle_a = run("owner-a", path.clone(), Arc::clone(&barrier));
-    let handle_b = run("owner-b", path.clone(), Arc::clone(&barrier));
+    let handle_a = run(
+        "owner-a",
+        path.clone(),
+        session_fence.clone(),
+        Arc::clone(&barrier),
+    );
+    let handle_b = run("owner-b", path.clone(), session_fence, Arc::clone(&barrier));
     let result_a = handle_a.join().expect("thread a");
     let result_b = handle_b.join().expect("thread b");
 
@@ -303,8 +357,8 @@ async fn unsupported_schema_error_reports_real_versions() {
         "error must report the found version 99: {message}"
     );
     assert!(
-        message.contains("schema version 3") || message.contains("version 3"),
-        "error must report the real expected version 3: {message}"
+        message.contains("schema version 4") || message.contains("version 4"),
+        "error must report the real expected version 4: {message}"
     );
     assert!(
         !message.contains("version 1 only"),
@@ -340,5 +394,5 @@ fn concurrent_first_open_never_observes_version_zero_schema() {
     let user_version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 4);
 }

@@ -14,6 +14,29 @@ impl<'run> ToolDispatchClient<'run> {
     }
 
     pub async fn batch(&self, calls: Vec<ToolInvocation>) -> Vec<ToolInvocationReply> {
+        if self
+            .context
+            .parent_invocation
+            .as_ref()
+            .is_some_and(|invocation| {
+                invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolAttempt)
+            })
+            && self
+                .context
+                .effect_controller
+                .controller()
+                .durability_tier()
+                == crate::DurabilityTier::Durable
+        {
+            return calls
+                .into_iter()
+                .map(|_| {
+                    ToolInvocationReply::error(serde_json::json!(
+                        "tool batch dispatch is not available inside a journaled tool attempt"
+                    ))
+                })
+                .collect();
+        }
         let Some(runtime) = self.context.runtime_execution_context.clone() else {
             return calls
                 .into_iter()

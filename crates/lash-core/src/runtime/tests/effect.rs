@@ -154,26 +154,21 @@ impl RuntimeEffectController for RecordingEffectController {
                     text_streamed: false,
                 })
             }
-            RuntimeEffectCommand::ToolCall { call } => {
-                let output = crate::ToolCallOutput::success(serde_json::json!({"ok": true}));
-                Ok(RuntimeEffectOutcome::ToolCall {
-                    launch: crate::ToolCallLaunch::Done {
-                        result: crate::sansio::CompletedToolCall {
-                            call_id: call.call_id.clone(),
-                            tool_name: call.tool_name.clone(),
-                            args: call.args,
-                            model_return: crate::ModelToolReturn {
-                                call_id: call.call_id,
-                                tool_name: call.tool_name,
-                                parts: vec![crate::ModelToolReturnPart::text("ok")],
-                            },
-                            output,
-                            duration_ms: 0,
-                            replay: call.replay,
+            RuntimeEffectCommand::ToolAttempt {
+                call,
+                attempt,
+                max_attempts,
+            } => {
+                local_executor
+                    .execute(RuntimeEffectEnvelope::new(
+                        envelope.invocation,
+                        RuntimeEffectCommand::ToolAttempt {
+                            call,
+                            attempt,
+                            max_attempts,
                         },
-                    },
-                    triggers: Vec::new(),
-                })
+                    ))
+                    .await
             }
             RuntimeEffectCommand::ToolBatch { batch } => {
                 local_executor
@@ -260,6 +255,67 @@ impl RuntimeEffectController for RecordingEffectController {
                 })
             }
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct SerialOnlyEffectController {
+    inner: RecordingEffectController,
+    in_flight_tool_attempts: Arc<std::sync::atomic::AtomicUsize>,
+    max_in_flight_tool_attempts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SerialOnlyEffectController {
+    fn count_kind(&self, kind: RuntimeEffectKind) -> usize {
+        self.inner.count_kind(kind)
+    }
+
+    fn max_in_flight_tool_attempts(&self) -> usize {
+        self.max_in_flight_tool_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectController for SerialOnlyEffectController {
+    fn supports_concurrent_effects(&self) -> bool {
+        false
+    }
+
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let is_tool_attempt = envelope.command.kind() == RuntimeEffectKind::ToolAttempt;
+        if is_tool_attempt {
+            let current = self
+                .in_flight_tool_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let mut observed = self.max_in_flight_tool_attempts();
+            while current > observed {
+                match self.max_in_flight_tool_attempts.compare_exchange(
+                    observed,
+                    current,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => observed = next,
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let outcome = self.inner.execute_effect(envelope, local_executor).await;
+
+        if is_tool_attempt {
+            self.in_flight_tool_attempts
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        outcome
     }
 }
 
@@ -910,6 +966,10 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::ToolBatch), 1);
+    assert_eq!(
+        scoped_recorder.count_kind(RuntimeEffectKind::ToolAttempt),
+        1
+    );
     assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::Direct), 1);
     assert_eq!(default_recorder.count_kind(RuntimeEffectKind::Direct), 0);
     assert!(
@@ -951,6 +1011,22 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
             }
 
             match envelope.command {
+                RuntimeEffectCommand::ToolAttempt {
+                    call,
+                    attempt,
+                    max_attempts,
+                } => {
+                    local_executor
+                        .execute(RuntimeEffectEnvelope::new(
+                            envelope.invocation,
+                            RuntimeEffectCommand::ToolAttempt {
+                                call,
+                                attempt,
+                                max_attempts,
+                            },
+                        ))
+                        .await
+                }
                 RuntimeEffectCommand::LlmCall { .. } => {
                     let mut llm_calls = self.llm_calls.lock().expect("llm calls");
                     *llm_calls += 1;
@@ -1213,15 +1289,16 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
         .expect("turn");
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
-    let tool_records = recorder
+    let attempt_records = recorder
         .records()
         .into_iter()
-        .filter(|record| record.kind == RuntimeEffectKind::ToolBatch)
+        .filter(|record| record.kind == RuntimeEffectKind::ToolAttempt)
         .collect::<Vec<_>>();
-    assert_eq!(tool_records.len(), 1);
-    let tool = &tool_records[0];
+    assert_eq!(attempt_records.len(), 2);
+    let tool = &attempt_records[0];
     assert_eq!(tool.turn_id.as_deref(), Some("scoped-retry-sleep"));
     assert!(tool.replay_key.contains("scoped-retry-sleep"));
+    assert!(tool.replay_key.contains("child:0:retry-call-1:attempt:1"));
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Sleep), 1);
     assert!(
         recorder
@@ -1232,7 +1309,7 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
 }
 
 #[tokio::test]
-async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_tools() {
+async fn tool_attempt_effect_crosses_controller_per_child_attempt_and_runs_local_tools() {
     let recorder = RecordingEffectController::default();
     let transport = mock_provider(vec![
         MockCall {
@@ -1296,13 +1373,24 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     assert_eq!(recorder.count_kind(RuntimeEffectKind::ToolBatch), 1);
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::ToolAttempt), 2);
     let tool_keys = recorder
         .records()
         .into_iter()
-        .filter(|record| record.kind == RuntimeEffectKind::ToolBatch)
+        .filter(|record| record.kind == RuntimeEffectKind::ToolAttempt)
         .map(|record| record.replay_key)
         .collect::<Vec<_>>();
-    assert_eq!(tool_keys.len(), 1);
+    assert_eq!(tool_keys.len(), 2);
+    assert!(
+        tool_keys
+            .iter()
+            .any(|key| key.contains("child:0:call-1:attempt:1"))
+    );
+    assert!(
+        tool_keys
+            .iter()
+            .any(|key| key.contains("child:1:call-2:attempt:1"))
+    );
     assert!(
         recorder
             .envelopes()
@@ -1313,6 +1401,79 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
         turn.tool_calls
             .iter()
             .any(|record| record.tool == "echo_tool" && record.output.is_success())
+    );
+}
+
+#[tokio::test]
+async fn tool_batch_serializes_child_attempts_when_controller_disallows_concurrency() {
+    let controller = SerialOnlyEffectController::default();
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: String::new(),
+                parts: vec![
+                    LlmOutputPart::ToolCall {
+                        call_id: "call-1".to_string(),
+                        tool_name: "echo_tool".to_string(),
+                        input_json: serde_json::json!({"value": "hi"}).to_string(),
+                        replay: None,
+                    },
+                    LlmOutputPart::ToolCall {
+                        call_id: "call-2".to_string(),
+                        tool_name: "echo_tool".to_string(),
+                        input_json: serde_json::json!({"value": "there"}).to_string(),
+                        replay: None,
+                    },
+                ],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "finished".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "finished".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(EchoTool),
+        transport,
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
+    )
+    .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "use the tool".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            scoped_test_turn(&controller, "serial-tool-batch-effects"),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
+    assert_eq!(controller.count_kind(RuntimeEffectKind::ToolBatch), 1);
+    assert_eq!(controller.count_kind(RuntimeEffectKind::ToolAttempt), 2);
+    assert_eq!(
+        controller.max_in_flight_tool_attempts(),
+        1,
+        "controllers that cannot accept concurrent effects must not receive overlapping child attempts"
     );
 }
 

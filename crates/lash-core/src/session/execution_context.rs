@@ -111,17 +111,14 @@ impl<'run> RuntimeExecutionContext<'run> {
     }
 
     pub fn session_scope(&self) -> crate::SessionScope {
-        self.dispatch
-            .agent_frame_id
-            .as_str()
-            .is_empty()
-            .then(|| crate::SessionScope::new(self.session_id.clone()))
-            .unwrap_or_else(|| {
-                crate::SessionScope::for_agent_frame(
-                    self.session_id.clone(),
-                    self.dispatch.agent_frame_id.clone(),
-                )
-            })
+        if self.dispatch.agent_frame_id.is_empty() {
+            crate::SessionScope::new(self.session_id.clone())
+        } else {
+            crate::SessionScope::for_agent_frame(
+                self.session_id.clone(),
+                self.dispatch.agent_frame_id.clone(),
+            )
+        }
     }
 
     pub fn trigger_store(&self) -> Option<Arc<dyn crate::TriggerStore>> {

@@ -962,7 +962,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standard_batch_tool_uses_core_tool_batch_under_durable_boundary() {
+    async fn standard_batch_tool_rejects_nested_batch_inside_durable_attempt() {
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let saw_batch_result = Arc::new(AtomicBool::new(false));
         let provider = BatchRuntimeProvider {
@@ -1023,9 +1023,13 @@ mod tests {
 
         assert!(matches!(turn.outcome, lash_core::TurnOutcome::Finished(_)));
         assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(started.load(Ordering::SeqCst), 2);
-        assert!(saw_batch_result.load(Ordering::SeqCst));
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+        assert!(!saw_batch_result.load(Ordering::SeqCst));
         assert_eq!(controller.count(lash_core::RuntimeEffectKind::ToolBatch), 1);
+        assert_eq!(
+            controller.count(lash_core::RuntimeEffectKind::ToolAttempt),
+            1
+        );
     }
 
     #[test]

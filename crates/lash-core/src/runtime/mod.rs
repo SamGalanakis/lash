@@ -16,6 +16,7 @@ mod process_work_driver;
 mod process_worker;
 mod queued_work_driver;
 mod session_api;
+mod session_execution_lease;
 mod session_manager;
 mod session_ops;
 mod state;
@@ -60,12 +61,23 @@ use crate::{
 use crate::{Effect, TurnMachine};
 
 use host::*;
+use session_execution_lease::*;
 use session_manager::*;
 use turn_boundary::*;
 use turn_commit_draft::*;
 use turn_driver::*;
 
 pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
+
+pub(super) fn runtime_error_from_store_commit(err: crate::store::StoreError) -> RuntimeError {
+    match err {
+        crate::store::StoreError::SessionExecutionLeaseExpired { session_id } => RuntimeError::new(
+            RuntimeErrorCode::SessionExecutionLeaseLost,
+            format!("session execution lease for session `{session_id}` was lost before commit"),
+        ),
+        err => RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()),
+    }
+}
 
 // `PromptUsage` is re-exported below alongside the runtime's own types.
 pub use lash_sansio::PromptUsage;
@@ -89,7 +101,7 @@ pub use effect::{
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
-    ToolBatchEffectOutcome, ToolCallLaunch,
+    ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};

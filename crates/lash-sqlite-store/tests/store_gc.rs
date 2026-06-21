@@ -90,9 +90,18 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
         session_id: "auto-gc".to_string(),
         ..RuntimeSessionState::default()
     };
+    let session_lease = store
+        .try_claim_session_execution_lease("auto-gc", "auto-gc-test", 60_000)
+        .await
+        .expect("claim session execution lease")
+        .expect("session execution lease");
 
     store
-        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[]))
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(session_lease.fence())
+                .releasing_session_execution_lease(session_lease.completion()),
+        )
         .await
         .expect("commit");
 

@@ -409,7 +409,7 @@ fn is_ident_continue(ch: char) -> bool {
 
 fn string_delimiter(quote: char, triple: bool) -> String {
     let count = if triple { 3 } else { 1 };
-    std::iter::repeat(quote).take(count).collect()
+    std::iter::repeat_n(quote, count).collect()
 }
 
 fn translate_escape(escaped: char, quote: char) -> char {

@@ -127,7 +127,7 @@ impl RuntimeTurnDriver<'_> {
                     messages,
                     event_delta,
                 )
-                .await
+                .await?
         } else {
             self.turn_pipeline
                 .progress_boundary(
@@ -137,7 +137,7 @@ impl RuntimeTurnDriver<'_> {
                     messages,
                     event_delta,
                 )
-                .await
+                .await?
         };
         if boundary.persisted {
             for event in &boundary.protocol_events {

@@ -87,7 +87,7 @@ fn draw_toast(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
-    let max_width = area.width.saturating_sub(4).min(60).max(4);
+    let max_width = area.width.saturating_sub(4).clamp(4, 60);
     let inner_width = max_width.saturating_sub(4).max(1) as usize;
     let message = smart_truncate_preview_line(&toast.message, inner_width);
     let message_width = display_width(&message) as u16;

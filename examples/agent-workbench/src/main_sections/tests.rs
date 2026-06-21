@@ -588,6 +588,88 @@ mod tests {
     }
 
     #[test]
+    fn parallel_inbox_lists_complete_in_durable_workbench_turn() {
+        run_async_test_on_stack_budget("workbench-parallel-inbox-list-test", || {
+            parallel_inbox_lists_complete_in_durable_workbench_turn_inner()
+        });
+    }
+
+    async fn parallel_inbox_lists_complete_in_durable_workbench_turn_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-parallel-inbox-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let mail_world = mail::MailWorld::new();
+        mail_world.add_account("test").expect("add test");
+        mail_world.add_account("test2").expect("add test2");
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete(|_| async {
+                Ok(text_response(
+                    r#"<lashlang>
+initial = await {
+  test: inbox.test.list({})?,
+  test2: inbox.test2.list({})?
+}
+submit initial
+</lashlang>"#,
+                ))
+            })
+            .build()
+            .into_handle();
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let session_id = WorkbenchSessionIds::fresh().current();
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(
+                WorkbenchPluginFactory::new("").with_mail_world(mail_world.clone()),
+            ))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let session = core
+            .session(session_id)
+            .open()
+            .await
+            .expect("open session");
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            session
+                .turn(lash::TurnInput::text("list both inboxes"))
+                .turn_id(format!("workbench-test-turn:{}", uuid::Uuid::new_v4()))
+                .run(),
+        )
+        .await
+        .expect("parallel inbox list turn must not hang")
+        .expect("parallel inbox list turn");
+        assert_eq!(
+            output.submitted_value(),
+            Some(&serde_json::json!({
+                "test": { "account": "test", "messages": [] },
+                "test2": { "account": "test2", "messages": [] }
+            }))
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
     fn inbox_added_after_session_open_updates_persisted_tool_catalog() {
         run_async_test_on_stack_budget("workbench-dynamic-inbox-surface-test", || {
             inbox_added_after_session_open_updates_persisted_tool_catalog_inner()

@@ -60,7 +60,8 @@ use lash_core::{
     ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
     ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope, SessionScope,
+    RuntimePersistence, SessionExecutionLease, SessionExecutionLeaseCompletion,
+    SessionExecutionLeaseFence, SessionMeta, SessionPickerInfo, SessionReadScope, SessionScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};

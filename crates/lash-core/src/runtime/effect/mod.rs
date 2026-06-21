@@ -5,7 +5,8 @@ mod outcome;
 pub use envelope::{
     LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, ToolBatchEffectOutcome, ToolCallLaunch,
+    RuntimeReplay, RuntimeScope, RuntimeSubject, ToolAttemptEffectOutcome, ToolAttemptLaunch,
+    ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use executor::{
     AwaitEventKey, AwaitEventWaitIdentity, EffectHost, ExecutionScope, ExternalCompletionError,
@@ -165,23 +166,6 @@ mod tests {
         }
     }
 
-    fn completed_tool_call(call_id: &str, tool_name: &str) -> crate::sansio::CompletedToolCall {
-        let output = crate::ToolCallOutput::success(serde_json::json!({"done": call_id}));
-        crate::sansio::CompletedToolCall {
-            call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            args: serde_json::json!({"value": call_id}),
-            model_return: crate::ModelToolReturn::from_output(
-                call_id.to_string(),
-                tool_name.to_string(),
-                &output,
-            ),
-            output,
-            duration_ms: 7,
-            replay: None,
-        }
-    }
-
     #[test]
     fn tool_batch_effect_envelope_round_trips_and_hashes_stably() {
         let batch = crate::PreparedToolBatch::new(
@@ -227,18 +211,24 @@ mod tests {
 
     #[test]
     fn tool_batch_outcome_rejects_wrong_effect_kind() {
-        let error = RuntimeEffectOutcome::ToolCall {
-            launch: ToolCallLaunch::Done {
-                result: completed_tool_call("call-1", "echo"),
+        let error = RuntimeEffectOutcome::ToolAttempt {
+            launch: ToolAttemptLaunch::Done {
+                record: crate::ToolCallRecord {
+                    call_id: Some("call-1".to_string()),
+                    tool: "echo".to_string(),
+                    args: serde_json::json!({"value": "call-1"}),
+                    output: crate::ToolCallOutput::success(serde_json::json!({"done": "call-1"})),
+                    duration_ms: 7,
+                },
             },
             triggers: Vec::new(),
         }
         .into_tool_batch_effect()
-        .expect_err("tool call is not a tool batch outcome");
+        .expect_err("tool attempt is not a tool batch outcome");
 
         assert_eq!(error.code, "runtime_effect_wrong_outcome");
         assert!(error.message.contains("expected tool_batch outcome"));
-        assert!(error.message.contains("got tool_call"));
+        assert!(error.message.contains("got tool_attempt"));
     }
 
     #[tokio::test]

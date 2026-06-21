@@ -92,7 +92,7 @@ let core = lash::RlmCore::builder()
     .store(Arc::new(my_custom_persistence))
     .open()
     .await?;</code></pre>
-      <p>The examples use the first-party SQLite adapter because it is the smallest local durable setup. The runtime contract is <code>SessionStoreFactory</code> / <code>RuntimePersistence</code>; a host can provide another database-backed implementation when it preserves the same optimistic head commits, checkpoint/blob references, queued work, and idempotency semantics.</p>
+      <p>The examples use the first-party SQLite adapter because it is the smallest local durable setup. The runtime contract is <code>SessionStoreFactory</code> / <code>RuntimePersistence</code>; a host can provide another database-backed implementation when it preserves the same session execution lease, fenced head commits, checkpoint/blob references, queued work, and idempotency semantics.</p>
       <p>Without <code>.store_factory(...)</code> or <code>.store(...)</code>, turns still succeed but state stays in memory. You still provide explicit in-memory effect, artifact, and attachment facets.</p>
     </div>
 
@@ -124,7 +124,7 @@ let core = lash::RlmCore::builder()
     // provider, model, effect host...
     .build()?;</code></pre>
       <p><code>PostgresStorage::connect</code> creates the exact supported schema on an empty database and rejects mismatched component versions. Runtime checkpoints, queued work, process rows, triggers, attachment manifests, and Lashlang artifacts live in Postgres. Attachment bytes live in S3-compatible object storage under content-addressed keys; MinIO uses the same implementation with an endpoint URL and path-style mode.</p>
-      <p><code>PostgresStoreConfig</code> applies connection-level backstops by default: a 10 second <code>lock_timeout</code> and a 30 second <code>statement_timeout</code>. Session commits are optimistic CAS writes on the head revision; Postgres serialization failures, deadlocks, and lock-acquisition timeouts on that write surface as <code>HeadRevisionConflict</code> so hosts can reload and retry instead of treating ordinary write contention as an opaque backend failure.</p>
+      <p><code>PostgresStoreConfig</code> applies connection-level backstops by default: a 10 second <code>lock_timeout</code> and a 30 second <code>statement_timeout</code>. Mutating session work first claims the durable session execution lease; session commits then verify that lease fence and perform the head-revision CAS in one transaction. Postgres serialization failures, deadlocks, and lock-acquisition timeouts on the backstop write surface as retryable conflicts so hosts can reload and retry instead of treating ordinary write contention as an opaque backend failure.</p>
       <p>The distributed integration harness is <code>just restate-postgres-workers-e2e</code>. It starts Postgres, MinIO, Restate, a deterministic OpenAI-compatible mock provider, two worker processes behind a Caddy h2c proxy, and a runner. The workers build a normal downstream-style <code>LashCore</code> with <code>PostgresStorage</code>, <code>S3AttachmentStore</code>, <code>PostgresLashlangArtifactStore</code>, <code>PostgresTriggerStore</code>, <code>PostgresProcessRegistry</code>, <code>RestateRuntimeEffectController</code>, <code>RestateProcessDeployment</code>, and JSONL trace sinks.</p>
       <p>The scenario runs real <code>session.turn(input).stream_to(...)</code> turns through the public facade. It covers foreground tools, attachment creation through the configured attachment store, parent/nested/parallel Lashlang processes, durable sleep and wake paths, public trigger registration and delivery, live replay from a stored observation cursor, MinIO byte/metadata assertions, and failover where worker A exits from the real turn path after terminal submit or another durable effect and worker B completes through Restate replay. The runner asserts one provider call per journaled effect, one committed turn, no duplicate runtime rows, and no active Lash Restate invocations left in <code>pending</code>, <code>ready</code>, <code>running</code>, <code>backing-off</code>, or <code>suspended</code>.</p>
     </div>
@@ -167,16 +167,28 @@ if let Some(process_report) = report.process {
 
     <div class="section" id="cas-conflicts">
       <div class="section-header">
-        <h2>Concurrent Writes And CAS</h2>
-        <p>At most one turn per session commits at a time. Stores check the expected head revision in the same transaction as the commit; mismatch rolls back with no partial state.</p>
+        <h2>Session Lane And CAS</h2>
+        <p>At most one mutating runner holds the session execution lease at a time. Stores still check the expected head revision in the same transaction as the fenced commit; mismatch rolls back with no partial state.</p>
       </div>
-      <p>Concurrent turns from two workers on the same session id race for the head. The loser receives a turn-level error such as <code>store_commit_failed</code>; it is not a <code>TurnStop</code> variant.</p>
+      <p>Concurrent turns from two workers on the same session id normally resolve at the lease boundary. A busy session returns <code>session_execution_busy</code>; a runner that loses the lease before commit returns <code>session_execution_lease_lost</code>. If the head CAS backstop fires, the loser receives a turn-level error such as <code>store_commit_failed</code>; these are not <code>TurnStop</code> variants.</p>
       <pre data-lang="rust" data-snippet="persistence#commit-conflict-retry"><code>use lash::runtime::RuntimeErrorCode;
 
 match session.turn(input).run().await {
     Ok(turn) =&gt; persist(turn)?,
+    Err(lash::EmbedError::Runtime(err))
+        if err.code == RuntimeErrorCode::SessionExecutionBusy =&gt;
+    {
+        retry_later(err)?;
+    }
+    Err(lash::EmbedError::Runtime(err))
+        if err.code == RuntimeErrorCode::SessionExecutionLeaseLost =&gt;
+    {
+        // The durable lane moved to another owner before commit: reopen and retry.
+        let session = core.session(chat_id).open().await?;
+        retry_or_report(err, session)?;
+    }
     Err(lash::EmbedError::Runtime(err)) if err.code == RuntimeErrorCode::StoreCommitFailed =&gt; {
-        // Another writer won the head-revision race: reload and retry.
+        // The CAS backstop fired: reload and retry.
         let session = core.session(chat_id).open().await?;
         retry_or_report(err, session)?;
     }

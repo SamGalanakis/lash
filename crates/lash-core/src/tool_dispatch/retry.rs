@@ -66,6 +66,25 @@ pub(super) async fn execute_tool_call<'run>(
     .await
 }
 
+pub(super) async fn execute_tool_attempt<'run>(
+    context: &ToolDispatchContext<'run>,
+    manifest: &ToolManifest,
+    prepared: &PreparedToolCall,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolContext<'run>,
+    attempt: u32,
+    max_attempts: u32,
+) -> ToolResult {
+    let tool_name = manifest.name.as_str();
+    execute_once(
+        context,
+        prepared,
+        progress,
+        tool_context.with_retry_context(tool_name, attempt, max_attempts),
+    )
+    .await
+}
+
 async fn execute_once<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: &PreparedToolCall,
@@ -90,14 +109,14 @@ async fn sleep_before_retry(
         .parent_invocation
         .as_ref()
         .is_some_and(|invocation| {
-            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolBatch)
+            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolAttempt)
         })
         && context.effect_controller.controller().durability_tier()
             == crate::DurabilityTier::Durable
     {
         return Err(crate::RuntimeEffectControllerError::new(
-            "tool_batch_retry_sleep_unavailable",
-            "retry sleeps are not available inside a tool batch child",
+            "tool_attempt_retry_sleep_unavailable",
+            "retry sleeps are not available inside a journaled tool attempt",
         ));
     }
     let duration = std::time::Duration::from_millis(retry_after_ms);
@@ -156,7 +175,7 @@ fn derive_retry_replay_key(tool_context: &ToolContext<'_>, tool_name: &str) -> O
     })
 }
 
-fn retry_after_ms(
+pub(crate) fn retry_after_ms(
     result: &ToolResult,
     retry_policy: ToolRetryPolicy,
     retry_index: u32,
@@ -174,7 +193,7 @@ fn retry_after_ms(
     Some(retry_policy.delay_ms_for_retry(retry_index, *after_ms))
 }
 
-fn mark_retry_exhausted(result: ToolResult, attempts: u32) -> ToolResult {
+pub(crate) fn mark_retry_exhausted(result: ToolResult, attempts: u32) -> ToolResult {
     let mut output = match result.into_done_output() {
         Ok(output) => output,
         Err(pending) => return ToolResult::pending(pending),

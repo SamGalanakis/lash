@@ -265,6 +265,7 @@ impl AgentFrameRecord {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_at(
         frame_id: impl Into<AgentFrameId>,
         session_id: impl Into<String>,

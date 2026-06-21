@@ -33,6 +33,7 @@ pub(crate) struct RlmLashlangExecutionTraceConfig {
     pub(crate) trace_context: TraceContext,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_code(
     mut state: RlmExecutionState,
     ctx: RuntimeExecutionContext<'_>,
@@ -74,6 +75,7 @@ fn clean_model_code(code: &str) -> String {
         .join("\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_code_inner(
     state: &mut RlmExecutionState,
     ctx: RuntimeExecutionContext<'_>,

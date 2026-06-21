@@ -9,9 +9,7 @@ use crate::{
     shared_parts,
 };
 
-use super::{
-    RuntimeError, RuntimeErrorCode, RuntimeSessionState, TurnCommitDraft, merge_ledger_entry,
-};
+use super::{RuntimeError, RuntimeSessionState, TurnCommitDraft, merge_ledger_entry};
 
 pub(super) struct ProgressBoundaryCommit {
     pub(super) protocol_events: Vec<crate::ProtocolEvent>,
@@ -31,6 +29,7 @@ struct ProgressBoundarySnapshot<'a> {
 pub(super) struct TurnBoundary {
     stage: TurnCommitStage,
     clock: Arc<dyn crate::Clock>,
+    session_execution_lease: Option<crate::SessionExecutionLeaseFence>,
 }
 
 /// Explicit two-phase lifecycle for a turn commit.
@@ -72,6 +71,7 @@ struct FinalCommitInput<'a> {
     turn_id: Option<&'a str>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     pending_attachment_ids: Vec<crate::AttachmentId>,
+    session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
 }
 
 enum PersistedGraphMark {
@@ -115,7 +115,16 @@ impl TurnBoundary {
                 draft_clock,
             ))),
             clock,
+            session_execution_lease: None,
         }
+    }
+
+    pub(super) fn with_session_execution_lease(
+        mut self,
+        lease: Option<crate::SessionExecutionLeaseFence>,
+    ) -> Self {
+        self.session_execution_lease = lease;
+        self
     }
 
     pub(super) fn state_mut(&mut self) -> &mut RuntimeSessionState {
@@ -203,12 +212,12 @@ impl TurnBoundary {
         turn_index: usize,
         messages: MessageSequence,
         event_delta: Vec<SessionEventRecord>,
-    ) -> ProgressBoundaryCommit {
+    ) -> Result<ProgressBoundaryCommit, RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
-            return ProgressBoundaryCommit {
+            return Ok(ProgressBoundaryCommit {
                 protocol_events: Vec::new(),
                 persisted: false,
-            };
+            });
         }
 
         let store = session.history_store();
@@ -233,12 +242,12 @@ impl TurnBoundary {
         turn_index: usize,
         messages: MessageSequence,
         event_delta: Vec<SessionEventRecord>,
-    ) -> ProgressBoundaryCommit {
+    ) -> Result<ProgressBoundaryCommit, RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
-            return ProgressBoundaryCommit {
+            return Ok(ProgressBoundaryCommit {
                 protocol_events: Vec::new(),
                 persisted: false,
-            };
+            });
         }
 
         let execution_state_snapshot = Self::snapshot_dirty_execution_state(session).await;
@@ -258,7 +267,7 @@ impl TurnBoundary {
     async fn progress_boundary_with_snapshot(
         &mut self,
         snapshot: ProgressBoundarySnapshot<'_>,
-    ) -> ProgressBoundaryCommit {
+    ) -> Result<ProgressBoundaryCommit, RuntimeError> {
         let ProgressBoundarySnapshot {
             policy,
             turn_index,
@@ -269,10 +278,10 @@ impl TurnBoundary {
             store,
         } = snapshot;
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
-            return ProgressBoundaryCommit {
+            return Ok(ProgressBoundaryCommit {
                 protocol_events: Vec::new(),
                 persisted: false,
-            };
+            });
         }
 
         let protocol_events = self.apply_event_delta(event_delta);
@@ -291,22 +300,25 @@ impl TurnBoundary {
         }
 
         let Some(store) = store else {
-            return ProgressBoundaryCommit {
+            return Ok(ProgressBoundaryCommit {
                 protocol_events,
                 persisted: false,
-            };
+            });
         };
         match self.commit_progress_graph(store, &[]).await {
-            Ok(()) => ProgressBoundaryCommit {
+            Ok(()) => Ok(ProgressBoundaryCommit {
                 protocol_events,
                 persisted: true,
-            },
+            }),
+            Err(err @ StoreError::SessionExecutionLeaseExpired { .. }) => {
+                Err(super::runtime_error_from_store_commit(err))
+            }
             Err(err) => {
                 tracing::warn!("failed to persist runtime progress boundary: {err}");
-                ProgressBoundaryCommit {
+                Ok(ProgressBoundaryCommit {
                     protocol_events,
                     persisted: false,
-                }
+                })
             }
         }
     }
@@ -330,6 +342,7 @@ impl TurnBoundary {
         protocol_events
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn final_commit(
         &mut self,
         returned_turn: &mut AssembledTurn,
@@ -338,6 +351,7 @@ impl TurnBoundary {
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         pending_attachment_ids: Vec<crate::AttachmentId>,
+        session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
     ) -> Result<(), RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
             Some(session) => {
@@ -359,9 +373,10 @@ impl TurnBoundary {
             turn_id,
             completed_queue_claims,
             pending_attachment_ids,
+            session_execution_lease_completion,
         })
         .await
-        .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
+        .map_err(super::runtime_error_from_store_commit)?;
         returned_turn.state = self.final_state_mut().to_snapshot();
         Ok(())
     }
@@ -417,8 +432,16 @@ impl TurnBoundary {
         let draft = self.draft_mut();
         let state = draft.state();
         let graph = draft.graph_commit(state.graph_replace_required);
-        self.apply_commit(store, graph, usage_deltas, None, Vec::new(), Vec::new())
-            .await
+        self.apply_commit(
+            store,
+            graph,
+            usage_deltas,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .await
     }
 
     async fn final_commit_with_snapshots(
@@ -436,6 +459,7 @@ impl TurnBoundary {
             turn_id,
             completed_queue_claims,
             pending_attachment_ids,
+            session_execution_lease_completion,
         } = input;
         let clock = Arc::clone(&self.clock);
         let state = self.final_state_mut();
@@ -494,6 +518,7 @@ impl TurnBoundary {
                 turn_id,
                 completed_queue_claims,
                 committed_attachment_ids,
+                session_execution_lease_completion,
             )
             .await
         } else {
@@ -502,6 +527,7 @@ impl TurnBoundary {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn apply_commit(
         &mut self,
         store: &(dyn RuntimePersistence + '_),
@@ -510,12 +536,20 @@ impl TurnBoundary {
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         committed_attachment_ids: Vec<crate::AttachmentId>,
+        session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
     ) -> Result<(), StoreError> {
+        let session_execution_lease = self.session_execution_lease.clone();
         let state = self.state_mut();
         let mark = PersistedGraphMark::from_graph_commit(&graph);
         let mut commit =
             RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas)
                 .with_committed_attachments(committed_attachment_ids);
+        if let Some(lease) = session_execution_lease {
+            commit = commit.with_session_execution_lease(lease);
+        }
+        if let Some(completion) = session_execution_lease_completion {
+            commit = commit.releasing_session_execution_lease(completion);
+        }
         commit.completed_queue_claims = completed_queue_claims;
         if let Some(turn_id) = turn_id {
             let turn_commit_hash = commit.turn_commit_hash()?;
@@ -815,6 +849,21 @@ mod tests {
         }
     }
 
+    async fn leased_boundary(
+        store: &RecordingStore,
+        state: RuntimeSessionState,
+    ) -> (TurnBoundary, crate::SessionExecutionLease) {
+        let lease = store
+            .try_claim_session_execution_lease(&state.session_id, "turn-boundary-test", 60_000)
+            .await
+            .expect("claim test session execution lease")
+            .expect("test session execution lease");
+        (
+            TurnBoundary::from_state(state).with_session_execution_lease(Some(lease.fence())),
+            lease,
+        )
+    }
+
     #[test]
     fn agent_frame_switch_keeps_session_and_tags_initial_nodes_to_new_frame() {
         let graph = SessionGraph::from_active_read_state(&[text_message(
@@ -982,7 +1031,7 @@ mod tests {
             .lock()
             .expect("lock graph")
             .extend_node_records(base_graph.nodes.iter().cloned());
-        let mut pipeline = TurnBoundary::from_state(state);
+        let (mut pipeline, _lease) = leased_boundary(&store, state).await;
 
         pipeline
             .prepared_checkpoint(
@@ -1027,7 +1076,7 @@ mod tests {
                 ..crate::SessionHeadMeta::default()
             })
             .await;
-        let mut pipeline = TurnBoundary::from_state(state);
+        let (mut pipeline, _lease) = leased_boundary(&store, state).await;
 
         let err = pipeline
             .prepared_checkpoint(
@@ -1057,7 +1106,6 @@ mod tests {
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
         let base_graph = graph.clone();
-        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let event_delta = vec![
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(user.clone())),
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
@@ -1070,6 +1118,7 @@ mod tests {
             .lock()
             .expect("lock graph")
             .extend_node_records(base_graph.nodes.iter().cloned());
+        let (mut pipeline, _lease) = leased_boundary(&store, state_with_graph(graph)).await;
 
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
@@ -1081,7 +1130,8 @@ mod tests {
                 plugins: None,
                 store: Some(&store),
             })
-            .await;
+            .await
+            .expect("progress boundary");
 
         assert!(boundary.persisted);
         assert!(boundary.protocol_events.is_empty());
@@ -1129,6 +1179,12 @@ mod tests {
             )
             .await
             .expect("checkpoint without store");
+        let lease = store
+            .try_claim_session_execution_lease("session-1", "turn-boundary-test", 60_000)
+            .await
+            .expect("claim test session execution lease")
+            .expect("test session execution lease");
+        pipeline = pipeline.with_session_execution_lease(Some(lease.fence()));
 
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
@@ -1140,7 +1196,8 @@ mod tests {
                 plugins: None,
                 store: Some(&store),
             })
-            .await;
+            .await
+            .expect("progress boundary");
 
         assert!(boundary.persisted);
         let stored_graph = stored_graph_with_head_leaf(&store);
@@ -1155,13 +1212,13 @@ mod tests {
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let trajectory = test_protocol_event("trajectory");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
-        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph.clone()));
         let store = RecordingStore::default();
         store
             .session_graph
             .lock()
             .expect("lock graph")
             .extend_node_records(graph.nodes.iter().cloned());
+        let (mut pipeline, _lease) = leased_boundary(&store, state_with_graph(graph.clone())).await;
 
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
@@ -1178,7 +1235,8 @@ mod tests {
                 plugins: None,
                 store: Some(&store),
             })
-            .await;
+            .await
+            .expect("progress boundary");
 
         assert!(boundary.persisted);
         let stored_graph = stored_graph_with_head_leaf(&store);
@@ -1208,7 +1266,8 @@ mod tests {
                 plugins: None,
                 store: None,
             })
-            .await;
+            .await
+            .expect("progress boundary");
 
         assert!(!boundary.persisted);
         assert_eq!(boundary.protocol_events.len(), 1);
@@ -1220,7 +1279,6 @@ mod tests {
         let user = text_message("u0", MessageRole::User, "hello");
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
-        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
                 .expect("protocol event serializes");
@@ -1232,6 +1290,7 @@ mod tests {
                 ..crate::SessionHeadMeta::default()
             })
             .await;
+        let (mut pipeline, _lease) = leased_boundary(&store, state_with_graph(graph)).await;
 
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
@@ -1243,7 +1302,8 @@ mod tests {
                 plugins: None,
                 store: Some(&store),
             })
-            .await;
+            .await
+            .expect("progress boundary");
 
         assert!(!boundary.persisted);
         assert_eq!(boundary.protocol_events.len(), 1);
@@ -1295,7 +1355,7 @@ mod tests {
             usage_entry("turn", "gpt", 17),
         ];
         let store = RecordingStore::default();
-        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph.clone()));
+        let (mut pipeline, _lease) = leased_boundary(&store, state_with_graph(graph.clone())).await;
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline
@@ -1310,6 +1370,7 @@ mod tests {
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
                 pending_attachment_ids: Vec::new(),
+                session_execution_lease_completion: None,
             })
             .await
             .expect("commit");
@@ -1348,6 +1409,7 @@ mod tests {
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
                 pending_attachment_ids: Vec::new(),
+                session_execution_lease_completion: None,
             })
             .await
             .expect("no-store commit");

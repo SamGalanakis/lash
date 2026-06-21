@@ -175,9 +175,7 @@ impl<'run> ProcessEngineRunContext<'run> {
     }
 
     pub fn resolved_tool_catalog(&self) -> Result<Arc<crate::ToolCatalog>, crate::PluginError> {
-        self.plugins
-            .resolved_tool_catalog(&self.session_id)
-            .map_err(crate::PluginError::from)
+        self.plugins.resolved_tool_catalog(&self.session_id)
     }
 
     pub fn into_runtime_context(

@@ -153,7 +153,7 @@
         {
           title: "Persistence",
           href: "persistence.html",
-          summary: "Install local or distributed stores, understand what persists, handle CAS conflicts, and verify Postgres/S3/Restate E2E durability.",
+          summary: "Install local or distributed stores, understand what persists, handle session-lane conflicts, and verify Postgres/S3/Restate E2E durability.",
           kind: "guide",
         },
         {
@@ -171,7 +171,7 @@
         {
           title: "Scaling",
           href: "architecture/scaling.html",
-          summary: "Run Lash as a stateless service with Postgres, S3-compatible attachments, Restate replay, CAS, and session-agnostic ingress.",
+          summary: "Run Lash as a stateless service with Postgres, session execution leases, S3-compatible attachments, Restate replay, and session-agnostic ingress.",
           kind: "guide",
         },
         {

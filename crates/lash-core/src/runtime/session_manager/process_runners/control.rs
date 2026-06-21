@@ -418,6 +418,7 @@ impl ProcessCapability {
         runner.cancel(process_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::runtime::session_manager) async fn signal_process(
         &self,
         current: &CurrentSessionCapability,

@@ -25,7 +25,7 @@ use super::executor::RuntimeEffectControllerError;
 pub enum RuntimeEffectKind {
     LlmCall,
     Direct,
-    ToolCall,
+    ToolAttempt,
     ToolBatch,
     Process,
     ExecCode,
@@ -41,7 +41,7 @@ impl RuntimeEffectKind {
         match self {
             Self::LlmCall => "llm_call",
             Self::Direct => "direct",
-            Self::ToolCall => "tool_call",
+            Self::ToolAttempt => "tool_attempt",
             Self::ToolBatch => "tool_batch",
             Self::Process => "process",
             Self::ExecCode => "exec_code",
@@ -287,6 +287,27 @@ fn validate_effect_command(
             "runtime effect durable step id must be non-empty",
         ));
     }
+    if let RuntimeEffectCommand::ToolAttempt {
+        call,
+        attempt,
+        max_attempts,
+    } = command
+    {
+        if call.call_id.trim().is_empty() {
+            return Err(RuntimeEffectControllerError::new(
+                "runtime_effect_tool_attempt_call_id",
+                "runtime effect tool attempt requires a non-empty call id",
+            ));
+        }
+        if *attempt == 0 || *max_attempts == 0 || *attempt > *max_attempts {
+            return Err(RuntimeEffectControllerError::new(
+                "runtime_effect_tool_attempt_index",
+                format!(
+                    "runtime effect tool attempt must satisfy 1 <= attempt <= max_attempts, got {attempt}/{max_attempts}"
+                ),
+            ));
+        }
+    }
     if let RuntimeEffectCommand::ToolBatch { batch } = command {
         if batch.batch_id.trim().is_empty() {
             return Err(RuntimeEffectControllerError::new(
@@ -300,17 +321,17 @@ fn validate_effect_command(
                 "runtime effect tool batch must contain at least one prepared call",
             ));
         }
-        for (index, child) in batch.calls.iter().enumerate() {
-            if child.call.call_id.trim().is_empty() {
+        for (index, call) in batch.calls.iter().enumerate() {
+            if call.call.call_id.trim().is_empty() {
                 return Err(RuntimeEffectControllerError::new(
-                    "runtime_effect_tool_batch_child_call_id",
-                    format!("runtime effect tool batch child {index} has an empty call id"),
+                    "runtime_effect_tool_batch_call_id",
+                    format!("runtime effect tool batch call {index} has an empty call id"),
                 ));
             }
-            if child.replay_suffix.trim().is_empty() {
+            if call.replay_suffix.trim().is_empty() {
                 return Err(RuntimeEffectControllerError::new(
-                    "runtime_effect_tool_batch_child_replay",
-                    format!("runtime effect tool batch child {index} has an empty replay suffix"),
+                    "runtime_effect_tool_batch_call_replay",
+                    format!("runtime effect tool batch call {index} has an empty replay suffix"),
                 ));
             }
         }
@@ -329,8 +350,10 @@ pub enum RuntimeEffectCommand {
         request: Box<LlmRequestSpec>,
         usage_source: String,
     },
-    ToolCall {
+    ToolAttempt {
         call: crate::PreparedToolCall,
+        attempt: u32,
+        max_attempts: u32,
     },
     ToolBatch {
         batch: crate::PreparedToolBatch,
@@ -371,7 +394,7 @@ impl RuntimeEffectCommand {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
             Self::Direct { .. } => RuntimeEffectKind::Direct,
-            Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
+            Self::ToolAttempt { .. } => RuntimeEffectKind::ToolAttempt,
             Self::ToolBatch { .. } => RuntimeEffectKind::ToolBatch,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
@@ -387,6 +410,7 @@ impl RuntimeEffectCommand {
 /// Serializable operation against the process admin plane.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ProcessCommand {
     Start {
         registration: ProcessRegistration,
@@ -496,8 +520,8 @@ pub enum ProcessEffectOutcome {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ToolCallEffectOutcome {
-    pub launch: ToolCallLaunch,
+pub struct ToolAttemptEffectOutcome {
+    pub launch: ToolAttemptLaunch,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<ToolTriggerEffectOutcome>,
 }
@@ -511,6 +535,7 @@ pub struct ToolBatchEffectOutcome {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ToolCallLaunch {
     Done {
         result: CompletedToolCall,
@@ -522,9 +547,23 @@ pub enum ToolCallLaunch {
     },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolAttemptLaunch {
+    Done {
+        record: crate::ToolCallRecord,
+    },
+    Pending {
+        key: crate::AwaitEventKey,
+        pending: crate::PendingCompletion,
+        duration_ms: u64,
+    },
+}
+
 /// Serializable result of a runtime effect command.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum RuntimeEffectOutcome {
     LlmCall {
         result: Result<LlmResponse, LlmCallError>,
@@ -533,8 +572,8 @@ pub enum RuntimeEffectOutcome {
     Direct {
         result: Result<LlmResponse, LlmCallError>,
     },
-    ToolCall {
-        launch: ToolCallLaunch,
+    ToolAttempt {
+        launch: ToolAttemptLaunch,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         triggers: Vec<ToolTriggerEffectOutcome>,
     },
@@ -723,33 +762,15 @@ impl RuntimeEffectOutcome {
         }
     }
 
-    pub fn into_tool_call(self) -> Result<CompletedToolCall, RuntimeEffectControllerError> {
-        match self {
-            Self::ToolCall {
-                launch: ToolCallLaunch::Done { result },
-                ..
-            } => Ok(result),
-            Self::ToolCall {
-                launch: ToolCallLaunch::Pending { .. },
-                ..
-            } => Err(RuntimeEffectControllerError::new(
-                "runtime_effect_tool_call_pending",
-                "tool call launch is pending and has no completed output yet",
-            )),
-            other => Err(RuntimeEffectControllerError::wrong_outcome(
-                RuntimeEffectKind::ToolCall,
-                other.kind(),
-            )),
-        }
-    }
-
-    pub fn into_tool_call_effect(
+    pub fn into_tool_attempt_effect(
         self,
-    ) -> Result<ToolCallEffectOutcome, RuntimeEffectControllerError> {
+    ) -> Result<ToolAttemptEffectOutcome, RuntimeEffectControllerError> {
         match self {
-            Self::ToolCall { launch, triggers } => Ok(ToolCallEffectOutcome { launch, triggers }),
+            Self::ToolAttempt { launch, triggers } => {
+                Ok(ToolAttemptEffectOutcome { launch, triggers })
+            }
             other => Err(RuntimeEffectControllerError::wrong_outcome(
-                RuntimeEffectKind::ToolCall,
+                RuntimeEffectKind::ToolAttempt,
                 other.kind(),
             )),
         }
@@ -838,7 +859,7 @@ impl RuntimeEffectOutcome {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
             Self::Direct { .. } => RuntimeEffectKind::Direct,
-            Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
+            Self::ToolAttempt { .. } => RuntimeEffectKind::ToolAttempt,
             Self::ToolBatch { .. } => RuntimeEffectKind::ToolBatch,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,

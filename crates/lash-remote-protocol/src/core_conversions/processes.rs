@@ -862,7 +862,7 @@ impl From<lash_core::RuntimeEffectKind> for RemoteRuntimeEffectKind {
         match value {
             lash_core::RuntimeEffectKind::LlmCall => Self::LlmCall,
             lash_core::RuntimeEffectKind::Direct => Self::Direct,
-            lash_core::RuntimeEffectKind::ToolCall => Self::ToolCall,
+            lash_core::RuntimeEffectKind::ToolAttempt => Self::ToolAttempt,
             lash_core::RuntimeEffectKind::ToolBatch => Self::ToolBatch,
             lash_core::RuntimeEffectKind::Process => Self::Process,
             lash_core::RuntimeEffectKind::ExecCode => Self::ExecCode,
@@ -880,7 +880,7 @@ impl From<RemoteRuntimeEffectKind> for lash_core::RuntimeEffectKind {
         match value {
             RemoteRuntimeEffectKind::LlmCall => Self::LlmCall,
             RemoteRuntimeEffectKind::Direct => Self::Direct,
-            RemoteRuntimeEffectKind::ToolCall => Self::ToolCall,
+            RemoteRuntimeEffectKind::ToolAttempt => Self::ToolAttempt,
             RemoteRuntimeEffectKind::ToolBatch => Self::ToolBatch,
             RemoteRuntimeEffectKind::Process => Self::Process,
             RemoteRuntimeEffectKind::ExecCode => Self::ExecCode,

@@ -143,9 +143,10 @@ pub mod persistence {
     };
     pub use lash_core::{
         BlobRef, GcReport, PersistedSessionConfig, PersistedTurnState, ProtocolEvent,
-        RuntimePersistence, SessionEventRecord, SessionGraph, SessionMeta, SessionNodeRecord,
-        SessionReadScope, SessionReadView, SessionRelation, StoreError, TokenLedgerEntry,
-        VacuumReport,
+        RuntimePersistence, SessionEventRecord, SessionExecutionLease,
+        SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionGraph, SessionMeta,
+        SessionNodeRecord, SessionReadScope, SessionReadView, SessionRelation, StoreError,
+        TokenLedgerEntry, VacuumReport,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{InMemoryLashlangArtifactStore, LashlangArtifactStore};

@@ -419,6 +419,37 @@ pub(crate) fn command_palette_items(
     items
 }
 
+/// Insert an `[Image #n]` marker for a pasted clipboard image and encode it
+/// to PNG off the UI thread.
+fn paste_clipboard_image(
+    app: &mut App,
+    app_tx: &crate::event::AppEventTx,
+    img_data: arboard::ImageData<'_>,
+) {
+    let image_id = app.next_image_marker_id();
+    let marker = format!("[Image #{}]", image_id);
+    insert_inline_marker(app, &marker);
+    app.begin_pending_image(image_id);
+    app.update_suggestions();
+    let app_tx = app_tx.clone();
+    let w = img_data.width as u32;
+    let h = img_data.height as u32;
+    let bytes = img_data.bytes.into_owned();
+    tokio::spawn(async move {
+        let png = task::spawn_blocking(move || {
+            let rgba = image::RgbaImage::from_raw(w, h, bytes)
+                .ok_or_else(|| anyhow::anyhow!("Failed to decode pasted image data."))?;
+            let mut png_buf = std::io::Cursor::new(Vec::new());
+            rgba.write_to(&mut png_buf, image::ImageFormat::Png)
+                .map_err(|err| anyhow::anyhow!("Failed to encode pasted image: {err}"))?;
+            Ok::<_, anyhow::Error>(png_buf.into_inner())
+        })
+        .await
+        .unwrap_or_else(|err| Err(anyhow::anyhow!("Failed to process pasted image: {err}")));
+        let _ = app_tx.send(AppEvent::ClipboardImageReady { id: image_id, png });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -457,35 +488,4 @@ mod tests {
             KeyModifiers::NONE
         )));
     }
-}
-
-/// Insert an `[Image #n]` marker for a pasted clipboard image and encode it
-/// to PNG off the UI thread.
-fn paste_clipboard_image(
-    app: &mut App,
-    app_tx: &crate::event::AppEventTx,
-    img_data: arboard::ImageData<'_>,
-) {
-    let image_id = app.next_image_marker_id();
-    let marker = format!("[Image #{}]", image_id);
-    insert_inline_marker(app, &marker);
-    app.begin_pending_image(image_id);
-    app.update_suggestions();
-    let app_tx = app_tx.clone();
-    let w = img_data.width as u32;
-    let h = img_data.height as u32;
-    let bytes = img_data.bytes.into_owned();
-    tokio::spawn(async move {
-        let png = task::spawn_blocking(move || {
-            let rgba = image::RgbaImage::from_raw(w, h, bytes)
-                .ok_or_else(|| anyhow::anyhow!("Failed to decode pasted image data."))?;
-            let mut png_buf = std::io::Cursor::new(Vec::new());
-            rgba.write_to(&mut png_buf, image::ImageFormat::Png)
-                .map_err(|err| anyhow::anyhow!("Failed to encode pasted image: {err}"))?;
-            Ok::<_, anyhow::Error>(png_buf.into_inner())
-        })
-        .await
-        .unwrap_or_else(|err| Err(anyhow::anyhow!("Failed to process pasted image: {err}")));
-        let _ = app_tx.send(AppEvent::ClipboardImageReady { id: image_id, png });
-    });
 }

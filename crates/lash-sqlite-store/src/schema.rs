@@ -74,6 +74,15 @@ CREATE TABLE IF NOT EXISTS runtime_turn_commits (
     PRIMARY KEY (session_id, turn_id)
 );
 
+CREATE TABLE IF NOT EXISTS session_execution_leases (
+    session_id               TEXT PRIMARY KEY,
+    lease_owner_id           TEXT,
+    lease_token              TEXT,
+    lease_fencing_token      INTEGER NOT NULL DEFAULT 0,
+    lease_claimed_at_ms      INTEGER NOT NULL DEFAULT 0,
+    lease_expires_at_ms      INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS queued_work_batches (
     enqueue_seq       INTEGER PRIMARY KEY,
     batch_id          TEXT NOT NULL UNIQUE,
@@ -132,7 +141,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 3;
+pub(crate) const SCHEMA_VERSION: i32 = 4;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

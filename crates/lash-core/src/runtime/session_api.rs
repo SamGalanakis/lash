@@ -429,7 +429,7 @@ impl LashRuntime {
             .and_then(|session| session.history_store())
         else {
             let batch_id = format!("inline-command:{}", uuid::Uuid::new_v4());
-            self.apply_session_command(command, None).await?;
+            self.apply_session_command(command, None, None).await?;
             return Ok(crate::SessionCommandReceipt {
                 session_id,
                 batch_id,
@@ -466,6 +466,7 @@ impl LashRuntime {
 
     pub async fn drain_next_session_command(
         &mut self,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
     ) -> Result<Option<crate::SessionCommandReceipt>, RuntimeError> {
         let Some(store) = self
             .session
@@ -477,15 +478,14 @@ impl LashRuntime {
         let claim = store
             .claim_ready_queued_work(
                 &self.state.session_id,
+                session_execution_lease,
                 &self.runtime_scope_id,
                 crate::QueuedWorkClaimBoundary::Idle,
                 crate::QUEUED_WORK_CLAIM_TTL_MS,
                 1,
             )
             .await
-            .map_err(|err| {
-                RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
-            })?;
+            .map_err(super::runtime_error_from_store_commit)?;
         let Some(claim) = claim else {
             return Ok(None);
         };
@@ -501,8 +501,12 @@ impl LashRuntime {
         let batch_id = batch.batch_id.clone();
         let source_key = batch.source_key.clone().unwrap_or_else(|| batch_id.clone());
         let command = command.clone();
-        self.apply_session_command(command, Some(claim.completion()))
-            .await?;
+        self.apply_session_command(
+            command,
+            Some(claim.completion()),
+            Some(session_execution_lease),
+        )
+        .await?;
         Ok(Some(crate::SessionCommandReceipt {
             session_id: self.state.session_id.clone(),
             batch_id,
@@ -514,6 +518,7 @@ impl LashRuntime {
         &mut self,
         command: crate::SessionCommand,
         completion: Option<crate::QueuedWorkCompletion>,
+        session_execution_lease: Option<&crate::SessionExecutionLeaseFence>,
     ) -> Result<(), RuntimeError> {
         self.refresh_session_graph_from_store()
             .await
@@ -549,12 +554,20 @@ impl LashRuntime {
         };
         let mut commit =
             crate::store::RuntimeCommit::persisted_state_with_graph_commit(&self.state, graph, &[]);
+        let Some(session_execution_lease) = session_execution_lease else {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::StoreCommitFailed,
+                "session command commit requires a session execution lease",
+            ));
+        };
+        commit = commit.with_session_execution_lease(session_execution_lease.clone());
         if let Some(completion) = completion {
             commit = commit.completing_queue_claim(completion);
         }
-        let result = store.commit_runtime_state(commit).await.map_err(|err| {
-            RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
-        })?;
+        let result = store
+            .commit_runtime_state(commit)
+            .await
+            .map_err(super::runtime_error_from_store_commit)?;
         self.state.apply_persisted_commit_result(result);
         Ok(())
     }

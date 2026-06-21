@@ -1,5 +1,178 @@
 use super::*;
 
+#[derive(Debug)]
+struct ManualClock {
+    epoch_ms: std::sync::atomic::AtomicU64,
+}
+
+impl ManualClock {
+    fn new(epoch_ms: u64) -> Self {
+        Self {
+            epoch_ms: std::sync::atomic::AtomicU64::new(epoch_ms),
+        }
+    }
+
+    fn advance_ms(&self, delta_ms: u64) {
+        self.epoch_ms
+            .fetch_add(delta_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::Clock for ManualClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn timestamp_ms(&self) -> u64 {
+        self.epoch_ms.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn timestamp_rfc3339(&self) -> String {
+        self.timestamp_datetime().to_rfc3339()
+    }
+
+    fn timestamp_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        let system_time =
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.timestamp_ms());
+        chrono::DateTime::<chrono::Utc>::from(system_time)
+    }
+
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
+
+    async fn sleep_until(&self, deadline: std::time::Instant) {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    }
+}
+
+#[derive(Debug)]
+struct StepExpiryClock {
+    epoch_ms: u64,
+    live_timestamp_calls: std::sync::atomic::AtomicU64,
+    timestamp_calls: std::sync::atomic::AtomicU64,
+    armed: AtomicBool,
+}
+
+impl StepExpiryClock {
+    fn new(epoch_ms: u64) -> Self {
+        Self {
+            epoch_ms,
+            live_timestamp_calls: std::sync::atomic::AtomicU64::new(u64::MAX),
+            timestamp_calls: std::sync::atomic::AtomicU64::new(0),
+            armed: AtomicBool::new(false),
+        }
+    }
+
+    fn expire_after_timestamp_calls(&self, live_calls: u64) {
+        self.timestamp_calls
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.live_timestamp_calls
+            .store(live_calls, std::sync::atomic::Ordering::SeqCst);
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::Clock for StepExpiryClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn timestamp_ms(&self) -> u64 {
+        if !self.armed.load(Ordering::SeqCst) {
+            return self.epoch_ms;
+        }
+        let call = self
+            .timestamp_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call
+            < self
+                .live_timestamp_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.epoch_ms
+        } else {
+            self.epoch_ms
+                .saturating_add(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS)
+                .saturating_add(1)
+        }
+    }
+
+    fn timestamp_rfc3339(&self) -> String {
+        self.timestamp_datetime().to_rfc3339()
+    }
+
+    fn timestamp_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        let system_time =
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.timestamp_ms());
+        chrono::DateTime::<chrono::Utc>::from(system_time)
+    }
+
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
+
+    async fn sleep_until(&self, deadline: std::time::Instant) {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    }
+}
+
+struct ExpireLeaseAtFinalCommit {
+    clock: Arc<ManualClock>,
+    expired: AtomicBool,
+}
+
+impl ExpireLeaseAtFinalCommit {
+    fn new(clock: Arc<ManualClock>) -> Self {
+        Self {
+            clock,
+            expired: AtomicBool::new(false),
+        }
+    }
+}
+
+impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAtFinalCommit {
+    fn begin(&self, phase: crate::runtime::RuntimeTurnPhase) {
+        if phase == crate::runtime::RuntimeTurnPhase::FinalCommit
+            && !self.expired.swap(true, Ordering::SeqCst)
+        {
+            self.clock
+                .advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+        }
+    }
+
+    fn end(&self, _phase: crate::runtime::RuntimeTurnPhase) {}
+}
+
+struct ExpireLeaseAfterPromptBuild {
+    clock: Arc<ManualClock>,
+    expired: AtomicBool,
+}
+
+impl ExpireLeaseAfterPromptBuild {
+    fn new(clock: Arc<ManualClock>) -> Self {
+        Self {
+            clock,
+            expired: AtomicBool::new(false),
+        }
+    }
+}
+
+impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAfterPromptBuild {
+    fn begin(&self, _phase: crate::runtime::RuntimeTurnPhase) {}
+
+    fn end(&self, phase: crate::runtime::RuntimeTurnPhase) {
+        if phase == crate::runtime::RuntimeTurnPhase::PromptBuild
+            && !self.expired.swap(true, Ordering::SeqCst)
+        {
+            self.clock
+                .advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+        }
+    }
+}
+
 async fn standard_runtime_with_transport_and_queue_store(
     transport: TestProvider,
 ) -> (LashRuntime, Arc<RecordingStore>) {
@@ -846,6 +1019,369 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
             .expect("queued work after commit")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn foreground_turn_returns_session_execution_busy_when_lane_is_held() {
+    let (mut runtime, store) =
+        standard_runtime_with_transport_and_queue_store(mock_provider(Vec::new())).await;
+    let held_lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+        store.as_ref(),
+        "root",
+        "other-runtime",
+        60_000,
+    )
+    .await
+    .expect("claim session execution lease")
+    .expect("session execution lease");
+
+    let err = runtime
+        .run_turn_assembled(
+            TurnInput::text("foreground should be busy"),
+            CancellationToken::new(),
+            named_turn_scope("root", "foreground-busy-turn"),
+        )
+        .await
+        .expect_err("foreground turn should be rejected while lane is held");
+
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionBusy);
+    crate::store::RuntimePersistence::release_session_execution_lease(
+        store.as_ref(),
+        &held_lease.completion(),
+    )
+    .await
+    .expect("release held session execution lease");
+}
+
+#[tokio::test]
+async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "queued answer".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "queued answer".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    enqueue_turn_input_for_checkpoint(
+        store.as_ref(),
+        "root",
+        Some("busy-lane-queued-input".to_string()),
+        TurnInput::text("queued while busy"),
+    )
+    .await;
+    let held_lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+        store.as_ref(),
+        "root",
+        "foreground-runtime",
+        60_000,
+    )
+    .await
+    .expect("claim session execution lease")
+    .expect("session execution lease");
+
+    let busy_result = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "queued-busy-turn"),
+        ))
+        .await
+        .expect("busy queued drain should not error");
+
+    assert!(
+        busy_result.is_none(),
+        "idle queued drain must no-op while another owner holds the session lane"
+    );
+    assert_eq!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queued work while busy")
+            .len(),
+        1,
+        "busy drain must not consume queued work"
+    );
+
+    crate::store::RuntimePersistence::release_session_execution_lease(
+        store.as_ref(),
+        &held_lease.completion(),
+    )
+    .await
+    .expect("release held session execution lease");
+    let drained = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "queued-after-busy-turn"),
+        ))
+        .await
+        .expect("queued drain after release should succeed")
+        .expect("queued turn should still be pending after busy no-op");
+
+    assert_eq!(drained.assistant_output.safe_text, "queued answer");
+    assert!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queued work after drain")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn session_command_claim_lease_expiry_surfaces_session_execution_lease_lost() {
+    let clock = Arc::new(StepExpiryClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let store = Arc::new(RecordingStore::with_clock(store_clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        mock_provider(Vec::new()),
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    let lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+        store.as_ref(),
+        "root",
+        "session-command-drain-test",
+        crate::runtime::RUNTIME_TURN_LEASE_TTL_MS,
+    )
+    .await
+    .expect("claim session execution lease")
+    .expect("session execution lease");
+    clock.expire_after_timestamp_calls(0);
+
+    let err = runtime
+        .drain_next_session_command(&lease.fence())
+        .await
+        .expect_err("expired session command claim lease must fail as lease lost");
+
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+}
+
+#[tokio::test]
+async fn idle_queued_work_claim_lease_expiry_surfaces_session_execution_lease_lost() {
+    let clock = Arc::new(StepExpiryClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let store = Arc::new(RecordingStore::with_clock(store_clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        mock_provider(Vec::new()),
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    clock.expire_after_timestamp_calls(3);
+
+    let err = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "idle-claim-lease-expiry-turn"),
+        ))
+        .await
+        .expect_err("expired idle queued-work claim lease must fail as lease lost");
+
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+}
+
+#[tokio::test]
+async fn lease_loss_stops_foreground_turn_before_final_commit() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let store = Arc::new(RecordingStore::with_clock(store_clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let (provider_started_tx, provider_started_rx) = tokio::sync::oneshot::channel();
+    let (provider_continue_tx, provider_continue_rx) = tokio::sync::oneshot::channel();
+    let provider_started_tx = Arc::new(Mutex::new(Some(provider_started_tx)));
+    let provider_continue_rx = Arc::new(Mutex::new(Some(provider_continue_rx)));
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete({
+            let provider_started_tx = Arc::clone(&provider_started_tx);
+            let provider_continue_rx = Arc::clone(&provider_continue_rx);
+            move |_request| {
+                let provider_started_tx = Arc::clone(&provider_started_tx);
+                let provider_continue_rx = Arc::clone(&provider_continue_rx);
+                async move {
+                    if let Some(tx) = provider_started_tx
+                        .lock()
+                        .expect("provider started sender")
+                        .take()
+                    {
+                        let _ = tx.send(());
+                    }
+                    let rx = provider_continue_rx
+                        .lock()
+                        .expect("provider continue receiver")
+                        .take()
+                        .expect("provider continue receiver available");
+                    let _ = rx.await;
+                    Ok(LlmResponse {
+                        full_text: "should not commit".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "should not commit".to_string(),
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    })
+                }
+            }
+        })
+        .build();
+    let host_clock: Arc<dyn crate::Clock> = clock.clone();
+    let mut config = crate::RuntimeHostConfig::in_memory().with_clock(host_clock);
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        transport.clone().into_handle(),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        crate::EmbeddedRuntimeHost::new(config),
+        runtime_store,
+    )
+    .await;
+
+    let turn = tokio::spawn(async move {
+        runtime
+            .run_turn_assembled(
+                TurnInput::text("lease can be lost"),
+                CancellationToken::new(),
+                named_turn_scope("root", "lease-loss-turn"),
+            )
+            .await
+    });
+    provider_started_rx
+        .await
+        .expect("provider should start after session lease acquisition");
+    let commits_before_lease_loss = *store.runtime_commit_count.lock().expect("commit count");
+
+    clock.advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+    let stolen = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+        store.as_ref(),
+        "root",
+        "stealing-runtime",
+        60_000,
+    )
+    .await
+    .expect("steal expired session execution lease")
+    .expect("expired session execution lease should be claimable");
+    provider_continue_tx
+        .send(())
+        .expect("provider should still be waiting");
+
+    let err = turn
+        .await
+        .expect("foreground turn task")
+        .expect_err("lost session lease must reject the turn before commit");
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+    assert_eq!(
+        *store.runtime_commit_count.lock().expect("commit count"),
+        commits_before_lease_loss,
+        "a turn that lost the session execution lease must not commit again after the lease is lost"
+    );
+    crate::store::RuntimePersistence::release_session_execution_lease(
+        store.as_ref(),
+        &stolen.completion(),
+    )
+    .await
+    .expect("release stolen session execution lease");
+}
+
+#[tokio::test]
+async fn final_commit_lease_expiry_surfaces_session_execution_lease_lost() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let store = Arc::new(RecordingStore::with_clock(store_clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "should not commit".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "should not commit".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let host_clock: Arc<dyn crate::Clock> = clock.clone();
+    let mut config = crate::RuntimeHostConfig::in_memory().with_clock(host_clock);
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        transport.clone().into_handle(),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        crate::EmbeddedRuntimeHost::new(config),
+        runtime_store,
+    )
+    .await;
+    runtime.set_turn_phase_probe(Arc::new(ExpireLeaseAtFinalCommit::new(Arc::clone(&clock))));
+
+    let err = runtime
+        .run_turn_assembled(
+            TurnInput::text("lease expires at commit"),
+            CancellationToken::new(),
+            named_turn_scope("root", "final-commit-lease-expiry-turn"),
+        )
+        .await
+        .expect_err("final commit with an expired lease must fail as lease lost");
+
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+}
+
+#[tokio::test]
+async fn prepared_checkpoint_lease_expiry_surfaces_session_execution_lease_lost() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let store = Arc::new(RecordingStore::with_clock(store_clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "provider should not be reached".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "provider should not be reached".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let host_clock: Arc<dyn crate::Clock> = clock.clone();
+    let mut config = crate::RuntimeHostConfig::in_memory().with_clock(host_clock);
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        transport.clone().into_handle(),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        crate::EmbeddedRuntimeHost::new(config),
+        runtime_store,
+    )
+    .await;
+    runtime.set_turn_phase_probe(Arc::new(ExpireLeaseAfterPromptBuild::new(Arc::clone(
+        &clock,
+    ))));
+
+    let err = runtime
+        .run_turn_assembled(
+            TurnInput::text("lease expires at prepared checkpoint"),
+            CancellationToken::new(),
+            named_turn_scope("root", "prepared-checkpoint-lease-expiry-turn"),
+        )
+        .await
+        .expect_err("prepared checkpoint with an expired lease must fail as lease lost");
+
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
 }
 
 #[tokio::test]

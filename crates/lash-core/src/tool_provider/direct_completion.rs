@@ -6,7 +6,7 @@ pub struct ToolDirectCompletionClient<'run> {
     pub(super) tool_call_id: Option<String>,
     pub(super) direct_completions: crate::DirectCompletionClient<'run>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
-    pub(super) parent_tool_batch_is_durable: bool,
+    pub(super) parent_tool_attempt_is_durable: bool,
 }
 
 impl ToolDirectCompletionClient<'_> {
@@ -16,11 +16,11 @@ impl ToolDirectCompletionClient<'_> {
         usage_source: &str,
     ) -> Result<DirectCompletion, PluginError> {
         if self.parent_invocation.as_ref().is_some_and(|invocation| {
-            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolBatch)
-        }) && self.parent_tool_batch_is_durable
+            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolAttempt)
+        }) && self.parent_tool_attempt_is_durable
         {
             return Err(PluginError::Session(
-                "direct completions are not available inside a tool batch child".to_string(),
+                "direct completions are not available inside a journaled tool attempt".to_string(),
             ));
         }
         if request.session_id.is_none() {

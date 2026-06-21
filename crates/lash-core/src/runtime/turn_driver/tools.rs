@@ -158,25 +158,6 @@ impl RuntimeTurnDriver<'_> {
             .collect()
     }
 
-    pub(in crate::runtime) async fn run_tool_calls(
-        &mut self,
-        pending_tools: Vec<(crate::PreparedToolCall, crate::RuntimeInvocation)>,
-        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
-        cancel: &CancellationToken,
-    ) -> Result<ToolBatchRunOutcome, crate::RuntimeEffectControllerError> {
-        let mut launches = Vec::with_capacity(pending_tools.len());
-        let mut triggers = Vec::new();
-        for (prepared, invocation) in pending_tools {
-            let batch = crate::PreparedToolBatch::new(prepared.call_id.clone(), vec![prepared]);
-            let mut outcome = self
-                .run_tool_batch(batch, invocation, event_tx, cancel)
-                .await?;
-            launches.append(&mut outcome.launches);
-            triggers.append(&mut outcome.triggers);
-        }
-        Ok(ToolBatchRunOutcome { launches, triggers })
-    }
-
     pub(in crate::runtime) async fn run_tool_batch(
         &mut self,
         batch: crate::PreparedToolBatch,
@@ -234,6 +215,7 @@ impl RuntimeTurnDriver<'_> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn await_pending_tool_completion(
         &mut self,
         machine: &mut TurnMachine,

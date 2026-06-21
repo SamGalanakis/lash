@@ -10,6 +10,7 @@ use lash::messages::MessageRole;
 use lash::persistence::{
     GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeCommit, RuntimeCommitResult,
     RuntimePersistence, RuntimeSessionState, RuntimeTurnCommitStamp, SessionCheckpoint, SessionMeta,
+    SessionExecutionLease, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
     SessionNodeRecord, SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport,
     load_persisted_session_state, load_persisted_session_state_active_path,
 };
@@ -63,6 +64,44 @@ impl RuntimePersistence for FacadeStore {
         })
     }
 
+    async fn try_claim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<SessionExecutionLease>, StoreError> {
+        Ok(Some(SessionExecutionLease {
+            session_id: session_id.to_string(),
+            owner_id: owner_id.to_string(),
+            lease_token: "facade-token".to_string(),
+            fencing_token: 1,
+            claimed_at_epoch_ms: 0,
+            expires_at_epoch_ms: lease_ttl_ms,
+        }))
+    }
+
+    async fn renew_session_execution_lease(
+        &self,
+        fence: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLease, StoreError> {
+        Ok(SessionExecutionLease {
+            session_id: fence.session_id.clone(),
+            owner_id: fence.owner_id.clone(),
+            lease_token: fence.lease_token.clone(),
+            fencing_token: fence.fencing_token,
+            claimed_at_epoch_ms: 0,
+            expires_at_epoch_ms: lease_ttl_ms,
+        })
+    }
+
+    async fn release_session_execution_lease(
+        &self,
+        _completion: &SessionExecutionLeaseCompletion,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
         Ok(())
     }
@@ -91,6 +130,8 @@ fn persistence_types_are_nameable(
     RuntimeCommit {
         session_id: "facade".to_string(),
         expected_head_revision: Some(0),
+        session_execution_lease: None,
+        release_session_execution_lease: None,
         config: Default::default(),
         agent_frames: Vec::new(),
         current_agent_frame_id: String::new(),

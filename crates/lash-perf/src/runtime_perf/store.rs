@@ -11,9 +11,10 @@ use lash_core::store::{
     GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    BlobRef, DeliveryPolicy, GcReport, RuntimeCommit, RuntimePersistence, SessionGraph,
-    SessionNodeRecord, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
-    SlotPolicy, StoreError, VacuumReport, current_epoch_ms,
+    BlobRef, DeliveryPolicy, GcReport, RuntimeCommit, RuntimePersistence, SessionExecutionLease,
+    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionGraph, SessionNodeRecord,
+    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError,
+    VacuumReport, current_epoch_ms,
 };
 
 #[derive(Clone)]
@@ -26,6 +27,15 @@ struct RuntimePerfQueuedBatch {
     claim_expires_at_ms: u64,
 }
 
+#[derive(Clone, Default)]
+struct RuntimePerfSessionExecutionLease {
+    owner_id: Option<String>,
+    lease_token: Option<String>,
+    fencing_token: u64,
+    claimed_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+}
+
 #[derive(Default)]
 pub(crate) struct RuntimePerfStore {
     next_blob_id: AtomicU64,
@@ -35,6 +45,7 @@ pub(crate) struct RuntimePerfStore {
     usage_deltas: Mutex<Vec<TokenLedgerEntry>>,
     session_meta: Mutex<Option<store::SessionMeta>>,
     runtime_turn_commits: Mutex<HashMap<(String, String), (String, RuntimeCommitResult)>>,
+    session_execution_leases: Mutex<HashMap<String, RuntimePerfSessionExecutionLease>>,
     queued_work: Mutex<Vec<RuntimePerfQueuedBatch>>,
 }
 
@@ -45,6 +56,59 @@ impl RuntimePerfStore {
             .expect("lock perf graph")
             .nodes
             .len()
+    }
+
+    fn verify_session_execution_lease(
+        &self,
+        session_id: &str,
+        fence: &SessionExecutionLeaseFence,
+    ) -> Result<(), StoreError> {
+        if fence.session_id != session_id {
+            return Err(StoreError::SessionExecutionLeaseExpired {
+                session_id: session_id.to_string(),
+            });
+        }
+        let now = current_epoch_ms();
+        let leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock perf session execution leases");
+        let Some(current) = leases.get(&fence.session_id) else {
+            return Err(StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            });
+        };
+        if current.owner_id.as_deref() == Some(fence.owner_id.as_str())
+            && current.lease_token.as_deref() == Some(fence.lease_token.as_str())
+            && current.fencing_token == fence.fencing_token
+            && current.expires_at_epoch_ms > now
+        {
+            Ok(())
+        } else {
+            Err(StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            })
+        }
+    }
+
+    fn release_session_execution_lease_in_memory(
+        &self,
+        completion: &SessionExecutionLeaseCompletion,
+    ) {
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock perf session execution leases");
+        if let Some(current) = leases.get_mut(&completion.session_id)
+            && current.owner_id.as_deref() == Some(completion.owner_id.as_str())
+            && current.lease_token.as_deref() == Some(completion.lease_token.as_str())
+            && current.fencing_token == completion.fencing_token
+        {
+            current.owner_id = None;
+            current.lease_token = None;
+            current.claimed_at_epoch_ms = 0;
+            current.expires_at_epoch_ms = 0;
+        }
     }
 }
 
@@ -168,6 +232,8 @@ impl RuntimePersistence for RuntimePerfStore {
             usage_deltas,
             turn_commit,
             completed_queue_claims,
+            session_execution_lease,
+            release_session_execution_lease,
             committed_attachment_ids: _,
         } = commit;
         let mut meta_guard = self
@@ -191,6 +257,9 @@ impl RuntimePersistence for RuntimePerfStore {
                 .cloned()
             {
                 if stored_hash == completed.turn_commit_hash {
+                    if let Some(completion) = release_session_execution_lease.as_ref() {
+                        self.release_session_execution_lease_in_memory(completion);
+                    }
                     return Ok(result);
                 }
                 return Err(StoreError::RuntimeTurnCommitConflict {
@@ -199,6 +268,12 @@ impl RuntimePersistence for RuntimePerfStore {
                 });
             }
         }
+        let Some(session_execution_lease) = session_execution_lease.as_ref() else {
+            return Err(StoreError::SessionExecutionLeaseExpired {
+                session_id: session_id.clone(),
+            });
+        };
+        self.verify_session_execution_lease(&session_id, session_execution_lease)?;
         if expected_head_revision.is_some() && expected_head_revision != Some(actual) {
             return Err(store::StoreError::HeadRevisionConflict {
                 expected: expected_head_revision,
@@ -304,7 +379,86 @@ impl RuntimePersistence for RuntimePerfStore {
                     (completed.turn_commit_hash.clone(), result.clone()),
                 );
         }
+        if let Some(completion) = release_session_execution_lease.as_ref() {
+            self.release_session_execution_lease_in_memory(completion);
+        }
         Ok(result)
+    }
+
+    async fn try_claim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<SessionExecutionLease>, StoreError> {
+        let now = current_epoch_ms();
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock perf session execution leases");
+        let current = leases.entry(session_id.to_string()).or_default();
+        if current.lease_token.is_some() && current.expires_at_epoch_ms > now {
+            return Ok(None);
+        }
+        current.fencing_token = current.fencing_token.saturating_add(1);
+        current.owner_id = Some(owner_id.to_string());
+        current.lease_token = Some(format!(
+            "{session_id}:{owner_id}:{now}:{}",
+            current.fencing_token
+        ));
+        current.claimed_at_epoch_ms = now;
+        current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+        Ok(Some(SessionExecutionLease {
+            session_id: session_id.to_string(),
+            owner_id: owner_id.to_string(),
+            lease_token: current.lease_token.clone().expect("lease token set"),
+            fencing_token: current.fencing_token,
+            claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+            expires_at_epoch_ms: current.expires_at_epoch_ms,
+        }))
+    }
+
+    async fn renew_session_execution_lease(
+        &self,
+        fence: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLease, StoreError> {
+        let now = current_epoch_ms();
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock perf session execution leases");
+        let Some(current) = leases.get_mut(&fence.session_id) else {
+            return Err(StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            });
+        };
+        if current.owner_id.as_deref() != Some(fence.owner_id.as_str())
+            || current.lease_token.as_deref() != Some(fence.lease_token.as_str())
+            || current.fencing_token != fence.fencing_token
+            || current.expires_at_epoch_ms <= now
+        {
+            return Err(StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            });
+        }
+        current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+        Ok(SessionExecutionLease {
+            session_id: fence.session_id.clone(),
+            owner_id: fence.owner_id.clone(),
+            lease_token: fence.lease_token.clone(),
+            fencing_token: fence.fencing_token,
+            claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+            expires_at_epoch_ms: current.expires_at_epoch_ms,
+        })
+    }
+
+    async fn release_session_execution_lease(
+        &self,
+        completion: &SessionExecutionLeaseCompletion,
+    ) -> Result<(), StoreError> {
+        self.release_session_execution_lease_in_memory(completion);
+        Ok(())
     }
 
     async fn enqueue_queued_work(
@@ -358,6 +512,7 @@ impl RuntimePersistence for RuntimePerfStore {
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
         owner_id: &str,
         boundary: QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
@@ -366,6 +521,7 @@ impl RuntimePersistence for RuntimePerfStore {
         if max_batches == 0 {
             return Ok(None);
         }
+        self.verify_session_execution_lease(session_id, session_execution_lease)?;
         let now = current_epoch_ms();
         let mut queued = self.queued_work.lock().expect("lock perf queued work");
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);

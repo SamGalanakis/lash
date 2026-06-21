@@ -48,6 +48,23 @@ fn session_head_refresh_error(err: SessionError) -> RuntimeError {
     )
 }
 
+#[derive(Clone, Copy)]
+enum SessionExecutionLeaseReleasePolicy {
+    FinalCommit,
+    KeepOnAgentFrameSwitch,
+}
+
+impl SessionExecutionLeaseReleasePolicy {
+    fn should_release(self, outcome: &TurnOutcome) -> bool {
+        match self {
+            Self::FinalCommit => true,
+            Self::KeepOnAgentFrameSwitch => {
+                !matches!(outcome, TurnOutcome::AgentFrameSwitch { .. })
+            }
+        }
+    }
+}
+
 fn queued_work_payload_type(payload: &crate::QueuedWorkPayload) -> &'static str {
     match payload {
         crate::QueuedWorkPayload::TurnInput { .. } => "turn_input",
@@ -160,6 +177,115 @@ impl LashRuntime {
     fn max_context_tokens(&self) -> usize {
         self.state.effective_policy().context_window_tokens()
     }
+
+    async fn claim_session_execution_lease(
+        &self,
+        cancel: CancellationToken,
+        busy_is_error: bool,
+    ) -> Result<Option<SessionExecutionLeaseGuard>, RuntimeError> {
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            return Ok(None);
+        };
+        match SessionExecutionLeaseGuard::try_acquire(
+            store,
+            &self.state.session_id,
+            &self.runtime_scope_id,
+            Arc::clone(&self.host.core.clock),
+            cancel,
+        )
+        .await
+        .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?
+        {
+            Some(lease) => Ok(Some(lease)),
+            None if busy_is_error => Err(RuntimeError::new(
+                RuntimeErrorCode::SessionExecutionBusy,
+                format!(
+                    "session `{}` is already executing on another runtime owner",
+                    self.state.session_id
+                ),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    async fn settle_session_execution_lease<T>(
+        &self,
+        guard: Option<&SessionExecutionLeaseGuard>,
+        result: Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        match result {
+            Ok(value) => {
+                if let Some(guard) = guard {
+                    guard.release_if_live().await.map_err(|err| {
+                        RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+                    })?;
+                }
+                Ok(value)
+            }
+            Err(err) => {
+                if err.code != RuntimeErrorCode::StoreCommitFailed
+                    && let Some(guard) = guard
+                    && let Err(release_err) = guard.release_if_live().await
+                {
+                    tracing::warn!(
+                        error = %release_err,
+                        "failed to release session execution lease after runtime error"
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn ensure_session_execution_lease_live(
+        &self,
+        guard: Option<&SessionExecutionLeaseGuard>,
+    ) -> Result<(), RuntimeError> {
+        let Some(guard) = guard else {
+            return Ok(());
+        };
+        guard.refresh_or_mark_lost().await.map_err(|err| {
+            RuntimeError::new(
+                RuntimeErrorCode::SessionExecutionLeaseLost,
+                format!(
+                    "session execution lease for session `{}` was lost before commit: {err}",
+                    self.state.session_id
+                ),
+            )
+        })
+    }
+
+    async fn abandon_queued_work_claims_after_lease_loss(
+        &self,
+        err: &RuntimeError,
+        claims: &[crate::QueuedWorkClaim],
+    ) {
+        if err.code != RuntimeErrorCode::SessionExecutionLeaseLost || claims.is_empty() {
+            return;
+        }
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            return;
+        };
+        for claim in claims {
+            if let Err(abandon_err) = store.abandon_queued_work_claim(claim).await {
+                tracing::warn!(
+                    error = %abandon_err,
+                    session_id = %claim.session_id,
+                    claim_id = %claim.claim_id,
+                    "failed to abandon queued work claim after session execution lease loss"
+                );
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn set_turn_phase_probe(&mut self, probe: Arc<dyn RuntimeTurnPhaseProbe>) {
         self.turn_phase_probe = Some(probe);
@@ -183,6 +309,8 @@ impl LashRuntime {
         events: &dyn EventSink,
         scoped_effect_controller: &ScopedEffectController<'_>,
         cancel_state: &CancellationToken,
+        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
+        session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
     ) -> Result<AssembledTurn, RuntimeError> {
         let TurnFinishInput {
             mut turn_pipeline,
@@ -232,6 +360,8 @@ impl LashRuntime {
             self.emit_completed_turn_trace(&assembled.state, &assembled.outcome, &trace_turn_id);
             return Ok(assembled);
         };
+        self.ensure_session_execution_lease_live(session_execution_lease)
+            .await?;
 
         let plugins = Arc::clone(session.plugins());
         let manager = match self.runtime_session_services_for_turn(None) {
@@ -265,8 +395,12 @@ impl LashRuntime {
             }
         };
         self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
+        self.ensure_session_execution_lease_live(session_execution_lease)
+            .await?;
 
         let mut returned_turn = finalized.turn;
+        let release_session_execution_lease =
+            session_execution_lease_release_policy.should_release(&returned_turn.outcome);
         self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
         self.mark_phase_begin(RuntimeTurnPhase::FinalCommit);
         let queued_work_completion_trace = queued_work_completions.clone();
@@ -284,12 +418,18 @@ impl LashRuntime {
                 Some(&trace_turn_id),
                 queued_work_completions,
                 pending_attachment_ids.clone(),
+                release_session_execution_lease
+                    .then(|| session_execution_lease.map(SessionExecutionLeaseGuard::completion))
+                    .flatten(),
             )
             .await
         {
             self.mark_phase_end(RuntimeTurnPhase::FinalCommit);
             self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
             return Err(err);
+        }
+        if release_session_execution_lease && let Some(lease) = session_execution_lease {
+            lease.mark_released();
         }
         self.host
             .core
@@ -422,16 +562,24 @@ impl LashRuntime {
         opts: TurnOptions<'_>,
     ) -> Result<AssembledTurn, RuntimeError> {
         let cancel = opts.cancel.clone();
+        let session_execution_lease = self
+            .claim_session_execution_lease(cancel.clone(), true)
+            .await?;
         let scoped_effect_controller = opts.scoped_effect_controller();
-        self.stream_turn_with_scoped_effect_controller_inner(
-            input,
-            opts.events_or_noop(),
-            opts.turn_events_or_noop(),
-            scoped_effect_controller,
-            cancel,
-            None,
-        )
-        .await
+        let result = self
+            .stream_turn_with_scoped_effect_controller_inner(
+                input,
+                opts.events_or_noop(),
+                opts.turn_events_or_noop(),
+                scoped_effect_controller,
+                cancel,
+                None,
+                session_execution_lease.as_ref(),
+                SessionExecutionLeaseReleasePolicy::FinalCommit,
+            )
+            .await;
+        self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
+            .await
     }
 
     pub async fn stream_next_queued_work(
@@ -454,7 +602,25 @@ impl LashRuntime {
         opts: TurnOptions<'_>,
         selected_batch_ids: Option<&[String]>,
     ) -> Result<Option<AssembledTurn>, RuntimeError> {
-        if self.drain_next_session_command().await?.is_some() {
+        let cancel = opts.cancel.clone();
+        let Some(session_execution_lease) = self
+            .claim_session_execution_lease(cancel.clone(), false)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let session_execution_fence = session_execution_lease.fence();
+        if self
+            .drain_next_session_command(&session_execution_fence)
+            .await?
+            .is_some()
+        {
+            session_execution_lease
+                .release_if_live()
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+                })?;
             return Ok(None);
         }
         let Some(store) = self
@@ -468,6 +634,7 @@ impl LashRuntime {
             store
                 .claim_ready_queued_work_by_batch_ids(
                     &self.state.session_id,
+                    &session_execution_fence,
                     &self.runtime_scope_id,
                     crate::QueuedWorkClaimBoundary::Idle,
                     crate::QUEUED_WORK_CLAIM_TTL_MS,
@@ -478,6 +645,7 @@ impl LashRuntime {
             store
                 .claim_ready_queued_work(
                     &self.state.session_id,
+                    &session_execution_fence,
                     &self.runtime_scope_id,
                     crate::QueuedWorkClaimBoundary::Idle,
                     crate::QUEUED_WORK_CLAIM_TTL_MS,
@@ -485,8 +653,14 @@ impl LashRuntime {
                 )
                 .await
         }
-        .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
+        .map_err(super::runtime_error_from_store_commit)?;
         let Some(claim) = claim else {
+            session_execution_lease
+                .release_if_live()
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+                })?;
             return Ok(None);
         };
         let mut work = claim.materialize_for_turn();
@@ -522,18 +696,30 @@ impl LashRuntime {
             },
             self.host.core.clock.as_ref(),
         );
-        let cancel = opts.cancel.clone();
+        let claim_for_abandon = claim.clone();
         let scoped_effect_controller = opts.scoped_effect_controller();
-        self.stream_turn_with_scoped_effect_controller_inner(
-            work.input,
-            opts.events_or_noop(),
-            opts.turn_events_or_noop(),
-            scoped_effect_controller,
-            cancel,
-            Some(claim),
-        )
-        .await
-        .map(Some)
+        let result = self
+            .stream_turn_with_scoped_effect_controller_inner(
+                work.input,
+                opts.events_or_noop(),
+                opts.turn_events_or_noop(),
+                scoped_effect_controller,
+                cancel,
+                Some(claim),
+                Some(&session_execution_lease),
+                SessionExecutionLeaseReleasePolicy::FinalCommit,
+            )
+            .await
+            .map(Some);
+        if let Err(err) = &result {
+            self.abandon_queued_work_claims_after_lease_loss(
+                err,
+                std::slice::from_ref(&claim_for_abandon),
+            )
+            .await;
+        }
+        self.settle_session_execution_lease(Some(&session_execution_lease), result)
+            .await
     }
 
     /// Enforce the durable-first wiring invariant at a turn-scope boundary: when
@@ -596,6 +782,7 @@ impl LashRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn stream_turn_with_scoped_effect_controller_inner(
         &mut self,
         mut input: TurnInput,
@@ -604,9 +791,27 @@ impl LashRuntime {
         scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
         queued_claim: Option<crate::QueuedWorkClaim>,
+        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
+        session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
     ) -> Result<AssembledTurn, RuntimeError> {
         if queued_claim.is_none() {
-            while self.drain_next_session_command().await?.is_some() {}
+            if let Some(lease) = session_execution_lease {
+                while self
+                    .drain_next_session_command(&lease.fence())
+                    .await?
+                    .is_some()
+                {}
+            } else if self
+                .session
+                .as_ref()
+                .and_then(|session| session.history_store())
+                .is_some()
+            {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::StoreCommitFailed,
+                    "session command drain requires a session execution lease",
+                ));
+            }
         }
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && scoped_effect_controller
@@ -633,6 +838,8 @@ impl LashRuntime {
             scoped_effect_controller,
             cancel.clone(),
             queued_claim,
+            session_execution_lease,
+            session_execution_lease_release_policy,
         )
         .await
     }
@@ -651,15 +858,22 @@ impl LashRuntime {
         opts: TurnOptions<'_>,
     ) -> Result<AgentFrameRun, RuntimeError> {
         let cancel = opts.cancel.clone();
+        let session_execution_lease = self
+            .claim_session_execution_lease(cancel.clone(), true)
+            .await?;
         let scoped_effect_controller = opts.scoped_effect_controller();
-        self.stream_turn_with_agent_frames_inner(
-            input,
-            opts.events_or_noop(),
-            opts.turn_events_or_noop(),
-            scoped_effect_controller,
-            cancel,
-        )
-        .await
+        let result = self
+            .stream_turn_with_agent_frames_inner(
+                input,
+                opts.events_or_noop(),
+                opts.turn_events_or_noop(),
+                scoped_effect_controller,
+                cancel,
+                session_execution_lease.as_ref(),
+            )
+            .await;
+        self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
+            .await
     }
 
     async fn stream_turn_with_agent_frames_inner(
@@ -669,6 +883,7 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
+        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
     ) -> Result<AgentFrameRun, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && scoped_effect_controller
@@ -713,6 +928,8 @@ impl LashRuntime {
                     turn_effect_controller,
                     cancel.clone(),
                     None,
+                    session_execution_lease,
+                    SessionExecutionLeaseReleasePolicy::KeepOnAgentFrameSwitch,
                 )
                 .await?;
             let switched_frame = match &turn.outcome {
@@ -732,6 +949,7 @@ impl LashRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn stream_turn_inner(
         &mut self,
         mut input: TurnInput,
@@ -740,6 +958,8 @@ impl LashRuntime {
         scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
         queued_claim: Option<crate::QueuedWorkClaim>,
+        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
+        session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.refresh_session_graph_from_store()
             .await
@@ -995,7 +1215,7 @@ impl LashRuntime {
         }
 
         self.state.last_prompt_usage = None;
-        Box::pin(self.stream_prepared_turn(
+        Box::pin(self.stream_prepared_turn_inner(
             messages,
             previous_prompt_usage,
             input.protocol_turn_options.clone(),
@@ -1009,6 +1229,8 @@ impl LashRuntime {
             scoped_effect_controller,
             cancel,
             queued_claim,
+            session_execution_lease,
+            session_execution_lease_release_policy,
         ))
         .await
     }
@@ -1029,7 +1251,7 @@ impl LashRuntime {
     pub async fn stream_prepared_turn(
         &mut self,
         messages: crate::MessageSequence,
-        _previous_prompt_usage: Option<PromptUsage>,
+        previous_prompt_usage: Option<PromptUsage>,
         protocol_turn_options: Option<crate::ProtocolTurnOptions>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
@@ -1042,6 +1264,65 @@ impl LashRuntime {
         cancel: CancellationToken,
         initial_queue_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
+        let session_execution_lease = self
+            .claim_session_execution_lease(cancel.clone(), true)
+            .await?;
+        let result = self
+            .stream_prepared_turn_inner(
+                messages,
+                previous_prompt_usage,
+                protocol_turn_options,
+                protocol_extension,
+                turn_context,
+                initial_turn_causes,
+                trace_turn_id,
+                turn_index,
+                events,
+                turn_events,
+                scoped_effect_controller,
+                cancel,
+                initial_queue_claim,
+                session_execution_lease.as_ref(),
+                SessionExecutionLeaseReleasePolicy::FinalCommit,
+            )
+            .await;
+        self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_prepared_turn_inner(
+        &mut self,
+        messages: crate::MessageSequence,
+        _previous_prompt_usage: Option<PromptUsage>,
+        protocol_turn_options: Option<crate::ProtocolTurnOptions>,
+        protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
+        turn_context: crate::TurnContext,
+        initial_turn_causes: Vec<crate::TurnCause>,
+        trace_turn_id: String,
+        turn_index: usize,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        scoped_effect_controller: ScopedEffectController<'_>,
+        cancel: CancellationToken,
+        initial_queue_claim: Option<crate::QueuedWorkClaim>,
+        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
+        session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        if session_execution_lease.is_none()
+            && self
+                .session
+                .as_ref()
+                .and_then(|session| session.history_store())
+                .is_some()
+        {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::StoreCommitFailed,
+                "prepared turn requires a session execution lease",
+            ));
+        }
+        let session_execution_fence =
+            session_execution_lease.map(SessionExecutionLeaseGuard::fence);
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let mut turn_policy = self.state.effective_policy().clone();
@@ -1174,7 +1455,8 @@ impl LashRuntime {
         let mut turn_pipeline = TurnBoundary::from_state_with_clock(
             self.state.clone(),
             Arc::clone(&self.host.core.clock),
-        );
+        )
+        .with_session_execution_lease(session_execution_fence.clone());
         let store = self
             .session
             .as_ref()
@@ -1198,9 +1480,7 @@ impl LashRuntime {
                 self.session.as_mut(),
             )
             .await
-            .map_err(|err| {
-                RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
-            })?;
+            .map_err(super::runtime_error_from_store_commit)?;
         let resolved_turn_policy = if let Some(provider) = turn_provider_override {
             RuntimeSessionPolicy::from_provider(
                 turn_policy.clone(),
@@ -1241,6 +1521,7 @@ impl LashRuntime {
             turn_causes: initial_turn_causes,
             pending_queue_claims: initial_queue_claim.into_iter().collect(),
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            session_execution_lease: session_execution_fence,
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let protocol_run_offset = 0;
@@ -1258,8 +1539,14 @@ impl LashRuntime {
             Ok(result) => result,
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
-                let RuntimeTurnDriver { session, .. } = driver;
+                let RuntimeTurnDriver {
+                    session,
+                    pending_queue_claims,
+                    ..
+                } = driver;
                 self.session = Some(session);
+                self.abandon_queued_work_claims_after_lease_loss(&err, &pending_queue_claims)
+                    .await;
                 return Err(err);
             }
         };
@@ -1278,24 +1565,36 @@ impl LashRuntime {
             ..
         } = driver;
         self.session = Some(session);
-        self.finish_turn(
-            TurnFinishInput {
-                turn_pipeline,
-                assembler,
-                new_messages,
-                policy,
-                turn_index,
-                queued_work_completions: pending_queue_claims
-                    .iter()
-                    .map(crate::QueuedWorkClaim::completion)
-                    .collect(),
-                trace_turn_id,
-            },
-            events,
-            &finish_scoped_effect_controller,
-            &cancel_state,
-        )
-        .await
+        let pending_queue_claims_for_abandon = pending_queue_claims.clone();
+        let finish_result = self
+            .finish_turn(
+                TurnFinishInput {
+                    turn_pipeline,
+                    assembler,
+                    new_messages,
+                    policy,
+                    turn_index,
+                    queued_work_completions: pending_queue_claims
+                        .iter()
+                        .map(crate::QueuedWorkClaim::completion)
+                        .collect(),
+                    trace_turn_id,
+                },
+                events,
+                &finish_scoped_effect_controller,
+                &cancel_state,
+                session_execution_lease,
+                session_execution_lease_release_policy,
+            )
+            .await;
+        if let Err(err) = &finish_result {
+            self.abandon_queued_work_claims_after_lease_loss(
+                err,
+                &pending_queue_claims_for_abandon,
+            )
+            .await;
+        }
+        finish_result
     }
     async fn normalize_input_items(
         &self,

@@ -137,10 +137,7 @@ fn handle_control_command(
     command: &str,
     pending_submit_raw_len: &mut Option<usize>,
 ) -> Result<ControlFlow> {
-    let (verb, rest) = command
-        .split_once(' ')
-        .map(|(verb, rest)| (verb, rest))
-        .unwrap_or((command, ""));
+    let (verb, rest) = command.split_once(' ').unwrap_or((command, ""));
     match verb {
         "type" | "paste" => {
             harness.type_text(rest)?;

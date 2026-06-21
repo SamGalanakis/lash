@@ -444,8 +444,10 @@ impl<'run> ToolContext<'run> {
             tool_call_id: self.tool_call_id.clone(),
             direct_completions: self.direct_completions.clone(),
             parent_invocation: self.parent_invocation.clone(),
-            parent_tool_batch_is_durable: self.parent_invocation.as_ref().is_some_and(
-                |invocation| invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolBatch),
+            parent_tool_attempt_is_durable: self.parent_invocation.as_ref().is_some_and(
+                |invocation| {
+                    invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolAttempt)
+                },
             ) && self
                 .effect_controller
                 .controller()
@@ -493,12 +495,12 @@ impl<'run> ToolContext<'run> {
             ));
         }
         if self.parent_invocation.as_ref().is_some_and(|invocation| {
-            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolBatch)
+            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolAttempt)
         }) && scoped.controller().durability_tier() == crate::DurabilityTier::Durable
         {
             return Err(crate::RuntimeError::new(
-                "durable_effects_unavailable_in_tool_batch",
-                "durable tool sub-effects are not available inside a tool batch child",
+                "durable_effects_unavailable_in_tool_attempt",
+                "durable tool sub-effects are not available inside a journaled tool attempt",
             ));
         }
         Ok(ToolDurableEffects { context: self })

@@ -34,6 +34,8 @@ impl DurableStoreFacet {
 pub enum RuntimeErrorCode {
     MissingExecutionScopeId,
     ExecutionScopeTurnIdMismatch,
+    SessionExecutionBusy,
+    SessionExecutionLeaseLost,
     /// A process (re-)execution was handed an empty/non-persisted process id.
     /// Process execution identity is the persisted `process_id`; a retry that
     /// cannot present that stable id has lost its idempotency anchor.
@@ -63,6 +65,8 @@ impl RuntimeErrorCode {
         match self {
             Self::MissingExecutionScopeId => "missing_execution_scope_id",
             Self::ExecutionScopeTurnIdMismatch => "execution_scope_turn_id_mismatch",
+            Self::SessionExecutionBusy => "session_execution_busy",
+            Self::SessionExecutionLeaseLost => "session_execution_lease_lost",
             Self::MissingProcessExecutionId => "missing_process_execution_id",
             Self::DurableStoreRequired { facet } => facet.as_code(),
             Self::StoreCommitFailed => "store_commit_failed",
@@ -93,6 +97,8 @@ impl From<&str> for RuntimeErrorCode {
         match code {
             "missing_execution_scope_id" => Self::MissingExecutionScopeId,
             "execution_scope_turn_id_mismatch" => Self::ExecutionScopeTurnIdMismatch,
+            "session_execution_busy" => Self::SessionExecutionBusy,
+            "session_execution_lease_lost" => Self::SessionExecutionLeaseLost,
             "missing_process_execution_id" => Self::MissingProcessExecutionId,
             "durable_store_required:attachment_store" => Self::DurableStoreRequired {
                 facet: DurableStoreFacet::AttachmentStore,
@@ -239,6 +245,15 @@ mod tests {
         assert_eq!(json["code"], "missing_process_execution_id");
         let decoded: RuntimeError = serde_json::from_value(json).expect("decode runtime error");
         assert_eq!(decoded.code, RuntimeErrorCode::MissingProcessExecutionId);
+    }
+
+    #[test]
+    fn session_execution_lease_lost_round_trips() {
+        let err = RuntimeError::new(RuntimeErrorCode::SessionExecutionLeaseLost, "lease lost");
+        let json = serde_json::to_value(&err).expect("serialize runtime error");
+        assert_eq!(json["code"], "session_execution_lease_lost");
+        let decoded: RuntimeError = serde_json::from_value(json).expect("decode runtime error");
+        assert_eq!(decoded.code, RuntimeErrorCode::SessionExecutionLeaseLost);
     }
 
     #[test]

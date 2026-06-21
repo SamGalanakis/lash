@@ -1,9 +1,10 @@
 use super::execution_context::RuntimeExecutionContext;
 use crate::tool_dispatch::{
     ToolCallLaunch, ToolDispatchOutcome, ToolPreparationOutcome,
+    dispatch_prepared_tool_attempt_launch_with_execution_context,
     dispatch_prepared_tool_call_launch_with_execution_context,
-    finalize_tool_result_with_execution_context, prepare_tool_call_with_context,
-    schedule_tool_batch,
+    finalize_tool_result_with_execution_context, mark_retry_exhausted,
+    prepare_tool_call_with_context, retry_after_ms, schedule_tool_batch,
 };
 use crate::{
     ModelToolReturn, SessionEvent, ToolCallOutput, ToolCallRecord, ToolCancellation, ToolFailure,
@@ -111,11 +112,6 @@ pub(crate) struct CompletedProtocolToolCall {
     pub record: ToolCallRecord,
 }
 
-pub(crate) enum ProtocolToolCallLaunch {
-    Done(CompletedProtocolToolCall),
-    Pending(crate::tool_dispatch::PendingToolDispatchOutcome),
-}
-
 fn cancelled_runtime_tool_call_launch(
     call_id: String,
     tool_name: String,
@@ -151,6 +147,28 @@ fn cancelled_completed_tool_call(
     }
 }
 
+fn runtime_failure_dispatch_outcome(
+    call_id: Option<String>,
+    tool_name: String,
+    args: serde_json::Value,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> ToolDispatchOutcome {
+    ToolDispatchOutcome {
+        record: ToolCallRecord {
+            call_id,
+            tool: tool_name,
+            args,
+            output: ToolCallOutput::failure(ToolFailure::runtime(
+                ToolFailureClass::Internal,
+                code,
+                message,
+            )),
+            duration_ms: 0,
+        },
+    }
+}
+
 fn deterministic_tool_invocation_batch_id(calls: &[ToolInvocation]) -> String {
     let identity = calls
         .iter()
@@ -167,12 +185,9 @@ fn deterministic_tool_invocation_batch_id(calls: &[ToolInvocation]) -> String {
     format!("tool-batch:{digest}")
 }
 
-#[derive(Clone)]
-pub(crate) struct PreparedToolRun {
-    pub prepared: crate::PreparedToolCall,
-    pub index: usize,
-    pub parent_invocation: Option<crate::RuntimeInvocation>,
-    pub activity_id: TurnActivityId,
+struct CoordinatedToolLaunch {
+    launch: crate::runtime::ToolCallLaunch,
+    triggers: Vec<crate::tool_dispatch::ToolTriggerEffectOutcome>,
 }
 
 impl RuntimeExecutionContext<'_> {
@@ -196,19 +211,6 @@ impl RuntimeExecutionContext<'_> {
         )
     }
 
-    fn should_execute_child_tool_batch_locally(&self) -> bool {
-        self.parent_invocation
-            .as_ref()
-            .and_then(crate::RuntimeInvocation::effect_kind)
-            == Some(crate::RuntimeEffectKind::ToolBatch)
-            && self
-                .dispatch
-                .effect_controller
-                .controller()
-                .durability_tier()
-                == crate::DurabilityTier::Durable
-    }
-
     pub(crate) async fn execute_prepared_tool_batch_launches(
         &self,
         batch: crate::PreparedToolBatch,
@@ -219,7 +221,43 @@ impl RuntimeExecutionContext<'_> {
         let cancellation = self.cancellation_token.clone().unwrap_or_default();
         let tool_cancel = cancellation.child_token();
         let child_trace_hooks = std::sync::Arc::new(child_trace_hooks);
-        let outcomes = schedule_tool_batch(
+        if !self
+            .dispatch
+            .effect_controller
+            .controller()
+            .supports_concurrent_effects()
+        {
+            let mut launches = Vec::with_capacity(indexed_tools.len());
+            let mut triggers = Vec::new();
+            let mut context = self.clone().with_cancellation_token(tool_cancel.clone());
+            for (index, child) in indexed_tools {
+                if cancellation.is_cancelled() {
+                    tool_cancel.cancel();
+                    launches.push(cancelled_runtime_tool_call_launch(
+                        child.call.call_id,
+                        child.call.tool_name,
+                        child.call.args,
+                        child.call.replay,
+                    ));
+                    continue;
+                }
+                let child_execution_trace_hook =
+                    child_trace_hooks.get(&child.call.call_id).cloned();
+                let outcome = context
+                    .execute_prepared_tool_batch_child(
+                        child,
+                        index,
+                        parent_invocation.clone(),
+                        child_execution_trace_hook,
+                    )
+                    .await;
+                launches.push(outcome.launch);
+                triggers.extend(outcome.triggers);
+                context = context.with_cancellation_token(tool_cancel.clone());
+            }
+            return Ok(crate::ToolBatchEffectOutcome { launches, triggers });
+        }
+        let child_outcomes = schedule_tool_batch(
             indexed_tools,
             |(index, _)| *index,
             |(_, child)| self.tool_scheduling(&child.call.tool_name),
@@ -237,10 +275,10 @@ impl RuntimeExecutionContext<'_> {
                     let child_execution_trace_hook =
                         child_trace_hooks.get(&child.call.call_id).cloned();
                     async move {
-                        let tool_call = context.execute_prepared_tool_call_launch(
-                            child.call,
+                        let tool_call = context.execute_prepared_tool_batch_child(
+                            child,
                             index,
-                            Some(parent_invocation),
+                            parent_invocation,
                             child_execution_trace_hook,
                         );
                         tokio::pin!(tool_call);
@@ -256,12 +294,15 @@ impl RuntimeExecutionContext<'_> {
                                 tokio::select! {
                                     biased;
                                     outcome = &mut tool_call => outcome,
-                                    _ = &mut grace => cancelled_runtime_tool_call_launch(
-                                        cancelled_tool.call_id,
-                                        cancelled_tool.tool_name,
-                                        cancelled_tool.args,
-                                        cancelled_tool.replay,
-                                    ),
+                                    _ = &mut grace => CoordinatedToolLaunch {
+                                        launch: cancelled_runtime_tool_call_launch(
+                                            cancelled_tool.call_id,
+                                            cancelled_tool.tool_name,
+                                            cancelled_tool.args,
+                                            cancelled_tool.replay,
+                                        ),
+                                        triggers: Vec::new(),
+                                    },
                                 }
                             }
                             outcome = &mut tool_call => outcome,
@@ -272,27 +313,349 @@ impl RuntimeExecutionContext<'_> {
         )
         .await;
 
-        let triggers = self.drain_tool_trigger_outcomes().map_err(|err| {
-            crate::RuntimeEffectControllerError::new("tool_trigger_outcome_drain", err.to_string())
-        })?;
-        Ok(crate::ToolBatchEffectOutcome {
-            launches: outcomes,
-            triggers,
-        })
+        let mut launches = Vec::with_capacity(child_outcomes.len());
+        let mut triggers = Vec::new();
+        for outcome in child_outcomes {
+            launches.push(outcome.launch);
+            triggers.extend(outcome.triggers);
+        }
+        Ok(crate::ToolBatchEffectOutcome { launches, triggers })
     }
 
-    fn prepared_tool_run(
+    async fn execute_prepared_tool_batch_child(
         &self,
-        prepared: crate::PreparedToolCall,
+        child: crate::PreparedToolBatchCall,
         index: usize,
-        parent_invocation: Option<crate::RuntimeInvocation>,
-    ) -> PreparedToolRun {
-        let activity_id = TurnActivityId::new(format!("tool:{}", prepared.call_id));
-        PreparedToolRun {
-            prepared,
-            index,
-            parent_invocation,
+        parent_invocation: crate::RuntimeInvocation,
+        child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
+    ) -> CoordinatedToolLaunch {
+        let call_id = child.call.call_id.clone();
+        let tool_name = child.call.tool_name.clone();
+        let args = child.call.args.clone();
+        let replay = child.call.replay.clone();
+        let activity_id = TurnActivityId::new(format!("tool:{call_id}"));
+        self.emit_tool_call_started(&call_id, &tool_name, args.clone(), activity_id.clone())
+            .await;
+
+        let retry_policy = crate::tool_dispatch::resolve_callable_manifest_by_id(
+            self.dispatch.as_ref(),
+            &child.call.tool_id,
+        )
+        .map(|manifest| manifest.retry_policy)
+        .unwrap_or(crate::ToolRetryPolicy::Never);
+        let max_attempts = retry_policy.max_attempts().max(1);
+        let mut triggers = Vec::new();
+
+        for attempt in 1..=max_attempts {
+            let attempt_invocation =
+                self.tool_attempt_invocation(&parent_invocation, &child.replay_suffix, attempt);
+            let attempt_outcome = self
+                .dispatch
+                .effect_controller
+                .controller()
+                .execute_effect(
+                    crate::RuntimeEffectEnvelope::new(
+                        attempt_invocation,
+                        crate::RuntimeEffectCommand::ToolAttempt {
+                            call: child.call.clone(),
+                            attempt,
+                            max_attempts,
+                        },
+                    ),
+                    crate::RuntimeEffectLocalExecutor::tool_batch(
+                        self.clone(),
+                        child_execution_trace_hook
+                            .clone()
+                            .map(|hook| {
+                                std::iter::once((child.call.call_id.clone(), hook)).collect()
+                            })
+                            .unwrap_or_default(),
+                    ),
+                )
+                .await;
+            let attempt_outcome = match attempt_outcome {
+                Ok(outcome) => match outcome.into_tool_attempt_effect() {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        let completed = self
+                            .complete_tool_call(
+                                index,
+                                call_id.clone(),
+                                replay,
+                                runtime_failure_dispatch_outcome(
+                                    Some(call_id.clone()),
+                                    tool_name,
+                                    args,
+                                    "tool_attempt_failed",
+                                    err.to_string(),
+                                ),
+                                activity_id,
+                            )
+                            .await;
+                        return CoordinatedToolLaunch {
+                            launch: crate::runtime::ToolCallLaunch::Done {
+                                result: completed.completed,
+                            },
+                            triggers,
+                        };
+                    }
+                },
+                Err(err) => {
+                    let completed = self
+                        .complete_tool_call(
+                            index,
+                            call_id.clone(),
+                            replay,
+                            runtime_failure_dispatch_outcome(
+                                Some(call_id.clone()),
+                                tool_name,
+                                args,
+                                "tool_attempt_failed",
+                                err.to_string(),
+                            ),
+                            activity_id,
+                        )
+                        .await;
+                    return CoordinatedToolLaunch {
+                        launch: crate::runtime::ToolCallLaunch::Done {
+                            result: completed.completed,
+                        },
+                        triggers,
+                    };
+                }
+            };
+            triggers.extend(attempt_outcome.triggers);
+            match attempt_outcome.launch {
+                crate::ToolAttemptLaunch::Pending {
+                    key,
+                    pending,
+                    duration_ms,
+                } => {
+                    let dispatch_outcome = self
+                        .await_pending_tool_dispatch_outcome_with_suffix(
+                            &call_id,
+                            Some(parent_invocation.clone()),
+                            format!("{}:await", child.replay_suffix),
+                            crate::tool_dispatch::PendingToolDispatchOutcome {
+                                tool_name: child.call.tool_name.clone(),
+                                args: child.call.args.clone(),
+                                key,
+                                pending,
+                                duration_ms,
+                            },
+                            self.cancellation_token.clone(),
+                        )
+                        .await;
+                    let completed = self
+                        .complete_tool_call(
+                            index,
+                            call_id.clone(),
+                            child.call.replay.clone(),
+                            dispatch_outcome,
+                            activity_id,
+                        )
+                        .await;
+                    return CoordinatedToolLaunch {
+                        launch: crate::runtime::ToolCallLaunch::Done {
+                            result: completed.completed,
+                        },
+                        triggers,
+                    };
+                }
+                crate::ToolAttemptLaunch::Done { mut record } => {
+                    record.call_id = Some(call_id.clone());
+                    let retry_after = retry_after_ms(
+                        &ToolResult::from_output(record.output.clone()),
+                        retry_policy,
+                        attempt - 1,
+                    );
+                    let Some(retry_after) = retry_after else {
+                        let completed = self
+                            .complete_tool_call(
+                                index,
+                                call_id.clone(),
+                                child.call.replay.clone(),
+                                ToolDispatchOutcome { record },
+                                activity_id,
+                            )
+                            .await;
+                        return CoordinatedToolLaunch {
+                            launch: crate::runtime::ToolCallLaunch::Done {
+                                result: completed.completed,
+                            },
+                            triggers,
+                        };
+                    };
+                    if attempt >= max_attempts {
+                        let exhausted =
+                            mark_retry_exhausted(ToolResult::from_output(record.output), attempt);
+                        record.output = exhausted.into_done_output().unwrap_or_else(|_| {
+                            ToolCallOutput::failure(ToolFailure::runtime(
+                                ToolFailureClass::Internal,
+                                "tool_retry_exhaustion_failed",
+                                "retry exhaustion produced a pending output",
+                            ))
+                        });
+                        let completed = self
+                            .complete_tool_call(
+                                index,
+                                call_id.clone(),
+                                child.call.replay.clone(),
+                                ToolDispatchOutcome { record },
+                                activity_id,
+                            )
+                            .await;
+                        return CoordinatedToolLaunch {
+                            launch: crate::runtime::ToolCallLaunch::Done {
+                                result: completed.completed,
+                            },
+                            triggers,
+                        };
+                    }
+                    if retry_after > 0
+                        && let Err(err) = self
+                            .sleep_before_tool_retry(
+                                &parent_invocation,
+                                &child.replay_suffix,
+                                attempt,
+                                retry_after,
+                            )
+                            .await
+                    {
+                        let completed = self
+                            .complete_tool_call(
+                                index,
+                                call_id.clone(),
+                                child.call.replay.clone(),
+                                runtime_failure_dispatch_outcome(
+                                    Some(call_id.clone()),
+                                    child.call.tool_name.clone(),
+                                    child.call.args.clone(),
+                                    "tool_retry_sleep_failed",
+                                    format!(
+                                        "retry sleep for tool `{}` failed after attempt {attempt}: {err}",
+                                        child.call.tool_name
+                                    ),
+                                ),
+                                activity_id,
+                            )
+                            .await;
+                        return CoordinatedToolLaunch {
+                            launch: crate::runtime::ToolCallLaunch::Done {
+                                result: completed.completed,
+                            },
+                            triggers,
+                        };
+                    }
+                }
+            }
+        }
+
+        let completed = self
+            .complete_tool_call(
+                index,
+                call_id.clone(),
+                child.call.replay,
+                runtime_failure_dispatch_outcome(
+                    Some(call_id),
+                    child.call.tool_name,
+                    child.call.args,
+                    "tool_retry_loop_failed",
+                    "tool retry loop exited without a terminal result",
+                ),
+                activity_id,
+            )
+            .await;
+        CoordinatedToolLaunch {
+            launch: crate::runtime::ToolCallLaunch::Done {
+                result: completed.completed,
+            },
+            triggers,
+        }
+    }
+
+    async fn emit_tool_call_started(
+        &self,
+        call_id: &str,
+        name: &str,
+        args: serde_json::Value,
+        activity_id: TurnActivityId,
+    ) {
+        let _ = self
+            .dispatch
+            .event_tx
+            .send(SessionEvent::ToolCallStart {
+                call_id: Some(call_id.to_string()),
+                name: name.to_string(),
+                args: args.clone(),
+            })
+            .await;
+        self.emit_turn_activity(
             activity_id,
+            TurnEvent::ToolCallStarted {
+                call_id: Some(call_id.to_string()),
+                name: name.to_string(),
+                args,
+            },
+        )
+        .await;
+    }
+
+    fn tool_attempt_invocation(
+        &self,
+        parent_invocation: &crate::RuntimeInvocation,
+        child_replay_suffix: &str,
+        attempt: u32,
+    ) -> crate::RuntimeInvocation {
+        let suffix = format!("{child_replay_suffix}:attempt:{attempt}");
+        let parent_effect_id = parent_invocation.effect_id().unwrap_or("tool-batch");
+        crate::runtime::causal::child_effect_invocation(
+            parent_invocation,
+            format!("{parent_effect_id}:{suffix}"),
+            crate::RuntimeEffectKind::ToolAttempt,
+            suffix,
+        )
+    }
+
+    async fn sleep_before_tool_retry(
+        &self,
+        parent_invocation: &crate::RuntimeInvocation,
+        child_replay_suffix: &str,
+        attempt: u32,
+        retry_after_ms: u64,
+    ) -> Result<(), crate::RuntimeEffectControllerError> {
+        let suffix = format!("{child_replay_suffix}:attempt:{attempt}:sleep");
+        let parent_effect_id = parent_invocation.effect_id().unwrap_or("tool-batch");
+        let invocation = crate::runtime::causal::child_effect_invocation(
+            parent_invocation,
+            format!("{parent_effect_id}:{suffix}"),
+            crate::RuntimeEffectKind::Sleep,
+            suffix,
+        );
+        let cancellation = self.cancellation_token.clone().unwrap_or_default();
+        let outcome = self
+            .dispatch
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::Sleep {
+                        duration_ms: retry_after_ms,
+                    },
+                ),
+                crate::RuntimeEffectLocalExecutor::sleep_with_clock(
+                    cancellation,
+                    std::sync::Arc::clone(&self.dispatch.clock),
+                ),
+            )
+            .await?;
+        match outcome {
+            crate::RuntimeEffectOutcome::Sleep => Ok(()),
+            other => Err(crate::RuntimeEffectControllerError::new(
+                "runtime_effect_wrong_outcome",
+                format!("expected sleep outcome, got {}", other.kind().as_str()),
+            )),
         }
     }
 
@@ -450,78 +813,31 @@ impl RuntimeExecutionContext<'_> {
         prepare_tool_call_with_context(self.dispatch.as_ref(), pending, call_id).await
     }
 
-    pub(crate) async fn execute_prepared_tool_call_launch(
+    pub(crate) async fn execute_prepared_tool_attempt_effect(
         &self,
         prepared: crate::PreparedToolCall,
-        index: usize,
-        parent_invocation: Option<crate::RuntimeInvocation>,
+        attempt: u32,
+        max_attempts: u32,
+        attempt_invocation: crate::RuntimeInvocation,
         child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
-    ) -> crate::runtime::ToolCallLaunch {
-        match Box::pin(self.execute_prepared_tool_call_launch_inner(
-            prepared,
-            index,
-            parent_invocation,
-            child_execution_trace_hook,
-        ))
-        .await
-        {
-            ProtocolToolCallLaunch::Done(completed) => crate::runtime::ToolCallLaunch::Done {
-                result: completed.completed,
-            },
-            ProtocolToolCallLaunch::Pending(pending) => crate::runtime::ToolCallLaunch::Pending {
-                key: pending.key,
-                pending: pending.pending,
-                duration_ms: pending.duration_ms,
-            },
-        }
-    }
-
-    async fn execute_prepared_tool_call_launch_inner(
-        &self,
-        prepared: crate::PreparedToolCall,
-        index: usize,
-        parent_invocation: Option<crate::RuntimeInvocation>,
-        child_execution_trace_hook: Option<crate::ToolChildExecutionTraceHook>,
-    ) -> ProtocolToolCallLaunch {
+    ) -> Result<crate::ToolAttemptEffectOutcome, crate::RuntimeEffectControllerError> {
         let call_id = prepared.call_id.clone();
-        let name = prepared.tool_name.clone();
-        let args = prepared.args.clone();
-        let replay = prepared.replay.clone();
-        let parent_invocation = parent_invocation.or_else(|| self.parent_invocation.clone());
-        let run = self.prepared_tool_run(prepared, index, parent_invocation);
-        let prepared = run.prepared.clone();
-        let _ = self
-            .dispatch
-            .event_tx
-            .send(SessionEvent::ToolCallStart {
-                call_id: Some(call_id.clone()),
-                name: name.clone(),
-                args: args.clone(),
-            })
-            .await;
-        let tool_correlation_id = run.activity_id.clone();
-        self.emit_turn_activity(
-            tool_correlation_id.clone(),
-            TurnEvent::ToolCallStarted {
-                call_id: Some(call_id.clone()),
-                name: name.clone(),
-                args: args.clone(),
-            },
-        )
-        .await;
+        let mut attempt_dispatch = (*self.dispatch).clone();
+        attempt_dispatch.parent_invocation = Some(attempt_invocation.clone());
+        attempt_dispatch.trigger_outcomes =
+            crate::tool_dispatch::ToolTriggerOutcomeBuffer::default();
+        let attempt_dispatch = std::sync::Arc::new(attempt_dispatch);
+        let mut attempt_context = self.clone();
+        attempt_context.dispatch = std::sync::Arc::clone(&attempt_dispatch);
+        attempt_context.parent_invocation = Some(attempt_invocation.clone());
 
-        let runtime_context = if let Some(parent_invocation) = run.parent_invocation.clone() {
-            self.clone().with_parent_invocation(parent_invocation)
-        } else {
-            self.clone()
-        };
         let mut tool_context =
-            crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
-                .runtime_execution_context(runtime_context)
+            crate::ToolContext::from_dispatch(std::sync::Arc::clone(&attempt_dispatch))
+                .runtime_execution_context(attempt_context.clone())
                 .prepared_call(&prepared)
                 .cancellation_token(self.cancellation_token.clone())
                 .runtime_process_id(self.runtime_process_id.clone())
-                .parent_invocation(run.parent_invocation.clone())
+                .parent_invocation(Some(attempt_invocation))
                 .child_execution_trace_hook(child_execution_trace_hook);
         if let Some(process_events) = self.process_event_context.as_ref() {
             tool_context = tool_context.process_events(
@@ -533,24 +849,38 @@ impl RuntimeExecutionContext<'_> {
             );
         }
         let tool_context = tool_context.build();
-        let outcome = Box::pin(dispatch_prepared_tool_call_launch_with_execution_context(
-            self.dispatch.as_ref(),
-            prepared,
-            None,
-            tool_context,
-        ))
-        .await;
-        match outcome {
-            ToolCallLaunch::Done(mut outcome) => {
-                outcome.record.call_id = Some(call_id.clone());
-                tokio::task::yield_now().await;
-                let completed = self
-                    .complete_tool_call(run.index, call_id, replay, outcome, tool_correlation_id)
-                    .await;
-                ProtocolToolCallLaunch::Done(completed)
+        let launch = match Box::pin(
+            dispatch_prepared_tool_attempt_launch_with_execution_context(
+                attempt_dispatch.as_ref(),
+                prepared,
+                attempt,
+                max_attempts,
+                None,
+                tool_context,
+            ),
+        )
+        .await
+        {
+            ToolCallLaunch::Done(outcome) => {
+                let mut record = outcome.record;
+                record.call_id = Some(call_id);
+                crate::ToolAttemptLaunch::Done { record }
             }
-            ToolCallLaunch::Pending(pending) => ProtocolToolCallLaunch::Pending(pending),
-        }
+            ToolCallLaunch::Pending(pending) => crate::ToolAttemptLaunch::Pending {
+                key: pending.key,
+                pending: pending.pending,
+                duration_ms: pending.duration_ms,
+            },
+        };
+        let triggers = attempt_context
+            .drain_tool_trigger_outcomes()
+            .map_err(|err| {
+                crate::RuntimeEffectControllerError::new(
+                    "tool_trigger_outcome_drain",
+                    err.to_string(),
+                )
+            })?;
+        Ok(crate::ToolAttemptEffectOutcome { launch, triggers })
     }
 
     pub(super) async fn await_process_with_cancellation(
@@ -693,6 +1023,24 @@ impl RuntimeExecutionContext<'_> {
         pending: crate::tool_dispatch::PendingToolDispatchOutcome,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> ToolDispatchOutcome {
+        self.await_pending_tool_dispatch_outcome_with_suffix(
+            call_id,
+            parent_invocation,
+            format!("{call_id}:await"),
+            pending,
+            cancellation,
+        )
+        .await
+    }
+
+    async fn await_pending_tool_dispatch_outcome_with_suffix(
+        &self,
+        call_id: &str,
+        parent_invocation: Option<crate::RuntimeInvocation>,
+        replay_suffix: String,
+        pending: crate::tool_dispatch::PendingToolDispatchOutcome,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> ToolDispatchOutcome {
         let fallback;
         let parent = if let Some(parent) = parent_invocation.as_ref() {
             parent
@@ -708,9 +1056,9 @@ impl RuntimeExecutionContext<'_> {
         let parent_effect_id = parent.effect_id().unwrap_or("tool");
         let invocation = crate::runtime::causal::child_effect_invocation(
             parent,
-            format!("{parent_effect_id}:{call_id}:await"),
+            format!("{parent_effect_id}:{replay_suffix}"),
             crate::RuntimeEffectKind::AwaitEvent,
-            format!("{call_id}:await"),
+            replay_suffix,
         );
         let cancellation = cancellation.unwrap_or_default();
         let deadline = pending
@@ -881,15 +1229,12 @@ impl RuntimeExecutionContext<'_> {
             );
             let local_executor =
                 crate::RuntimeEffectLocalExecutor::tool_batch(self.clone(), child_trace_hooks);
-            let raw_outcome = if self.should_execute_child_tool_batch_locally() {
-                local_executor.execute(envelope).await
-            } else {
-                self.dispatch
-                    .effect_controller
-                    .controller()
-                    .execute_effect(envelope, local_executor)
-                    .await
-            };
+            let raw_outcome = self
+                .dispatch
+                .effect_controller
+                .controller()
+                .execute_effect(envelope, local_executor)
+                .await;
             let outcome =
                 match raw_outcome.and_then(crate::RuntimeEffectOutcome::into_tool_batch_effect) {
                     Ok(outcome) => outcome,

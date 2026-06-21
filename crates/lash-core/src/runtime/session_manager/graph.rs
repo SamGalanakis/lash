@@ -72,10 +72,14 @@ impl CurrentSessionCapability {
             graph,
             &usage_deltas,
         );
-        let result = store
-            .commit_runtime_state(commit)
-            .await
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        let result = commit_runtime_state_with_fresh_session_execution_lease(
+            Arc::clone(store),
+            commit,
+            "session_manager.append_session_nodes",
+            Arc::clone(&self.host.core.clock),
+        )
+        .await
+        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         state.apply_persisted_commit_result(result);
         background.sync_needed.store(true, Ordering::Release);
         Ok(crate::AppendSessionNodesResult::Appended {

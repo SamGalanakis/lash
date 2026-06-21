@@ -58,9 +58,9 @@ pub struct RuntimeSessionState {
     pub token_ledger: Vec<TokenLedgerEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<crate::store::BlobRef>,
-    /// Store head revision observed by the runtime. Commits use it for
-    /// optimistic concurrency; `None` means the runtime is creating the
-    /// first persisted head.
+    /// Store head revision observed by the runtime. Lease-fenced commits use it
+    /// as the stale-writer CAS backstop; `None` means the runtime is creating
+    /// the first persisted head.
     #[serde(skip)]
     pub head_revision: Option<u64>,
     /// Signals that the next commit must write the full graph (for example,

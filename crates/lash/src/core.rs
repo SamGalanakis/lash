@@ -65,17 +65,12 @@ impl ProcessWorkSource {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) enum QueuedWorkSource {
     None,
+    #[default]
     LazyDefault,
     External(QueuedWorkDriver),
-}
-
-impl Default for QueuedWorkSource {
-    fn default() -> Self {
-        Self::LazyDefault
-    }
 }
 
 pub(crate) enum QueuedWorkDriverSetup {
@@ -562,17 +557,15 @@ impl RlmCore {
             self.core.plugin_factories.as_ref(),
             request.extra_plugin_factories,
         )?;
-        let plugins = plugin_host
-            .build_session_with_parent(
-                &request.session_id,
-                None,
-                None,
-                lash_core::plugin::SessionAuthorityContext {
-                    plugin_options: request.execution_env_spec.plugin_options,
-                    ..Default::default()
-                },
-            )
-            .map_err(lash_core::PluginError::from)?;
+        let plugins = plugin_host.build_session_with_parent(
+            &request.session_id,
+            None,
+            None,
+            lash_core::plugin::SessionAuthorityContext {
+                plugin_options: request.execution_env_spec.plugin_options,
+                ..Default::default()
+            },
+        )?;
         let tool_catalog = plugins.resolved_tool_catalog(&request.session_id)?;
         let surface = crate::rlm::rlm_lashlang_surface(
             &self.surface_config,
@@ -1431,6 +1424,7 @@ impl LashCoreBuilder {
         Ok(ProcessWorkDriverSetup::LazyDefault { config })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_queued_work_driver(
         queued_work_source: &QueuedWorkSource,
         env: RuntimeEnvironment,

@@ -98,7 +98,14 @@ impl LashRuntime {
                 graph,
                 &[],
             );
-            match store.commit_runtime_state(commit).await {
+            match super::commit_runtime_state_with_fresh_session_execution_lease(
+                store,
+                commit,
+                "runtime.append_session_nodes",
+                Arc::clone(&self.host.core.clock),
+            )
+            .await
+            {
                 Ok(result) => self.state.apply_persisted_commit_result(result),
                 Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
             }
@@ -458,7 +465,14 @@ impl LashRuntime {
                 graph,
                 &[],
             );
-            let result = store.commit_runtime_state(commit).await.map_err(|err| {
+            let result = super::commit_runtime_state_with_fresh_session_execution_lease(
+                store,
+                commit,
+                "runtime.plugin_runtime_events",
+                Arc::clone(&self.host.core.clock),
+            )
+            .await
+            .map_err(|err| {
                 PluginOperationInvokeError::Failed(format!(
                     "failed to persist plugin runtime events: {err}"
                 ))
@@ -479,7 +493,14 @@ impl LashRuntime {
             return Ok(());
         };
         let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
-        let result = store.commit_runtime_state(commit).await.map_err(|err| {
+        let result = super::commit_runtime_state_with_fresh_session_execution_lease(
+            store,
+            commit,
+            "runtime.plugin_operation_state",
+            Arc::clone(&self.host.core.clock),
+        )
+        .await
+        .map_err(|err| {
             PluginOperationInvokeError::Failed(format!(
                 "failed to persist plugin operation state: {err}"
             ))

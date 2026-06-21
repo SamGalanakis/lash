@@ -793,6 +793,10 @@ impl RuntimeEffectController for RestateEffectHostController {
         true
     }
 
+    fn supports_concurrent_effects(&self) -> bool {
+        false
+    }
+
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
@@ -1588,6 +1592,10 @@ where
         true
     }
 
+    fn supports_concurrent_effects(&self) -> bool {
+        false
+    }
+
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
@@ -1602,6 +1610,7 @@ where
                     .await
                     .map(|result| RuntimeEffectOutcome::Process { result })
             }
+            RestateEffectExecution::DirectLocal => local_executor.execute(envelope).await,
             RestateEffectExecution::Timer => {
                 let RuntimeEffectCommand::Sleep { duration_ms } = &envelope.command else {
                     unreachable!("timer execution is only selected for sleep effects");
@@ -1862,6 +1871,7 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RestateEffectExecution {
     DirectProcess,
+    DirectLocal,
     Timer,
     AwaitEvent,
     JournaledRun,
@@ -1870,12 +1880,12 @@ enum RestateEffectExecution {
 fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExecution {
     match command {
         RuntimeEffectCommand::Process { .. } => RestateEffectExecution::DirectProcess,
+        RuntimeEffectCommand::ToolBatch { .. } => RestateEffectExecution::DirectLocal,
         RuntimeEffectCommand::Sleep { .. } => RestateEffectExecution::Timer,
         RuntimeEffectCommand::AwaitEvent { .. } => RestateEffectExecution::AwaitEvent,
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::Direct { .. }
-        | RuntimeEffectCommand::ToolCall { .. }
-        | RuntimeEffectCommand::ToolBatch { .. }
+        | RuntimeEffectCommand::ToolAttempt { .. }
         | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
         | RuntimeEffectCommand::SyncExecutionEnvironment { .. }

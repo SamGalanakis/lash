@@ -26,6 +26,21 @@ struct InMemoryQueuedBatch {
     claim_expires_at_ms: u64,
 }
 
+#[derive(Clone, Default)]
+struct InMemorySessionExecutionLease {
+    owner_id: Option<String>,
+    lease_token: Option<String>,
+    fencing_token: u64,
+    claimed_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+}
+
+impl InMemorySessionExecutionLease {
+    fn is_live(&self, now: u64) -> bool {
+        self.lease_token.is_some() && self.expires_at_epoch_ms > now
+    }
+}
+
 pub struct InMemorySessionStore {
     clock: Arc<dyn crate::Clock>,
     pub(crate) session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
@@ -38,6 +53,7 @@ pub struct InMemorySessionStore {
     runtime_turn_commits: Mutex<
         std::collections::HashMap<(String, String), (String, crate::store::RuntimeCommitResult)>,
     >,
+    session_execution_leases: Mutex<HashMap<String, InMemorySessionExecutionLease>>,
     queued_work: Mutex<Vec<InMemoryQueuedBatch>>,
     queued_work_next_seq: Mutex<u64>,
 }
@@ -58,8 +74,62 @@ impl InMemorySessionStore {
             usage_deltas: Mutex::new(Vec::new()),
             runtime_commit_count: Mutex::new(0),
             runtime_turn_commits: Mutex::new(std::collections::HashMap::new()),
+            session_execution_leases: Mutex::new(HashMap::new()),
             queued_work: Mutex::new(Vec::new()),
             queued_work_next_seq: Mutex::new(0),
+        }
+    }
+
+    fn verify_session_execution_lease(
+        &self,
+        session_id: &str,
+        fence: &crate::SessionExecutionLeaseFence,
+    ) -> Result<(), crate::store::StoreError> {
+        if fence.session_id != session_id {
+            return Err(crate::store::StoreError::SessionExecutionLeaseExpired {
+                session_id: session_id.to_string(),
+            });
+        }
+        let now = self.clock.timestamp_ms();
+        let leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock session execution leases");
+        let Some(current) = leases.get(&fence.session_id) else {
+            return Err(crate::store::StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            });
+        };
+        if current.owner_id.as_deref() == Some(fence.owner_id.as_str())
+            && current.lease_token.as_deref() == Some(fence.lease_token.as_str())
+            && current.fencing_token == fence.fencing_token
+            && current.expires_at_epoch_ms > now
+        {
+            Ok(())
+        } else {
+            Err(crate::store::StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            })
+        }
+    }
+
+    fn release_session_execution_lease_in_memory(
+        &self,
+        completion: &crate::SessionExecutionLeaseCompletion,
+    ) {
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock session execution leases");
+        if let Some(current) = leases.get_mut(&completion.session_id)
+            && current.owner_id.as_deref() == Some(completion.owner_id.as_str())
+            && current.lease_token.as_deref() == Some(completion.lease_token.as_str())
+            && current.fencing_token == completion.fencing_token
+        {
+            current.owner_id = None;
+            current.lease_token = None;
+            current.claimed_at_epoch_ms = 0;
+            current.expires_at_epoch_ms = 0;
         }
     }
 }
@@ -173,6 +243,9 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 .cloned()
             {
                 if stored_hash == completed.turn_commit_hash {
+                    if let Some(completion) = commit.release_session_execution_lease.as_ref() {
+                        self.release_session_execution_lease_in_memory(completion);
+                    }
                     return Ok(result);
                 }
                 return Err(crate::store::StoreError::RuntimeTurnCommitConflict {
@@ -181,6 +254,12 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 });
             }
         }
+        let Some(session_execution_lease) = commit.session_execution_lease.as_ref() else {
+            return Err(crate::store::StoreError::SessionExecutionLeaseExpired {
+                session_id: commit.session_id.clone(),
+            });
+        };
+        self.verify_session_execution_lease(&commit.session_id, session_execution_lease)?;
         if commit.expected_head_revision.is_some() && commit.expected_head_revision != Some(actual)
         {
             return Err(crate::store::StoreError::HeadRevisionConflict {
@@ -282,7 +361,86 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                     (completed.turn_commit_hash.clone(), result.clone()),
                 );
         }
+        if let Some(completion) = commit.release_session_execution_lease.as_ref() {
+            self.release_session_execution_lease_in_memory(completion);
+        }
         Ok(result)
+    }
+
+    async fn try_claim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<crate::SessionExecutionLease>, crate::store::StoreError> {
+        let now = self.clock.timestamp_ms();
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock session execution leases");
+        let current = leases.entry(session_id.to_string()).or_default();
+        if current.is_live(now) {
+            return Ok(None);
+        }
+        current.fencing_token = current.fencing_token.saturating_add(1);
+        current.owner_id = Some(owner_id.to_string());
+        current.lease_token = Some(format!(
+            "{session_id}:{owner_id}:{now}:{}",
+            current.fencing_token
+        ));
+        current.claimed_at_epoch_ms = now;
+        current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+        Ok(Some(crate::SessionExecutionLease {
+            session_id: session_id.to_string(),
+            owner_id: owner_id.to_string(),
+            lease_token: current.lease_token.clone().expect("lease token set"),
+            fencing_token: current.fencing_token,
+            claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+            expires_at_epoch_ms: current.expires_at_epoch_ms,
+        }))
+    }
+
+    async fn renew_session_execution_lease(
+        &self,
+        fence: &crate::SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<crate::SessionExecutionLease, crate::store::StoreError> {
+        let now = self.clock.timestamp_ms();
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock session execution leases");
+        let Some(current) = leases.get_mut(&fence.session_id) else {
+            return Err(crate::store::StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            });
+        };
+        if current.owner_id.as_deref() != Some(fence.owner_id.as_str())
+            || current.lease_token.as_deref() != Some(fence.lease_token.as_str())
+            || current.fencing_token != fence.fencing_token
+            || current.expires_at_epoch_ms <= now
+        {
+            return Err(crate::store::StoreError::SessionExecutionLeaseExpired {
+                session_id: fence.session_id.clone(),
+            });
+        }
+        current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+        Ok(crate::SessionExecutionLease {
+            session_id: fence.session_id.clone(),
+            owner_id: fence.owner_id.clone(),
+            lease_token: fence.lease_token.clone(),
+            fencing_token: fence.fencing_token,
+            claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+            expires_at_epoch_ms: current.expires_at_epoch_ms,
+        })
+    }
+
+    async fn release_session_execution_lease(
+        &self,
+        completion: &crate::SessionExecutionLeaseCompletion,
+    ) -> Result<(), crate::store::StoreError> {
+        self.release_session_execution_lease_in_memory(completion);
+        Ok(())
     }
 
     async fn enqueue_queued_work(
@@ -340,6 +498,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
         owner_id: &str,
         boundary: crate::QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
@@ -348,6 +507,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         if max_batches == 0 {
             return Ok(None);
         }
+        self.verify_session_execution_lease(session_id, session_execution_lease)?;
         let now = self.clock.timestamp_ms();
         let mut queued = self.queued_work.lock().expect("lock queued work");
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);

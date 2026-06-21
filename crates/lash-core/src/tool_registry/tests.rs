@@ -1,3 +1,35 @@
+pub(crate) fn project_tool_catalog<I>(entries: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = crate::ToolCatalogEntry>,
+{
+    entries
+        .into_iter()
+        .filter(|entry| entry.availability.is_searchable())
+        .map(|entry| {
+            let manifest = entry.manifest;
+            let availability = entry.availability;
+            let mut projected = serde_json::json!({
+                "id": manifest.id,
+                "name": manifest.name,
+                "description": manifest.description,
+                "bindings": manifest.bindings,
+                "availability": availability,
+                "callable": availability.is_callable(),
+                "showcased": availability.is_showcased(),
+                "searchable": availability.is_searchable(),
+                "activation": manifest.activation,
+            });
+            if let Some(contract) = manifest.compact_contract {
+                projected
+                    .as_object_mut()
+                    .expect("projected tool catalog entry is an object")
+                    .insert("contract".to_string(), serde_json::json!(contract));
+            }
+            projected
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,36 +1054,4 @@ mod tests {
         );
         assert_eq!(catalog[0]["contract"]["returns"], serde_json::json!("T"));
     }
-}
-
-pub(crate) fn project_tool_catalog<I>(entries: I) -> Vec<serde_json::Value>
-where
-    I: IntoIterator<Item = crate::ToolCatalogEntry>,
-{
-    entries
-        .into_iter()
-        .filter(|entry| entry.availability.is_searchable())
-        .map(|entry| {
-            let manifest = entry.manifest;
-            let availability = entry.availability;
-            let mut projected = serde_json::json!({
-                "id": manifest.id,
-                "name": manifest.name,
-                "description": manifest.description,
-                "bindings": manifest.bindings,
-                "availability": availability,
-                "callable": availability.is_callable(),
-                "showcased": availability.is_showcased(),
-                "searchable": availability.is_searchable(),
-                "activation": manifest.activation,
-            });
-            if let Some(contract) = manifest.compact_contract {
-                projected
-                    .as_object_mut()
-                    .expect("projected tool catalog entry is an object")
-                    .insert("contract".to_string(), serde_json::json!(contract));
-            }
-            projected
-        })
-        .collect()
 }

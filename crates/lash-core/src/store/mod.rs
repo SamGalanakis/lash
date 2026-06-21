@@ -62,6 +62,8 @@ pub enum StoreError {
         session_id: String,
         claim_id: String,
     },
+    #[error("session execution lease for session `{session_id}` is missing or expired")]
+    SessionExecutionLeaseExpired { session_id: String },
     #[error(
         "{record_kind} schema_version {actual} is not supported by this binary (expected {expected})"
     )]
@@ -265,6 +267,10 @@ impl GraphCommitDelta {
 pub struct RuntimeCommit {
     pub session_id: String,
     pub expected_head_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_execution_lease: Option<SessionExecutionLeaseFence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_session_execution_lease: Option<SessionExecutionLeaseCompletion>,
     pub config: crate::PersistedSessionConfig,
     pub agent_frames: Vec<crate::AgentFrameRecord>,
     pub current_agent_frame_id: crate::AgentFrameId,
@@ -288,6 +294,58 @@ pub struct RuntimeCommitResult {
     pub head_revision: u64,
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionExecutionLease {
+    pub session_id: String,
+    pub owner_id: String,
+    pub lease_token: String,
+    pub fencing_token: u64,
+    pub claimed_at_epoch_ms: u64,
+    pub expires_at_epoch_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionExecutionLeaseFence {
+    pub session_id: String,
+    pub owner_id: String,
+    pub lease_token: String,
+    pub fencing_token: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionExecutionLeaseCompletion {
+    pub session_id: String,
+    pub owner_id: String,
+    pub lease_token: String,
+    pub fencing_token: u64,
+}
+
+impl SessionExecutionLease {
+    pub fn fence(&self) -> SessionExecutionLeaseFence {
+        SessionExecutionLeaseFence {
+            session_id: self.session_id.clone(),
+            owner_id: self.owner_id.clone(),
+            lease_token: self.lease_token.clone(),
+            fencing_token: self.fencing_token,
+        }
+    }
+
+    pub fn completion(&self) -> SessionExecutionLeaseCompletion {
+        SessionExecutionLeaseCompletion {
+            session_id: self.session_id.clone(),
+            owner_id: self.owner_id.clone(),
+            lease_token: self.lease_token.clone(),
+            fencing_token: self.fencing_token,
+        }
+    }
+}
+
+impl SessionExecutionLeaseCompletion {
+    pub fn from_lease(lease: &SessionExecutionLease) -> Self {
+        lease.completion()
+    }
 }
 
 // =============================================================================
@@ -479,6 +537,8 @@ impl RuntimeCommit {
     pub fn turn_commit_hash(&self) -> Result<String, StoreError> {
         let mut semantic_commit = self.clone();
         semantic_commit.expected_head_revision = None;
+        semantic_commit.session_execution_lease = None;
+        semantic_commit.release_session_execution_lease = None;
         semantic_commit.turn_commit = None;
         let mut semantic_commit = serde_json::to_value(&semantic_commit).map_err(|err| {
             StoreError::Backend(format!("failed to serialize runtime turn commit: {err}"))
@@ -498,6 +558,8 @@ impl RuntimeCommit {
         Self {
             session_id: state.session_id.clone(),
             expected_head_revision: state.head_revision,
+            session_execution_lease: None,
+            release_session_execution_lease: None,
             config: persisted_session_config_from_state(state),
             agent_frames: state.agent_frames.clone(),
             current_agent_frame_id: state.current_agent_frame_id.clone(),
@@ -524,6 +586,8 @@ impl RuntimeCommit {
         Self {
             session_id: state.session_id.clone(),
             expected_head_revision: state.head_revision,
+            session_execution_lease: None,
+            release_session_execution_lease: None,
             config: persisted_session_config_from_state(state),
             agent_frames: state.agent_frames.clone(),
             current_agent_frame_id: state.current_agent_frame_id.clone(),
@@ -538,6 +602,19 @@ impl RuntimeCommit {
 
     pub fn with_turn_commit(mut self, turn_commit: RuntimeTurnCommitStamp) -> Self {
         self.turn_commit = Some(turn_commit);
+        self
+    }
+
+    pub fn with_session_execution_lease(mut self, lease: SessionExecutionLeaseFence) -> Self {
+        self.session_execution_lease = Some(lease);
+        self
+    }
+
+    pub fn releasing_session_execution_lease(
+        mut self,
+        completion: SessionExecutionLeaseCompletion,
+    ) -> Self {
+        self.release_session_execution_lease = Some(completion);
         self
     }
 
@@ -710,6 +787,35 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
 
+    /// Try to claim the durable single-writer execution lane for `session_id`.
+    ///
+    /// Returns `Ok(None)` when another owner holds an unexpired lease. Expired
+    /// or released leases may be reclaimed and receive a higher fencing token.
+    async fn try_claim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<SessionExecutionLease>, StoreError>;
+
+    /// Extend a live session execution lease owned by the caller.
+    ///
+    /// Backends must reject stale, released, superseded, or expired fences with
+    /// [`StoreError::SessionExecutionLeaseExpired`].
+    async fn renew_session_execution_lease(
+        &self,
+        fence: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLease, StoreError>;
+
+    /// Release a session execution lease fenced by its completion token.
+    ///
+    /// This operation is idempotent and must not clear a newer owner's lease.
+    async fn release_session_execution_lease(
+        &self,
+        completion: &SessionExecutionLeaseCompletion,
+    ) -> Result<(), StoreError>;
+
     /// Persist a queued-work batch for later claiming.
     ///
     /// The default implementation rejects the batch: backends that do not
@@ -730,6 +836,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
         _owner_id: &str,
         _boundary: crate::QueuedWorkClaimBoundary,
         _lease_ttl_ms: u64,
@@ -751,6 +858,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
         owner_id: &str,
         boundary: crate::QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
@@ -762,6 +870,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         let Some(claim) = self
             .claim_ready_queued_work(
                 session_id,
+                session_execution_lease,
                 owner_id,
                 boundary,
                 lease_ttl_ms,

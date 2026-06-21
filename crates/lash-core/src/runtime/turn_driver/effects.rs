@@ -89,18 +89,23 @@ impl RuntimeTurnDriver<'_> {
         let mut transient_messages = Vec::new();
         let mut turn_causes = Vec::new();
         let queue_claim = if let Some(store) = self.session.history_store() {
+            let Some(session_execution_lease) = self.session_execution_lease.as_ref() else {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::StoreCommitFailed,
+                    "active checkpoint queued-work claim requires a session execution lease",
+                ));
+            };
             store
                 .claim_ready_queued_work(
                     &self.session_id,
+                    session_execution_lease,
                     &self.turn_id,
                     crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
                     crate::QUEUED_WORK_CLAIM_TTL_MS,
                     64,
                 )
                 .await
-                .map_err(|err| {
-                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
-                })?
+                .map_err(crate::runtime::runtime_error_from_store_commit)?
         } else {
             None
         };

@@ -26,9 +26,10 @@ use lash_core::{
     DeliveryPolicy, DurabilityTier, GcReport, MergeKey, ProcessAwaitOutput, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, RuntimePersistence, SessionMeta,
-    SessionNodeRecord, SessionReadScope, SessionScope, SessionStoreCreateRequest,
-    SessionStoreFactory, SlotPolicy, StoreError, TokenLedgerEntry, VacuumReport,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, RuntimePersistence, SessionExecutionLease,
+    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionMeta, SessionNodeRecord,
+    SessionReadScope, SessionScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+    StoreError, TokenLedgerEntry, VacuumReport,
 };
 use lash_core::{
     PluginError, TriggerDeliveryReservation, TriggerOccurrenceRecord, TriggerOccurrenceRequest,
@@ -39,7 +40,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{Executor, Row};
 
 const SCHEMA_COMPONENT: &str = "lash-postgres-store";
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]
@@ -83,12 +84,13 @@ pub struct PostgresLashlangArtifactStore {
 
 /// Connection-pool and per-connection timeout knobs for [`PostgresStorage`].
 ///
-/// Session commits use **optimistic CAS** on the head (`UPDATE … WHERE
-/// head_revision = expected`), not a held `SELECT … FOR UPDATE`, so concurrent
-/// writers never pin a pool connection while blocked on a lock. `lock_timeout` is
-/// defense in depth: it caps how long the single CAS write may wait on the head
-/// row's lock before erroring (surfaced as a retryable conflict), so a pathological
-/// burst can never starve the pool.
+/// Mutating session work first claims the durable session execution lease.
+/// Session commits then verify that lease fence and use **optimistic CAS** on
+/// the head (`UPDATE … WHERE head_revision = expected`) as a stale-writer
+/// backstop, not as the normal cross-worker concurrency primitive.
+/// `lock_timeout` is defense in depth: it caps how long the fenced CAS write
+/// may wait on the head row's lock before erroring (surfaced as a retryable
+/// conflict), so a pathological burst can never starve the pool.
 #[derive(Clone, Debug)]
 pub struct PostgresStoreConfig {
     /// Maximum pooled connections. Default 16.
