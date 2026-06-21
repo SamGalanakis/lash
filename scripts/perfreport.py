@@ -159,8 +159,10 @@ def summarize_runtime(report: dict[str, Any]) -> str:
             lines.append("hot phases by median duration:")
             ranked = sorted(ps.items(), key=lambda kv: -kv[1]["duration_ms"]["median"])
             for name, m in ranked:
+                samples = m.get("samples", {}).get("median")
+                sample_text = f"n={int(samples):>4d}" if samples is not None else "n=   ?"
                 lines.append(
-                    f"  {name:30s}  dur={fmt_ms(m['duration_ms']['median']):>9s}  "
+                    f"  {name:30s}  {sample_text}  dur={fmt_ms(m['duration_ms']['median']):>9s}  "
                     f"alloc={fmt_bytes(m['alloc_bytes']['median']):>10s}  "
                     f"live={fmt_bytes(m['live_bytes']['median']):>10s}"
                 )
@@ -168,8 +170,10 @@ def summarize_runtime(report: dict[str, Any]) -> str:
             lines.append("hot phases by median allocation bytes:")
             ranked = sorted(ps.items(), key=lambda kv: -kv[1]["alloc_bytes"]["median"])
             for name, m in ranked:
+                samples = m.get("samples", {}).get("median")
+                sample_text = f"n={int(samples):>4d}" if samples is not None else "n=   ?"
                 lines.append(
-                    f"  {name:30s}  alloc={fmt_bytes(m['alloc_bytes']['median']):>10s}  "
+                    f"  {name:30s}  {sample_text}  alloc={fmt_bytes(m['alloc_bytes']['median']):>10s}  "
                     f"dur={fmt_ms(m['duration_ms']['median']):>9s}"
                 )
             lines.append("")

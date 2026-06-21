@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -38,40 +39,26 @@ DEFAULT_STACKS = [
 
 STACK_BUDGET_BYTES = 2 * 1024 * 1024
 
-KNOWN_RUNTIME_SCENARIOS = [
-    "standard",
-    "rlm",
-    "standard_tool_calls",
-    "standard_async_tool_completion",
-    "rlm_tool_calls",
-    "rlm_async_tool_completion",
-    "rlm_process_handles",
-    "rlm_trigger_mail_pipeline",
-    "rlm_process_async_tool_completion",
-    "rlm_subagent_spawn",
-    "rlm_llm_query",
-    "rlm_globals",
-    "rlm_large_tool_catalog",
-    "observational_memory",
-    "observational_memory_maintenance",
-    "openai_compat_stream",
-    "standard_shell_output",
-    "tool_discovery_search",
-    "openai_responses_sse_parse",
-    "direct_llm_client",
-    "process_list_stress",
-    "embed_standard",
-    "embed_rlm",
-    "scoped_effect_controller",
-    "store_reopen",
-    "sqlite_store_reopen",
-    "turn_checkpoint",
-    "live_replay_pressure",
-    "trace_jsonl_standard",
-    "trace_jsonl_extended",
-]
+RUNTIME_SCENARIOS_RS = (
+    Path(__file__).resolve().parent.parent
+    / "crates"
+    / "lash-perf"
+    / "src"
+    / "runtime_perf"
+    / "scenarios.rs"
+)
 
-DEFAULT_SCENARIOS = KNOWN_RUNTIME_SCENARIOS
+
+def load_known_runtime_scenarios() -> list[str]:
+    scenarios_rs = RUNTIME_SCENARIOS_RS.read_text()
+    scenarios = re.findall(r'"([a-z0-9_]+)" => Some\(Self::', scenarios_rs)
+    if not scenarios:
+        raise RuntimeError(f"no runtime perf scenarios found in {RUNTIME_SCENARIOS_RS}")
+    return scenarios
+
+
+KNOWN_RUNTIME_SCENARIOS = load_known_runtime_scenarios()
+DEFAULT_SCENARIOS = KNOWN_RUNTIME_SCENARIOS.copy()
 
 
 def parse_size(value: str) -> int:

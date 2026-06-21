@@ -1015,7 +1015,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmTriggerMailPipeline => format!(
-            "Turn {} in RLM mode. Register a mail trigger, send through inbox.test, let the forwarder process run, and submit exactly: {}",
+            "Turn {} in RLM mode. Ensure a mail trigger is registered, send through inbox.test, let the forwarder process run, and submit exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1056,6 +1056,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::RlmLargePrint => format!(
             "Turn {} in RLM mode. Print a large structured tool result to exercise host-owned print projection, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmStreamedPairedLashlang => format!(
+            "Turn {} in RLM mode. Stream visible prose before a paired <lashlang> block, close it, ignore any suffix after the close tag, and submit exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

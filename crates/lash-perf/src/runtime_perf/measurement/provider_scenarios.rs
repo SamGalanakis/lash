@@ -220,6 +220,7 @@ async fn run_once_direct_llm_client(chat_turns: usize) -> anyhow::Result<Runtime
         phase_profile.insert(
             "direct_llm_client.complete".to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: run_turn_ms,
                 allocations: run_turn_alloc.clone(),
                 rss_growth_kb: diff_opt_i64(turn_before_memory.rss_kb, after_turn_memory.rss_kb),

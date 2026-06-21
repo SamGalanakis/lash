@@ -13,6 +13,7 @@ fn measure_runtime_perf_phase<T>(
         (
             name.to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(started),
                 allocations: alloc_delta(before_alloc, after_alloc),
                 rss_growth_kb: diff_opt_i64(before_memory.rss_kb, after_memory.rss_kb),
@@ -39,6 +40,7 @@ where
         (
             name.to_string(),
             RuntimePerfPhaseRunResult {
+                samples: 1,
                 duration_ms: elapsed_ms(started),
                 allocations: alloc_delta(before_alloc, after_alloc),
                 rss_growth_kb: diff_opt_i64(before_memory.rss_kb, after_memory.rss_kb),
@@ -380,6 +382,7 @@ fn measure_checkpoint_phase(
     Ok((
         name.to_string(),
         RuntimePerfPhaseRunResult {
+            samples: 1,
             duration_ms: elapsed_ms(started),
             allocations: alloc_delta(before_alloc, after_alloc),
             rss_growth_kb: diff_opt_i64(before_memory.rss_kb, after_memory.rss_kb),
@@ -793,10 +796,12 @@ pub(crate) fn sum_phase_profiles<'a>(
             let entry = totals
                 .entry(phase.clone())
                 .or_insert_with(|| RuntimePerfPhaseRunResult {
+                    samples: 0,
                     duration_ms: 0.0,
                     allocations: zero_allocation_delta(),
                     rss_growth_kb: Some(0),
                 });
+            entry.samples += metrics.samples;
             entry.duration_ms = round3(entry.duration_ms + metrics.duration_ms);
             entry.allocations = sum_allocation_deltas([&entry.allocations, &metrics.allocations]);
             entry.rss_growth_kb = sum_optional_i64(entry.rss_growth_kb, metrics.rss_growth_kb);
@@ -819,6 +824,7 @@ pub(crate) fn mean_phase_profiles<'a>(
             (
                 phase,
                 RuntimePerfPhaseRunResult {
+                    samples: ((metrics.samples as f64) / count).round() as usize,
                     duration_ms: round3(metrics.duration_ms / count),
                     allocations: scale_allocation_delta(&metrics.allocations, count),
                     rss_growth_kb: metrics

@@ -1065,6 +1065,27 @@ fn benchmark_stream_profile_for_request(
             let text = lashlang_block(r#"submit "runtime perf benchmark ok""#);
             text_profile(text)
         }
+        RuntimePerfScenario::RlmStreamedPairedLashlang => {
+            let full_text = concat!(
+                "Visible preface before executable code.\n",
+                "<lashlang>\n",
+                "value = \"runtime perf benchmark ok\"\n",
+                "submit value\n",
+                "</lashlang>\n",
+                "This suffix must be ignored after the close tag."
+            )
+            .to_string();
+            BenchmarkStreamProfile {
+                full_text,
+                deltas: vec![
+                    "Visible preface before executable code.\n<lash".to_string(),
+                    "lang>\nvalue = \"runtime perf benchmark ok\"\n".to_string(),
+                    "submit value\n</lash".to_string(),
+                    "lang>\nThis suffix must be ignored after the close tag.".to_string(),
+                ],
+                parts: Vec::new(),
+            }
+        }
         RuntimePerfScenario::RlmGlobals => {
             // Mix of small (inline) and large (degraded preview) globals so the
             // benchmark exercises both branches of `render_bound_variables`:
@@ -1199,17 +1220,25 @@ process forward_mail(event: mail.Received) {
       title: format("[Fwd from test] {}", event.title),
       text: event.text
     })?
-    wake { kind: "forwarded", from: "test", to: "test23", title: event.title }
   }
   finish true
 }
 
-handle = await triggers.register({
-  source: mail.received({}),
-  target: forward_mail,
-  inputs: { event: trigger.event },
-  name: "runtime-perf-test-to-test23-forwarder"
+existing = await triggers.list({
+  name: "runtime-perf-test-to-test23-forwarder",
+  enabled: true
 })?
+
+if len(existing) > 0 {
+  handle = existing[0]
+} else {
+  handle = await triggers.register({
+    source: mail.received({}),
+    target: forward_mail,
+    inputs: { event: trigger.event },
+    name: "runtime-perf-test-to-test23-forwarder"
+  })?
+}
 
 @label(title: "Send test message to inbox.test")
 sent = await inbox.test.send({
@@ -1217,7 +1246,6 @@ sent = await inbox.test.send({
   text: "This is a forwarding test for runtime perf stack profiling."
 })?
 
-print { trigger_handle: handle, sent: sent }
 submit "runtime perf benchmark ok""#,
             );
             text_profile(text)
@@ -1425,5 +1453,24 @@ mod tests {
         assert_eq!(surface.callable_tools().len(), GMAIL_LIKE_TOOL_NAMES.len());
         assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
         assert_eq!(surface.prompt_tool_docs(), "");
+    }
+
+    #[test]
+    fn streamed_paired_lashlang_profile_splits_tags_and_trailing_suffix() {
+        let profile = benchmark_stream_profile(RuntimePerfScenario::RlmStreamedPairedLashlang);
+        assert_eq!(profile.full_text.matches("<lashlang>").count(), 1);
+        assert_eq!(profile.full_text.matches("</lashlang>").count(), 1);
+        assert!(
+            profile
+                .full_text
+                .ends_with("This suffix must be ignored after the close tag.")
+        );
+        assert_eq!(profile.deltas.len(), 4);
+        assert!(profile.deltas[0].ends_with("<lash"));
+        assert!(profile.deltas[1].starts_with("lang>"));
+        assert!(profile.deltas[2].ends_with("</lash"));
+        assert!(profile.deltas[3].starts_with("lang>"));
+        assert!(profile.deltas[3].contains("This suffix must be ignored"));
+        assert!(profile.parts.is_empty());
     }
 }
