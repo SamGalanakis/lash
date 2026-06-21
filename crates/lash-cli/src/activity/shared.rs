@@ -209,10 +209,6 @@ pub(super) fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "apply_patch" => "apply patch".to_string(),
         "grep" => super::projectors::exploration::grep_label(args),
         "glob" => super::projectors::exploration::glob_label(args),
-        "ls" => format!(
-            "list {}",
-            compact_path_display(tool_arg_str(args, "path").unwrap_or("."))
-        ),
         "exec_command" | "start_command" => tool_arg_str(args, "cmd")
             .map(inline_text)
             .unwrap_or_else(|| "command".to_string()),

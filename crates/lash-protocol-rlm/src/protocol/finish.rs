@@ -15,7 +15,7 @@ pub(crate) fn turn_limit_final_message(message_id: String, max_turns: usize) -> 
                 1. Summary of what you accomplished\n\
                 2. List of remaining tasks not yet completed\n\
                 3. Recommended next steps\n\
-                Do NOT emit a lashlang code fence, invoke module operations, or call submit/control.continue_as."
+                Do NOT emit a <lashlang> block, invoke module operations, or call submit/control.continue_as."
             ),
             attachment: None,
             tool_call_id: None,
@@ -63,9 +63,9 @@ fn prose_message(content: String, origin: Option<lash_core::MessageOrigin>) -> M
 pub(super) fn submit_required_reminder_message(requires_schema: bool) -> Message {
     let id = fresh_message_id();
     let content = if requires_schema {
-        "Deliver the final answer from a fenced ```lashlang block by calling `submit <value>` with a value matching the required output schema. Plain text outside a fence is not delivered."
+        "Deliver the final answer from a paired `<lashlang>...</lashlang>` block by calling `submit <value>` with a value matching the required output schema. Plain text before the block is not delivered."
     } else {
-        "Deliver the final answer from a fenced ```lashlang block by calling `submit <value>`. Plain text outside a fence is not delivered."
+        "Deliver the final answer from a paired `<lashlang>...</lashlang>` block by calling `submit <value>`. Plain text before the block is not delivered."
     };
     Message {
         id: id.clone(),
@@ -98,7 +98,7 @@ pub(super) fn submit_schema_mismatch_message(error_text: &str) -> Message {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
             content: format!(
-                "The `submit` value didn't match the required output schema:\n{error_text}\n\nFix the value and call `submit <corrected>` from another fenced ```lashlang block."
+                "The `submit` value didn't match the required output schema:\n{error_text}\n\nFix the value and call `submit <corrected>` from another paired `<lashlang>...</lashlang>` block."
             ),
             attachment: None,
             tool_call_id: None,

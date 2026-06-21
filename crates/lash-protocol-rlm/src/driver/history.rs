@@ -3,7 +3,7 @@
 //!
 //! Contract:
 //! - **Message roles.** Each prior step is a chat message, not one packed
-//!   blob. User messages render as `User`; prior RLM steps and protocol events
+//!   blob. User messages render as `User`; prior lashlang steps and protocol events
 //!   render as `Assistant` (see `borrowed_history_entry_llm_role`).
 //! - **Cache fence.** The last history message is marked with a
 //!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
@@ -11,11 +11,10 @@
 //!   volatile `=== CURRENT ITERATION ===` tail — iteration number, turn
 //!   events, finalization, required-output schema, context budget — is appended
 //!   uncached by `append_current_iteration_message`.
-//! - **Re-fetch handle.** Outputs longer than `max_output_chars` are
-//!   head/tail truncated and tagged with `full: history[N].output[M]`
-//!   (`truncated_ref`). That handle resolves: the `history` projected binding
-//!   carries the full untruncated value, so the model can recover it by
-//!   re-printing the reference. Proven by
+//! - **Re-fetch handle.** Outputs lossy-projected for the history prompt are
+//!   tagged with `full: history[N].output[M]`. That handle resolves: the
+//!   `history` projected binding carries the full untruncated value, so the
+//!   model can recover it by re-printing the reference. Proven by
 //!   `projection::context::tests::history_step_output_resolves_full_untruncated_value`.
 //! - **Variables.** The live variable namespace is surfaced separately as the
 //!   "Bound Variables" prompt contribution (`crate::rlm_support::render_bound_variables`),
@@ -32,8 +31,9 @@ use lash_core::{ChronologicalEntry, ChronologicalPayload};
 #[cfg(test)]
 use lash_rlm_types::RlmHistoryItem;
 use lash_rlm_types::{RlmAttachmentRef, RlmHistoryRole, RlmImageRef};
+use lashlang::{Value as FlowValue, ValueProjectionContext};
 
-use crate::projection::decode_rlm_protocol_event;
+use crate::projection::{decode_rlm_protocol_event, json_to_flow_value};
 
 pub(super) struct RlmHistoryRenderInput<'a> {
     pub(super) events: &'a [lash_core::SessionEventRecord],
@@ -282,10 +282,9 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
             attachments,
             max_output_chars,
         ),
-        RlmHistoryItem::RlmStep {
+        RlmHistoryItem::LashlangStep {
             id: _,
             protocol_iteration,
-            reasoning,
             code,
             output,
             images,
@@ -296,13 +295,11 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
             ReplStepRender {
                 index,
                 protocol_iteration: *protocol_iteration,
-                reasoning,
                 code,
                 output,
                 images,
                 error: error.as_deref(),
                 final_output: final_output.as_ref(),
-                max_output_chars,
             },
         ),
     }
@@ -360,13 +357,11 @@ fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> 
                 ReplStepRender {
                     index: entry.index,
                     protocol_iteration: step.protocol_iteration,
-                    reasoning: &step.reasoning,
                     code: &step.code,
                     output: &step.output,
                     images: &images,
                     error: step.error.as_deref(),
                     final_output: step.final_output.as_ref(),
-                    max_output_chars,
                 },
             );
         }
@@ -427,13 +422,11 @@ fn render_borrowed_history_entry(
                 ReplStepRender {
                     index: entry.index,
                     protocol_iteration: step.protocol_iteration,
-                    reasoning: &step.reasoning,
                     code: &step.code,
                     output: &step.output,
                     images: &images,
                     error: step.error.as_deref(),
                     final_output: step.final_output.as_ref(),
-                    max_output_chars,
                 },
             );
         }
@@ -575,43 +568,27 @@ fn message_role_label(role: &RlmHistoryRole) -> &'static str {
 struct ReplStepRender<'a> {
     index: usize,
     protocol_iteration: usize,
-    reasoning: &'a str,
     code: &'a str,
     output: &'a [String],
     images: &'a [RlmImageRef],
     error: Option<&'a str>,
     final_output: Option<&'a serde_json::Value>,
-    max_output_chars: usize,
 }
 
 fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
     let ReplStepRender {
         index,
         protocol_iteration,
-        reasoning,
         code,
         output,
         images,
         error,
         final_output,
-        max_output_chars,
     } = step;
-    let reasoning = reasoning_without_first_fence(reasoning).trim().to_string();
-    let (reasoning_preview, reasoning_raw_len) = head_tail_truncate(&reasoning, max_output_chars);
-    let reasoning_ref = truncated_ref(
-        reasoning_raw_len,
-        max_output_chars,
-        &format!("history[{index}].reasoning"),
-    );
     let _ = write!(
         out,
-        "--- history[{index}] · rlm step · protocol_iteration {protocol_iteration} ---\n\nReasoning ({reasoning_raw_len} chars{reasoning_ref}):\n{}\n\nCode:\n```lashlang\n{}\n```",
-        if reasoning_preview.is_empty() {
-            "(none)"
-        } else {
-            &reasoning_preview
-        },
-        code.trim(),
+        "--- history[{index}] · lashlang step · protocol_iteration {protocol_iteration} ---\n\nCode:\n{}",
+        indent_source(code.trim()),
     );
 
     // One block per `print` (or raw stdout emission). Tool calls used to
@@ -620,10 +597,10 @@ fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
     // bloated history; the `code` field above shows every receiver
     // operation the model wrote.
     for (output_index, item) in output.iter().enumerate() {
-        let (preview, raw_len) = head_tail_truncate(item, max_output_chars);
-        let full_ref = truncated_ref(
-            raw_len,
-            max_output_chars,
+        let (preview, projected_lossy) = project_history_output(item);
+        let raw_len = item.chars().count();
+        let full_ref = projected_ref(
+            projected_lossy,
             &format!("history[{index}].output[{output_index}]"),
         );
         let _ = write!(
@@ -665,72 +642,46 @@ fn truncated_ref(raw_len: usize, max_output_chars: usize, reference: &str) -> St
     }
 }
 
-/// Strip the executed ` ```lashlang ` block out of the reasoning
-/// preview — the code already renders verbatim in the dedicated
-/// "Code:" section below, so leaving it in the reasoning duplicates it.
-///
-/// Routes through the canonical [`crate::fence_scan`] scanner so this
-/// strips *exactly* the fence the driver extracts and executes. The
-/// older bespoke copy here only inspected the first backtick run and
-/// recognized a divergent alias set (`rlm`/`lash`); a reasoning string
-/// that opened with some other fenced sample (e.g. a ` ```python `
-/// illustration) before the real ` ```lashlang ` block slipped past it
-/// entirely, leaking the executed code into the reasoning preview.
-fn reasoning_without_first_fence(text: &str) -> String {
-    let Some(span) = crate::fence_scan::first_lashlang_fence_span(text) else {
-        return text.to_string();
-    };
-    let after_close = (span.body_end + span.close_len).min(text.len());
-    let mut out = String::new();
-    out.push_str(text[..span.open_start].trim_end());
-    let tail = text[after_close..].trim_start();
-    if !tail.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(tail);
+fn projected_ref(projected_lossy: bool, reference: &str) -> String {
+    if projected_lossy {
+        format!(", full: {reference}")
+    } else {
+        String::new()
     }
-    out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::reasoning_without_first_fence;
-
-    #[test]
-    fn strips_the_canonical_lashlang_block() {
-        let reasoning = "I'll compute it.\n\n```lashlang\nsubmit 1\n```";
-        assert_eq!(
-            reasoning_without_first_fence(reasoning),
-            "I'll compute it.",
-            "the executed block is rendered separately and must not be duplicated"
-        );
+fn indent_source(source: &str) -> String {
+    if source.is_empty() {
+        return "    (empty)".to_string();
     }
+    source
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-    #[test]
-    fn strips_lashlang_block_after_a_non_lashlang_sample() {
-        // Regression: the reasoning leads with an illustrative
-        // ```python sample, then the real ```lashlang block. The old
-        // stripper only inspected the first backtick run, saw a
-        // non-lashlang tag, and returned the text unchanged — leaking
-        // the executed code into the reasoning preview (where it then
-        // duplicated the dedicated "Code:" section). The unified
-        // scanner skips the sample and strips the real block.
-        let reasoning = "For example:\n\n```python\nx = 1\n```\n\nNow the real one:\n\n```lashlang\nsubmit x\n```";
-        let stripped = reasoning_without_first_fence(reasoning);
-        assert!(
-            !stripped.contains("submit x"),
-            "the executed lashlang block must be stripped, got: {stripped:?}"
-        );
-        assert!(
-            stripped.contains("```python"),
-            "the non-lashlang sample is prose and stays in the reasoning"
-        );
-    }
+fn project_history_output(item: &str) -> (String, bool) {
+    let value = history_output_value(item);
+    let projected = crate::rlm_support::print_history_projector()
+        .project_blocking(ValueProjectionContext::new(&value));
+    let lossy = projection_is_lossy(item, &projected);
+    (projected, lossy)
+}
 
-    #[test]
-    fn leaves_reasoning_without_a_lashlang_fence_untouched() {
-        let reasoning = "Just thinking out loud, no code here.";
-        assert_eq!(reasoning_without_first_fence(reasoning), reasoning);
+fn history_output_value(item: &str) -> FlowValue {
+    let trimmed = item.trim_start();
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(item)
+    {
+        return json_to_flow_value(value);
     }
+    FlowValue::String(item.into())
+}
+
+fn projection_is_lossy(original: &str, projected: &str) -> bool {
+    projected.contains("truncated")
+        || projected.contains("omitted")
+        || projected.contains("max depth")
+        || projected.chars().count() < original.chars().count()
 }

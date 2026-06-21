@@ -50,11 +50,11 @@ impl TurnCommitDraft {
         self.apply_message_projection(messages);
     }
 
-    pub(super) fn append_protocol_events<I>(&mut self, events: I)
+    pub(super) fn append_events<I>(&mut self, events: I)
     where
-        I: IntoIterator<Item = crate::ProtocolEvent>,
+        I: IntoIterator<Item = SessionEventRecord>,
     {
-        self.graph.append_protocol_events(events);
+        self.graph.append_events(events);
     }
 
     pub(super) fn read_view(

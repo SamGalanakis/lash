@@ -29,7 +29,7 @@
 <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents: <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, and Rust-style raw strings like <code>r#"..."#</code>. The parser accepts the full module grammar, but the linked host surface decides which abilities and language features exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, process signals, and optional static process-map labels are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL cells. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents: <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, and Python-shaped raw strings like <code>r"""..."""</code> or <code>r'...'</code>. The parser accepts the full module grammar, but the linked host surface decides which abilities and language features exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, process signals, and optional static process-map labels are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
@@ -73,21 +73,21 @@ submit { board: board, move: move }</code></pre>
         <div class="section" id="program-form">
           <div class="section-header">
             <h2>Program Form</h2>
-            <p>The RLM protocol extracts the first closed <code>```lashlang</code> fence from model output. Only the <code>lashlang</code> language tag is recognised; <code>rlm</code> and other labels are treated as plain prose by <code>first_lashlang_fence_span</code>. Opening fences may be three or more backticks (CommonMark variable-length), the closer must match the opener length, and anything after the first closed block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
+            <p>The RLM protocol extracts the first complete paired block whose start tag line trims to exactly <code>&lt;lashlang&gt;</code> and whose closing tag line trims to exactly <code>&lt;/lashlang&gt;</code>. Text before the start tag is visible assistant prose; only text between the tag lines is Lashlang source. Inline text such as <code>Use &lt;lashlang&gt; here</code> remains prose and does not execute.</p>
           </div>
           <dl class="def-list">
             <dt>REPL state</dt>
-            <dd>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through RLM's projection API are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose. Lazy app projections are ref-backed and resolved before each block runs.</dd>
+            <dd>Variables persist across <code>&lt;lashlang&gt;</code> blocks in the active RLM execution state. Read-only host bindings projected through RLM's projection API are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose. Lazy app projections are ref-backed and resolved before each block runs.</dd>
             <dt>Completion</dt>
-            <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await control.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
+            <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await control.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another <code>&lt;lashlang&gt;</code> block.</dd>
           </dl>
           <p>The examples below assume the host has linked a lowercase <code>workspace.default</code> resource with the shown operations enabled.</p>
-          <pre><code>```lashlang
+          <pre><code>&lt;lashlang&gt;
 text = await workspace.default.read_file({ path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 1200) }
-```</code></pre>
-          <p>A typical AgentFrame switch packs the concrete state the AgentFrame needs and ends the block. Computed expressions default to global state on the AgentFrame; values rooted at a projected binding (like <code>input.prompt</code>) stay projected, preserving their <code>ProjectionRef</code> when one exists.</p>
-          <pre><code>```lashlang
+&lt;/lashlang&gt;</code></pre>
+          <p>A typical AgentFrame switch packs the concrete state the AgentFrame needs and ends the cell. Computed expressions default to global state on the AgentFrame; values rooted at a projected binding (like <code>input.prompt</code>) stay projected, preserving their <code>ProjectionRef</code> when one exists.</p>
+          <pre><code>&lt;lashlang&gt;
 findings = []
 for path in await workspace.default.glob({ pattern: "src/**/*.rs" })? {
   text = await workspace.default.read_file({ path: path })?
@@ -99,7 +99,7 @@ await control.continue_as({
   task: "summarize the TODO audit and propose a follow-up plan",
   seed: { problem: input.prompt, findings: findings }
 })?
-```</code></pre>
+&lt;/lashlang&gt;</code></pre>
         </div>
 
         <div class="section" id="label-annotations">
@@ -132,7 +132,7 @@ await control.continue_as({
             <dt>Literals</dt>
             <dd>Use <code>null</code>, <code>true</code>, <code>false</code>, numbers, strings, lists like <code>[a, b]</code>, and records like <code>{ name: "lash", "with space": 1 }</code>. Record insertion order is preserved for display and serialization.</dd>
             <dt>Strings</dt>
-            <dd><code>"..."</code> supports <code>\n</code>, <code>\r</code>, <code>\t</code>, <code>\"</code>, and <code>\\</code>. <code>"""..."""</code> is multiline with escapes. Rust-style raw strings such as <code>r#"..."#</code> and <code>r##"..."##</code> preserve content exactly for patches, JSON, scripts, Markdown, and heredocs; add more <code>#</code> characters when the body contains the closing delimiter.</dd>
+            <dd><code>"..."</code> and <code>'...'</code> support <code>\n</code>, <code>\r</code>, <code>\t</code>, escaped matching quotes, and <code>\\</code>. <code>"""..."""</code> and <code>'''...'''</code> are multiline with the same escapes. Raw strings such as <code>r"..."</code>, <code>r'...'</code>, <code>r"""..."""</code>, and <code>r'''...'''</code> preserve content exactly for patches, JSON, scripts, Markdown, and heredocs.</dd>
             <dt>Fields and indexes</dt>
             <dd><code>value.field</code> reads record and image fields. <code>value[index]</code> reads lists and records; record indexes are string-coerced and missing keys read as <code>null</code>. List indexes support negative offsets for reads and slices.</dd>
             <dt>Images</dt>

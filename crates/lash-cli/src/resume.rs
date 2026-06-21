@@ -270,6 +270,7 @@ pub async fn load_resumed_session(
     app.usage.last_response_usage = loaded.last_token_usage;
     app.usage.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
+    app.replace_ui_activity_journal(loaded.ui_activity_journal);
     app.timeline.push(UiTimelineItem::SystemMessage(format!(
         "Resumed: {}",
         loaded.filename

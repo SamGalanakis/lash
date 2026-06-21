@@ -35,6 +35,7 @@ members = [
     "crates/lash-tui",
     "crates/lash-autoresearch",
     "crates/lash-harness-opt",
+    "crates/lash-debug-cli-harness",
     "crates/lash-cli",
     "crates/lash-perf",
     "crates/lash-export",

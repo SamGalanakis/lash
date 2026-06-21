@@ -75,45 +75,7 @@ pub fn push_assistant_reasoning_block(blocks: &mut UiTimeline, text: &str) -> bo
     if cleaned.is_empty() {
         return false;
     }
-    if let Some(UiTimelineItem::AssistantReasoning(existing)) = blocks.last_mut() {
-        // Consecutive reasoning blocks get merged into a single,
-        // paragraph-separated block so the renderer draws one continuous
-        // "thinking" span instead of a stack of near-identical
-        // separators.
-        return merge_assistant_reasoning_text(existing, &cleaned);
-    }
     blocks.push(UiTimelineItem::AssistantReasoning(cleaned));
-    true
-}
-
-pub fn merge_assistant_reasoning_text(existing: &mut String, text: &str) -> bool {
-    let cleaned = normalize_assistant_text(text);
-    if cleaned.is_empty() {
-        return false;
-    }
-
-    let existing_cleaned = normalize_assistant_text(existing);
-    if existing_cleaned.is_empty() {
-        *existing = cleaned;
-        return true;
-    }
-    if existing_cleaned == cleaned || existing_cleaned.ends_with(cleaned.as_str()) {
-        if *existing != existing_cleaned {
-            *existing = existing_cleaned;
-            return true;
-        }
-        return false;
-    }
-
-    let merged = if cleaned.starts_with(existing_cleaned.as_str()) {
-        cleaned
-    } else {
-        format!("{existing_cleaned}\n\n{cleaned}")
-    };
-    if *existing == merged {
-        return false;
-    }
-    *existing = merged;
     true
 }
 

@@ -122,6 +122,13 @@ impl SessionNodeDraft {
         }
     }
 
+    pub(crate) fn event(event: SessionEventRecord) -> Self {
+        match event {
+            SessionEventRecord::Conversation(record) => Self::message(record.to_message()),
+            SessionEventRecord::Protocol(event) => Self::protocol_event(event),
+        }
+    }
+
     pub(crate) fn with_caused_by(mut self, caused_by: Option<crate::CausalRef>) -> Self {
         self.caused_by = caused_by;
         self
@@ -275,18 +282,15 @@ impl SessionGraphAppendBuilder {
         )
     }
 
-    pub(crate) fn append_protocol_events_at<I>(
+    pub(crate) fn append_events_at<I>(
         &mut self,
         events: I,
         timestamp: String,
     ) -> Vec<SessionNodeRecord>
     where
-        I: IntoIterator<Item = ProtocolEvent>,
+        I: IntoIterator<Item = SessionEventRecord>,
     {
-        self.append_drafts_at(
-            events.into_iter().map(SessionNodeDraft::protocol_event),
-            timestamp,
-        )
+        self.append_drafts_at(events.into_iter().map(SessionNodeDraft::event), timestamp)
     }
 
     pub(crate) fn append_drafts_at<I>(

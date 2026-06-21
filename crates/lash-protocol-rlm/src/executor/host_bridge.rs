@@ -14,10 +14,10 @@ use lash_lashlang_runtime::{
     prepare_lashlang_process_start, protocol_tool_output_to_lashlang_value,
     resolve_lashlang_module_operation, sleep_duration_ms,
 };
-use lash_plugin_tool_output_budget::{ToolOutputBudgetConfig, project_observation_text};
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessSignal, ProcessStart,
-    ProjectedFuture, Record as FlowRecord, Sleep, Value as FlowValue,
+    ProjectedFuture, Record as FlowRecord, Sleep, Value as FlowValue, ValueProjectionContext,
+    ValueProjector,
 };
 use serde_json::Value;
 
@@ -25,7 +25,7 @@ use crate::projection::{flow_to_json_value, format_output_value};
 
 pub(super) struct HostBridge<'run> {
     ctx: RuntimeExecutionContext<'run>,
-    observe_projection: ToolOutputBudgetConfig,
+    print_projector: std::sync::Arc<dyn ValueProjector>,
     tool_result_projectors: Vec<crate::RlmToolResultProjector>,
     observations: Mutex<Vec<String>>,
     observation_truncation: Mutex<Vec<TextProjectionMetadata>>,
@@ -42,7 +42,7 @@ pub(super) struct HostBridge<'run> {
 impl<'run> HostBridge<'run> {
     pub(super) fn new(
         ctx: RuntimeExecutionContext<'run>,
-        observe_projection: ToolOutputBudgetConfig,
+        print_projector: std::sync::Arc<dyn ValueProjector>,
         tool_result_projectors: Vec<crate::RlmToolResultProjector>,
         lashlang_execution_trace: Option<LashlangExecutionTrace>,
         host_environment: lashlang::LashlangHostEnvironment,
@@ -50,7 +50,7 @@ impl<'run> HostBridge<'run> {
     ) -> Self {
         Self {
             ctx,
-            observe_projection,
+            print_projector,
             tool_result_projectors,
             observations: Mutex::new(Vec::new()),
             observation_truncation: Mutex::new(Vec::new()),
@@ -576,9 +576,14 @@ impl HostBridge<'_> {
     async fn print(&self, value: FlowValue) -> Result<(), ExecutionHostError> {
         let attachment_store = self.ctx.attachment_store();
         let images = collect_printed_images(&value, attachment_store.as_ref()).await?;
+        let projected_text = {
+            let _phase = self.ctx.named_phase("rlm_lashlang.print_project");
+            self.print_projector
+                .project(ValueProjectionContext::new(&value))
+                .await
+        };
         let raw_text = format_output_value(&value).await;
-        let (_projected_text, metadata) =
-            project_observation_text(&raw_text, &self.observe_projection);
+        let metadata = observation_projection_metadata(&raw_text, &projected_text);
         self.observations
             .lock()
             .map_err(|_| ExecutionHostError::new("observation buffer poisoned"))?
@@ -605,6 +610,26 @@ impl HostBridge<'_> {
             .map_err(|err| ExecutionHostError::new(err.to_string()))?;
         Ok(FlowValue::Null)
     }
+}
+
+fn observation_projection_metadata(original: &str, projected: &str) -> TextProjectionMetadata {
+    TextProjectionMetadata {
+        truncated: projection_is_lossy(original, projected),
+        original_chars: original.chars().count(),
+        projected_chars: projected.chars().count(),
+        original_lines: original.lines().count(),
+        projected_lines: projected.lines().count(),
+        limit: crate::rlm_support::PRINT_HISTORY_PROJECTION_CONFIG.max_bytes,
+        limit_mode: "bytes".to_string(),
+        max_lines: crate::rlm_support::PRINT_HISTORY_PROJECTION_CONFIG.max_lines,
+    }
+}
+
+fn projection_is_lossy(original: &str, projected: &str) -> bool {
+    projected.contains("truncated")
+        || projected.contains("omitted")
+        || projected.contains("max depth")
+        || projected.chars().count() < original.chars().count()
 }
 
 impl ExecutionHost for HostBridge<'_> {

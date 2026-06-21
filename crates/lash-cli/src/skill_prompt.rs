@@ -76,6 +76,35 @@ pub fn append_skill_blocks(text: &str, catalog: &SkillCatalog) -> String {
     out
 }
 
+pub fn strip_appended_skill_blocks(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut search_start = 0usize;
+    while let Some(relative_split) = trimmed[search_start..].find("\n\n<skill>") {
+        let split = search_start + relative_split;
+        let suffix = trimmed[split..].trim_start();
+        if is_skill_block_suffix(suffix) {
+            return trimmed[..split].trim_end().to_string();
+        }
+        search_start = split + "\n\n<skill>".len();
+    }
+    trimmed.to_string()
+}
+
+fn is_skill_block_suffix(mut rest: &str) -> bool {
+    let mut saw_block = false;
+    loop {
+        rest = rest.trim_start();
+        let Some(after_open) = rest.strip_prefix("<skill>") else {
+            return saw_block && rest.is_empty();
+        };
+        let Some(close_start) = after_open.find("</skill>") else {
+            return false;
+        };
+        saw_block = true;
+        rest = &after_open[close_start + "</skill>".len()..];
+    }
+}
+
 fn is_skill_name_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
 }
@@ -178,5 +207,29 @@ mod tests {
 
         assert_eq!(expanded.matches("<skill>").count(), 1);
         assert!(expanded.contains("<name>demo</name>"));
+    }
+
+    #[test]
+    fn strips_generated_skill_blocks_from_display_text() {
+        let expanded = "Use /demo\n\n<skill>\n<name>demo</name>\nbody\n</skill>";
+
+        assert_eq!(strip_appended_skill_blocks(expanded), "Use /demo");
+    }
+
+    #[test]
+    fn strips_multiple_generated_skill_blocks_from_display_text() {
+        let expanded = "Use /demo and /other\n\n<skill>\n<name>demo</name>\nbody\n</skill>\n\n<skill>\n<name>other</name>\nmore\n</skill>";
+
+        assert_eq!(
+            strip_appended_skill_blocks(expanded),
+            "Use /demo and /other"
+        );
+    }
+
+    #[test]
+    fn keeps_non_suffix_skill_xml_visible() {
+        let text = "Use /demo\n\n<skill>\n<name>demo</name>\nbody\n</skill>\n\nthen continue";
+
+        assert_eq!(strip_appended_skill_blocks(text), text);
     }
 }

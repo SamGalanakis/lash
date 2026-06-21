@@ -512,17 +512,15 @@
             },
             {
               "parameters": {
-                "depth": 3,
-                "path": "/tmp/tmp.m4yJpzPolc",
-                "with_lines": true
+                "limit": 100,
+                "path": "/tmp/tmp.m4yJpzPolc"
               },
-              "tool": "ls"
+              "tool": "read_file"
             },
             {
               "parameters": {
                 "path": "/tmp/tmp.m4yJpzPolc",
-                "pattern": "**/*",
-                "with_lines": true
+                "pattern": "**/*"
               },
               "tool": "glob"
             },
@@ -545,7 +543,7 @@
             {
               "duration_ms": 2,
               "success": true,
-              "tool": "ls"
+              "tool": "read_file"
             },
             {
               "duration_ms": 0,
@@ -586,17 +584,15 @@
           "tool_calls": [
             {
               "parameters": {
-                "depth": 3,
-                "path": "/tmp/tmp.m4yJpzPolc",
-                "with_lines": true
+                "limit": 100,
+                "path": "/tmp/tmp.m4yJpzPolc"
               },
-              "tool": "ls"
+              "tool": "read_file"
             },
             {
               "parameters": {
                 "path": "/tmp/tmp.m4yJpzPolc",
-                "pattern": "**/*",
-                "with_lines": true
+                "pattern": "**/*"
               },
               "tool": "glob"
             },
@@ -620,7 +616,7 @@
             {
               "duration_ms": 0,
               "success": true,
-              "tool": "ls"
+              "tool": "read_file"
             },
             {
               "duration_ms": 1,
@@ -1063,49 +1059,19 @@
       "event": {
         "type": "tool_call",
         "call_id": "call_Wm9YLNMLP19cyRNo6Py5weCG",
-        "name": "ls",
+        "name": "glob",
         "args": {
-          "depth": 2,
+          "limit": 100,
           "path": "/tmp/tmp.m4yJpzPolc",
-          "with_lines": true
+          "pattern": "**/*"
         },
         "result": {
-          "items": [
-            {
-              "kind": "file",
-              "lines": 2,
-              "modified_at": "2026-04-07T18:28:12Z",
-              "path": "/tmp/tmp.m4yJpzPolc/a.txt",
-              "size_bytes": 11
-            },
-            {
-              "kind": "file",
-              "lines": 0,
-              "modified_at": "2026-04-07T18:28:12Z",
-              "path": "/tmp/tmp.m4yJpzPolc/empty.log",
-              "size_bytes": 0
-            },
-            {
-              "kind": "file",
-              "lines": 2,
-              "modified_at": "2026-04-07T18:28:26Z",
-              "path": "/tmp/tmp.m4yJpzPolc/patched.txt",
-              "size_bytes": 23
-            },
-            {
-              "kind": "dir",
-              "lines": null,
-              "modified_at": "2026-04-07T18:28:12Z",
-              "path": "/tmp/tmp.m4yJpzPolc/subdir",
-              "size_bytes": 60
-            },
-            {
-              "kind": "file",
-              "lines": 1,
-              "modified_at": "2026-04-07T18:28:12Z",
-              "path": "/tmp/tmp.m4yJpzPolc/subdir/b.txt",
-              "size_bytes": 6
-            }
+          "paths": [
+            "/tmp/tmp.m4yJpzPolc/a.txt",
+            "/tmp/tmp.m4yJpzPolc/empty.log",
+            "/tmp/tmp.m4yJpzPolc/patched.txt",
+            "/tmp/tmp.m4yJpzPolc/subdir",
+            "/tmp/tmp.m4yJpzPolc/subdir/b.txt"
           ],
           "truncated": null
         },
@@ -1212,7 +1178,7 @@
               {
                 "duration_ms": 0,
                 "success": true,
-                "tool": "ls"
+                "tool": "glob"
               }
             ],
             "tool_calls": 1
@@ -1733,7 +1699,7 @@
       "op": "event",
       "event": {
         "type": "text_delta",
-        "content": "I tested the toolset in a throwaway temp directory: `/tmp/tmp.m4yJpzPolc`.\n\nWhat I exercised\n- Filesystem:\n  - `ls`\n  - `glob`\n  - `grep`\n  - `read_file`\n- Editing:\n  - `apply_patch`\n- Commands:\n  - `exec_command`\n  - `write_stdin`\n- Coordination:\n  - `update_plan`\n  - `agent_call`\n  - `agent_result`\n  - `ask`\n  - `batch`\n  - `multi_tool_use.parallel`\n- Web:\n  - `search_web`\n  - `fetch_url`\n\nWhat worked well\n- Temp workspace creation succeeded.\n- File creation, discovery, content search, and file reads all worked.\n- Patch application worked; I created `patched.txt` and verified its contents.\n- One-shot shell commands worked.\n- Interactive PTY flow worked:\n  - started `cat`\n  - sent input with `write_stdin`\n  - got echoed output\n  - closed stdin cleanly\n- Delegation worked:\n  - spawned a child agent\n  - it inspected the temp dir\n  - returned a structured result\n- Parallel wrappers worked:\n  - `batch` successfully ran multiple independent calls\n  - `multi_tool_use.parallel` also succeeded\n- Web tools worked:\n  - web search returned successfully\n  - URL fetch from `https://example.com/` returned successfully\n\nMinor caveats\n- The `ask` tool necessarily pauses for an answer"
+        "content": "I tested the toolset in a throwaway temp directory: `/tmp/tmp.m4yJpzPolc`.\n\nWhat I exercised\n- Filesystem:\n  - `glob`\n  - `grep`\n  - `read_file`\n- Editing:\n  - `apply_patch`\n- Commands:\n  - `exec_command`\n  - `write_stdin`\n- Coordination:\n  - `update_plan`\n  - `agent_call`\n  - `agent_result`\n  - `ask`\n  - `batch`\n  - `multi_tool_use.parallel`\n- Web:\n  - `search_web`\n  - `fetch_url`\n\nWhat worked well\n- Temp workspace creation succeeded.\n- File creation, discovery, content search, and file reads all worked.\n- Patch application worked; I created `patched.txt` and verified its contents.\n- One-shot shell commands worked.\n- Interactive PTY flow worked:\n  - started `cat`\n  - sent input with `write_stdin`\n  - got echoed output\n  - closed stdin cleanly\n- Delegation worked:\n  - spawned a child agent\n  - it inspected the temp dir\n  - returned a structured result\n- Parallel wrappers worked:\n  - `batch` successfully ran multiple independent calls\n  - `multi_tool_use.parallel` also succeeded\n- Web tools worked:\n  - web search returned successfully\n  - URL fetch from `https://example.com/` returned successfully\n\nMinor caveats\n- The `ask` tool necessarily pauses for an answer"
       }
     },
     {

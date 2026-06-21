@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::session_graph::SessionReadModel;
 use crate::session_graph::build_active_read_replacement;
-use crate::session_model::{ProtocolEvent, SessionEventRecord};
+use crate::session_model::SessionEventRecord;
 use crate::store::GraphCommitDelta;
 use crate::{BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord};
 
@@ -62,24 +62,35 @@ impl TurnGraphEditor {
         }
     }
 
-    pub(super) fn append_protocol_events<I>(&mut self, events: I)
+    pub(super) fn append_events<I>(&mut self, events: I)
     where
-        I: IntoIterator<Item = ProtocolEvent>,
+        I: IntoIterator<Item = SessionEventRecord>,
     {
-        let events = events.into_iter().collect::<Vec<_>>();
+        let mut active_message_ids = self
+            .active_messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<HashSet<_>>();
+        let events = events
+            .into_iter()
+            .filter(|event| match event {
+                SessionEventRecord::Conversation(record) => {
+                    let message = record.to_message();
+                    !message.is_transient() && active_message_ids.insert(record.id.clone())
+                }
+                SessionEventRecord::Protocol(_) => true,
+            })
+            .collect::<Vec<_>>();
         if events.is_empty() {
             return;
         }
         let nodes = self
             .append_builder
-            .append_protocol_events_at(events, self.clock.timestamp_rfc3339());
-        Arc::make_mut(&mut self.active_events).extend(nodes.iter().filter_map(|node| {
-            if let Some(SessionEventRecord::Protocol(event)) = node.event() {
-                Some(SessionEventRecord::Protocol(event.clone()))
-            } else {
-                None
-            }
-        }));
+            .append_events_at(events, self.clock.timestamp_rfc3339());
+        Arc::make_mut(&mut self.active_events)
+            .extend(nodes.iter().filter_map(|node| node.event().cloned()));
+        self.active_messages
+            .extend(nodes.iter().filter_map(|node| node.message()).collect());
         self.append_appended_nodes(nodes);
     }
 

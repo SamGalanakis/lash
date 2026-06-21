@@ -179,6 +179,180 @@ fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
         .collect()
 }
 
+fn single_llm_extraction_payload(machine: &TurnMachine) -> serde_json::Value {
+    let payloads: Vec<_> = machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Protocol(event) => {
+                match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+                    Some(RlmProtocolEvent::RlmDiagnostic(diagnostic)) => {
+                        (diagnostic.phase == "llm_extraction").then_some(diagnostic.payload)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(payloads.len(), 1, "expected one llm_extraction diagnostic");
+    let payload = payloads.into_iter().next().expect("payload");
+    assert_no_legacy_llm_extraction_keys(&payload);
+    payload
+}
+
+fn assert_no_legacy_llm_extraction_keys(payload: &serde_json::Value) {
+    let object = payload.as_object().expect("diagnostic payload object");
+    assert_eq!(
+        object.len(),
+        3,
+        "llm_extraction payload should only contain decision, termination, and counts"
+    );
+    for key in [
+        "assistant_text_chars",
+        "prose_only_ends_turn",
+        "finalization_reason",
+    ] {
+        assert!(
+            object.get(key).is_none(),
+            "legacy llm_extraction key `{key}` should not be emitted"
+        );
+    }
+}
+
+fn assistant_messages(machine: &TurnMachine) -> Vec<Message> {
+    machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Conversation(record) => {
+                let message = record.to_message();
+                (message.role == MessageRole::Assistant).then_some(message)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn assistant_reasoning_texts(machine: &TurnMachine) -> Vec<String> {
+    assistant_messages(machine)
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .parts
+                .iter()
+                .filter(|part| matches!(part.kind, PartKind::Reasoning))
+                .map(|part| part.content.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn assistant_visible_texts(machine: &TurnMachine) -> Vec<String> {
+    assistant_messages(machine)
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .parts
+                .iter()
+                .filter(|part| matches!(part.kind, PartKind::Text | PartKind::Prose))
+                .map(|part| part.content.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn text_part(text: &str) -> LlmOutputPart {
+    LlmOutputPart::Text {
+        text: text.to_string(),
+        response_meta: None,
+    }
+}
+
+fn reasoning_part(text: &str) -> LlmOutputPart {
+    LlmOutputPart::Reasoning {
+        text: text.to_string(),
+        replay: None,
+    }
+}
+
+fn lashlang_block(code: &str) -> String {
+    format!("<lashlang>\n{code}\n</lashlang>")
+}
+
+fn lashlang_block_with_prose(prose: &str, code: &str) -> String {
+    format!("{prose}\n<lashlang>\n{code}\n</lashlang>")
+}
+
+fn rlm_response(parts: Vec<LlmOutputPart>) -> LlmResponse {
+    let full_text = parts
+        .iter()
+        .filter_map(|part| match part {
+            LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    LlmResponse {
+        full_text,
+        parts,
+        ..LlmResponse::default()
+    }
+}
+
+fn exec_response(
+    output: &[&str],
+    error: Option<&str>,
+    final_output: Option<serde_json::Value>,
+) -> lash_sansio::ExecResponse {
+    lash_sansio::ExecResponse {
+        observations: output.iter().map(|item| (*item).to_string()).collect(),
+        observation_truncation: Vec::new(),
+        tool_calls: Vec::new(),
+        images: Vec::new(),
+        printed_images: Vec::new(),
+        error: error.map(str::to_string),
+        duration_ms: 1,
+        terminal_finish: final_output,
+    }
+}
+
+fn run_single_rlm_exec_step_machine(
+    llm_response: LlmResponse,
+    exec_response: lash_sansio::ExecResponse,
+) -> TurnMachine {
+    let config = test_config_with_termination(
+        TestProtocol::Rlm,
+        RlmTermination::SubmitRequired { schema: None },
+    );
+    let msgs = vec![user_message("perform one step")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(llm_response),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(exec_response),
+    });
+
+    let _effects = drain_effects(&mut machine);
+    machine
+}
+
 fn effects_include_runtime_error(effects: &[Effect], message_fragment: &str) -> bool {
     let has_error = effects.iter().any(|effect| {
         matches!(
@@ -716,9 +890,9 @@ fn submit_required_rlm_exec_error_at_max_turns_stops_without_retry() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nmissing_name\n```".to_string(),
+            full_text: lashlang_block("missing_name"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nmissing_name\n```".to_string(),
+                text: lashlang_block("missing_name"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -763,6 +937,182 @@ fn submit_required_rlm_exec_error_at_max_turns_stops_without_retry() {
             .last()
             .and_then(|entry| entry.error.as_deref())
             .is_some_and(|error| error.contains("missing_name"))
+    );
+}
+
+#[test]
+fn rlm_submit_required_prose_only_diagnostic_has_clean_counts() {
+    let config = test_config_with_termination(
+        TestProtocol::Rlm,
+        RlmTermination::SubmitRequired { schema: None },
+    );
+    let msgs = vec![user_message("hello")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+    let assistant_text = "Hello there!";
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: assistant_text.to_string(),
+            ..LlmResponse::default()
+        }),
+    });
+
+    let _effects = drain_effects(&mut machine);
+    assert_eq!(
+        single_llm_extraction_payload(&machine),
+        serde_json::json!({
+            "decision": "request_submit",
+            "termination": "submit_required",
+            "counts": {
+                "full_text_chars": assistant_text.chars().count(),
+                "prose_chars": assistant_text.chars().count(),
+                "code_chars": 0,
+                "reasoning_chars": 0,
+                "lashlang_cell_count": 0,
+            },
+        })
+    );
+}
+
+#[test]
+fn rlm_prose_or_submit_prose_only_diagnostic_has_clean_counts() {
+    let config = test_config_with_termination(TestProtocol::Rlm, RlmTermination::ProseOrSubmit);
+    let msgs = vec![user_message("hello")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+    let assistant_text = "Hello there!";
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: assistant_text.to_string(),
+            ..LlmResponse::default()
+        }),
+    });
+
+    let _effects = drain_effects(&mut machine);
+    assert_eq!(
+        single_llm_extraction_payload(&machine),
+        serde_json::json!({
+            "decision": "finish_prose",
+            "termination": "prose_or_submit",
+            "counts": {
+                "full_text_chars": assistant_text.chars().count(),
+                "prose_chars": assistant_text.chars().count(),
+                "code_chars": 0,
+                "reasoning_chars": 0,
+                "lashlang_cell_count": 0,
+            },
+        })
+    );
+}
+
+#[test]
+fn rlm_cell_reasoning_prose_code_diagnostic_has_clean_counts() {
+    let config = test_config(TestProtocol::Rlm);
+    let msgs = vec![user_message("run some code")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+    let reasoning_text = "Checking state.";
+    let assistant_prose = "Ready.";
+    let code = "print \"hi\"";
+    let assistant_text = lashlang_block_with_prose(assistant_prose, code);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: assistant_text.clone(),
+            parts: vec![
+                LlmOutputPart::Reasoning {
+                    text: reasoning_text.to_string(),
+                    replay: None,
+                },
+                LlmOutputPart::Text {
+                    text: assistant_text.clone(),
+                    response_meta: None,
+                },
+            ],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert_eq!(
+        effects.iter().find_map(|effect| match effect {
+            Effect::ExecCode { code, .. } => Some(code.as_str()),
+            _ => None,
+        }),
+        Some(code)
+    );
+    assert_eq!(
+        single_llm_extraction_payload(&machine),
+        serde_json::json!({
+            "decision": "execute_lashlang",
+            "termination": "submit_required",
+            "counts": {
+                "full_text_chars": assistant_text.chars().count(),
+                "prose_chars": assistant_prose.chars().count(),
+                "code_chars": code.chars().count(),
+                "reasoning_chars": reasoning_text.chars().count(),
+                "lashlang_cell_count": 1,
+            },
+        })
+    );
+}
+
+#[test]
+fn retired_percent_marker_inside_source_is_plain_lashlang_text() {
+    let config = test_config(TestProtocol::Rlm);
+    let msgs = vec![user_message("run some code")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+    let assistant_prose = "First.";
+    let code = "text = \"%%lashlang is just source here\"\nprint text";
+    let assistant_text = lashlang_block_with_prose(assistant_prose, code);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: assistant_text.clone(),
+            parts: vec![LlmOutputPart::Text {
+                text: assistant_text.clone(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert_eq!(
+        effects.iter().find_map(|effect| match effect {
+            Effect::ExecCode { code, .. } => Some(code.as_str()),
+            _ => None,
+        }),
+        Some(code)
+    );
+    assert_eq!(
+        single_llm_extraction_payload(&machine),
+        serde_json::json!({
+            "decision": "execute_lashlang",
+            "termination": "submit_required",
+            "counts": {
+                "full_text_chars": assistant_text.chars().count(),
+                "prose_chars": assistant_prose.chars().count(),
+                "code_chars": code.chars().count(),
+                "reasoning_chars": 0,
+                "lashlang_cell_count": 1,
+            },
+        })
     );
 }
 
@@ -824,7 +1174,7 @@ fn prose_or_submit_response_finishes_with_assistant_message() {
 }
 
 #[test]
-fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
+fn rlm_lashlang_cell_runs_exec_and_continues() {
     let config = test_config(TestProtocol::Rlm);
     let msgs = vec![user_message("run some code")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -838,9 +1188,9 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
+            full_text: lashlang_block_with_prose("Quick check.\n", "print \"hi\""),
             parts: vec![LlmOutputPart::Text {
-                text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
+                text: lashlang_block_with_prose("Quick check.\n", "print \"hi\""),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -906,9 +1256,9 @@ fn rlm_empty_turn_options_use_submit_required_default() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nsubmit \"done\"\n```".to_string(),
+            full_text: lashlang_block("submit \"done\""),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nsubmit \"done\"\n```".to_string(),
+                text: lashlang_block("submit \"done\""),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1024,9 +1374,9 @@ fn rlm_driver_state_with_wrong_plugin_id_fails_loudly() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nprint \"hi\"\n```".to_string(),
+            full_text: lashlang_block("print \"hi\""),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nprint \"hi\"\n```".to_string(),
+                text: lashlang_block("print \"hi\""),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1059,9 +1409,9 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "Reason first.\n```lashlang\nprint \"hi\"\n```".to_string(),
+            full_text: lashlang_block_with_prose("Reason first.", "print \"hi\""),
             parts: vec![LlmOutputPart::Text {
-                text: "Reason first.\n```lashlang\nprint \"hi\"\n```".to_string(),
+                text: lashlang_block_with_prose("Reason first.", "print \"hi\""),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1110,7 +1460,7 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     let trajectory = machine_trajectory(&restored);
     let entry = trajectory.last().expect("rlm trajectory entry");
     assert_eq!(entry.code, "print \"hi\"");
-    assert!(entry.reasoning.contains("Reason first."));
+    assert_eq!(assistant_visible_texts(&restored), vec!["Reason first."]);
     assert_eq!(entry.output, vec!["hi\n".to_string()]);
     let (_, checkpoint) = find_checkpoint(&effects).expect("after-work checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
@@ -1128,9 +1478,9 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nok = await tools.ok({})\nfail = await tools.fail({})\nstop = await tools.stop({})\nresults = { a: ok, b: fail, c: stop }\n```".to_string(),
+            full_text: lashlang_block("ok = await tools.ok({})\nfail = await tools.fail({})\nstop = await tools.stop({})\nresults = { a: ok, b: fail, c: stop }"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nok = await tools.ok({})\nfail = await tools.fail({})\nstop = await tools.stop({})\nresults = { a: ok, b: fail, c: stop }\n```".to_string(),
+                text: lashlang_block("ok = await tools.ok({})\nfail = await tools.fail({})\nstop = await tools.stop({})\nresults = { a: ok, b: fail, c: stop }"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1221,10 +1571,9 @@ fn rlm_exec_result_does_not_store_tool_call_ids_or_replay_tool_events() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nx = await tools.read_file({ path: \"foo\" })?\n```"
-                .to_string(),
+            full_text: lashlang_block("x = await tools.read_file({ path: \"foo\" })?"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nx = await tools.read_file({ path: \"foo\" })?\n```".to_string(),
+                text: lashlang_block("x = await tools.read_file({ path: \"foo\" })?"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1287,9 +1636,9 @@ fn rlm_exec_any_tool_control_frame_switch_is_terminal() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nx = await tools.custom_frame_switch({})?\n```".to_string(),
+            full_text: lashlang_block("x = await tools.custom_frame_switch({})?"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nx = await tools.custom_frame_switch({})?\n```".to_string(),
+                text: lashlang_block("x = await tools.custom_frame_switch({})?"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1364,9 +1713,9 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nx = await tools.custom_fail({})?\n```".to_string(),
+            full_text: lashlang_block("x = await tools.custom_fail({})?"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nx = await tools.custom_fail({})?\n```".to_string(),
+                text: lashlang_block("x = await tools.custom_fail({})?"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1449,9 +1798,9 @@ fn typed_rlm_finish_emits_turn_outcome_and_done() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
+            full_text: lashlang_block("submit { ok: true }"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
+                text: lashlang_block("submit { ok: true }"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1519,9 +1868,9 @@ fn prose_or_submit_allows_submit_value() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
+            full_text: lashlang_block("submit { ok: true }"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
+                text: lashlang_block("submit { ok: true }"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1573,6 +1922,179 @@ fn prose_or_submit_allows_submit_value() {
 }
 
 #[test]
+fn rlm_text_only_cell_records_code_without_reasoning_or_prose() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![text_part(&lashlang_block("print \"hi\""))]),
+        exec_response(&["hi\n"], None, None),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert!(assistant_messages(&machine).is_empty());
+    assert_eq!(entry.code, "print \"hi\"");
+    assert_eq!(entry.output, vec!["hi\n".to_string()]);
+    assert_eq!(entry.error, None);
+    assert_eq!(entry.final_output, None);
+}
+
+#[test]
+fn rlm_provider_reasoning_is_recorded_separately_from_lashlang_text() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![
+            reasoning_part("hidden plan"),
+            text_part(&lashlang_block("print \"hi\"")),
+        ]),
+        exec_response(&["hi\n"], None, None),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert_eq!(assistant_reasoning_texts(&machine), vec!["hidden plan"]);
+    assert!(assistant_visible_texts(&machine).is_empty());
+    assert_eq!(entry.code, "print \"hi\"");
+    assert_eq!(entry.output, vec!["hi\n".to_string()]);
+}
+
+#[test]
+fn rlm_visible_text_before_cell_is_recorded_as_prose_not_reasoning() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![text_part(&lashlang_block_with_prose(
+            "I will inspect first.\n",
+            "print \"hi\"",
+        ))]),
+        exec_response(&["hi\n"], None, None),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert!(assistant_reasoning_texts(&machine).is_empty());
+    assert_eq!(
+        assistant_visible_texts(&machine),
+        vec!["I will inspect first."]
+    );
+    assert_eq!(entry.code, "print \"hi\"");
+    assert_eq!(entry.output, vec!["hi\n".to_string()]);
+}
+
+#[test]
+fn rlm_text_after_closing_tag_is_ignored_not_recorded_as_prose_or_code() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![text_part(
+            "Before\n<lashlang>\nprint \"hi\"\n</lashlang>\nIgnored suffix",
+        )]),
+        exec_response(&["hi\n"], None, None),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert!(assistant_reasoning_texts(&machine).is_empty());
+    assert_eq!(assistant_visible_texts(&machine), vec!["Before"]);
+    assert_eq!(entry.code, "print \"hi\"");
+    assert_eq!(entry.output, vec!["hi\n".to_string()]);
+}
+
+#[test]
+fn rlm_reasoning_and_visible_prose_are_independent_lanes() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![
+            reasoning_part("private chain"),
+            text_part(&lashlang_block_with_prose("visible status", "print \"hi\"")),
+        ]),
+        exec_response(&["hi\n"], None, None),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert_eq!(assistant_reasoning_texts(&machine), vec!["private chain"]);
+    assert_eq!(assistant_visible_texts(&machine), vec!["visible status"]);
+    assert_eq!(entry.code, "print \"hi\"");
+    assert_eq!(entry.output, vec!["hi\n".to_string()]);
+}
+
+#[test]
+fn rlm_markdown_code_block_remains_visible_prose_before_real_lashlang_cell() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![text_part(&lashlang_block_with_prose(
+            "Example:\n```python\nprint('hi')\n```",
+            "print \"done\"",
+        ))]),
+        exec_response(&["done\n"], None, None),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert!(assistant_reasoning_texts(&machine).is_empty());
+    assert_eq!(
+        assistant_visible_texts(&machine),
+        vec!["Example:\n```python\nprint('hi')\n```"]
+    );
+    assert_eq!(entry.code, "print \"done\"");
+    assert_eq!(entry.output, vec!["done\n".to_string()]);
+}
+
+#[test]
+fn rlm_exec_error_keeps_reasoning_prose_and_code_exact() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![
+            reasoning_part("find the failing call"),
+            text_part(&lashlang_block_with_prose("Trying it now.", "missing_name")),
+        ]),
+        exec_response(&[], Some("unknown variable `missing_name`"), None),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert_eq!(
+        assistant_reasoning_texts(&machine),
+        vec!["find the failing call"]
+    );
+    assert_eq!(assistant_visible_texts(&machine), vec!["Trying it now."]);
+    assert_eq!(entry.code, "missing_name");
+    assert_eq!(entry.output, Vec::<String>::new());
+    assert_eq!(
+        entry.error,
+        Some("unknown variable `missing_name`".to_string())
+    );
+    assert_eq!(entry.final_output, None);
+}
+
+#[test]
+fn rlm_submit_final_value_keeps_reasoning_prose_and_code_exact() {
+    let machine = run_single_rlm_exec_step_machine(
+        rlm_response(vec![
+            reasoning_part("ready to finish"),
+            text_part(&lashlang_block_with_prose("Submitting.", "submit \"done\"")),
+        ]),
+        exec_response(&[], None, Some(serde_json::json!("done"))),
+    );
+    let entry = machine_trajectory(&machine)
+        .last()
+        .cloned()
+        .expect("trajectory entry");
+
+    assert_eq!(assistant_reasoning_texts(&machine), vec!["ready to finish"]);
+    assert_eq!(assistant_visible_texts(&machine), vec!["Submitting."]);
+    assert_eq!(entry.code, "submit \"done\"");
+    assert_eq!(entry.output, Vec::<String>::new());
+    assert_eq!(entry.error, None);
+    assert_eq!(entry.final_output, Some(serde_json::json!("done")));
+}
+
+#[test]
 fn rlm_reasoning_part_is_preserved_in_trajectory() {
     let config = test_config_with_termination(
         TestProtocol::Rlm,
@@ -1587,14 +2109,14 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
         id: llm_id,
         text_streamed: true,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),
+            full_text: lashlang_block("submit \"Hi.\""),
             parts: vec![
                 LlmOutputPart::Reasoning {
                     text: "I'll answer directly.".to_string(),
                     replay: None,
                 },
                 LlmOutputPart::Text {
-                    text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),
+                    text: lashlang_block("submit \"Hi.\""),
                     response_meta: None,
                 },
             ],
@@ -1639,8 +2161,12 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
     );
     let trajectory = machine_trajectory(&machine);
     let entry = trajectory.last().expect("trajectory entry");
-    assert!(entry.reasoning.contains("I'll answer directly."));
-    assert!(entry.reasoning.contains("```lashlang"));
+    assert_eq!(
+        assistant_reasoning_texts(&machine),
+        vec!["I'll answer directly."]
+    );
+    assert!(assistant_visible_texts(&machine).is_empty());
+    assert_eq!(entry.code, "submit \"Hi.\"");
     assert_eq!(entry.final_output, Some(serde_json::json!("Hi.")));
 }
 
@@ -1667,9 +2193,9 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
+            full_text: lashlang_block("submit { missing: true }"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
+                text: lashlang_block("submit { missing: true }"),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1739,9 +2265,9 @@ fn typed_rlm_schema_mismatch_checks_any_of() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nsubmit true\n```".to_string(),
+            full_text: lashlang_block("submit true"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nsubmit true\n```".to_string(),
+                text: lashlang_block("submit true"),
                 response_meta: None,
             }],
             ..LlmResponse::default()

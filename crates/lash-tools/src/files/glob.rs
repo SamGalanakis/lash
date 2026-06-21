@@ -4,13 +4,12 @@ use std::path::PathBuf;
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
 use lash_tool_support::{
-    FS_DEFAULTS_PREAMBLE, FilesystemEntriesOutput, OptionalUsizeArg, StaticToolExecute,
-    StaticToolProvider, ToolDefinitionLashlangExt, build_path_entry, default_glob_limit,
-    default_path_dot, default_true, execute_typed_tool, filesystem_entries_output,
-    invalid_tool_args, non_empty_string, rg_file_list, run_blocking_value,
+    FS_DEFAULTS_PREAMBLE, OptionalUsizeArg, StaticToolExecute, StaticToolProvider,
+    ToolDefinitionLashlangExt, TruncationMeta, default_glob_limit, default_path_dot,
+    execute_typed_tool, invalid_tool_args, non_empty_string, rg_file_list, run_blocking_value,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Find files by glob pattern.
 #[derive(Default)]
@@ -32,34 +31,29 @@ struct GlobArgs {
     /// Maximum results to return. Use null or "none" for no cap.
     #[serde(default = "default_glob_limit")]
     limit: OptionalUsizeArg,
-    /// Count text lines for file entries.
-    #[serde(default)]
-    with_lines: bool,
-    /// Include dotfiles and dot-directories.
-    #[serde(default = "default_true")]
-    include_hidden: bool,
-    /// Respect `.gitignore` and related ignore files.
-    #[serde(default = "default_true")]
-    respect_gitignore: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GlobOutput {
+    paths: Vec<String>,
+    truncated: Option<TruncationMeta>,
 }
 
 #[async_trait::async_trait]
 impl StaticToolExecute for Glob {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        execute_typed_tool::<GlobArgs, FilesystemEntriesOutput, _, _>(
-            call.args,
-            |args| async move {
-                match run_blocking_value(move || execute_glob_sync(args)).await {
-                    Ok(result) => result,
-                    Err(err) => Err(ToolResult::err_fmt(format_args!("{err}"))),
-                }
-            },
-        )
+        execute_typed_tool::<GlobArgs, GlobOutput, _, _>(call.args, |args| async move {
+            match run_blocking_value(move || execute_glob_sync(args)).await {
+                Ok(result) => result,
+                Err(err) => Err(ToolResult::err_fmt(format_args!("{err}"))),
+            }
+        })
         .await
     }
 }
 
-fn execute_glob_sync(args: GlobArgs) -> Result<FilesystemEntriesOutput, ToolResult> {
+fn execute_glob_sync(args: GlobArgs) -> Result<GlobOutput, ToolResult> {
     non_empty_string(&args.pattern, "pattern")?;
     let limit = args.limit.into_option("limit", 1)?;
     let base = PathBuf::from(args.path);
@@ -85,13 +79,7 @@ fn execute_glob_sync(args: GlobArgs) -> Result<FilesystemEntriesOutput, ToolResu
         .build()
         .map_err(|err| ToolResult::err_fmt(format_args!("Failed to build glob matcher: {err}")))?;
 
-    let files = rg_file_list(
-        &base,
-        args.include_hidden,
-        args.respect_gitignore,
-        None,
-        &[],
-    )?;
+    let files = rg_file_list(&base, false, true, None, &[])?;
 
     let mut matched_paths = BTreeSet::new();
     for file in files {
@@ -114,28 +102,33 @@ fn execute_glob_sync(args: GlobArgs) -> Result<FilesystemEntriesOutput, ToolResu
         }
     }
 
-    let mut matches = matched_paths
+    let total_matches = matched_paths.len();
+    let mut paths = matched_paths
         .into_iter()
-        .map(|path| build_path_entry(&path, args.with_lines))
+        .map(|path| path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
-    matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.path.cmp(&b.0.path)));
-    let total_matches = matches.len();
+    paths.sort();
     if let Some(limit) = limit {
-        matches.truncate(limit);
+        paths.truncate(limit);
     }
 
-    let items = matches.into_iter().map(|(entry, _)| entry).collect();
-    Ok(filesystem_entries_output(items, total_matches))
+    let shown = paths.len();
+    let truncated = (total_matches > shown).then_some(TruncationMeta {
+        shown,
+        total: total_matches,
+        omitted: total_matches - shown,
+    });
+    Ok(GlobOutput { paths, truncated })
 }
 
 fn glob_tool_definition() -> ToolDefinition {
-    ToolDefinition::typed::<GlobArgs, FilesystemEntriesOutput>(
+    ToolDefinition::typed::<GlobArgs, GlobOutput>(
                 "tool:glob",
                 "glob",
                 [
-                    "Find filesystem entries by glob. ",
+                    "Find filesystem paths by glob. ",
                     FS_DEFAULTS_PREAMBLE,
-                    " Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit=100, with_lines=false, include_hidden=true, respect_gitignore=true.",
+                    " Returns `paths` sorted lexicographically with truncation metadata. Defaults: path=\".\", limit=100.",
                 ]
                 .concat(),
             )
@@ -158,25 +151,27 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    fn items(result: &ToolResult) -> Vec<serde_json::Value> {
+    fn paths(result: &ToolResult) -> Vec<String> {
         let value = result.value_for_projection();
         value
-            .get("items")
+            .get("paths")
             .and_then(|v| v.as_array())
             .unwrap()
-            .clone()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
     }
 
     #[test]
     fn glob_contract_documents_result_shape() {
         let definition = glob_tool_definition();
         assert_eq!(definition.contract.output_schema["type"], json!("object"));
-        assert!(definition.contract.output_schema["properties"]["items"].is_object());
+        assert!(definition.contract.output_schema["properties"]["paths"].is_object());
         assert!(
             definition
                 .compact_contract()
                 .render_signature()
-                .contains("items")
+                .contains("paths")
         );
     }
 
@@ -193,26 +188,10 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        let arr = items(&result);
-        let paths: Vec<&str> = arr
-            .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
-            .collect();
+        let paths = paths(&result);
         assert!(paths.iter().any(|p| p.contains("a.rs")));
         assert!(paths.iter().any(|p| p.contains("b.rs")));
         assert!(!paths.iter().any(|p| p.contains("c.txt")));
-        assert!(
-            arr.iter()
-                .all(|v| v.get("size_bytes").and_then(|x| x.as_u64()).is_some())
-        );
-        assert!(
-            arr.iter()
-                .all(|v| v.get("modified_at").and_then(|x| x.as_str()).is_some())
-        );
-        assert!(
-            arr.iter()
-                .all(|v| v.get("lines").map(|x| x.is_null()).unwrap_or(false))
-        );
     }
 
     #[tokio::test]
@@ -226,7 +205,7 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        assert!(items(&result).is_empty());
+        assert!(paths(&result).is_empty());
     }
 
     #[tokio::test]
@@ -241,11 +220,7 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        let arr = items(&result);
-        let paths: Vec<&str> = arr
-            .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
-            .collect();
+        let paths = paths(&result);
         assert!(paths.iter().any(|p| p.contains("file.rs")));
     }
 
@@ -262,8 +237,7 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        let arr = items(&result);
-        assert_eq!(arr.len(), 2);
+        assert_eq!(paths(&result).len(), 2);
         let value = result.value_for_projection();
         let truncated = value.get("truncated").and_then(|v| v.as_object()).unwrap();
         assert_eq!(truncated.get("shown").and_then(|v| v.as_u64()), Some(2));
@@ -284,8 +258,7 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        let arr = items(&result);
-        assert_eq!(arr.len(), 3);
+        assert_eq!(paths(&result).len(), 3);
         assert!(
             result
                 .value_for_projection()
@@ -296,25 +269,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_glob_with_lines() {
+    async fn test_glob_rejects_removed_list_like_options() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.rs"), "line1\nline2\nline3\n").unwrap();
         let result = lash_core::testing::run_tool(
             &glob_provider(),
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "with_lines": true}),
         )
         .await;
-        assert!(result.is_success());
-        let arr = items(&result);
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0].get("lines").and_then(|v| v.as_u64()), Some(3));
+        assert!(!result.is_success());
     }
 
     #[tokio::test]
-    async fn test_glob_includes_hidden_by_default() {
+    async fn test_glob_excludes_hidden_by_default() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".hidden.rs"), "").unwrap();
+        std::fs::write(dir.path().join("shown.rs"), "").unwrap();
         let result = lash_core::testing::run_tool(
             &glob_provider(),
             "glob",
@@ -322,43 +292,13 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        let paths: Vec<String> = items(&result)
-            .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
-            .collect();
-        assert!(paths.iter().any(|p| p.ends_with("/.hidden.rs")));
+        let paths = paths(&result);
+        assert!(paths.iter().any(|p| p.ends_with("/shown.rs")));
+        assert!(!paths.iter().any(|p| p.ends_with("/.hidden.rs")));
     }
 
     #[tokio::test]
-    async fn test_glob_respect_gitignore_false_disables_repo_gitignore() {
-        let dir = TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
-        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
-        std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
-        let result = lash_core::testing::run_tool(
-            &glob_provider(),
-            "glob",
-            &json!({
-                "pattern": "*.rs",
-                "path": dir.path().to_str().unwrap(),
-                "respect_gitignore": false
-            }),
-        )
-        .await;
-        assert!(result.is_success());
-        let paths: Vec<String> = items(&result)
-            .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
-            .collect();
-        assert!(paths.iter().any(|p| p.ends_with("/ignored.rs")));
-    }
-
-    #[tokio::test]
-    async fn test_glob_respect_gitignore_true_hides_repo_ignored_files() {
+    async fn test_glob_respects_repo_gitignore_by_default() {
         let dir = TempDir::new().unwrap();
         std::process::Command::new("git")
             .args(["init", "-q"])
@@ -377,15 +317,12 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        let paths: Vec<String> = items(&result)
-            .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
-            .collect();
+        let paths = paths(&result);
         assert!(!paths.iter().any(|p| p.ends_with("/ignored.rs")));
     }
 
     #[tokio::test]
-    async fn test_glob_no_longer_hides_dot_git_entries_by_default() {
+    async fn test_glob_excludes_dot_git_even_when_pattern_matches_it() {
         let dir = TempDir::new().unwrap();
         std::process::Command::new("git")
             .args(["init", "-q"])
@@ -399,10 +336,24 @@ mod tests {
         )
         .await;
         assert!(result.is_success());
-        let paths: Vec<String> = items(&result)
-            .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
-            .collect();
-        assert!(paths.iter().any(|p| p.contains("/.git/")));
+        assert!(paths(&result).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_glob_excludes_node_modules_by_default() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
+        std::fs::write(dir.path().join("app.js"), "").unwrap();
+        let result = lash_core::testing::run_tool(
+            &glob_provider(),
+            "glob",
+            &json!({"pattern": "**/*.js", "path": dir.path().to_str().unwrap()}),
+        )
+        .await;
+        assert!(result.is_success());
+        let paths = paths(&result);
+        assert!(paths.iter().any(|p| p.ends_with("/app.js")));
+        assert!(!paths.iter().any(|p| p.contains("node_modules")));
     }
 }

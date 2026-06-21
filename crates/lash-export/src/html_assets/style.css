@@ -396,8 +396,8 @@ body::after {
 .spine-tick[data-spine="user"] { background: var(--sodium); }
 .spine-tick[data-spine="assistant"] { background: var(--chalk-mid); }
 .spine-tick[data-spine="system"] { background: var(--ash-text); }
-.spine-tick[data-spine="rlm"] { background: var(--info); flex-grow: 1.4; }
-.spine-tick[data-spine="rlm"][data-status="err"] { background: var(--error); flex-grow: 2; }
+.spine-tick[data-spine="lashlang"] { background: var(--info); flex-grow: 1.4; }
+.spine-tick[data-spine="lashlang"][data-status="err"] { background: var(--error); flex-grow: 2; }
 .spine-tick.is-current { outline: 1px solid var(--sodium); outline-offset: 1px; transform: scaleX(1.8); }
 .spine-tick.is-hidden { opacity: 0.16; flex-grow: 0.4; }
 
@@ -523,8 +523,8 @@ body::after {
 .entry--user .entry-glyph { color: var(--sodium); }
 .entry--assistant .entry-glyph { color: var(--chalk); }
 .entry--system .entry-glyph { color: var(--ash-text); }
-.entry--rlm .entry-glyph { color: var(--info); }
-.entry--rlm.entry--err .entry-glyph { color: var(--error); }
+.entry--lashlang .entry-glyph { color: var(--info); }
+.entry--lashlang.entry--err .entry-glyph { color: var(--error); }
 
 .entry-body {
   padding-left: 14px;
@@ -572,7 +572,7 @@ summary.entry-head:hover .entry-tag { color: var(--sodium); }
 }
 .entry--user .entry-tag { color: var(--sodium); }
 .entry--assistant .entry-tag { color: var(--chalk-mid); }
-.entry-tag--rlm { color: var(--info) !important; }
+.entry-tag--lashlang { color: var(--info) !important; }
 
 .entry-headline {
   flex: 1 1 auto;

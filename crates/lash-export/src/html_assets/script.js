@@ -421,7 +421,7 @@
         <dt>llm call</dt><dd>one outbound request to the model. Renders the system block and request messages.</dd>
         <dt>tool call</dt><dd>the agent invoked a registered tool. The result is rendered inline.</dd>
         <dt>direct completion</dt><dd>an LLM call issued from inside a tool (e.g. tournament_rerank's batch reranks). Folded under the parent tool call.</dd>
-        <dt>RLM step</dt><dd>one iteration of the recursive language-model mode: model emits a lashlang block, runtime executes it.</dd>
+        <dt>lashlang step</dt><dd>one execution entry from recursive language-model mode: model emits a lashlang block, runtime executes it.</dd>
         <dt>system hash</dt><dd>short fingerprint of the system prompt; identical hashes mean the same system text. Repeats are coalesced.</dd>
       </dl>
       <div class="help-foot">click a chip to filter · click an entry's id (e.g. e23) to copy a permalink</div>

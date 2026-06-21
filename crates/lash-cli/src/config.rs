@@ -236,6 +236,8 @@ fn materialize_test_provider_spec(spec: &ProviderSpec) -> Result<ProviderHandle,
     match scenario {
         "standard-echo" => Ok(standard_echo_provider().into_handle()),
         "rlm-subagent-smoke" => Ok(rlm_subagent_smoke_provider().into_handle()),
+        "rlm-workspace-smoke" => Ok(rlm_workspace_smoke_provider().into_handle()),
+        "rlm-nonzero-exit-smoke" => Ok(rlm_nonzero_exit_smoke_provider().into_handle()),
         other => Err(format!("unknown CLI test provider scenario `{other}`")),
     }
 }
@@ -279,19 +281,76 @@ fn rlm_subagent_smoke_provider() -> lash_core::testing::TestProvider {
         })
         .complete(|request| async move {
             let response = if request_contains_subagent_prompt(&request) {
-                r#"```lashlang
+                r#"<lashlang>
 submit { value: "subagent-ok" }
-```"#
+</lashlang>"#
             } else {
-                r#"```lashlang
+                r#"<lashlang>
 result = await agents.spawn({
   capability: "explore",
   task: "Submit `{ value: \"subagent-ok\" }` exactly.",
   output: Type { value: str }
 })?
 submit result.value
-```"#
+</lashlang>"#
             };
+            Ok(lash_core::LlmResponse {
+                full_text: response.to_string(),
+                parts: vec![lash_core::llm::types::LlmOutputPart::Text {
+                    text: response.to_string(),
+                    response_meta: None,
+                }],
+                ..Default::default()
+            })
+        })
+        .build()
+}
+
+#[cfg(feature = "test-provider")]
+fn rlm_workspace_smoke_provider() -> lash_core::testing::TestProvider {
+    lash_core::testing::TestProvider::builder()
+        .kind("test")
+        .serialize_config(|| {
+            serde_json::json!({
+                "scenario": "rlm-workspace-smoke",
+            })
+        })
+        .complete(|_request| async move {
+            let response = r#"<lashlang>
+pwd = await shell.exec({ cmd: "pwd" })?
+write = await shell.exec({ cmd: "printf '%s\n' workspace-smoke-ok > qc-workspace.txt" })?
+if write.exit_code == 0 {
+  submit format("workspace-smoke-ok cwd={}", trim(pwd.output))
+} else {
+  submit format("workspace-smoke-failed exit={}", write.exit_code)
+}
+</lashlang>"#;
+            Ok(lash_core::LlmResponse {
+                full_text: response.to_string(),
+                parts: vec![lash_core::llm::types::LlmOutputPart::Text {
+                    text: response.to_string(),
+                    response_meta: None,
+                }],
+                ..Default::default()
+            })
+        })
+        .build()
+}
+
+#[cfg(feature = "test-provider")]
+fn rlm_nonzero_exit_smoke_provider() -> lash_core::testing::TestProvider {
+    lash_core::testing::TestProvider::builder()
+        .kind("test")
+        .serialize_config(|| {
+            serde_json::json!({
+                "scenario": "rlm-nonzero-exit-smoke",
+            })
+        })
+        .complete(|_request| async move {
+            let response = r#"<lashlang>
+result = await shell.exec({ cmd: "sh -c 'echo qc-nonzero-stderr >&2; exit 7'" })?
+submit format("nonzero-smoke-ok exit={}", result.exit_code)
+</lashlang>"#;
             Ok(lash_core::LlmResponse {
                 full_text: response.to_string(),
                 parts: vec![lash_core::llm::types::LlmOutputPart::Text {

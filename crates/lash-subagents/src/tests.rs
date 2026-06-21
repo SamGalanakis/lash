@@ -40,6 +40,10 @@ fn prompt_advertises_bound_variable(prompt: &str, name: &str) -> bool {
     prompt.contains(&format!("- `{name}`:")) || prompt.contains(&format!("- `{name}` ="))
 }
 
+fn lashlang_block(code: &str) -> String {
+    format!("<lashlang>\n{code}\n</lashlang>")
+}
+
 #[test]
 fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
     let current = SessionPolicy {
@@ -391,7 +395,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
 #[tokio::test]
 async fn rlm_spawn_seed_is_visible_to_child_executor_and_prompt() {
     let (outcome, prompt) = run_seed_probe(
-        r#"```lashlang
+        r#"<lashlang>
 result = await agents.spawn({
   capability: "default",
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
@@ -399,7 +403,7 @@ result = await agents.spawn({
   output: Type { len: int }
 })?
 submit result
-```"#,
+</lashlang>"#,
         TurnInput::text("spawn a child with a seeded chunk"),
     )
     .await;
@@ -419,7 +423,7 @@ submit result
 #[tokio::test]
 async fn rlm_spawn_record_shorthand_returns_child_submitted_value() {
     let (outcome, _) = run_seed_probe(
-        r#"```lashlang
+        r#"<lashlang>
 @label(title: "Spawn subagent")
 direct = await agents.spawn({
   capability: "default",
@@ -428,7 +432,7 @@ direct = await agents.spawn({
   output: { len: "int" }
 })?
 submit direct
-```"#,
+</lashlang>"#,
         TurnInput::text("spawn a child with record shorthand output"),
     )
     .await;
@@ -444,7 +448,7 @@ submit direct
 #[tokio::test]
 async fn rlm_spawn_process_handle_returns_child_submitted_value() {
     let (outcome, prompt) = run_seed_probe(
-        r#"```lashlang
+        r#"<lashlang>
 process spawn_child(agents: Agents) {
   result = await agents.spawn({
     capability: "default",
@@ -457,7 +461,7 @@ process spawn_child(agents: Agents) {
 handle = start spawn_child(agents: agents)
 result = (await handle)?
 submit result
-```"#,
+</lashlang>"#,
         TurnInput::text("spawn a child with a seeded chunk through start/await"),
     )
     .await;
@@ -477,7 +481,7 @@ submit result
 #[tokio::test]
 async fn rlm_spawn_labeled_inside_process_returns_child_submitted_value() {
     let (outcome, prompt) = run_seed_probe(
-        r#"```lashlang
+        r#"<lashlang>
 process spawn_child() {
   @label(title: "Spawn subagent inside process")
   result = await agents.spawn({
@@ -491,7 +495,7 @@ process spawn_child() {
 handle = start spawn_child()
 result = (await handle)?
 submit result
-```"#,
+</lashlang>"#,
         TurnInput::text("spawn a labeled child inside a Lashlang process"),
     )
     .await;
@@ -511,7 +515,7 @@ submit result
 #[tokio::test]
 async fn rlm_spawn_captured_process_authority_returns_child_submitted_value() {
     let (outcome, prompt) = run_seed_probe(
-        r#"```lashlang
+        r#"<lashlang>
 process spawn_child() {
   result = await agents.spawn({
     capability: "default",
@@ -524,7 +528,7 @@ process spawn_child() {
 handle = start spawn_child()
 result = (await handle)?
 submit result
-```"#,
+</lashlang>"#,
         TurnInput::text("spawn a child with captured agents authority through start/await"),
     )
     .await;
@@ -545,7 +549,7 @@ submit result
 async fn rlm_spawn_links_subagent_process_from_lashlang_graph() {
     let graph_store = Arc::new(TraceLashlangGraphStore::default());
     let (outcome, _) = run_seed_probe_with_graph_store(
-        r#"```lashlang
+        r#"<lashlang>
 result = await agents.spawn({
   capability: "default",
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
@@ -553,7 +557,7 @@ result = await agents.spawn({
   output: Type { len: int }
 })?
 submit result
-```"#,
+</lashlang>"#,
         TurnInput::text("spawn a child and link its graph"),
         Some(Arc::clone(&graph_store)),
     )
@@ -597,14 +601,14 @@ submit result
 #[tokio::test]
 async fn rlm_spawn_defaults_single_capability_when_omitted() {
     let (outcome, prompt) = run_seed_probe(
-        r#"```lashlang
+        r#"<lashlang>
 result = await agents.spawn({
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
   output: Type { len: int }
 })?
 submit result
-```"#,
+</lashlang>"#,
         TurnInput::text("spawn a child with the default capability"),
     )
     .await;
@@ -636,7 +640,7 @@ async fn rlm_spawn_seed_derived_from_projected_binding_is_visible_to_child_promp
             )
             .expect("project input");
     let (outcome, prompt) = run_seed_probe(
-        r#"```lashlang
+        r#"<lashlang>
 ctx = to_string(input.context)
 lines = split(ctx, "\n")
 data = []
@@ -653,7 +657,7 @@ result = await agents.spawn({
   output: Type { len: int }
 })?
 submit result
-```"#,
+</lashlang>"#,
         input,
     )
     .await;
@@ -693,9 +697,9 @@ async fn complete_seed_probe_request(
     if is_child {
         *state.captured_child_prompt.lock().expect("captured prompt") = Some(prompt);
         Ok(LlmResponse {
-            full_text: "```lashlang\nsubmit { len: len(chunk) }\n```".to_string(),
+            full_text: lashlang_block("submit { len: len(chunk) }"),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nsubmit { len: len(chunk) }\n```".to_string(),
+                text: lashlang_block("submit { len: len(chunk) }"),
                 response_meta: None,
             }],
             ..Default::default()

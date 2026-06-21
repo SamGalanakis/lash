@@ -15,6 +15,7 @@ use std::time::Instant;
 use rustc_hash::FxHashMap;
 
 use crate::ast::UnaryOp;
+use crate::lexer::Span;
 use crate::{
     LashlangExecutionChild, LashlangExecutionObservation, LashlangExecutionSite,
     ProcessBranchSelection,
@@ -220,6 +221,7 @@ pub(crate) struct Vm<'a, H> {
     lashlang_execution_occurrences: FxHashMap<String, u64>,
     profile: Option<ProfileAccumulator>,
     validation_plans: FxHashMap<usize, (Arc<Record>, ValidationPlan)>,
+    pending_error_span: Option<Span>,
 }
 
 #[derive(Clone)]
@@ -254,6 +256,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             lashlang_execution_occurrences: FxHashMap::default(),
             profile: None,
             validation_plans: FxHashMap::default(),
+            pending_error_span: None,
         }
     }
 
@@ -276,6 +279,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             lashlang_execution_occurrences: FxHashMap::default(),
             profile: None,
             validation_plans: FxHashMap::default(),
+            pending_error_span: None,
         }
     }
 

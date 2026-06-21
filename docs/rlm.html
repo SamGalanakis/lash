@@ -28,12 +28,12 @@
     <div class="section" id="what-this-is">
       <div class="section-header">
         <h2>What This Is</h2>
-        <p>RLM is a core execution mode. You still open normal <code>LashSession</code> handles and run normal turns; the protocol changes the model action from provider-native tool calls to one fenced <code>lashlang</code> program per iteration.</p>
+        <p>RLM is a core execution mode. You still open normal <code>LashSession</code> handles and run normal turns; the protocol changes the model action from provider-native tool calls to one paired <code>&lt;lashlang&gt;</code> block per iteration.</p>
       </div>
       <div class="listing">
         <div class="listing__row">
           <div class="listing__label">program action</div>
-          <div class="listing__body"><p>The model writes one closed <code>```lashlang</code> block. Lash executes it in the active AgentFrame VM and records reasoning, code, <code>print</code> output, diagnostics, images, and terminal values.</p></div>
+          <div class="listing__body"><p>The model writes optional prose, then a <code>&lt;lashlang&gt;</code> block closed by <code>&lt;/lashlang&gt;</code>. Lash executes only the source inside that block in the active AgentFrame VM and records reasoning, code, <code>print</code> output, diagnostics, images, and terminal values.</p></div>
         </div>
         <div class="listing__row">
           <div class="listing__label">host boundary</div>

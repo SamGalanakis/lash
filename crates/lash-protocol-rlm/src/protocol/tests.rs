@@ -1,4 +1,4 @@
-use super::fence::extract_first_lashlang_fence;
+use super::cell::extract_lashlang_cell;
 use super::*;
 
 #[test]
@@ -87,6 +87,24 @@ fn execution_section_hides_processes_when_disabled() {
     assert!(!section.contains("sleep for"));
     assert!(!section.contains("wait_signal"));
     assert!(!section.contains("signal_run"));
+}
+
+#[test]
+fn execution_section_makes_paired_lashlang_tag_contract_explicit() {
+    let section = rlm_execution_section_for_host_environment(
+        RlmPromptFeatures::default(),
+        &full_prompt_host_environment(),
+    );
+
+    assert!(section.contains(
+        "Your response must be visible prose optionally followed by exactly one Lashlang block"
+    ));
+    assert!(section.contains("start tag line must trim to exactly `<lashlang>`"));
+    assert!(section.contains("closing tag line must trim to exactly `</lashlang>`"));
+    assert!(section.contains("skip prose by starting with `<lashlang>`"));
+    assert!(section.contains("skip Lashlang by omitting the block, but not both"));
+    assert!(section.contains("NEVER have multiple `<lashlang>` blocks in one response"));
+    assert!(section.contains("generation stops as soon as `</lashlang>` is emitted"));
 }
 
 #[test]
@@ -345,85 +363,74 @@ fn execution_section_mentions_while_and_bounded_loop_guidance() {
 }
 
 #[test]
-fn fence_detector_accepts_inline_opener_after_prose() {
-    // Regression: reasoning models emit the opening fence mid-line:
-    // `…required output shape.```lashlang\n…`. Requiring newline
-    // before ``` caused the detector to miss the block entirely,
-    // which made the RLM turn terminate after one protocol_iteration
-    // without executing anything.
-    let text = "I'll inspect the prompt.```lashlang\nprint slice(input.prompt, 0, 10)\n```";
-    let extraction = extract_first_lashlang_fence(text)
-        .expect("inline opener with newline-terminated closer should parse");
-    assert_eq!(extraction.code, "print slice(input.prompt, 0, 10)");
-    assert!(contains_closed_lashlang_fence(text));
+fn cell_extraction_returns_none_for_prose_only() {
+    assert!(extract_lashlang_cell("plain prose").is_none());
+    assert_eq!(
+        project_visible_assistant_prose("plain prose"),
+        "plain prose"
+    );
+    assert!(!contains_lashlang_cell("plain prose"));
 }
 
 #[test]
-fn fence_detector_still_accepts_newline_preceded_opener() {
-    let text = "prose\n\n```lashlang\nsubmit 1\n```";
-    let extraction = extract_first_lashlang_fence(text).expect("should parse");
+fn cell_extraction_requires_complete_paired_block() {
+    for text in [
+        "<lashlang>",
+        "<lashlang>\nsubmit 1",
+        "</lashlang>\nsubmit 1",
+        "%%lashlang\nsubmit 1",
+    ] {
+        assert!(
+            extract_lashlang_cell(text).is_none(),
+            "incomplete or retired form should not parse: {text:?}"
+        );
+        assert!(!contains_lashlang_cell(text));
+    }
+}
+
+#[test]
+fn cell_extraction_uses_prose_before_start_tag_and_code_before_end_tag() {
+    let text = "Before\n\n<lashlang>\nprint 1\nsubmit 2\n</lashlang>\nignored";
+    let extraction = extract_lashlang_cell(text).expect("should extract");
+    assert_eq!(extraction.prose, "Before");
+    assert_eq!(extraction.code, "print 1\nsubmit 2");
+    assert_eq!(project_visible_assistant_prose(text), "Before");
+}
+
+#[test]
+fn cell_extraction_accepts_indented_tag_lines() {
+    let text = "Before\n  <lashlang>  \nsubmit 1\n  </lashlang>  \nignored";
+    let extraction = extract_lashlang_cell(text).expect("should extract");
+    assert_eq!(extraction.prose, "Before");
     assert_eq!(extraction.code, "submit 1");
 }
 
 #[test]
-fn fence_detector_closer_matches_anywhere() {
-    // `\`\`\`` closes the block wherever it appears. Simpler mental
-    // model: `\`\`\`lashlang` starts, `\`\`\`` stops. No newline
-    // requirement on either side.
-    let text = "```lashlang\nsubmit 1``` more prose";
-    let extraction = extract_first_lashlang_fence(text).expect("should extract");
+fn inline_tag_text_is_plain_prose() {
+    let text = "Use <lashlang> in documentation.";
+    assert!(extract_lashlang_cell(text).is_none());
+    assert_eq!(project_visible_assistant_prose(text), text);
+}
+
+#[test]
+fn markdown_code_blocks_before_tags_remain_visible_prose() {
+    let text = "Example:\n```python\nprint('x')\n```\n<lashlang>\nsubmit 1\n</lashlang>";
+    let extraction = extract_lashlang_cell(text).expect("should extract paired block");
     assert_eq!(extraction.code, "submit 1");
+    assert_eq!(extraction.prose, "Example:\n```python\nprint('x')\n```");
+    assert_eq!(
+        project_visible_assistant_prose(text),
+        "Example:\n```python\nprint('x')\n```"
+    );
 }
 
 #[test]
-fn fence_detector_recovers_from_double_triple_concatenation() {
-    // Reasoning-mode output sometimes emits ``` ``` back-to-back
-    // (closer of one block immediately followed by opener of the
-    // next with no prose between). The detector should still find
-    // the first valid block.
-    let text = "lead-in.```lashlang\nprint 1\n``````lashlang\nprint 2\n```";
-    let extraction = extract_first_lashlang_fence(text)
-        .expect("should extract the first block even with glued-on second block");
-    assert_eq!(extraction.code, "print 1");
-    assert!(extraction.had_extra_fences);
-}
-
-#[test]
-fn fence_detector_ignores_unknown_lang_tag() {
-    // `python` is not lashlang — the detector must look further.
-    let text = "```python\nprint('x')\n```\n\n```lashlang\nsubmit 1\n```";
-    let extraction = extract_first_lashlang_fence(text).expect("should skip python block");
-    assert_eq!(extraction.code, "submit 1");
-}
-
-#[test]
-fn fence_detector_four_backticks_allows_embedded_triple() {
-    // Variable-length fences: opener of 4 backticks lets the body
-    // contain literal ``` (which would otherwise terminate a 3-bt
-    // block). Closer must be ≥4 backticks.
-    let text = "````lashlang\nprint \"```\"\nsubmit 1\n````";
-    let extraction = extract_first_lashlang_fence(text)
-        .expect("4-backtick fence should allow embedded triple-backticks");
-    assert_eq!(extraction.code, "print \"```\"\nsubmit 1");
-    assert!(contains_closed_lashlang_fence(text));
-}
-
-#[test]
-fn fence_detector_four_backtick_opener_accepts_longer_closer() {
-    // CommonMark allows the closer to be longer than the opener.
-    // 4-backtick opener closed by 5-backtick closer.
-    let text = "````lashlang\nsubmit 1\n`````";
-    let extraction =
-        extract_first_lashlang_fence(text).expect("4-bt opener should accept 5-bt closer");
-    assert_eq!(extraction.code, "submit 1");
-}
-
-#[test]
-fn fence_detector_four_backtick_opener_ignores_inner_triple() {
-    // Inner ``` runs (length 3 < opener 4) are NOT closers — body
-    // continues until a run of ≥4 backticks (or EOF).
-    let text = "````lashlang\nbody with ``` inside\nmore body\n````\ntail";
-    let extraction = extract_first_lashlang_fence(text)
-        .expect("4-bt opener should not be closed by inner triple");
-    assert_eq!(extraction.code, "body with ``` inside\nmore body");
+fn markdown_code_blocks_inside_tags_are_lashlang_source() {
+    let text =
+        "<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload\n</lashlang>";
+    let extraction = extract_lashlang_cell(text).expect("should extract");
+    assert_eq!(
+        extraction.code,
+        "payload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload"
+    );
 }

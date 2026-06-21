@@ -51,6 +51,33 @@ fn lashlang_execution_paths(program: &Program) -> FxHashMap<usize, LashlangAstPa
     paths
 }
 
+fn expression_source_spans(program: &Program) -> FxHashMap<usize, Span> {
+    let spans_by_path = program
+        .expression_source_spans
+        .iter()
+        .map(|source_span| (source_span.path.clone(), source_span.span))
+        .collect::<FxHashMap<_, _>>();
+    let mut spans = FxHashMap::default();
+    collect_expression_source_spans(&program.main, Vec::new(), &spans_by_path, &mut spans);
+    spans
+}
+
+fn collect_expression_source_spans(
+    expr: &Expr,
+    path: Vec<u32>,
+    spans_by_path: &FxHashMap<Vec<u32>, Span>,
+    spans: &mut FxHashMap<usize, Span>,
+) {
+    if let Some(span) = spans_by_path.get(&path).copied() {
+        spans.insert(expr_key(expr), span);
+    }
+    for (index, child) in expr.children().enumerate() {
+        let mut child_path = path.clone();
+        child_path.push(index as u32);
+        collect_expression_source_spans(child, child_path, spans_by_path, spans);
+    }
+}
+
 fn collect_lashlang_execution_paths(
     expr: &Expr,
     path: LashlangAstPath,

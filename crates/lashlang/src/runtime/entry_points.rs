@@ -65,6 +65,7 @@ pub fn compile_process(
         main: process.body.clone(),
         declaration_spans: program.declaration_spans.clone(),
         expression_spans: Vec::new(),
+        expression_source_spans: Vec::new(),
     };
     Ok(compile_program_internal(&process_program))
 }
@@ -84,6 +85,7 @@ pub fn compile_linked_process(
         main: process.body.clone(),
         declaration_spans: linked_program.declaration_spans.clone(),
         expression_spans: Vec::new(),
+        expression_source_spans: Vec::new(),
     };
     let process_ref = linked
         .artifact
@@ -135,6 +137,7 @@ pub fn compile_module_artifact_process(
         main: process.body.clone(),
         declaration_spans: artifact.canonical_ir.declaration_spans.clone(),
         expression_spans: Vec::new(),
+        expression_source_spans: Vec::new(),
     };
     let (chunk, compile_stats) = Compiler::compile_linked_process_program(
         &process_program,

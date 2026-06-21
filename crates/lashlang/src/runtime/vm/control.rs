@@ -6,6 +6,7 @@ use super::super::{
 };
 use super::Vm;
 use super::effects::VmEffect;
+use crate::lexer::Span;
 
 pub(super) enum VmStep {
     Continue,
@@ -37,6 +38,7 @@ pub(super) enum VmOutcome {
 struct VmTrap {
     error: RuntimeError,
     instruction_ip: usize,
+    span: Option<Span>,
 }
 
 impl<H: ExecutionHost> Vm<'_, H> {
@@ -116,7 +118,9 @@ impl<H: ExecutionHost> Vm<'_, H> {
     async fn run_raw_traced(&mut self) -> Result<VmOutcome, RuntimeFailure> {
         let result = self.run_loop().await.map_err(|trap| RuntimeFailure {
             error: trap.error,
-            span: self.chunk.spans.get(trap.instruction_ip).copied().flatten(),
+            span: trap
+                .span
+                .or_else(|| self.chunk.spans.get(trap.instruction_ip).copied().flatten()),
         });
         self.unwind_iterators();
         result
@@ -148,9 +152,11 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => {}
                 Err(error) => {
+                    let span = self.pending_error_span.take();
                     return Err(VmTrap {
                         error,
                         instruction_ip,
+                        span,
                     });
                 }
             }

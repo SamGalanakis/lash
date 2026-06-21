@@ -99,11 +99,11 @@ let input = TurnInput::text("Play one move.").rlm_project(
 )?;
 
 let result = session.turn(input).run().await?;</code></pre>
-          <p>The model reads these names directly in fenced lashlang:</p>
-          <pre data-lang="lashlang"><code>```lashlang
+          <p>The model reads these names directly inside a paired <code>&lt;lashlang&gt;</code> block:</p>
+          <pre data-lang="lashlang"><code>&lt;lashlang&gt;
 let move_idx = best_move(board.cells, board.turn)
 submit({ "move": move_idx, "tenant": tenant_id })
-```</code></pre>
+&lt;/lashlang&gt;</code></pre>
           <p>Three bind methods, in order of growing power:</p>
           <ul class="bullets">
             <li><code>.bind_json(name, value)</code>: common case. Any <code>serde_json::Value</code>; re-typed on entry.</li>

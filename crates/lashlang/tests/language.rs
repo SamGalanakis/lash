@@ -447,10 +447,10 @@ async fn numeric_helper_errors_are_rejected() {
 #[tokio::test(flavor = "current_thread")]
 async fn parser_accepts_trailing_semicolon_after_raw_string() {
     let program = parse(
-        r##"
-        msg = r#"hello"#;
+        r#"
+        msg = r"hello";
         submit msg
-        "##,
+        "#,
     )
     .expect("program should parse");
 
@@ -486,19 +486,105 @@ second"""
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rust_style_raw_strings_preserve_patch_text() {
+async fn single_quoted_strings_are_expression_values() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            submit 'it\'s ready\n'
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("program should run"),
+    );
+
+    assert_eq!(value, Value::String("it's ready\n".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn triple_single_strings_are_expression_values() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            submit '''first\n'second'
+third'''
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("program should run"),
+    );
+
+    assert_eq!(value, Value::String("first\n'second'\nthird".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn raw_single_and_double_strings_preserve_backslashes() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            submit [r"path\to\file", R'\n stays raw']
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("program should run"),
+    );
+
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::String("path\\to\\file".into()),
+                Value::String("\\n stays raw".into())
+            ]
+            .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strings_preserve_utf8_content() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            submit "Grüße 東京"
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("program should run"),
+    );
+
+    assert_eq!(value, Value::String("Grüße 東京".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn raw_triple_strings_preserve_patch_text() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
         execute(
             r####"
-            patch = r#"*** Begin Patch
+            patch = r"""*** Begin Patch
 *** Update File: src/lib.rs
 @@
 -old
 +new
 \n { braces stay raw }
-*** End Patch"#
+*** End Patch"""
             submit patch
             "####,
             &mut state,
@@ -518,16 +604,16 @@ async fn rust_style_raw_strings_preserve_patch_text() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rust_style_raw_strings_preserve_script_text() {
+async fn raw_triple_strings_preserve_script_text() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
         execute(
             r#####"
-            script = r##"python3 - <<'PY'
+            script = r'''python3 - <<'PY'
 print("""hello""")
 \n { braces stay raw }
-PY"##
+PY'''
             submit script
             "#####,
             &mut state,
@@ -542,6 +628,15 @@ PY"##
         Value::String(
             "python3 - <<'PY'\nprint(\"\"\"hello\"\"\")\n\\n { braces stay raw }\nPY".into()
         )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rust_style_raw_strings_are_not_valid_lashlang_strings() {
+    let err = runtime_error(r####"submit r#"hello"#"####).await;
+    assert!(
+        format!("{err}").contains("unknown name `r`"),
+        "old raw syntax should not lex as a string, got {err}"
     );
 }
 
@@ -1492,6 +1587,72 @@ async fn format_supports_escaped_braces() {
     );
 
     assert_eq!(value, Value::String("{1}".to_string().into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn format_accepts_multiline_markdown_string_templates() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r####"
+        submit format("""## Installed {0}
+
+`{1}` is installed and available.
+
+Tail:
+{2}""", "cargo-machete", "cargo machete", "ok")
+        "####,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(
+        value,
+        Value::String(
+            "## Installed cargo-machete\n\n`cargo machete` is installed and available.\n\nTail:\nok"
+                .to_string()
+                .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn format_accepts_raw_markdown_templates_with_literal_braces() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r####"
+        submit format(r"""## {0}
+
+```json
+{{"status":"{1}","ok":true}}
+```
+
+Output:
+{2}""", "cargo-machete", "installed", "ready")
+        "####,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(
+        value,
+        Value::String(
+            "## cargo-machete\n\n```json\n{\"status\":\"installed\",\"ok\":true}\n```\n\nOutput:\nready"
+                .to_string()
+                .into()
+        )
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

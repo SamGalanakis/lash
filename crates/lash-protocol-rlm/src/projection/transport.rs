@@ -3,8 +3,8 @@ use std::sync::Arc;
 use lash_core::{SessionAppendNode, ToolArgumentProjectionPolicy};
 use lash_rlm_types::{PROJECTED_JSON_TAG, PROJECTION_REF_JSON_TAG};
 use lashlang::{
-    ImageValue, ProjectedFuture, ProjectedValue, Record as FlowRecord, State as FlowState,
-    Value as FlowValue,
+    BudgetedJsonProjector, ImageValue, ProjectedFuture, ProjectedValue, Record as FlowRecord,
+    State as FlowState, Value as FlowValue, ValueProjectionContext, ValueProjector,
 };
 use serde_json::Value;
 
@@ -324,18 +324,9 @@ fn optional_json_u32(value: &Value) -> Option<Option<u32>> {
 }
 
 pub(crate) async fn format_output_value(value: &FlowValue) -> String {
-    match value {
-        FlowValue::Null => "null".to_string(),
-        FlowValue::String(text) => text.to_string(),
-        FlowValue::Bool(value) => value.to_string(),
-        FlowValue::Number(value) => value.to_string(),
-        FlowValue::Image(_)
-        | FlowValue::Resource(_)
-        | FlowValue::List(_)
-        | FlowValue::Record(_)
-        | FlowValue::Projected(_) => serde_json::to_string(&flow_to_json_value(value).await)
-            .unwrap_or_else(|_| value.to_string()),
-    }
+    BudgetedJsonProjector::unbounded()
+        .project(ValueProjectionContext::new(value))
+        .await
 }
 
 pub(crate) fn projection_ref_from_seed_value(

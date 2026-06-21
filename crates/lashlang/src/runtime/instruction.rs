@@ -88,6 +88,7 @@ pub(crate) struct CompiledResourceOperationBatchLeaf {
     pub(crate) receiver_stack_index: usize,
     pub(crate) unwrap: bool,
     pub(crate) site: Option<LashlangExecutionSite>,
+    pub(crate) source_span: Option<Span>,
 }
 
 #[derive(Clone)]

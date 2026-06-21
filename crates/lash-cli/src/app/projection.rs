@@ -1,5 +1,6 @@
 use super::*;
-use crate::assistant_text::{merge_assistant_reasoning_text, normalize_assistant_text};
+use crate::assistant_text::normalize_assistant_text;
+use crate::skill_prompt::strip_appended_skill_blocks;
 use lash_export::transcript::{
     TranscriptEntryKind, projection_transcript_entries, submitted_value_display_text,
 };
@@ -109,11 +110,61 @@ pub(crate) enum UiTimelineItem {
     /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
     PluginPanel(PluginPanelBlock),
-    /// The fenced `lashlang` source from an RLM turn, captured so the
+    /// The source from a paired `<lashlang>` RLM block, captured so the
     /// transcript can reveal the code that produced the subsequent tool
     /// activities. Hidden by default; shown at full expansion.
     LashlangCode(String),
     Splash,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiActivityJournal {
+    #[serde(default)]
+    entries: Vec<UiActivityJournalEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UiActivityJournalEntry {
+    pub turn_ordinal: usize,
+    pub lashlang_block_ordinal: usize,
+    pub items: Vec<UiTimelineItem>,
+}
+
+impl UiActivityJournal {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn entries(&self) -> &[UiActivityJournalEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn record_lashlang_activity(
+        &mut self,
+        turn_ordinal: usize,
+        lashlang_block_ordinal: usize,
+        activity: ActivityBlock,
+    ) {
+        let entry = match self.entries.iter_mut().find(|entry| {
+            entry.turn_ordinal == turn_ordinal
+                && entry.lashlang_block_ordinal == lashlang_block_ordinal
+        }) {
+            Some(entry) => entry,
+            None => {
+                self.entries.push(UiActivityJournalEntry {
+                    turn_ordinal,
+                    lashlang_block_ordinal,
+                    items: Vec::new(),
+                });
+                self.entries
+                    .last_mut()
+                    .expect("entry was just pushed into journal")
+            }
+        };
+        let mut timeline = UiTimeline::from(std::mem::take(&mut entry.items));
+        ActivityState::append_projected_activity_to_timeline(&mut timeline, activity);
+        entry.items = timeline.items;
+    }
 }
 
 pub(crate) fn timeline_from_read_view(
@@ -122,6 +173,7 @@ pub(crate) fn timeline_from_read_view(
 ) -> UiTimeline {
     let projection = read_view.chronological_projection();
     let mut timeline = timeline_from_chronological(&projection);
+    apply_activity_journal(&mut timeline, &ui_state.activity_journal);
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
         ui_state
@@ -131,6 +183,63 @@ pub(crate) fn timeline_from_read_view(
             .map(UiTimelineItem::PluginPanel),
     );
     timeline
+}
+
+fn apply_activity_journal(timeline: &mut UiTimeline, journal: &UiActivityJournal) {
+    if journal.is_empty() {
+        return;
+    }
+    let mut insertions = journal
+        .entries()
+        .iter()
+        .filter(|entry| !entry.items.is_empty())
+        .filter_map(|entry| {
+            activity_journal_insert_position(timeline.items(), entry)
+                .map(|position| (position, entry.items.clone()))
+        })
+        .collect::<Vec<_>>();
+    insertions.sort_by_key(|(position, _)| *position);
+    let mut offset = 0usize;
+    for (position, items) in insertions {
+        let position = position + offset;
+        let item_count = items.len();
+        timeline.items.splice(position..position, items);
+        offset += item_count;
+    }
+}
+
+fn activity_journal_insert_position(
+    items: &[UiTimelineItem],
+    entry: &UiActivityJournalEntry,
+) -> Option<usize> {
+    let turn_starts = user_turn_start_indices(items);
+    let (turn_start, turn_end) = if turn_starts.is_empty() {
+        if entry.turn_ordinal == 0 {
+            (0, items.len())
+        } else {
+            return None;
+        }
+    } else {
+        let turn_start = *turn_starts.get(entry.turn_ordinal)?;
+        let turn_end = turn_starts
+            .get(entry.turn_ordinal + 1)
+            .copied()
+            .unwrap_or(items.len());
+        (turn_start, turn_end)
+    };
+
+    let mut seen_lashlang_blocks = 0usize;
+    for (idx, item) in items[turn_start..turn_end].iter().enumerate() {
+        if !matches!(item, UiTimelineItem::LashlangCode(_)) {
+            continue;
+        }
+        if seen_lashlang_blocks == entry.lashlang_block_ordinal {
+            return Some(turn_start + idx + 1);
+        }
+        seen_lashlang_blocks += 1;
+    }
+
+    Some(turn_end)
 }
 
 #[cfg(test)]
@@ -160,8 +269,14 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                     false,
                 );
             }
-            TranscriptEntryKind::RlmStep(step) => {
-                append_rlm_step_items(&mut timeline, &step);
+            TranscriptEntryKind::AssistantReasoning(text) => {
+                let _ = push_assistant_reasoning_item(&mut timeline, &text);
+            }
+            TranscriptEntryKind::AssistantText(text) => {
+                let _ = push_assistant_text_item(&mut timeline, &text);
+            }
+            TranscriptEntryKind::LashlangStep(step) => {
+                append_lashlang_step_items(&mut timeline, &step);
             }
         }
     }
@@ -169,13 +284,10 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
     timeline
 }
 
-fn append_rlm_step_items(
+fn append_lashlang_step_items(
     timeline: &mut UiTimeline,
-    step: &lash_export::transcript::RlmTranscriptStep,
+    step: &lash_export::transcript::LashlangTranscriptStep,
 ) {
-    if let Some(reasoning) = step.reasoning.as_deref() {
-        let _ = push_assistant_reasoning_item(timeline, reasoning);
-    }
     timeline.push(UiTimelineItem::LashlangCode(step.code.clone()));
     // Mirror the live path (`CodeBlockCompleted`): a failed block keeps its
     // code on screen with the error rendered after it, so scrollback shows the
@@ -559,22 +671,24 @@ fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool 
     if cleaned.is_empty() {
         return false;
     }
-    if let Some(UiTimelineItem::AssistantReasoning(existing)) = timeline.last_mut() {
-        return merge_assistant_reasoning_text(existing, &cleaned);
-    }
     timeline.push(UiTimelineItem::AssistantReasoning(cleaned));
     true
 }
 
 pub(crate) fn rendered_message_text(message: &Message) -> String {
-    message
+    let text = message
         .parts
         .iter()
         .filter_map(|part| rendered_part_text(&part.kind, &part.content))
         .collect::<Vec<_>>()
         .join("\n\n")
         .trim()
-        .to_string()
+        .to_string();
+    if matches!(message.role, MessageRole::User) {
+        strip_appended_skill_blocks(&text)
+    } else {
+        text
+    }
 }
 
 fn rendered_part_text(kind: &PartKind, content: &str) -> Option<String> {

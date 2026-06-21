@@ -383,7 +383,10 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
     assert!(matches!(blocks.first(), Some(UiTimelineItem::TurnStart(_))));
     assert!(matches!(
         blocks.get(1),
-        Some(UiTimelineItem::UserInput(text)) if text.contains("Use /wholehog")
+        Some(UiTimelineItem::UserInput(text))
+            if text == "Use /wholehog"
+                && !text.contains("<skill>")
+                && !text.contains("</skill>")
     ));
 }
 
@@ -1118,6 +1121,111 @@ fn lashlang_code_block_is_hidden_below_full_expand() {
             "expected no output at expand_level {level}, got {rendered:?}",
         );
     }
+}
+
+#[test]
+fn error_block_is_bounded_until_full_expand() {
+    let message = (0..32)
+        .map(|idx| format!("error line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let blocks = vec![UiTimelineItem::Error(message)];
+
+    let collapsed = render_block(&blocks, 0, 1, 96, 40)
+        .into_iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let full = render_block(&blocks, 0, 2, 96, 80)
+        .into_iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("16 lines hidden"))
+    );
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("press Alt+O for full error"))
+    );
+    assert!(
+        collapsed.len() < full.len(),
+        "collapsed error should render fewer rows"
+    );
+    assert!(
+        !full
+            .iter()
+            .any(|line| line.contains("press Alt+O for full error"))
+    );
+    assert!(full.iter().any(|line| line.contains("error line 15")));
+}
+
+#[test]
+fn error_block_truncates_large_utf8_lines_safely() {
+    let message = format!("prefix {} suffix", "å".repeat(400));
+    let blocks = vec![UiTimelineItem::Error(message)];
+
+    let collapsed = render_block(&blocks, 0, 1, 120, 40)
+        .into_iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert!(collapsed.iter().any(|line| line.contains("chars hidden")));
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("press Alt+O for full error"))
+    );
+    assert!(collapsed.iter().any(|line| line.contains("prefix")));
+    assert!(collapsed.iter().any(|line| line.contains("suffix")));
+}
+
+#[test]
+fn shell_output_error_is_bounded_until_full_expand() {
+    let stderr = (0..32)
+        .map(|idx| format!("stderr line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let blocks = vec![UiTimelineItem::ShellOutput {
+        command: "demo".into(),
+        output: String::new(),
+        error: Some(stderr),
+    }];
+
+    let collapsed = render_block(&blocks, 0, 1, 96, 40)
+        .into_iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let full = render_block(&blocks, 0, 2, 96, 80)
+        .into_iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("16 lines hidden"))
+    );
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("press Alt+O for full error"))
+    );
+    assert!(
+        !full
+            .iter()
+            .any(|line| line.contains("press Alt+O for full error"))
+    );
+    assert!(full.iter().any(|line| line.contains("stderr line 15")));
+}
+
+fn line_to_plain_text(line: Line<'static>) -> String {
+    line.spans
+        .into_iter()
+        .map(|span| span.content.into_owned())
+        .collect::<String>()
 }
 
 // ── Expansion-level mapping (see docs/design-language.html) ──────────

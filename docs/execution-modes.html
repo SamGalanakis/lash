@@ -87,7 +87,7 @@ let session = core.session("chat-1").open().await?;</code></pre>
       <div class="listing">
         <div class="listing__row">
           <div class="listing__label">model action</div>
-          <div class="listing__body"><p>One closed <code>```lashlang</code> block per iteration, executed in the active AgentFrame VM. Lash records reasoning, code, <code>print</code> output, diagnostics, images, and terminal values.</p></div>
+          <div class="listing__body"><p>One paired <code>&lt;lashlang&gt;</code> block per iteration, executed in the active AgentFrame VM. Only source before the closing <code>&lt;/lashlang&gt;</code> tag executes; streaming stops when the tag is emitted. Lash records reasoning, code, <code>print</code> output, diagnostics, images, and terminal values.</p></div>
         </div>
         <div class="listing__row">
           <div class="listing__label">host boundary</div>

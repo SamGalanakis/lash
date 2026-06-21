@@ -21,6 +21,7 @@ mod host;
 mod instruction;
 mod json;
 mod ops;
+mod projector;
 mod record;
 mod schema;
 mod state;
@@ -46,6 +47,9 @@ pub use host::{
 #[allow(unused_imports)]
 pub(crate) use instruction::*;
 pub use json::from_json;
+pub use projector::{
+    BudgetedJsonProjectionConfig, BudgetedJsonProjector, ValueProjectionContext, ValueProjector,
+};
 pub use record::Record;
 #[allow(unused_imports)]
 pub(crate) use record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};

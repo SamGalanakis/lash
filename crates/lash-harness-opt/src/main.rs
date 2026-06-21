@@ -610,7 +610,7 @@ Rules:
 - Prefer small, testable changes over broad rewrites.
 - Do not claim benchmark improvements that are not present in the evidence.
 
-Return only by calling `submit <object>` from a fenced `lashlang` block. The submitted object must match the required output schema."#
+Return only by calling `submit <object>` from a single paired `<lashlang>` block closed with `</lashlang>`. The submitted object must match the required output schema."#
 }
 
 fn resolve_provider(provider_id: Option<&str>) -> Result<lash_core::ProviderHandle> {

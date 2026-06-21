@@ -480,8 +480,8 @@ impl StaticToolExecute for StandardShell {
 
 impl StandardShell {
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `shell.start` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.";
-        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY as a durable background process. The result is a process handle with `__handle__: \"process\"`, `id`, `process_id`, `status: \"running\"`, `done: false`, and `running: true`; use `processes.list` to see it and `processes.cancel` to stop it. Nonzero exit codes fail the eventual process output by default; pass `allow_nonzero_exit: true` only when nonzero is expected data. Use `shell.exec` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
+        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. The command is executed exactly as written by the selected shell; the tool does not add strict-mode prefixes or rewrite pipelines. Completed commands always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`; nonzero exit codes are returned as ordinary result data, so inspect `exit_code` yourself. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default timeout still fails the tool. Use `shell.start` instead for interactive, TTY-dependent, or intentionally long-lived processes. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream; prefer that over shell-level `head`/`tail` truncation when you need to inspect more.";
+        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY as a durable background process. The command is executed exactly as written by the selected shell. The result is a process handle with `__handle__: \"process\"`, `id`, `process_id`, `status: \"running\"`, `done: false`, and `running: true`; use `processes.list` to see it and `processes.cancel` to stop it. When the process exits, nonzero exit codes are returned as ordinary result data with `exit_code`; inspect it yourself. Use `shell.exec` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
         let command_common = |command_description: &str| {
             json!({
                 "cmd": {
@@ -504,7 +504,7 @@ impl StandardShell {
                 "allow_nonzero_exit": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Shell-only flag. When true, nonzero exit codes are returned as successful tool results instead of failed tool calls; inspect `exit_code` yourself. Defaults to false."
+                    "description": "Legacy shell-only flag. Nonzero exit codes are always returned as result data; this flag only makes timed-out commands return a successful tool result so you can inspect `timed_out`. Defaults to false."
                 },
                 "max_output_tokens": {
                     "type": "integer",
@@ -532,7 +532,8 @@ impl StandardShell {
             )
             .with_examples(vec![
                 r#"await shell.exec({ cmd: "cargo test -p lash-protocol-rlm", timeout_ms: 600000 })?"#.into(),
-                r#"await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?"#.into(),
+                r#"probe = await shell.exec({ cmd: "test -f Cargo.lock" })?
+submit probe.exit_code == 0"#.into(),
             ])
             .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["shell"],

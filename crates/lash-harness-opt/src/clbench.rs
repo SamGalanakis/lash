@@ -22,14 +22,14 @@ At the start of each turn:
 
 Before every `submit`, append exactly one diary record and submit a value matching the **Required output** shape:
 
-```lashlang
+<lashlang>
 diary = push(diary, {
   history_index: len(history) - 1,
   summary: "brief task/action summary",
   learnings: "reusable lesson from this interaction"
 })
 submit answer
-```
+</lashlang>
 
 `answer` must match the **Required output** block exactly — the shape varies per task and per step, so build the value to fit the announced contract rather than assuming a fixed wrapper. Keep diary entries short, factual, and reusable; do not duplicate old lessons; incorporate feedback and revise strategy in later entries."#;
 

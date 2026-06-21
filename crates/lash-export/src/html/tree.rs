@@ -1,14 +1,19 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use lash_core::ChronologicalPayload;
+
 use crate::LoadedSession;
 use crate::transcript::{
-    TranscriptEntryKind, project_chronological_entry, suppressed_rlm_final_output_message_ids,
+    TranscriptEntryKind, project_chronological_entries, suppressed_rlm_final_output_message_ids,
 };
 use crate::tree::{LoadedSessionNode, LoadedSessionTree, NodeRelation};
 
 use super::assets::{CSS, JS};
-use super::entries::{render_message, render_rlm_step};
+use super::entries::{
+    render_assistant_reasoning_entry, render_assistant_text_entry, render_lashlang_step,
+    render_message,
+};
 use super::escaping::{escape, escape_attr, js_escape};
 use super::prompt::{
     PromptAnchor, compute_prompt_insertions, render_system_prompt, write_usage_chart_bar,
@@ -373,17 +378,26 @@ fn render_node_entries(
                 prompt_idx,
             );
         }
-        match project_chronological_entry(entry).map(|entry| entry.kind) {
-            Some(TranscriptEntryKind::Message(message)) => {
-                if message.is_transient() || suppressed_message_ids.contains(&message.id) {
-                    continue;
+        if let ChronologicalPayload::Message(message) = &entry.payload
+            && (message.is_transient() || suppressed_message_ids.contains(&message.id))
+        {
+            continue;
+        }
+        for transcript_entry in project_chronological_entries(entry) {
+            match transcript_entry.kind {
+                TranscriptEntryKind::Message(message) => {
+                    render_message(out, spine, ctx, message);
                 }
-                render_message(out, spine, ctx, message);
+                TranscriptEntryKind::AssistantReasoning(text) => {
+                    render_assistant_reasoning_entry(out, spine, ctx, &text);
+                }
+                TranscriptEntryKind::AssistantText(text) => {
+                    render_assistant_text_entry(out, spine, ctx, &text);
+                }
+                TranscriptEntryKind::LashlangStep(step) => {
+                    render_lashlang_step(out, spine, ctx, &step);
+                }
             }
-            Some(TranscriptEntryKind::RlmStep(step)) => {
-                render_rlm_step(out, spine, ctx, &step);
-            }
-            None => {}
         }
     }
 

@@ -12,7 +12,8 @@ use lash_core::{SessionSnapshot, TokenUsage};
 use lash_sqlite_store::Store;
 
 use crate::app::{
-    LiveToolOutput, PreparedTurn, UiTimeline, UiTimelineItem, timeline_from_read_view,
+    LiveToolOutput, PreparedTurn, UiActivityJournal, UiTimeline, UiTimelineItem,
+    timeline_from_read_view,
 };
 
 #[derive(Clone, Debug)]
@@ -39,6 +40,7 @@ pub struct LoadedSession {
     pub last_token_usage: TokenUsage,
     pub plugin_mode_indicators: BTreeMap<String, String>,
     pub live_tool_output: LiveToolOutput,
+    pub(crate) ui_activity_journal: UiActivityJournal,
 }
 
 pub struct SessionLogger {
@@ -48,8 +50,11 @@ pub struct SessionLogger {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-struct HostInputSidecar {
+struct HostUiSidecar {
+    #[serde(default)]
     inputs: Vec<HostInputRecord>,
+    #[serde(default)]
+    activity_journal: UiActivityJournal,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -111,24 +116,35 @@ impl SessionLogger {
         sessions_dir().join(&self.filename)
     }
 
-    fn host_input_path_for(filename: &str) -> PathBuf {
+    fn ui_sidecar_path_for(filename: &str) -> PathBuf {
         sessions_dir().join(format!("{filename}.ui.json"))
     }
 
-    fn host_input_path(&self) -> PathBuf {
-        Self::host_input_path_for(&self.filename)
+    fn ui_sidecar_path(&self) -> PathBuf {
+        Self::ui_sidecar_path_for(&self.filename)
     }
 
     pub fn record_host_input(&self, turn: &PreparedTurn) -> Result<()> {
         if turn.display_text.trim().is_empty() || turn.display_text == turn.effective_text {
             return Ok(());
         }
-        let path = self.host_input_path();
-        let mut sidecar = load_host_input_sidecar_path(&path).unwrap_or_default();
+        let path = self.ui_sidecar_path();
+        let mut sidecar = load_host_ui_sidecar_path(&path).unwrap_or_default();
         sidecar.inputs.push(HostInputRecord {
             display_text: turn.display_text.clone(),
             effective_text: turn.effective_text.clone(),
         });
+        std::fs::write(path, serde_json::to_vec_pretty(&sidecar)?)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_ui_activity_journal(&self, journal: &UiActivityJournal) -> Result<()> {
+        if journal.is_empty() {
+            return Ok(());
+        }
+        let path = self.ui_sidecar_path();
+        let mut sidecar = load_host_ui_sidecar_path(&path).unwrap_or_default();
+        sidecar.activity_journal = journal.clone();
         std::fs::write(path, serde_json::to_vec_pretty(&sidecar)?)?;
         Ok(())
     }
@@ -156,15 +172,15 @@ impl SessionLogger {
     }
 }
 
-fn load_host_input_sidecar_path(path: &Path) -> Result<HostInputSidecar> {
+fn load_host_ui_sidecar_path(path: &Path) -> Result<HostUiSidecar> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HostInputSidecar::default()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HostUiSidecar::default()),
         Err(err) => Err(err.into()),
     }
 }
 
-fn apply_host_input_sidecar(blocks: &mut UiTimeline, sidecar: &HostInputSidecar) {
+fn apply_host_input_sidecar(blocks: &mut UiTimeline, sidecar: &HostUiSidecar) {
     for item in blocks.iter_mut() {
         let UiTimelineItem::UserInput(text) = item else {
             continue;
@@ -352,7 +368,12 @@ pub async fn load_session(filename: &str) -> Result<LoadedSession> {
     };
     let read_view = state.read_view();
     let messages = read_view.messages().to_vec();
-    let ui_state = crate::app::UiProjectionState::default();
+    let sidecar = load_host_ui_sidecar_path(&SessionLogger::ui_sidecar_path_for(filename))
+        .unwrap_or_default();
+    let ui_state = crate::app::UiProjectionState {
+        activity_journal: sidecar.activity_journal.clone(),
+        ..crate::app::UiProjectionState::default()
+    };
     let checkpoint = checkpoint_ref
         .as_ref()
         .map(|blob_ref| async { store.get_checkpoint(blob_ref).await });
@@ -363,10 +384,7 @@ pub async fn load_session(filename: &str) -> Result<LoadedSession> {
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
     let mut blocks = timeline_from_read_view(&read_view, &ui_state);
-    if let Ok(sidecar) = load_host_input_sidecar_path(&SessionLogger::host_input_path_for(filename))
-    {
-        apply_host_input_sidecar(&mut blocks, &sidecar);
-    }
+    apply_host_input_sidecar(&mut blocks, &sidecar);
     tracing::debug!(
         session_file = filename,
         messages = read_view.messages().len(),
@@ -387,12 +405,14 @@ pub async fn load_session(filename: &str) -> Result<LoadedSession> {
             .unwrap_or_default(),
         plugin_mode_indicators,
         live_tool_output,
+        ui_activity_journal: ui_state.activity_journal,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{ActivityBlock, ActivityKind, ActivityStatus};
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
 
     fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -584,6 +604,65 @@ mod tests {
                     loaded.blocks.get(2),
                     Some(UiTimelineItem::AssistantText(text)) if text == "Done"
                 ));
+            });
+        });
+    }
+
+    #[test]
+    fn load_session_projects_cli_owned_ui_activity_journal() {
+        with_temp_lash_home("lash-session-load-ui-activity-journal", || {
+            block_on(async {
+                let filename = new_session_filename();
+                let path = sessions_dir().join(&filename);
+                let store = Arc::new(Store::open(&path).await.unwrap());
+                SessionLogger::new(
+                    Arc::clone(&store),
+                    filename.clone(),
+                    "gpt-test",
+                    Some("s-ui-activity".into()),
+                    "demo".into(),
+                )
+                .await
+                .unwrap();
+                let messages = vec![
+                    text_message(MessageRole::User, "m0", "inspect repo"),
+                    text_message(MessageRole::Assistant, "m1", "Done"),
+                ];
+                persist_root_snapshot(&store, messages, TokenUsage::default()).await;
+
+                let mut activity_journal = UiActivityJournal::default();
+                activity_journal.record_lashlang_activity(
+                    0,
+                    0,
+                    ActivityBlock::new(
+                        ActivityKind::GenericTool,
+                        "exec_command",
+                        serde_json::json!({"cmd": "pwd"}),
+                        "Run pwd",
+                        ActivityStatus::Completed,
+                        serde_json::json!({"exit_code": 0, "stdout": "/workspace/code/lash\n"}),
+                        4,
+                    )
+                    .with_call_id(Some("lashlang:tool-0".to_string())),
+                );
+                let sidecar = HostUiSidecar {
+                    inputs: Vec::new(),
+                    activity_journal: activity_journal.clone(),
+                };
+                std::fs::write(
+                    SessionLogger::ui_sidecar_path_for(&filename),
+                    serde_json::to_vec_pretty(&sidecar).unwrap(),
+                )
+                .unwrap();
+
+                let loaded = load_session(&filename).await.unwrap();
+                assert_eq!(loaded.ui_activity_journal, activity_journal);
+                assert!(loaded.blocks.iter().any(|block| matches!(
+                    block,
+                    UiTimelineItem::Activity(activity)
+                        if activity.call.call_id.as_deref() == Some("lashlang:tool-0")
+                            && activity.result.status == ActivityStatus::Completed
+                )));
             });
         });
     }

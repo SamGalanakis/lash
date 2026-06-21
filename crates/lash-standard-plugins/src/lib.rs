@@ -10,7 +10,7 @@ use lash_plugin_process_controls::SessionProcessAdminPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
 use lash_tools::apply_patch::apply_patch_provider;
-use lash_tools::files::{glob_provider, ls_provider, read_file_provider};
+use lash_tools::files::{glob_provider, read_file_provider};
 use lash_tools::shell::StandardShellPluginFactory;
 use lash_tools::web::{fetch_url_provider, web_search_provider};
 pub use rolling_history::RollingHistoryConfig;
@@ -120,10 +120,6 @@ fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: boo
         "glob",
         PluginSpec::new().with_tool_provider(Arc::new(glob_provider()) as Arc<dyn ToolProvider>),
     )));
-    stack.push(Arc::new(StaticPluginFactory::new(
-        "ls",
-        PluginSpec::new().with_tool_provider(Arc::new(ls_provider()) as Arc<dyn ToolProvider>),
-    )));
 }
 
 fn push_web_tools(stack: &mut PluginStack, tavily_api_key: String) {
@@ -224,6 +220,19 @@ mod tests {
         let ids = stack_ids(&standard_tool_stack(StandardToolStackOptions::default()));
 
         assert!(!ids.contains(&"grep"));
+    }
+
+    #[test]
+    fn standard_stack_exposes_glob_and_read_without_ls() {
+        let names = tool_names_for_stack(
+            lash_core::testing::test_standard_protocol_factories(),
+            None,
+            true,
+        );
+
+        assert!(names.contains(&"glob".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(!names.contains(&"ls".to_string()));
     }
 
     #[test]

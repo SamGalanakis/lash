@@ -1,12 +1,12 @@
 //! RLM protocol plugin: a trajectory-shaped driver that uses lashlang as the
-//! persistent REPL. Model prose is projected as trajectory reasoning, fenced
-//! `lashlang` is executed, `print` yields observations, and `submit` yields the
-//! final value.
+//! persistent REPL. Provider reasoning is stored as trajectory reasoning,
+//! paired `<lashlang>` blocks are executed, `print` yields observations, and
+//! `submit` yields the final value.
 
+mod cell_scan;
 mod control_tools;
 mod driver;
 mod executor;
-mod fence_scan;
 mod plugin;
 mod projection;
 mod protocol;
@@ -31,7 +31,7 @@ pub use projection::{
     rlm_protocol_event, rlm_seed_initial_nodes,
 };
 pub use protocol::{
-    RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence,
+    RlmDriver, RlmPromptFeatures, contains_lashlang_cell,
     rlm_execution_section_for_host_environment,
 };
 pub use rlm_support::format_budget_suffix;

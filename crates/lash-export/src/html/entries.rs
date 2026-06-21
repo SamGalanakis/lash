@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use lash_core::ChronologicalPayload;
 use lash_core::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 
 use super::escaping::{escape, escape_attr, json_highlight};
@@ -11,7 +12,7 @@ use super::prompt::{
 use super::view_model::{RenderCtx, json_byte_size, one_line_summary, pretty_json, truncate};
 use crate::LoadedSession;
 use crate::transcript::{
-    RlmTranscriptStep, TranscriptEntryKind, format_count, project_chronological_entry,
+    LashlangTranscriptStep, TranscriptEntryKind, format_count, project_chronological_entries,
     suppressed_rlm_final_output_message_ids,
 };
 
@@ -122,17 +123,26 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx) -> En
                 prompt_idx,
             );
         }
-        match project_chronological_entry(entry).map(|entry| entry.kind) {
-            Some(TranscriptEntryKind::Message(message)) => {
-                if message.is_transient() || suppressed_message_ids.contains(&message.id) {
-                    continue;
+        if let ChronologicalPayload::Message(message) = &entry.payload
+            && (message.is_transient() || suppressed_message_ids.contains(&message.id))
+        {
+            continue;
+        }
+        for transcript_entry in project_chronological_entries(entry) {
+            match transcript_entry.kind {
+                TranscriptEntryKind::Message(message) => {
+                    render_message(&mut entries, &mut spine, ctx, message);
                 }
-                render_message(&mut entries, &mut spine, ctx, message);
+                TranscriptEntryKind::AssistantReasoning(text) => {
+                    render_assistant_reasoning_entry(&mut entries, &mut spine, ctx, &text);
+                }
+                TranscriptEntryKind::AssistantText(text) => {
+                    render_assistant_text_entry(&mut entries, &mut spine, ctx, &text);
+                }
+                TranscriptEntryKind::LashlangStep(step) => {
+                    render_lashlang_step(&mut entries, &mut spine, ctx, &step);
+                }
             }
-            Some(TranscriptEntryKind::RlmStep(step)) => {
-                render_rlm_step(&mut entries, &mut spine, ctx, &step);
-            }
-            None => {}
         }
     }
 
@@ -248,6 +258,85 @@ pub(crate) fn render_message(
     );
 }
 
+pub(crate) fn render_assistant_reasoning_entry(
+    out: &mut String,
+    spine: &mut String,
+    ctx: &mut RenderCtx,
+    text: &str,
+) {
+    render_assistant_content_entry(
+        out,
+        spine,
+        ctx,
+        "assistant_reasoning",
+        "reasoning",
+        text,
+        true,
+    );
+}
+
+pub(crate) fn render_assistant_text_entry(
+    out: &mut String,
+    spine: &mut String,
+    ctx: &mut RenderCtx,
+    text: &str,
+) {
+    render_assistant_content_entry(out, spine, ctx, "assistant_text", "assistant", text, false);
+}
+
+fn render_assistant_content_entry(
+    out: &mut String,
+    spine: &mut String,
+    ctx: &mut RenderCtx,
+    kind: &str,
+    label: &str,
+    text: &str,
+    reasoning: bool,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let id = ctx.next_id();
+    let headline = one_line_summary(text, 200);
+    let search = text.to_lowercase();
+    let _ = writeln!(
+        out,
+        "    <article class=\"entry entry--assistant\" id=\"{id}\" data-role=\"assistant\" data-kind=\"{kind}\" data-search=\"{search}\">",
+        search = escape_attr(&search)
+    );
+    out.push_str("      <div class=\"entry-rail\">\n");
+    let _ = writeln!(
+        out,
+        "        <a class=\"entry-num\" href=\"#{id}\" title=\"permalink\">{id}</a>"
+    );
+    out.push_str("        <span class=\"entry-glyph\">■</span>\n");
+    out.push_str("      </div>\n");
+    out.push_str("      <div class=\"entry-body\">\n");
+    out.push_str("        <header class=\"entry-head\">\n");
+    let _ = writeln!(out, "          <span class=\"entry-tag\">{label}</span>");
+    out.push_str("          <span class=\"entry-headline entry-headline--ghost\"></span>\n");
+    let _ = writeln!(
+        out,
+        "          <span class=\"entry-meta\">{}</span>",
+        format_count(text.chars().count() as u64)
+    );
+    out.push_str("        </header>\n");
+    out.push_str("        <div class=\"entry-content\">\n");
+    if reasoning {
+        render_reasoning(out, text);
+    } else {
+        render_prose(out, text);
+    }
+    out.push_str("        </div>\n");
+    out.push_str("      </div>\n");
+    out.push_str("    </article>\n");
+    let _ = writeln!(
+        spine,
+        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"assistant\" title=\"{label} · {h}\"></a>",
+        h = escape_attr(&truncate(&headline, 80)),
+    );
+}
+
 fn headline_for_message(message: &Message, user_text: Option<&str>) -> String {
     if let Some(text) = user_text {
         return one_line_summary(text, 200);
@@ -318,32 +407,23 @@ mod leaf;
 pub(crate) use leaf::pick_display_title;
 use leaf::{render_code, render_part, render_prose, render_reasoning};
 
-// ─── RLM step ───────────────────────────────────────────────────────────────
+// ─── lashlang step ──────────────────────────────────────────────────────────
 
-pub(crate) fn render_rlm_step(
+pub(crate) fn render_lashlang_step(
     out: &mut String,
     spine: &mut String,
     ctx: &mut RenderCtx,
-    step: &RlmTranscriptStep,
+    step: &LashlangTranscriptStep,
 ) {
     let id = ctx.next_id();
     let has_err = step.error.is_some();
     let status_key = if has_err { "err" } else { "ok" };
-    let reasoning = step.reasoning.as_deref().unwrap_or("");
-    let has_reasoning_body = !reasoning.is_empty();
-    let output_preview = if has_reasoning_body {
-        one_line_summary(&reasoning, 200)
-    } else if let Some(out_item) = step.output.iter().find(|o| !o.trim().is_empty()) {
+    let output_preview = if let Some(out_item) = step.output.iter().find(|o| !o.trim().is_empty()) {
         one_line_summary(out_item, 200)
     } else {
         String::new()
     };
     let mut search = String::new();
-    // Use the stripped reasoning so the lashlang body isn't duplicated —
-    // `step.reasoning` still contains the fenced block, and `step.code` is
-    // the same text extracted from it.
-    search.push_str(&reasoning.to_lowercase());
-    search.push('\n');
     search.push_str(&step.code.to_lowercase());
     for item in &step.output {
         search.push('\n');
@@ -357,7 +437,7 @@ pub(crate) fn render_rlm_step(
 
     let _ = writeln!(
         out,
-        "    <article class=\"entry entry--rlm entry--{status_key}\" id=\"{id}\" data-role=\"rlm\" data-kind=\"rlm_step\" data-status=\"{status_key}\" data-search=\"{search}\">",
+        "    <article class=\"entry entry--lashlang entry--{status_key}\" id=\"{id}\" data-role=\"lashlang\" data-kind=\"lashlang_step\" data-status=\"{status_key}\" data-search=\"{search}\">",
         search = escape_attr(&search)
     );
     out.push_str("      <div class=\"entry-rail\">\n");
@@ -371,20 +451,14 @@ pub(crate) fn render_rlm_step(
     out.push_str("        <header class=\"entry-head\">\n");
     let _ = writeln!(
         out,
-        "          <span class=\"entry-tag entry-tag--rlm\">RLM step {}</span>",
+        "          <span class=\"entry-tag entry-tag--lashlang\">lashlang step {}</span>",
         step.protocol_iteration
     );
-    if has_reasoning_body {
-        // Reasoning renders below as its own block — keep the layout
-        // balanced without restating the same text in the head row.
-        out.push_str("          <span class=\"entry-headline entry-headline--ghost\"></span>\n");
-    } else {
-        let _ = writeln!(
-            out,
-            "          <span class=\"entry-headline\">{}</span>",
-            escape(&output_preview)
-        );
-    }
+    let _ = writeln!(
+        out,
+        "          <span class=\"entry-headline\">{}</span>",
+        escape(&output_preview)
+    );
     if has_err {
         out.push_str("          <span class=\"entry-meta entry-meta--err\">error</span>\n");
     }
@@ -396,9 +470,6 @@ pub(crate) fn render_rlm_step(
     out.push_str("        </header>\n");
     out.push_str("        <div class=\"entry-content\">\n");
 
-    if has_reasoning_body {
-        render_reasoning(out, &reasoning);
-    }
     if !step.code.is_empty() {
         render_code(out, "code", &step.code, Some("lashlang"));
     }
@@ -423,7 +494,7 @@ pub(crate) fn render_rlm_step(
 
     let _ = writeln!(
         spine,
-        "    <a class=\"spine-tick spine-tick--rlm\" href=\"#{id}\" data-spine=\"rlm\" data-status=\"{status_key}\" title=\"RLM step {it}\"></a>",
+        "    <a class=\"spine-tick spine-tick--lashlang\" href=\"#{id}\" data-spine=\"lashlang\" data-status=\"{status_key}\" title=\"lashlang step {it}\"></a>",
         it = step.protocol_iteration,
     );
 }

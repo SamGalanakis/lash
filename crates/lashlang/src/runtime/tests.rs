@@ -447,6 +447,31 @@ async fn golden_lashlang_diagnostic_corpus_is_exact() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn labeled_aggregate_await_failure_points_at_failing_leaf_not_label() {
+    let source = r#"@label(title: "Aggregate")
+result = await {
+  ok: tools.echo({ value: "ok" })?,
+  bad: tools.err({})?
+}
+submit result"#;
+    let compiled = compile_labeled_source(source);
+    let mut state = State::new();
+    let failure = execute_compiled_traced(&compiled, &mut state, &Host)
+        .await
+        .expect_err("later aggregate leaf should fail");
+    let message = crate::format_runtime_diagnostic(source, &failure.error, failure.span);
+
+    assert!(
+        message.contains("`?` unwrapped failed module operation: boom"),
+        "{message}"
+    );
+    assert!(message.contains("--> line 4, column 8"), "{message}");
+    assert!(message.contains("bad: tools.err({})?"), "{message}");
+    assert!(message.contains("       ^~~~~~~~~~~~~~"), "{message}");
+    assert!(!message.contains("--> line 1"), "{message}");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn golden_serialized_state_snapshot_contract_is_exact() {
     let program = crate::parse(
         r#"

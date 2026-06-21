@@ -145,24 +145,27 @@ fn render_block_into(
                     ]));
                 }
                 if let Some(err) = error {
-                    for line in err.lines() {
+                    for line in error_display_lines(err, expand_level) {
                         lines.push(Line::from(vec![
                             Span::styled("│ ", theme::code_chrome()),
-                            Span::styled(line.to_string(), theme::error()),
+                            Span::styled(line, theme::error()),
                         ]));
                     }
                 }
             }
         }
-        UiTimelineItem::Error(message) => render_bordered_text_block(
-            "ERROR",
-            message.lines().map(str::to_string).collect(),
-            lines,
-            viewport_width,
-            theme::error_border(),
-            theme::error_title(),
-            theme::error(),
-        ),
+        UiTimelineItem::Error(message) => {
+            let content_lines = error_display_lines(message, expand_level);
+            render_bordered_text_block(
+                "ERROR",
+                content_lines,
+                lines,
+                viewport_width,
+                theme::error_border(),
+                theme::error_title(),
+                theme::error(),
+            );
+        }
         UiTimelineItem::SystemMessage(text) => {
             for line in text.lines() {
                 lines.push(Line::from(Span::styled(
@@ -186,6 +189,68 @@ fn render_block_into(
             render_splash(lines, viewport_width, viewport_height, blocks.len() == 1)
         }
     }
+}
+
+const COLLAPSED_ERROR_HEAD_LINES: usize = 12;
+const COLLAPSED_ERROR_TAIL_LINES: usize = 4;
+const COLLAPSED_ERROR_LINE_CHAR_LIMIT: usize = 240;
+
+fn error_display_lines(message: &str, expand_level: u8) -> Vec<String> {
+    if expand_level >= 2 {
+        return message.lines().map(str::to_string).collect();
+    }
+
+    collapsed_error_lines(message)
+}
+
+fn collapsed_error_lines(message: &str) -> Vec<String> {
+    let raw_lines = if message.is_empty() {
+        vec![""]
+    } else {
+        message.lines().collect::<Vec<_>>()
+    };
+    let line_limit = COLLAPSED_ERROR_HEAD_LINES + COLLAPSED_ERROR_TAIL_LINES + 1;
+    let line_truncated = raw_lines.len() > line_limit;
+    let hidden_lines = if line_truncated {
+        raw_lines
+            .len()
+            .saturating_sub(COLLAPSED_ERROR_HEAD_LINES + COLLAPSED_ERROR_TAIL_LINES)
+    } else {
+        0
+    };
+
+    let mut char_truncated = false;
+    let mut out = Vec::new();
+
+    if line_truncated {
+        for line in raw_lines.iter().take(COLLAPSED_ERROR_HEAD_LINES) {
+            out.push(collapsed_error_line(line, &mut char_truncated));
+        }
+        out.push(format!("... {hidden_lines} lines hidden ..."));
+        for line in raw_lines
+            .iter()
+            .skip(raw_lines.len().saturating_sub(COLLAPSED_ERROR_TAIL_LINES))
+        {
+            out.push(collapsed_error_line(line, &mut char_truncated));
+        }
+    } else {
+        for line in raw_lines {
+            out.push(collapsed_error_line(line, &mut char_truncated));
+        }
+    }
+
+    if line_truncated || char_truncated {
+        out.push("... truncated; press Alt+O for full error ...".to_string());
+    }
+
+    out
+}
+
+fn collapsed_error_line(line: &str, char_truncated: &mut bool) -> String {
+    if line.chars().count() > COLLAPSED_ERROR_LINE_CHAR_LIMIT {
+        *char_truncated = true;
+    }
+    crate::app::smart_truncate_preview_line(line, COLLAPSED_ERROR_LINE_CHAR_LIMIT)
 }
 
 /// Render the captured `lashlang` source for an RLM turn, with a dim `╎`

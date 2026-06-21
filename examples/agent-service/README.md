@@ -132,10 +132,12 @@ In lashlang, the model calls the demo tools through their host-declared module
 surface. `DemoPlugin` maps the underlying `read_board` tool to `board.read`
 and `play_move` to `board.play` with `LashlangToolBinding`:
 
-```lashlang
+```text
+<lashlang>
 board = await board.read({})?
 move = await board.play({ cell: 4 })?
 submit "I played the center."
+</lashlang>
 ```
 
 The browser also listens for submitted/tool value stream events and renders

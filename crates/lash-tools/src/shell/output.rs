@@ -21,7 +21,7 @@ use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Notify;
 
-use lash_core::ToolResult;
+use lash_core::{ToolFailure, ToolFailureClass, ToolResult, ToolValue};
 
 pub(crate) const MAX_OUTPUT: usize = 512_000;
 pub(crate) const SPILL_OUTPUT_THRESHOLD: usize = 50 * 1024;
@@ -493,9 +493,9 @@ pub(crate) fn shell_io_result(
     original_token_count: Option<usize>,
     full_output_path: Option<&Path>,
     wall_time_seconds: f64,
-    allow_nonzero_exit: bool,
+    _allow_nonzero_exit: bool,
 ) -> ToolResult {
-    let mut record = standard_shell_io_record(
+    let record = standard_shell_io_record(
         id,
         output,
         exit_code,
@@ -503,18 +503,6 @@ pub(crate) fn shell_io_result(
         full_output_path,
         wall_time_seconds,
     );
-    if let Some(code) = exit_code
-        && code != 0
-        && !allow_nonzero_exit
-    {
-        if let Some(object) = record.as_object_mut() {
-            object.insert(
-                "error".into(),
-                json!(format!("Command exited with code {code}")),
-            );
-        }
-        return ToolResult::err(record);
-    }
     ToolResult::ok(record)
 }
 
@@ -549,6 +537,16 @@ pub(crate) fn timed_out_shell_io_result(
     if allow_nonzero_exit {
         ToolResult::ok(record)
     } else {
-        ToolResult::err(record)
+        shell_failure(
+            "shell_timeout",
+            format!("Command timed out after {timeout_ms} ms"),
+            record,
+        )
     }
+}
+
+fn shell_failure(code: &str, message: impl Into<String>, raw: serde_json::Value) -> ToolResult {
+    let mut failure = ToolFailure::tool(ToolFailureClass::Execution, code, message);
+    failure.raw = Some(ToolValue::from(raw));
+    ToolResult::failure(failure)
 }

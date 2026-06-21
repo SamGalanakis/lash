@@ -1,7 +1,7 @@
 use crate::ast::{
-    AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, LabelMetadata,
-    ProcessDecl, ProcessParam, ProcessSignalDecl, ProcessStartExpr, Program, TypeDecl, TypeExpr,
-    TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, ExpressionSourceSpan,
+    LabelMetadata, ProcessDecl, ProcessParam, ProcessSignalDecl, ProcessStartExpr, Program,
+    TypeDecl, TypeExpr, TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -39,6 +39,21 @@ pub enum ParseError {
 }
 
 impl ParseError {
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::Lex(_) => None,
+            Self::Expected { span, .. }
+            | Self::Unexpected { span, .. }
+            | Self::LoopControlOutsideLoop { span, .. }
+            | Self::SessionProcessAdminOutsideBlock { span, .. }
+            | Self::ForegroundControlInsideProcess { span, .. }
+            | Self::DeclarativeTriggerRemoved { span }
+            | Self::InvalidLabelAnnotation { span, .. }
+            | Self::InvalidLabelTarget { span }
+            | Self::NestingTooDeep { span, .. } => Some(*span),
+        }
+    }
+
     pub fn offset(&self) -> usize {
         match self {
             Self::Lex(err) => err.offset(),
@@ -75,16 +90,17 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
 /// The deepest chain is expression nesting: each level descends the full
 /// precedence ladder (`parse_expr` -> ternary -> or -> and -> compare -> add ->
 /// mul -> unary -> postfix -> primary -> grouping -> `parse_expr`), roughly a
-/// dozen native frames carrying the large `Expr` enum. Empirically ~64 levels
-/// parse comfortably on a 2 MiB thread stack while ~128 overflow it, so the
-/// limit is kept well under that cliff. Block nesting (`parse_block` ->
+/// dozen native frames carrying the large parsed-expression/span bundle.
+/// Empirically ~40 levels parse comfortably on a 2 MiB thread stack while
+/// leaving headroom for debug-test frames, so the limit is kept under that
+/// cliff. Block nesting (`parse_block` ->
 /// `parse_statement_expr` -> `parse_if`/`parse_for`/`parse_while` -> `parse_block`) is a
 /// shallower per-level chain and shares the same budget, so any mix of the two
 /// stays bounded. Real generated programs nest only a handful deep, so this is
 /// ample headroom; capping here also bounds every downstream AST walker
 /// (validate, lower, compile, eval), since the tree can never be deeper than
 /// the parser allowed.
-const MAX_NESTING_DEPTH: usize = 64;
+const MAX_NESTING_DEPTH: usize = 40;
 
 struct Parser {
     tokens: Vec<Token>,
@@ -94,6 +110,71 @@ struct Parser {
     nesting_depth: usize,
 }
 
+#[derive(Clone)]
+struct ParsedExpr {
+    expr: Expr,
+    span: Span,
+    source_spans: Vec<ExpressionSourceSpan>,
+}
+
+impl ParsedExpr {
+    fn leaf(expr: Expr, span: Span) -> Self {
+        Self {
+            expr,
+            span,
+            source_spans: vec![ExpressionSourceSpan {
+                path: Vec::new(),
+                span,
+            }],
+        }
+    }
+
+    fn node(expr: Expr, span: Span, children: impl IntoIterator<Item = (u32, ParsedExpr)>) -> Self {
+        let mut source_spans = vec![ExpressionSourceSpan {
+            path: Vec::new(),
+            span,
+        }];
+        for (child_index, child) in children {
+            source_spans.extend(child.source_spans.into_iter().map(|mut source_span| {
+                source_span.path.insert(0, child_index);
+                source_span
+            }));
+        }
+        Self {
+            expr,
+            span,
+            source_spans,
+        }
+    }
+
+    fn into_expr(self) -> Expr {
+        self.expr
+    }
+}
+
+struct ParsedAssignTarget {
+    target: AssignTarget,
+    index_spans: Vec<ParsedExpr>,
+}
+
+fn push_root_expression(
+    expressions: &mut Vec<Expr>,
+    source_spans: &mut Vec<ExpressionSourceSpan>,
+    parsed: ParsedExpr,
+) {
+    let root = expressions.len() as u32;
+    let ParsedExpr {
+        expr,
+        source_spans: parsed_source_spans,
+        ..
+    } = parsed;
+    source_spans.extend(parsed_source_spans.into_iter().map(|mut source_span| {
+        source_span.path.insert(0, root);
+        source_span
+    }));
+    expressions.push(expr);
+}
+
 impl Parser {
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         let capacity = (self.tokens.len() / 20).max(1);
@@ -101,6 +182,7 @@ impl Parser {
         let mut declaration_spans = Vec::new();
         let mut expressions = Vec::with_capacity(capacity);
         let mut expression_spans = Vec::with_capacity(capacity);
+        let mut expression_source_spans = Vec::new();
         while !self.at_eof() {
             if matches!(self.peek_kind(), TokenKind::At) {
                 let start = self.peek().span.start;
@@ -118,17 +200,23 @@ impl Parser {
                         span: self.peek().span,
                     });
                 }
-                let expr = self.parse_statement_expr()?;
-                expressions.push(Expr::LabelAnnotated {
-                    label,
-                    expr: Box::new(expr),
-                });
+                let inner = self.parse_statement_expr()?;
                 let end = self
                     .tokens
                     .get(self.index.saturating_sub(1))
                     .map(|token| token.span.end)
                     .unwrap_or(start);
-                expression_spans.push(Span { start, end });
+                let span = Span { start, end };
+                let expr = ParsedExpr::node(
+                    Expr::LabelAnnotated {
+                        label,
+                        expr: Box::new(inner.expr.clone()),
+                    },
+                    span,
+                    [(0, inner)],
+                );
+                expression_spans.push(span);
+                push_root_expression(&mut expressions, &mut expression_source_spans, expr);
                 continue;
             }
             if self.peek_contextual("type") && !self.peek_assignment_target() {
@@ -149,19 +237,22 @@ impl Parser {
                 });
             }
             let start = self.peek().span.start;
-            expressions.push(self.parse_statement_expr()?);
+            let expr = self.parse_statement_expr()?;
             let end = self
                 .tokens
                 .get(self.index.saturating_sub(1))
                 .map(|token| token.span.end)
                 .unwrap_or(start);
-            expression_spans.push(Span { start, end });
+            let span = Span { start, end };
+            expression_spans.push(span);
+            push_root_expression(&mut expressions, &mut expression_source_spans, expr);
         }
         Ok(Program::module_with_spans(
             declarations,
             declaration_spans,
             expressions,
             expression_spans,
+            expression_source_spans,
         ))
     }
 
@@ -235,7 +326,7 @@ impl Parser {
             signals,
             return_ty,
             label,
-            body,
+            body: body.into_expr(),
         })
     }
 
@@ -261,7 +352,7 @@ impl Parser {
         Ok(signals)
     }
 
-    fn parse_statement_expr(&mut self) -> Result<Expr, ParseError> {
+    fn parse_statement_expr(&mut self) -> Result<ParsedExpr, ParseError> {
         match self.peek_kind() {
             TokenKind::If => self.parse_if(),
             TokenKind::For => self.parse_for(),
@@ -295,24 +386,48 @@ impl Parser {
         }
     }
 
-    fn parse_let_assign(&mut self) -> Result<Expr, ParseError> {
+    fn parse_let_assign(&mut self) -> Result<ParsedExpr, ParseError> {
         self.bump();
         self.parse_assign()
     }
 
-    fn parse_assign(&mut self) -> Result<Expr, ParseError> {
+    fn parse_assign(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.peek().span.start;
         let target = self.parse_assignment_target()?;
         self.expect_exact(TokenKind::Equal, "`=`")?;
         let expr = self.parse_expr()?;
-        Ok(Expr::Assign {
-            target,
-            expr: Box::new(expr),
-        })
+        let value_child_index = target.index_spans.len() as u32;
+        let span = Span {
+            start,
+            end: expr.span.end,
+        };
+        let mut children = target
+            .index_spans
+            .into_iter()
+            .enumerate()
+            .map(|(index, expr)| (index as u32, expr))
+            .collect::<Vec<_>>();
+        children.push((value_child_index, expr));
+        let value_expr = children
+            .last()
+            .expect("assignment value child")
+            .1
+            .expr
+            .clone();
+        Ok(ParsedExpr::node(
+            Expr::Assign {
+                target: target.target,
+                expr: Box::new(value_expr),
+            },
+            span,
+            children,
+        ))
     }
 
-    fn parse_assignment_target(&mut self) -> Result<AssignTarget, ParseError> {
+    fn parse_assignment_target(&mut self) -> Result<ParsedAssignTarget, ParseError> {
         let root = self.expect_ident()?;
         let mut steps = Vec::new();
+        let mut index_spans = Vec::new();
         loop {
             match self.peek_kind() {
                 TokenKind::Dot => {
@@ -323,16 +438,20 @@ impl Parser {
                     self.bump();
                     let index = self.parse_expr()?;
                     self.expect_exact(TokenKind::RBracket, "`]`")?;
-                    steps.push(AssignPathStep::Index(index));
+                    steps.push(AssignPathStep::Index(index.expr.clone()));
+                    index_spans.push(index);
                 }
                 _ => break,
             }
         }
-        Ok(AssignTarget { root, steps })
+        Ok(ParsedAssignTarget {
+            target: AssignTarget { root, steps },
+            index_spans,
+        })
     }
 
-    fn parse_if(&mut self) -> Result<Expr, ParseError> {
-        self.bump();
+    fn parse_if(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.bump().span.start;
         let condition = self.parse_expr()?;
         let then_block = self.parse_block()?;
         let else_block = if matches!(self.peek_kind(), TokenKind::Else) {
@@ -343,55 +462,86 @@ impl Parser {
                 self.parse_block()?
             }
         } else {
-            Expr::Block(Vec::new())
+            ParsedExpr::leaf(
+                Expr::Block(Vec::new()),
+                Span {
+                    start: then_block.span.end,
+                    end: then_block.span.end,
+                },
+            )
         };
-        Ok(Expr::If {
-            condition: Box::new(condition),
-            then_block: Box::new(then_block),
-            else_block: Box::new(else_block),
-        })
+        let span = Span {
+            start,
+            end: else_block.span.end,
+        };
+        Ok(ParsedExpr::node(
+            Expr::If {
+                condition: Box::new(condition.expr.clone()),
+                then_block: Box::new(then_block.expr.clone()),
+                else_block: Box::new(else_block.expr.clone()),
+            },
+            span,
+            [(0, condition), (1, then_block), (2, else_block)],
+        ))
     }
 
-    fn parse_for(&mut self) -> Result<Expr, ParseError> {
-        self.bump();
+    fn parse_for(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.bump().span.start;
         let binding = self.expect_ident()?;
         self.expect_exact(TokenKind::In, "`in`")?;
         let iterable = self.parse_expr()?;
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;
-        Ok(Expr::For {
-            binding,
-            iterable: Box::new(iterable),
-            body: Box::new(body),
-        })
+        let span = Span {
+            start,
+            end: body.span.end,
+        };
+        Ok(ParsedExpr::node(
+            Expr::For {
+                binding,
+                iterable: Box::new(iterable.expr.clone()),
+                body: Box::new(body.expr.clone()),
+            },
+            span,
+            [(0, iterable), (1, body)],
+        ))
     }
 
-    fn parse_while(&mut self) -> Result<Expr, ParseError> {
-        self.bump();
+    fn parse_while(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.bump().span.start;
         let condition = self.parse_expr()?;
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;
-        Ok(Expr::While {
-            condition: Box::new(condition),
-            body: Box::new(body),
-        })
+        let span = Span {
+            start,
+            end: body.span.end,
+        };
+        Ok(ParsedExpr::node(
+            Expr::While {
+                condition: Box::new(condition.expr.clone()),
+                body: Box::new(body.expr.clone()),
+            },
+            span,
+            [(0, condition), (1, body)],
+        ))
     }
 
-    fn parse_loop_control(&mut self, keyword: &'static str) -> Result<Expr, ParseError> {
+    fn parse_loop_control(&mut self, keyword: &'static str) -> Result<ParsedExpr, ParseError> {
         let span = self.bump().span;
         if self.loop_depth == 0 {
             return Err(ParseError::LoopControlOutsideLoop { keyword, span });
         }
-        Ok(match keyword {
+        let expr = match keyword {
             "break" => Expr::Break,
             "continue" => Expr::Continue,
             _ => unreachable!("unknown loop control keyword"),
-        })
+        };
+        Ok(ParsedExpr::leaf(expr, span))
     }
 
-    fn parse_submit(&mut self) -> Result<Expr, ParseError> {
+    fn parse_submit(&mut self) -> Result<ParsedExpr, ParseError> {
         let span = self.bump().span;
         if self.process_depth > 0 {
             return Err(ParseError::ForegroundControlInsideProcess {
@@ -404,10 +554,19 @@ impl Parser {
         } else {
             Some(self.parse_expr()?)
         };
-        Ok(Expr::Submit(expr.map(Box::new)))
+        let end = expr.as_ref().map(|expr| expr.span.end).unwrap_or(span.end);
+        let span = Span {
+            start: span.start,
+            end,
+        };
+        let value_expr = expr.as_ref().map(|expr| Box::new(expr.expr.clone()));
+        Ok(match expr {
+            Some(expr) => ParsedExpr::node(Expr::Submit(value_expr), span, [(0, expr)]),
+            None => ParsedExpr::leaf(Expr::Submit(None), span),
+        })
     }
 
-    fn parse_print(&mut self) -> Result<Expr, ParseError> {
+    fn parse_print(&mut self) -> Result<ParsedExpr, ParseError> {
         let span = self.bump().span;
         if self.process_depth > 0 {
             return Err(ParseError::ForegroundControlInsideProcess {
@@ -415,10 +574,19 @@ impl Parser {
                 span,
             });
         }
-        Ok(Expr::Print(Box::new(self.parse_expr()?)))
+        let expr = self.parse_expr()?;
+        let span = Span {
+            start: span.start,
+            end: expr.span.end,
+        };
+        Ok(ParsedExpr::node(
+            Expr::Print(Box::new(expr.expr.clone())),
+            span,
+            [(0, expr)],
+        ))
     }
 
-    fn parse_processes(&mut self) -> Result<Expr, ParseError> {
+    fn parse_processes(&mut self) -> Result<ParsedExpr, ParseError> {
         let token = self.bump().clone();
         let TokenKind::Ident(keyword) = token.kind else {
             unreachable!("process admins are contextual identifiers");
@@ -436,26 +604,79 @@ impl Parser {
                 span: token.span,
             });
         }
-        let stmt = match keyword_static {
-            "yield" => Expr::Yield(Box::new(self.parse_expr()?)),
-            "wake" => Expr::Wake(Box::new(self.parse_expr()?)),
+        match keyword_static {
+            "yield" => {
+                let expr = self.parse_expr()?;
+                let span = Span {
+                    start: token.span.start,
+                    end: expr.span.end,
+                };
+                return Ok(ParsedExpr::node(
+                    Expr::Yield(Box::new(expr.expr.clone())),
+                    span,
+                    [(0, expr)],
+                ));
+            }
+            "wake" => {
+                let expr = self.parse_expr()?;
+                let span = Span {
+                    start: token.span.start,
+                    end: expr.span.end,
+                };
+                return Ok(ParsedExpr::node(
+                    Expr::Wake(Box::new(expr.expr.clone())),
+                    span,
+                    [(0, expr)],
+                ));
+            }
             "finish" => {
                 let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
                     None
                 } else {
                     Some(self.parse_expr()?)
                 };
-                Expr::Finish(expr.map(Box::new))
+                let end = expr
+                    .as_ref()
+                    .map(|expr| expr.span.end)
+                    .unwrap_or(token.span.end);
+                let span = Span {
+                    start: token.span.start,
+                    end,
+                };
+                let value_expr = expr.as_ref().map(|expr| Box::new(expr.expr.clone()));
+                return Ok(match expr {
+                    Some(expr) => ParsedExpr::node(Expr::Finish(value_expr), span, [(0, expr)]),
+                    None => ParsedExpr::leaf(Expr::Finish(None), span),
+                });
             }
-            "fail" => Expr::Fail(Box::new(self.parse_expr()?)),
+            "fail" => {
+                let expr = self.parse_expr()?;
+                let span = Span {
+                    start: token.span.start,
+                    end: expr.span.end,
+                };
+                return Ok(ParsedExpr::node(
+                    Expr::Fail(Box::new(expr.expr.clone())),
+                    span,
+                    [(0, expr)],
+                ));
+            }
             _ => unreachable!("unknown process admin keyword"),
-        };
-        Ok(stmt)
+        }
     }
 
-    fn parse_cancel(&mut self) -> Result<Expr, ParseError> {
-        self.bump();
-        Ok(Expr::Cancel(Box::new(self.parse_expr()?)))
+    fn parse_cancel(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.bump().span.start;
+        let expr = self.parse_expr()?;
+        let span = Span {
+            start,
+            end: expr.span.end,
+        };
+        Ok(ParsedExpr::node(
+            Expr::Cancel(Box::new(expr.expr.clone())),
+            span,
+            [(0, expr)],
+        ))
     }
 
     /// Account for entering one more level of syntactic nesting, rejecting
@@ -476,7 +697,7 @@ impl Parser {
         self.nesting_depth -= 1;
     }
 
-    fn parse_block(&mut self) -> Result<Expr, ParseError> {
+    fn parse_block(&mut self) -> Result<ParsedExpr, ParseError> {
         // Nested blocks (`if`/`for` bodies, bare braces) recurse through here
         // without passing through `parse_expr`, so they need their own guard.
         self.enter_nesting()?;
@@ -485,21 +706,31 @@ impl Parser {
         result
     }
 
-    fn parse_block_inner(&mut self) -> Result<Expr, ParseError> {
+    fn parse_block_inner(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.peek().span.start;
         self.expect_exact(TokenKind::LBrace, "`{`")?;
         let mut expressions = Vec::new();
+        let mut children = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            if matches!(self.peek_kind(), TokenKind::At) {
-                expressions.push(self.parse_annotated_statement()?);
+            let expr = if matches!(self.peek_kind(), TokenKind::At) {
+                self.parse_annotated_statement()?
             } else {
-                expressions.push(self.parse_statement_expr()?);
-            }
+                self.parse_statement_expr()?
+            };
+            let child_index = expressions.len() as u32;
+            expressions.push(expr.expr.clone());
+            children.push((child_index, expr));
         }
         self.expect_exact(TokenKind::RBrace, "`}`")?;
-        Ok(Expr::Block(expressions))
+        Ok(ParsedExpr::node(
+            Expr::Block(expressions),
+            self.span_from(start),
+            children,
+        ))
     }
 
-    fn parse_annotated_statement(&mut self) -> Result<Expr, ParseError> {
+    fn parse_annotated_statement(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.peek().span.start;
         let label = self.parse_label_annotation()?;
         if matches!(self.peek_kind(), TokenKind::At)
             || self.peek_contextual("type")
@@ -511,10 +742,18 @@ impl Parser {
             });
         }
         let expr = self.parse_statement_expr()?;
-        Ok(Expr::LabelAnnotated {
-            label,
-            expr: Box::new(expr),
-        })
+        let span = Span {
+            start,
+            end: expr.span.end,
+        };
+        Ok(ParsedExpr::node(
+            Expr::LabelAnnotated {
+                label,
+                expr: Box::new(expr.expr.clone()),
+            },
+            span,
+            [(0, expr)],
+        ))
     }
 
     fn parse_label_annotation(&mut self) -> Result<LabelMetadata, ParseError> {
@@ -573,7 +812,7 @@ impl Parser {
         Ok(LabelMetadata { title, description })
     }
 
-    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+    fn parse_expr(&mut self) -> Result<ParsedExpr, ParseError> {
         // Every nested expression (parenthesised, list/record element, index,
         // ternary, ...) funnels through here, so one depth guard at this
         // chokepoint bounds total recursive-descent stack growth.
@@ -583,7 +822,7 @@ impl Parser {
         result
     }
 
-    fn parse_ternary(&mut self) -> Result<Expr, ParseError> {
+    fn parse_ternary(&mut self) -> Result<ParsedExpr, ParseError> {
         let condition = self.parse_or()?;
         if !matches!(self.peek_kind(), TokenKind::Question) {
             return Ok(condition);
@@ -592,42 +831,66 @@ impl Parser {
         let then_expr = self.parse_expr()?;
         self.expect_exact(TokenKind::Colon, "`:`")?;
         let else_expr = self.parse_expr()?;
-        Ok(Expr::If {
-            condition: Box::new(condition),
-            then_block: Box::new(then_expr),
-            else_block: Box::new(else_expr),
-        })
+        let span = Span {
+            start: condition.span.start,
+            end: else_expr.span.end,
+        };
+        Ok(ParsedExpr::node(
+            Expr::If {
+                condition: Box::new(condition.expr.clone()),
+                then_block: Box::new(then_expr.expr.clone()),
+                else_block: Box::new(else_expr.expr.clone()),
+            },
+            span,
+            [(0, condition), (1, then_expr), (2, else_expr)],
+        ))
     }
 
-    fn parse_or(&mut self) -> Result<Expr, ParseError> {
+    fn parse_or(&mut self) -> Result<ParsedExpr, ParseError> {
         let mut expr = self.parse_and()?;
         while matches!(self.peek_kind(), TokenKind::Or | TokenKind::OrOr) {
             self.bump();
             let right = self.parse_and()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op: BinaryOp::Or,
-                right: Box::new(right),
+            let span = Span {
+                start: expr.span.start,
+                end: right.span.end,
             };
+            expr = ParsedExpr::node(
+                Expr::Binary {
+                    left: Box::new(expr.expr.clone()),
+                    op: BinaryOp::Or,
+                    right: Box::new(right.expr.clone()),
+                },
+                span,
+                [(0, expr), (1, right)],
+            );
         }
         Ok(expr)
     }
 
-    fn parse_and(&mut self) -> Result<Expr, ParseError> {
+    fn parse_and(&mut self) -> Result<ParsedExpr, ParseError> {
         let mut expr = self.parse_compare()?;
         while matches!(self.peek_kind(), TokenKind::And | TokenKind::AndAnd) {
             self.bump();
             let right = self.parse_compare()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op: BinaryOp::And,
-                right: Box::new(right),
+            let span = Span {
+                start: expr.span.start,
+                end: right.span.end,
             };
+            expr = ParsedExpr::node(
+                Expr::Binary {
+                    left: Box::new(expr.expr.clone()),
+                    op: BinaryOp::And,
+                    right: Box::new(right.expr.clone()),
+                },
+                span,
+                [(0, expr), (1, right)],
+            );
         }
         Ok(expr)
     }
 
-    fn parse_compare(&mut self) -> Result<Expr, ParseError> {
+    fn parse_compare(&mut self) -> Result<ParsedExpr, ParseError> {
         let mut expr = self.parse_add()?;
         loop {
             let op = match self.peek_kind() {
@@ -641,16 +904,24 @@ impl Parser {
             };
             self.bump();
             let right = self.parse_add()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
+            let span = Span {
+                start: expr.span.start,
+                end: right.span.end,
             };
+            expr = ParsedExpr::node(
+                Expr::Binary {
+                    left: Box::new(expr.expr.clone()),
+                    op,
+                    right: Box::new(right.expr.clone()),
+                },
+                span,
+                [(0, expr), (1, right)],
+            );
         }
         Ok(expr)
     }
 
-    fn parse_add(&mut self) -> Result<Expr, ParseError> {
+    fn parse_add(&mut self) -> Result<ParsedExpr, ParseError> {
         let mut expr = self.parse_mul()?;
         loop {
             let op = match self.peek_kind() {
@@ -660,16 +931,24 @@ impl Parser {
             };
             self.bump();
             let right = self.parse_mul()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
+            let span = Span {
+                start: expr.span.start,
+                end: right.span.end,
             };
+            expr = ParsedExpr::node(
+                Expr::Binary {
+                    left: Box::new(expr.expr.clone()),
+                    op,
+                    right: Box::new(right.expr.clone()),
+                },
+                span,
+                [(0, expr), (1, right)],
+            );
         }
         Ok(expr)
     }
 
-    fn parse_mul(&mut self) -> Result<Expr, ParseError> {
+    fn parse_mul(&mut self) -> Result<ParsedExpr, ParseError> {
         let mut expr = self.parse_unary()?;
         loop {
             let op = match self.peek_kind() {
@@ -680,47 +959,87 @@ impl Parser {
             };
             self.bump();
             let right = self.parse_unary()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
+            let span = Span {
+                start: expr.span.start,
+                end: right.span.end,
             };
+            expr = ParsedExpr::node(
+                Expr::Binary {
+                    left: Box::new(expr.expr.clone()),
+                    op,
+                    right: Box::new(right.expr.clone()),
+                },
+                span,
+                [(0, expr), (1, right)],
+            );
         }
         Ok(expr)
     }
 
-    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+    fn parse_unary(&mut self) -> Result<ParsedExpr, ParseError> {
         match self.peek_kind() {
             TokenKind::Minus => {
-                self.bump();
-                Ok(Expr::Unary {
-                    op: UnaryOp::Negate,
-                    expr: Box::new(self.parse_unary()?),
-                })
+                let start = self.bump().span.start;
+                let expr = self.parse_unary()?;
+                Ok(ParsedExpr::node(
+                    Expr::Unary {
+                        op: UnaryOp::Negate,
+                        expr: Box::new(expr.expr.clone()),
+                    },
+                    Span {
+                        start,
+                        end: expr.span.end,
+                    },
+                    [(0, expr)],
+                ))
             }
             TokenKind::Not => {
-                self.bump();
-                Ok(Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr: Box::new(self.parse_unary()?),
-                })
+                let start = self.bump().span.start;
+                let expr = self.parse_unary()?;
+                Ok(ParsedExpr::node(
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(expr.expr.clone()),
+                    },
+                    Span {
+                        start,
+                        end: expr.span.end,
+                    },
+                    [(0, expr)],
+                ))
             }
             TokenKind::Bang => {
-                self.bump();
-                Ok(Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr: Box::new(self.parse_unary()?),
-                })
+                let start = self.bump().span.start;
+                let expr = self.parse_unary()?;
+                Ok(ParsedExpr::node(
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(expr.expr.clone()),
+                    },
+                    Span {
+                        start,
+                        end: expr.span.end,
+                    },
+                    [(0, expr)],
+                ))
             }
             TokenKind::Await => {
-                self.bump();
-                Ok(Expr::Await(Box::new(self.parse_unary()?)))
+                let start = self.bump().span.start;
+                let expr = self.parse_unary()?;
+                Ok(ParsedExpr::node(
+                    Expr::Await(Box::new(expr.expr.clone())),
+                    Span {
+                        start,
+                        end: expr.span.end,
+                    },
+                    [(0, expr)],
+                ))
             }
             _ => self.parse_postfix(),
         }
     }
 
-    fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
+    fn parse_postfix(&mut self) -> Result<ParsedExpr, ParseError> {
         let mut expr = self.parse_primary()?;
         loop {
             match self.peek_kind() {
@@ -729,30 +1048,59 @@ impl Parser {
                     let field = self.expect_key_name()?;
                     if matches!(self.peek_kind(), TokenKind::LParen) {
                         let args = self.parse_call_arguments()?;
-                        expr = Expr::ReceiverCall {
-                            receiver: Box::new(expr),
-                            operation: field,
-                            args,
-                        };
+                        let span = self.span_from(expr.span.start);
+                        let mut children = Vec::with_capacity(args.len() + 1);
+                        children.push((0, expr));
+                        let arg_exprs = args.iter().map(|arg| arg.expr.clone()).collect();
+                        children.extend(
+                            args.into_iter()
+                                .enumerate()
+                                .map(|(index, arg)| ((index + 1) as u32, arg)),
+                        );
+                        let receiver = children[0].1.expr.clone();
+                        expr = ParsedExpr::node(
+                            Expr::ReceiverCall {
+                                receiver: Box::new(receiver),
+                                operation: field,
+                                args: arg_exprs,
+                            },
+                            span,
+                            children,
+                        );
                     } else {
-                        expr = Expr::Field {
-                            target: Box::new(expr),
-                            field,
-                        };
+                        let span = self.span_from(expr.span.start);
+                        expr = ParsedExpr::node(
+                            Expr::Field {
+                                target: Box::new(expr.expr.clone()),
+                                field,
+                            },
+                            span,
+                            [(0, expr)],
+                        );
                     }
                 }
                 TokenKind::LBracket => {
                     self.bump();
                     let index = self.parse_expr()?;
                     self.expect_exact(TokenKind::RBracket, "`]`")?;
-                    expr = Expr::Index {
-                        target: Box::new(expr),
-                        index: Box::new(index),
-                    };
+                    let span = self.span_from(expr.span.start);
+                    expr = ParsedExpr::node(
+                        Expr::Index {
+                            target: Box::new(expr.expr.clone()),
+                            index: Box::new(index.expr.clone()),
+                        },
+                        span,
+                        [(0, expr), (1, index)],
+                    );
                 }
                 TokenKind::Question if !self.question_starts_ternary() => {
                     self.bump();
-                    expr = Expr::ResultUnwrap(Box::new(expr));
+                    let span = self.span_from(expr.span.start);
+                    expr = ParsedExpr::node(
+                        Expr::ResultUnwrap(Box::new(expr.expr.clone())),
+                        span,
+                        [(0, expr)],
+                    );
                 }
                 _ => break,
             }
@@ -760,31 +1108,32 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+    fn parse_primary(&mut self) -> Result<ParsedExpr, ParseError> {
         match self.peek_kind() {
             TokenKind::Null => {
-                self.bump();
-                Ok(Expr::Null)
+                let span = self.bump().span;
+                Ok(ParsedExpr::leaf(Expr::Null, span))
             }
             TokenKind::True => {
-                self.bump();
-                Ok(Expr::Bool(true))
+                let span = self.bump().span;
+                Ok(ParsedExpr::leaf(Expr::Bool(true), span))
             }
             TokenKind::False => {
-                self.bump();
-                Ok(Expr::Bool(false))
+                let span = self.bump().span;
+                Ok(ParsedExpr::leaf(Expr::Bool(false), span))
             }
             TokenKind::Number(value) => {
                 let value = *value;
-                self.bump();
-                Ok(Expr::Number(value))
+                let span = self.bump().span;
+                Ok(ParsedExpr::leaf(Expr::Number(value), span))
             }
             TokenKind::String(value) => {
                 let value = value.clone();
-                self.bump();
-                Ok(Expr::String(value))
+                let span = self.bump().span;
+                Ok(ParsedExpr::leaf(Expr::String(value), span))
             }
             TokenKind::Ident(name) => {
+                let token_span = self.peek().span;
                 if name == "parallel"
                     && self
                         .tokens
@@ -799,7 +1148,7 @@ impl Parser {
                 let name = name.clone();
                 self.bump();
                 if name == "sleep" {
-                    return self.parse_sleep_expr();
+                    return self.parse_sleep_expr(token_span.start);
                 }
                 if name == "start" && matches!(self.peek_kind(), TokenKind::Call) {
                     return Err(ParseError::Unexpected {
@@ -812,11 +1161,14 @@ impl Parser {
                         || matches!(self.peek_kind(), TokenKind::LBrace)
                         || self.paren_group_followed_by_lbrace())
                 {
-                    return self.parse_process_start_expr();
+                    return self.parse_process_start_expr(token_span.start);
                 }
                 if name == "Type" && matches!(self.peek_kind(), TokenKind::LBrace) {
                     let ty = self.parse_type_object()?;
-                    return Ok(Expr::TypeLiteral(Box::new(ty)));
+                    return Ok(ParsedExpr::leaf(
+                        Expr::TypeLiteral(Box::new(ty)),
+                        self.span_from(token_span.start),
+                    ));
                 }
                 if matches!(self.peek_kind(), TokenKind::LParen) {
                     let args = self.parse_call_arguments()?;
@@ -828,9 +1180,12 @@ impl Parser {
                                 span: self.tokens[self.index.saturating_sub(1)].span,
                             });
                         }
-                        return Ok(Expr::WaitSignal {
-                            name: static_signal_name_arg(&args[0], "wait_signal")?,
-                        });
+                        return Ok(ParsedExpr::leaf(
+                            Expr::WaitSignal {
+                                name: static_signal_name_arg(&args[0].expr, "wait_signal")?,
+                            },
+                            self.span_from(token_span.start),
+                        ));
                     }
                     if name == "signal_run" {
                         if args.len() != 3 {
@@ -840,15 +1195,31 @@ impl Parser {
                                 span: self.tokens[self.index.saturating_sub(1)].span,
                             });
                         }
-                        return Ok(Expr::SignalRun {
-                            run: Box::new(args[0].clone()),
-                            name: static_signal_name_arg(&args[1], "signal_run")?,
-                            payload: Box::new(args[2].clone()),
-                        });
+                        let run = args[0].expr.clone();
+                        let payload = args[2].expr.clone();
+                        return Ok(ParsedExpr::node(
+                            Expr::SignalRun {
+                                run: Box::new(run),
+                                name: static_signal_name_arg(&args[1].expr, "signal_run")?,
+                                payload: Box::new(payload),
+                            },
+                            self.span_from(token_span.start),
+                            [(0, args[0].clone()), (1, args[2].clone())],
+                        ));
                     }
-                    Ok(Expr::BuiltinCall { name, args })
+                    let arg_exprs = args.iter().map(|arg| arg.expr.clone()).collect();
+                    Ok(ParsedExpr::node(
+                        Expr::BuiltinCall {
+                            name,
+                            args: arg_exprs,
+                        },
+                        self.span_from(token_span.start),
+                        args.into_iter()
+                            .enumerate()
+                            .map(|(index, arg)| (index as u32, arg)),
+                    ))
                 } else {
-                    Ok(Expr::Variable(name))
+                    Ok(ParsedExpr::leaf(Expr::Variable(name), token_span))
                 }
             }
             TokenKind::LParen => {
@@ -867,11 +1238,15 @@ impl Parser {
         }
     }
 
-    fn parse_list(&mut self) -> Result<Expr, ParseError> {
+    fn parse_list(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.peek().span.start;
         self.expect_exact(TokenKind::LBracket, "`[`")?;
         let mut items = Vec::new();
+        let mut children = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBracket) {
-            items.push(self.parse_expr()?);
+            let item = self.parse_expr()?;
+            children.push((items.len() as u32, item));
+            items.push(children.last().expect("item").1.expr.clone());
             if matches!(self.peek_kind(), TokenKind::Comma) {
                 self.bump();
                 continue;
@@ -879,17 +1254,33 @@ impl Parser {
             break;
         }
         self.expect_exact(TokenKind::RBracket, "`]`")?;
-        Ok(Expr::List(items))
+        Ok(ParsedExpr::node(
+            Expr::List(items),
+            self.span_from(start),
+            children,
+        ))
     }
 
-    fn parse_record(&mut self) -> Result<Expr, ParseError> {
+    fn parse_record(&mut self) -> Result<ParsedExpr, ParseError> {
+        let start = self.peek().span.start;
         self.expect_exact(TokenKind::LBrace, "`{`")?;
         let entries = self.parse_record_entries()?;
         self.expect_exact(TokenKind::RBrace, "`}`")?;
-        Ok(Expr::Record(entries))
+        let expr_entries = entries
+            .iter()
+            .map(|(key, value)| (key.clone(), value.expr.clone()))
+            .collect();
+        Ok(ParsedExpr::node(
+            Expr::Record(expr_entries),
+            self.span_from(start),
+            entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, (_, value))| (index as u32, value)),
+        ))
     }
 
-    fn parse_record_entries(&mut self) -> Result<Vec<(AstString, Expr)>, ParseError> {
+    fn parse_record_entries(&mut self) -> Result<Vec<(AstString, ParsedExpr)>, ParseError> {
         let mut entries = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace) {
             let key = self.expect_key_name()?;
@@ -905,7 +1296,7 @@ impl Parser {
         Ok(entries)
     }
 
-    fn parse_call_arguments(&mut self) -> Result<Vec<Expr>, ParseError> {
+    fn parse_call_arguments(&mut self) -> Result<Vec<ParsedExpr>, ParseError> {
         self.expect_exact(TokenKind::LParen, "`(`")?;
         let mut args = Vec::new();
         if !matches!(self.peek_kind(), TokenKind::RParen) {
@@ -925,7 +1316,7 @@ impl Parser {
         Ok(args)
     }
 
-    fn parse_named_arguments(&mut self) -> Result<Vec<(AstString, Expr)>, ParseError> {
+    fn parse_named_arguments(&mut self) -> Result<Vec<(AstString, ParsedExpr)>, ParseError> {
         let mut entries = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
             let key = self.expect_key_name()?;
@@ -941,7 +1332,7 @@ impl Parser {
         Ok(entries)
     }
 
-    fn parse_process_start_expr(&mut self) -> Result<Expr, ParseError> {
+    fn parse_process_start_expr(&mut self, start: usize) -> Result<ParsedExpr, ParseError> {
         if matches!(self.peek_kind(), TokenKind::LBrace) || self.paren_group_followed_by_lbrace() {
             return Err(ParseError::Unexpected {
                 found: "inline `start` process body".to_string(),
@@ -952,17 +1343,46 @@ impl Parser {
         self.expect_exact(TokenKind::LParen, "`(`")?;
         let args = self.parse_named_arguments()?;
         self.expect_exact(TokenKind::RParen, "`)`")?;
-        Ok(Expr::StartProcess(ProcessStartExpr { process, args }))
+        let expr_args = args
+            .iter()
+            .map(|(name, value)| (name.clone(), value.expr.clone()))
+            .collect();
+        Ok(ParsedExpr::node(
+            Expr::StartProcess(ProcessStartExpr {
+                process,
+                args: expr_args,
+            }),
+            self.span_from(start),
+            args.into_iter()
+                .enumerate()
+                .map(|(index, (_, value))| (index as u32, value)),
+        ))
     }
 
-    fn parse_sleep_expr(&mut self) -> Result<Expr, ParseError> {
+    fn parse_sleep_expr(&mut self, start: usize) -> Result<ParsedExpr, ParseError> {
         if matches!(self.peek_kind(), TokenKind::For) {
             self.bump();
-            return Ok(Expr::SleepFor(Box::new(self.parse_expr()?)));
+            let expr = self.parse_expr()?;
+            return Ok(ParsedExpr::node(
+                Expr::SleepFor(Box::new(expr.expr.clone())),
+                Span {
+                    start,
+                    end: expr.span.end,
+                },
+                [(0, expr)],
+            ));
         }
         if self.peek_contextual("until") {
             self.bump();
-            return Ok(Expr::SleepUntil(Box::new(self.parse_expr()?)));
+            let expr = self.parse_expr()?;
+            return Ok(ParsedExpr::node(
+                Expr::SleepUntil(Box::new(expr.expr.clone())),
+                Span {
+                    start,
+                    end: expr.span.end,
+                },
+                [(0, expr)],
+            ));
         }
         Err(ParseError::Expected {
             expected: "`for` or `until`",

@@ -47,7 +47,7 @@ impl RlmHistoryProjection {
                     if let Some(RlmProtocolEvent::RlmTrajectoryEntry(step)) =
                         decode_rlm_protocol_event(event)
                     {
-                        history.push(history_item_from_rlm_step(&step));
+                        history.push(history_item_from_lashlang_step(&step));
                     }
                 }
             }
@@ -223,31 +223,35 @@ pub(crate) fn prune_projected_binding_names<'a>(
 }
 
 fn history_item_from_message(message: &Message) -> Option<RlmHistoryItem> {
+    let content = message_history_text(message);
+    let attachments = message
+        .parts
+        .iter()
+        .filter_map(|part| {
+            let attachment = part.attachment.as_ref()?;
+            Some(RlmAttachmentRef {
+                id: part.id.clone(),
+                media_type: attachment.reference.media_type,
+                label: attachment.reference.label.clone(),
+                reference: attachment.reference.id.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if content.is_empty() && attachments.is_empty() {
+        return None;
+    }
     Some(RlmHistoryItem::Message {
         id: message.id.clone(),
         role: history_role(message.role),
-        content: message_history_text(message),
-        attachments: message
-            .parts
-            .iter()
-            .filter_map(|part| {
-                let attachment = part.attachment.as_ref()?;
-                Some(RlmAttachmentRef {
-                    id: part.id.clone(),
-                    media_type: attachment.reference.media_type,
-                    label: attachment.reference.label.clone(),
-                    reference: attachment.reference.id.to_string(),
-                })
-            })
-            .collect(),
+        content,
+        attachments,
     })
 }
 
-fn history_item_from_rlm_step(entry: &RlmTrajectoryEntry) -> RlmHistoryItem {
-    RlmHistoryItem::RlmStep {
+fn history_item_from_lashlang_step(entry: &RlmTrajectoryEntry) -> RlmHistoryItem {
+    RlmHistoryItem::LashlangStep {
         id: entry.id.clone(),
         protocol_iteration: entry.protocol_iteration,
-        reasoning: entry.reasoning.clone(),
         code: entry.code.clone(),
         output: entry.output.clone(),
         images: entry.images.iter().map(image_ref).collect(),
@@ -293,9 +297,8 @@ mod tests {
 
     fn step_projection(output: &str) -> lash_core::ChronologicalProjection {
         let entry = RlmTrajectoryEntry {
-            id: "rlm_step_0".to_string(),
+            id: "lashlang_step_0".to_string(),
             protocol_iteration: 0,
-            reasoning: "thinking".to_string(),
             code: "print big".to_string(),
             output: vec![output.to_string()],
             images: Vec::new(),
@@ -333,7 +336,7 @@ mod tests {
             projection: Arc::new(rlm_history_projection(&projection)),
         };
 
-        // history[0] -> the serialized RLM step record.
+        // history[0] -> the serialized lashlang execution record.
         let FlowValue::Record(step) = read_index(&value, 0).await else {
             panic!("history[0] should be a record");
         };

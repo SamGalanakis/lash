@@ -909,7 +909,7 @@ fn benchmark_stream_profile_for_request(
     if matches!(scenario, RuntimePerfScenario::RlmSubagentSpawn)
         && request_text(request).contains("Subagent capability: default. Depth: 1/5.")
     {
-        return text_profile("```lashlang\nsubmit { len: len(chunk) }\n```");
+        return text_profile(lashlang_block("submit { len: len(chunk) }"));
     }
 
     if matches!(
@@ -1062,7 +1062,7 @@ fn benchmark_stream_profile_for_request(
         | RuntimePerfScenario::RlmLargeToolCatalog
         | RuntimePerfScenario::EmbedRlm
         | RuntimePerfScenario::TraceJsonlExtended => {
-            let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
+            let text = lashlang_block(r#"submit "runtime perf benchmark ok""#);
             text_profile(text)
         }
         RuntimePerfScenario::RlmGlobals => {
@@ -1071,7 +1071,8 @@ fn benchmark_stream_profile_for_request(
             // small values render in full, while `big_map`/`big_notes`/`big_text`
             // exceed the inline budget and go through the keys / head-tail
             // truncation path that runs on every prompt build.
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 big_map = {}
 for i in range(24) {
   big_map[format("room_{}", i)] = { exits: ["north", "south", "east"], items: [format("item_{}", i)] }
@@ -1101,33 +1102,72 @@ live_list = [
 ]
 live_message = "runtime perf benchmark ok"
 host_snapshot = { benchmark: benchmark, input: input, chat: chat }
-submit live_message
-```"#
-                .to_string();
+submit live_message"#,
+            );
+            text_profile(text)
+        }
+        RuntimePerfScenario::RlmLargePrint => {
+            let text = lashlang_block(
+                r#"
+big_text = ""
+for i in range(70) {
+  big_text = format("{}line {}: abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789\n", big_text, i)
+}
+
+rows = []
+for i in range(16) {
+  rows = push(rows, {
+    id: format("row_{}", i),
+    status: "ok",
+    exit_code: 0,
+    stderr: "short diagnostic stderr remains visible",
+    output: big_text
+  })
+}
+
+payload = {
+  status: "ok",
+  error: null,
+  exit_code: 0,
+  stderr: "short diagnostic stderr remains visible",
+  output: big_text,
+  rows: rows,
+  metadata: {
+    scenario: "rlm_large_print",
+    turn: 1,
+    tags: ["runtime", "projection", "print"]
+  }
+}
+
+result = await tools.benchmark_echo({ value: payload, ordinal: 1 })?
+print result
+submit "runtime perf benchmark ok""#,
+            );
             text_profile(text)
         }
         RuntimePerfScenario::RlmToolCalls => {
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 first = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 1 })?
 second = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 2 })?
 third = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 3 })?
 fourth = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 4 })?
-submit first.value
-```"#
-                .to_string();
+submit first.value"#,
+            );
             text_profile(text)
         }
         RuntimePerfScenario::RlmAsyncToolCompletion => {
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 first = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
 second = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
-submit first.value
-```"#
-                .to_string();
+submit first.value"#,
+            );
             text_profile(text)
         }
         RuntimePerfScenario::RlmProcessHandles => {
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 process benchmark_echo_process(tool: Tools, value: str, ordinal: int) {
   result = await tool.benchmark_echo({ value: value, ordinal: ordinal })?
   finish result
@@ -1145,13 +1185,13 @@ live = await processes.list({})?
 cancel slow
 first_result = (await first)?
 second_result = (await second)?
-submit first_result.value
-```"#
-                .to_string();
+submit first_result.value"#,
+            );
             text_profile(text)
         }
         RuntimePerfScenario::RlmTriggerMailPipeline => {
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 @label(title: "Define and register mail forwarder")
 process forward_mail(event: mail.Received) {
   if event.account == "test" {
@@ -1178,13 +1218,13 @@ sent = await inbox.test.send({
 })?
 
 print { trigger_handle: handle, sent: sent }
-submit "runtime perf benchmark ok"
-```"#
-                .to_string();
+submit "runtime perf benchmark ok""#,
+            );
             text_profile(text)
         }
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => {
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 process benchmark_async_process(tool: Tools, value: str) {
   result = await tool.benchmark_async({ value: value, delay_ms: 0 })?
   finish result
@@ -1194,13 +1234,13 @@ first = start benchmark_async_process(tool: tools, value: "runtime perf benchmar
 second = start benchmark_async_process(tool: tools, value: "runtime perf benchmark ok")
 first_result = (await first)?
 second_result = (await second)?
-submit first_result.value
-```"#
-                .to_string();
+submit first_result.value"#,
+            );
             text_profile(text)
         }
         RuntimePerfScenario::RlmSubagentSpawn => {
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 process spawn_child(agents: Agents) {
   result = await agents.spawn({
     capability: "default",
@@ -1213,24 +1253,27 @@ process spawn_child(agents: Agents) {
 
 handle = start spawn_child(agents: agents)
 result = (await handle)?
-submit "runtime perf benchmark ok"
-```"#
-                .to_string();
+submit "runtime perf benchmark ok""#,
+            );
             text_profile(text)
         }
         RuntimePerfScenario::RlmLlmQuery => {
-            let text = r#"```lashlang
+            let text = lashlang_block(
+                r#"
 result = await llm.query({
   task: "Return the exact benchmark marker.",
   inputs: { marker: "runtime perf benchmark ok" }
 })?
-submit result
-```"#
-                .to_string();
+submit result"#,
+            );
             text_profile(text)
         }
         _ => text_profile("runtime perf benchmark ok"),
     }
+}
+
+fn lashlang_block(source: &str) -> String {
+    format!("<lashlang>\n{}\n</lashlang>", source.trim())
 }
 
 fn text_profile(text: impl Into<String>) -> BenchmarkStreamProfile {

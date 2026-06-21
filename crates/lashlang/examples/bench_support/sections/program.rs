@@ -409,7 +409,7 @@ submit {
 missing = await tools.missing_tool({ value: "x" })
 boom = await tools.boom({ reason: "explicit" })
 ok = await tools.echo({ value: "still-running" })
-probe = await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })
+probe = await shell.exec({ cmd: "test -f Cargo.lock" })
 submit {
   missing_ok: missing.ok,
   missing_error: contains(missing.error, "unknown tool"),
@@ -521,17 +521,17 @@ submit {
         Scenario::SyntaxTextHostEnvironment => {
             r####"
 // Exercise parser-heavy string forms, comments, semicolon recovery, and text builtins.
-patch = r#"*** Begin Patch
+patch = r"""*** Begin Patch
 *** Update File: crates/lashlang/src/lib.rs
 @@
 -old
 +new
 \n { braces stay raw }
-*** End Patch"#;
-script = r##"python3 - <<'PY'
+*** End Patch""";
+script = r'''python3 - <<'PY'
 print("""double quotes are preserved""")
 \n { braces stay raw }
-PY"##;
+PY''';
 plain = """first
 "quoted"
 second""";

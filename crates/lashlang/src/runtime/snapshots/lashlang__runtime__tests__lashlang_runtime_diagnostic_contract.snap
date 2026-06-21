@@ -1,8 +1,9 @@
 ---
 source: crates/lashlang/src/runtime/tests.rs
-expression: diagnostic_message(err)
+assertion_line: 375
+expression: "runtime_diagnostic(\"x = 1\\nsubmit len(true)\").await"
 ---
 `len` requires a string, list, record, or null; use `.size` for images
 --> line 2, column 1
 submit len(true)
-^
+^~~~~~~~~~~~~~~~

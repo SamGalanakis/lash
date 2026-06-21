@@ -435,9 +435,8 @@ mod tests {
     fn step_event(protocol_iteration: usize, code: &str, output: &str) -> SessionEventRecord {
         SessionEventRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmTrajectoryEntry(
             RlmTrajectoryEntry {
-                id: format!("rlm_step_{protocol_iteration}"),
+                id: format!("lashlang_step_{protocol_iteration}"),
                 protocol_iteration,
-                reasoning: "thinking".to_string(),
                 code: code.to_string(),
                 output: if output.is_empty() {
                     Vec::new()
@@ -471,15 +470,15 @@ mod tests {
         let history = projector.format_history(&projection_from_events(&events));
 
         assert!(history.contains("--- history[0] · user message · 5 chars ---\n\nfirst"));
-        assert!(history.contains("--- history[1] · rlm step · protocol_iteration 0 ---"));
-        assert!(history.contains("Code:\n```lashlang\nprint 1\n```"));
+        assert!(history.contains("--- history[1] · lashlang step · protocol_iteration 0 ---"));
+        assert!(history.contains("Code:\n    print 1"));
         assert!(history.contains("history[1].output[0] (1 chars):\n1"));
         assert!(history.contains("--- history[2] · user message · 6 chars ---\n\nsecond"));
-        assert!(history.contains("--- history[3] · rlm step · protocol_iteration 1 ---"));
+        assert!(history.contains("--- history[3] · lashlang step · protocol_iteration 1 ---"));
         assert!(history.contains("history[3].output[0] (1 chars):\n2"));
-        // Old combined "Output" + "Tool calls" sections were removed —
+        // Old combined "Output" + "Tool calls" sections were removed;
         // each `print` is now its own block, and tool calls are visible
-        // inline in the `code` block above.
+        // inline in the source display above.
         assert!(!history.contains("\n\nOutput ("));
         assert!(!history.contains("\n\nTool calls:"));
         assert!(!history.contains("Task"));
@@ -493,7 +492,7 @@ mod tests {
         let history = projector.format_history(&projection_from_events(&events));
 
         assert!(history.contains("--- history[0] · user message"));
-        assert!(history.contains("--- history[1] · rlm step · protocol_iteration 0 ---"));
+        assert!(history.contains("--- history[1] · lashlang step · protocol_iteration 0 ---"));
         assert!(!history.contains("tool_call"));
     }
 
@@ -511,21 +510,50 @@ mod tests {
     }
 
     #[test]
-    fn truncated_rlm_step_output_emits_full_reference() {
+    fn truncated_lashlang_step_output_emits_full_reference() {
         // The render half of the re-fetch contract: a truncated step output
         // shows a preview plus a `full: history[0].output[0]` handle. The
         // resolve half — that the handle returns the full untruncated value —
         // is covered by `history_step_output_resolves_full_untruncated_value`
         // in projection::context.
         let projector = projector(10);
+        let output = "x".repeat(60 * 1024);
         let history = projector.format_history(&projection_from_events(&[step_event(
             0,
             "print big",
-            "abcdefghijklmnopqrstuvwxyz",
+            &output,
         )]));
 
         assert!(history.contains("full: history[0].output[0]"));
-        assert!(history.contains("... (16 characters omitted) ..."));
+        assert!(history.contains("...truncated..."));
+    }
+
+    #[test]
+    fn structured_lashlang_step_output_keeps_diagnostic_fields_in_projected_history() {
+        let projector = projector(10);
+        let raw = serde_json::json!({
+            "output": "x".repeat(60 * 1024),
+            "status": "failed",
+            "error": "boom",
+            "exit_code": 2,
+            "stderr": "short stderr"
+        })
+        .to_string();
+        let history = projector.format_history(&projection_from_events(&[step_event(
+            0,
+            "print result",
+            &raw,
+        )]));
+
+        assert!(history.contains("full: history[0].output[0]"), "{history}");
+        let status = history.find(r#""status":"failed""#).expect("status field");
+        let error = history.find(r#""error":"boom""#).expect("error field");
+        let exit = history.find(r#""exit_code":2"#).expect("exit field");
+        let stderr = history
+            .find(r#""stderr":"short stderr""#)
+            .expect("stderr field");
+        assert!(status < error && error < exit && exit < stderr, "{history}");
+        assert!(history.contains("truncated"), "{history}");
     }
 
     #[test]
@@ -672,9 +700,8 @@ mod tests {
     fn printed_images_render_as_llm_image_blocks() {
         let event = SessionEventRecord::Protocol(rlm_protocol_event(
             RlmProtocolEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
-                id: "rlm_step_1".to_string(),
+                id: "lashlang_step_1".to_string(),
                 protocol_iteration: 1,
-                reasoning: String::new(),
                 code: "print img".to_string(),
                 output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
                 images: vec![lash_core::AttachmentRef {
@@ -752,7 +779,7 @@ mod tests {
                 text,
                 cache_breakpoint: true,
                 ..
-            }) if text.starts_with("--- history[1] · rlm step")
+            }) if text.starts_with("--- history[1] · lashlang step")
         ));
         assert!(matches!(
             messages[2].blocks.first(),
@@ -890,7 +917,7 @@ mod tests {
             step_event(0, "print 1", "1"),
         ]));
         assert!(initial.contains("--- history[0] · user message"));
-        assert!(initial.contains("--- history[1] · rlm step · protocol_iteration 0 ---"));
+        assert!(initial.contains("--- history[1] · lashlang step · protocol_iteration 0 ---"));
 
         let extended = projector.format_history(&projection_from_events(&[
             user_event("u1", "first"),
@@ -900,6 +927,6 @@ mod tests {
         ]));
         assert!(extended.starts_with(&initial));
         assert!(extended.contains("--- history[2] · user message"));
-        assert!(extended.contains("--- history[3] · rlm step · protocol_iteration 1 ---"));
+        assert!(extended.contains("--- history[3] · lashlang step · protocol_iteration 1 ---"));
     }
 }

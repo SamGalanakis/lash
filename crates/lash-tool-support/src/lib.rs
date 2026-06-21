@@ -3,9 +3,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::future::Future;
-use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 mod static_provider;
 #[cfg(feature = "lashlang")]
@@ -137,33 +135,14 @@ pub fn display_relative(base: &Path, path: &Path) -> String {
     display.replace('\\', "/")
 }
 
-/// Shared preamble describing default filesystem-listing behavior.
-/// Used by `ls` and `glob` so both tools document hidden-file and
-/// `.gitignore` handling in identical wording.
-pub const FS_DEFAULTS_PREAMBLE: &str =
-    "By default this includes hidden files and respects `.gitignore` only inside Git repos.";
-
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-pub struct PathEntry {
-    pub path: String,
-    pub kind: String,
-    pub size_bytes: u64,
-    pub lines: Option<u64>,
-    pub modified_at: String,
-}
+/// Shared preamble describing default filesystem discovery behavior.
+pub const FS_DEFAULTS_PREAMBLE: &str = "By default this excludes hidden entries, `.git`, and `node_modules`, and respects ignore files.";
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct TruncationMeta {
     pub shown: usize,
     pub total: usize,
     pub omitted: usize,
-}
-
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct FilesystemEntriesOutput {
-    pub items: Vec<PathEntry>,
-    pub truncated: Option<TruncationMeta>,
 }
 
 pub fn invalid_tool_args(message: impl Into<String>) -> ToolResult {
@@ -238,10 +217,6 @@ pub fn non_empty_string(value: &str, key: &str) -> Result<(), ToolResult> {
     }
 }
 
-pub fn default_true() -> bool {
-    true
-}
-
 pub fn default_path_dot() -> String {
     ".".to_string()
 }
@@ -290,14 +265,6 @@ where
             "expected integer, null, or \"none\"",
         )),
     }
-}
-
-pub fn default_ls_depth() -> OptionalUsizeArg {
-    OptionalUsizeArg::Value(3)
-}
-
-pub fn default_ls_limit() -> OptionalUsizeArg {
-    OptionalUsizeArg::Value(500)
 }
 
 pub fn default_glob_limit() -> OptionalUsizeArg {
@@ -398,58 +365,6 @@ pub fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_
     })
 }
 
-pub fn path_entry_output_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "path": { "type": "string" },
-            "kind": { "type": "string", "enum": ["file", "dir", "symlink", "other"] },
-            "size_bytes": { "type": "integer", "minimum": 0 },
-            "lines": {
-                "anyOf": [
-                    { "type": "integer", "minimum": 0 },
-                    { "type": "null" }
-                ]
-            },
-            "modified_at": {
-                "type": "string",
-                "description": "Modification timestamp formatted as RFC3339 UTC."
-            }
-        },
-        "required": ["path", "kind", "size_bytes", "lines", "modified_at"],
-        "additionalProperties": false,
-    })
-}
-
-pub fn filesystem_entries_output_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": path_entry_output_schema()
-            },
-            "truncated": {
-                "anyOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "shown": { "type": "integer", "minimum": 0 },
-                            "total": { "type": "integer", "minimum": 0 },
-                            "omitted": { "type": "integer", "minimum": 0 }
-                        },
-                        "required": ["shown", "total", "omitted"],
-                        "additionalProperties": false
-                    },
-                    { "type": "null" }
-                ]
-            }
-        },
-        "required": ["items", "truncated"],
-        "additionalProperties": false,
-    })
-}
-
 pub fn lashlang_binding(
     module_path: impl IntoIterator<Item = impl Into<String>>,
     operation: impl Into<String>,
@@ -480,65 +395,24 @@ where
         .map_err(|err| format!("blocking task failed: {err}"))
 }
 
-/// Build a normalized filesystem entry for tool output.
-/// Returns the entry plus raw mtime for optional sorting.
-pub fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, SystemTime) {
-    let fallback_mtime = UNIX_EPOCH;
-    let path_str = path.to_string_lossy().to_string();
-
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(_) => {
-            let entry = PathEntry {
-                path: path_str,
-                kind: "other".to_string(),
-                size_bytes: 0,
-                lines: None,
-                modified_at: format_time_rfc3339(fallback_mtime),
-            };
-            return (entry, fallback_mtime);
-        }
-    };
-
-    let file_type = metadata.file_type();
-    let kind = if file_type.is_symlink() {
-        "symlink"
-    } else if file_type.is_dir() {
-        "dir"
-    } else if file_type.is_file() {
-        "file"
-    } else {
-        "other"
-    };
-
-    let mtime = metadata.modified().unwrap_or(fallback_mtime);
-    let lines = if with_lines && kind == "file" {
-        count_text_lines(path)
-    } else {
-        None
-    };
-
-    let entry = PathEntry {
-        path: path_str,
-        kind: kind.to_string(),
-        size_bytes: metadata.len(),
-        lines,
-        modified_at: format_time_rfc3339(mtime),
-    };
-    (entry, mtime)
-}
-
 pub fn rg_file_list(
     base: &Path,
-    include_hidden: bool,
-    respect_gitignore: bool,
+    show_hidden_entries: bool,
+    respect_ignore_files: bool,
     max_depth: Option<usize>,
     globs: &[String],
 ) -> Result<Vec<PathBuf>, ToolResult> {
-    let mut builder = ignore::WalkBuilder::new(base);
-    builder.hidden(!include_hidden).max_depth(max_depth);
+    if is_default_excluded_entry(base) {
+        return Ok(Vec::new());
+    }
 
-    if respect_gitignore {
+    let mut builder = ignore::WalkBuilder::new(base);
+    builder
+        .hidden(!show_hidden_entries)
+        .max_depth(max_depth)
+        .filter_entry(|entry| !is_default_excluded_entry(entry.path()));
+
+    if respect_ignore_files {
         builder.git_ignore(true).git_exclude(true).git_global(true);
         builder.require_git(true);
     } else {
@@ -575,49 +449,17 @@ pub fn rg_file_list(
         .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.path() != base)
+        .filter(|entry| !is_default_excluded_entry(entry.path()))
         .map(ignore::DirEntry::into_path)
         .collect();
     Ok(files)
 }
 
-/// Build the standard result envelope returned by filesystem listing tools.
-pub fn filesystem_entries_output(
-    items: Vec<PathEntry>,
-    total_count: usize,
-) -> FilesystemEntriesOutput {
-    let shown = items.len();
-    let truncated = if total_count > shown {
-        Some(TruncationMeta {
-            shown,
-            total: total_count,
-            omitted: total_count - shown,
-        })
-    } else {
-        None
-    };
-    FilesystemEntriesOutput { items, truncated }
-}
-
-pub fn filesystem_entries_result(items: Vec<PathEntry>, total_count: usize) -> serde_json::Value {
-    serde_json::to_value(filesystem_entries_output(items, total_count))
-        .unwrap_or_else(|_| serde_json::json!({ "items": [], "truncated": null }))
-}
-
-fn count_text_lines(path: &Path) -> Option<u64> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut count = 0_u64;
-    for line in reader.lines() {
-        if line.is_err() {
-            return None;
-        }
-        count += 1;
-    }
-    Some(count)
-}
-
-fn format_time_rfc3339(ts: SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(ts).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn is_default_excluded_entry(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        matches!(name.as_ref(), ".git" | "node_modules")
+    })
 }
 
 /// Generate a compact unified diff between old and new content.
