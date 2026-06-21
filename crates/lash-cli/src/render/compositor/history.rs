@@ -104,18 +104,8 @@ fn draw_empty_history_state(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 || app.overlay.is_some() || app.has_suggestions() {
         return;
     }
-    if area.width < 54 || area.height < 12 {
-        let text = "Type a message or / for commands";
-        let width = display_width(text) as u16;
-        if area.width > width {
-            frame.write_text(
-                area.x + area.width.saturating_sub(width) / 2,
-                area.y + area.height / 2,
-                text,
-                theme::text_faint_style(),
-                width,
-            );
-        }
+    if area.width < 54 || area.height < 12 || !theme::empty_state_logo_enabled() {
+        draw_empty_history_hint(frame, area);
         return;
     }
 
@@ -151,6 +141,20 @@ fn draw_empty_history_state(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ]),
         content_width,
     );
+}
+
+fn draw_empty_history_hint(frame: &mut Frame<'_>, area: Rect) {
+    let text = "Type a message or / for commands";
+    let width = display_width(text) as u16;
+    if area.width > width {
+        frame.write_text(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height / 2,
+            text,
+            theme::text_faint_style(),
+            width,
+        );
+    }
 }
 
 fn draw_process_dock(frame: &mut Frame<'_>, app: &App, area: Rect) {

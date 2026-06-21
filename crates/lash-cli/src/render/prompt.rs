@@ -78,14 +78,8 @@ pub(crate) fn prompt_section_label(text: &str, inner_w: usize) -> Line<'static> 
             .add_modifier(Modifier::Bold),
     )];
     if fill_width > 0 {
-        spans.push(Span::styled(
-            " ",
-            Style::default().fg(theme::border_faint()),
-        ));
-        spans.push(Span::styled(
-            "─".repeat(fill_width),
-            Style::default().fg(theme::border_faint()),
-        ));
+        spans.push(Span::styled(" ", theme::chrome_rule()));
+        spans.push(Span::styled("─".repeat(fill_width), theme::chrome_rule()));
     }
     Line::from(spans)
 }
@@ -169,10 +163,7 @@ fn prompt_help_line(prompt: &PromptState) -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, (key, desc)) in prompt_help_items(prompt).into_iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled(
-                " · ",
-                Style::default().fg(theme::border_faint()),
-            ));
+            spans.push(Span::styled(" · ", theme::chrome_rule()));
         }
         spans.push(Span::styled(key.to_string(), theme::help_key()));
         spans.push(Span::styled(format!(" {desc}"), theme::help_desc()));
@@ -315,9 +306,7 @@ fn prompt_interaction_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'s
             let active = prompt.selected_option_idx() == Some(idx);
             let marked = prompt.option_marked(idx);
             let text_style = if active {
-                Style::default()
-                    .fg(theme::text_primary())
-                    .bg(theme::surface_raised())
+                theme::selected_row()
             } else if marked {
                 Style::default().fg(theme::text_muted())
             } else {
@@ -326,7 +315,7 @@ fn prompt_interaction_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'s
             let prefix_style = if active {
                 Style::default()
                     .fg(theme::brand())
-                    .bg(theme::surface_raised())
+                    .bg(theme::selection_bg())
                     .add_modifier(Modifier::Bold)
             } else if marked {
                 Style::default()
@@ -379,12 +368,12 @@ fn prompt_interaction_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'s
                 if prompt.is_text_entry() {
                     theme::prompt()
                 } else {
-                    Style::default().fg(theme::border_faint())
+                    theme::chrome_rule()
                 },
             ),
-            Span::styled("   ", Style::default().fg(theme::border_faint())),
+            Span::styled("   ", theme::chrome_rule()),
             if is_placeholder {
-                Style::default().fg(theme::border_faint())
+                theme::chrome_rule()
             } else {
                 Style::default().fg(theme::text_primary())
             },

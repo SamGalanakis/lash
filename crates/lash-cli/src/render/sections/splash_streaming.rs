@@ -15,6 +15,33 @@ fn render_splash(
         1
     };
     let pad = " ".repeat(cx);
+    let target_height = if fullscreen {
+        viewport_height
+    } else {
+        SPLASH_SCROLLBACK_HEIGHT
+    };
+
+    if !theme::empty_state_logo_enabled() {
+        let hint = "Type a message or / for commands";
+        let hint_width = UnicodeWidthStr::width(hint);
+        let hint_x = viewport_width.saturating_sub(hint_width) / 2;
+        let hint_y = if fullscreen {
+            viewport_height / 2
+        } else {
+            1
+        };
+        for row in 0..target_height {
+            if row == hint_y && viewport_width > hint_width {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", " ".repeat(hint_x), hint),
+                    theme::text_faint_style(),
+                )));
+            } else {
+                lines.push(Line::from(""));
+            }
+        }
+        return;
+    }
 
     for _ in 0..cy {
         lines.push(Line::from(""));
@@ -45,11 +72,6 @@ fn render_splash(
     ]));
     lines.push(Line::from(""));
 
-    let target_height = if fullscreen {
-        viewport_height
-    } else {
-        SPLASH_SCROLLBACK_HEIGHT
-    };
     for _ in (cy + content_height)..target_height {
         lines.push(Line::from(""));
     }

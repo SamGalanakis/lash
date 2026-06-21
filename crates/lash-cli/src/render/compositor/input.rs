@@ -10,7 +10,9 @@ fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
         area.height.saturating_sub(2),
     );
 
-    draw_top_bottom_rule(frame, area, fg(theme::border_faint()));
+    if theme::input_rules_enabled() {
+        draw_top_bottom_rule(frame, area, theme::chrome_rule());
+    }
     for (idx, line) in snapshot
         .lines
         .iter()
@@ -146,7 +148,7 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
     for (idx, suggestion) in app.suggestions().iter().take(max_visible).enumerate() {
         let selected = !is_indexing && idx == app.suggestion_idx();
         let base_style = if selected {
-            fg(theme::text_primary()).bg(theme::surface_raised())
+            theme::selected_row()
         } else if is_indexing {
             fg(theme::text_subtle())
                 .add_modifier(Modifier::Italic)
@@ -177,7 +179,7 @@ fn build_suggestion_line<'a>(
         if selected {
             Style::default()
                 .fg(theme::brand())
-                .bg(theme::surface_raised())
+                .bg(theme::selection_bg())
                 .add_modifier(Modifier::Bold)
         } else {
             base_style

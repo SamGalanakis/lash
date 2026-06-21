@@ -313,9 +313,7 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                 },
             );
             let style = if row_selected {
-                fg(theme::text_primary())
-                    .bg(theme::surface_raised())
-                    .add_modifier(Modifier::Bold)
+                theme::selected_row()
             } else if session.message_count == 0 && picker.showing_empty_sessions {
                 theme::text_faint_style()
             } else {
@@ -445,7 +443,7 @@ fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                 active_marker
             );
             let style = if selected {
-                fg(theme::text_primary()).bg(theme::surface_raised())
+                theme::selected_row()
             } else if row.active {
                 fg(theme::brand())
             } else {
@@ -526,7 +524,7 @@ fn draw_skill_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
             let prefix = if selected { "> " } else { "  " };
             let line = format!("{prefix}{:<width$} {}", name, desc, width = name_col);
             let style = if selected {
-                fg(theme::text_primary()).bg(theme::surface_raised())
+                theme::selected_row()
             } else {
                 fg(theme::text_subtle())
             };

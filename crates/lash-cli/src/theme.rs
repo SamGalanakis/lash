@@ -16,11 +16,15 @@ pub fn set_active_theme(theme: ThemeName) {
     ACTIVE_THEME.store(theme as u8, Ordering::Relaxed);
 }
 
-fn themed(lash: Color, system: Color) -> Color {
-    match active_theme() {
+fn themed_for(theme: ThemeName, lash: Color, system: Color) -> Color {
+    match theme {
         ThemeName::Lash => lash,
         ThemeName::System => system,
     }
+}
+
+fn themed(lash: Color, system: Color) -> Color {
+    themed_for(active_theme(), lash, system)
 }
 
 // ─── Pigments ────────────────────────────────────────────────────────────────
@@ -105,15 +109,15 @@ pub fn state_error() -> Color {
 }
 
 pub fn surface_base() -> Color {
-    themed(FORM, Color::default_background())
+    surface_base_for(active_theme())
 }
 
 pub fn surface_raised() -> Color {
-    themed(FORM_RAISED, Color::ansi(8))
+    surface_raised_for(active_theme())
 }
 
 pub fn surface_deep() -> Color {
-    themed(FORM_DEEP, Color::default_background())
+    surface_deep_for(active_theme())
 }
 
 pub fn rule() -> Color {
@@ -129,7 +133,35 @@ pub fn border_faint() -> Color {
 }
 
 pub fn selection_bg() -> Color {
-    themed(SELECTION_BG, Color::ansi(4))
+    selection_bg_for(active_theme())
+}
+
+pub fn empty_state_logo_enabled() -> bool {
+    empty_state_logo_enabled_for(active_theme())
+}
+
+pub fn input_rules_enabled() -> bool {
+    matches!(active_theme(), ThemeName::Lash)
+}
+
+fn surface_base_for(theme: ThemeName) -> Color {
+    themed_for(theme, FORM, Color::default_background())
+}
+
+fn surface_raised_for(theme: ThemeName) -> Color {
+    themed_for(theme, FORM_RAISED, Color::default_background())
+}
+
+fn surface_deep_for(theme: ThemeName) -> Color {
+    themed_for(theme, FORM_DEEP, Color::default_background())
+}
+
+fn selection_bg_for(theme: ThemeName) -> Color {
+    themed_for(theme, SELECTION_BG, Color::ansi(6))
+}
+
+fn empty_state_logo_enabled_for(theme: ThemeName) -> bool {
+    matches!(theme, ThemeName::Lash)
 }
 
 // ─── Semantic styles ─────────────────────────────────────────────────────────
@@ -212,7 +244,20 @@ pub fn code_comment() -> Style {
 }
 
 pub fn code_chrome() -> Style {
-    Style::default().fg(border_faint())
+    chrome_rule()
+}
+
+pub fn chrome_rule() -> Style {
+    chrome_rule_for(active_theme())
+}
+
+fn chrome_rule_for(theme: ThemeName) -> Style {
+    match theme {
+        ThemeName::Lash => Style::default().fg(themed_for(theme, ASH, Color::ansi(8))),
+        ThemeName::System => Style::default()
+            .fg(themed_for(theme, ASH_TEXT, Color::ansi(8)))
+            .add_modifier(Modifier::Dim),
+    }
 }
 
 pub fn explore_marker() -> Style {
@@ -351,7 +396,17 @@ pub fn subagent_child() -> Style {
 }
 
 pub fn turn_separator() -> Style {
-    Style::default().fg(rule())
+    match active_theme() {
+        ThemeName::Lash => Style::default().fg(rule()),
+        ThemeName::System => chrome_rule(),
+    }
+}
+
+pub fn selected_row() -> Style {
+    Style::default()
+        .fg(text_primary())
+        .bg(selection_bg())
+        .add_modifier(Modifier::Bold)
 }
 
 pub fn edit_lane_bold() -> Style {
@@ -359,9 +414,12 @@ pub fn edit_lane_bold() -> Style {
 }
 
 pub fn turn_status_brand() -> Style {
-    Style::default()
-        .fg(text_primary())
-        .add_modifier(Modifier::Bold)
+    match active_theme() {
+        ThemeName::Lash => Style::default()
+            .fg(text_primary())
+            .add_modifier(Modifier::Bold),
+        ThemeName::System => Style::default().fg(text_subtle()),
+    }
 }
 
 pub fn turn_status_slash() -> Style {
@@ -369,9 +427,12 @@ pub fn turn_status_slash() -> Style {
 }
 
 pub fn turn_status_state() -> Style {
-    Style::default()
-        .fg(text_primary())
-        .add_modifier(Modifier::Bold)
+    match active_theme() {
+        ThemeName::Lash => Style::default()
+            .fg(text_primary())
+            .add_modifier(Modifier::Bold),
+        ThemeName::System => Style::default().fg(text_muted()),
+    }
 }
 
 pub fn turn_status_elapsed() -> Style {
@@ -423,4 +484,53 @@ pub fn text_subtle_style() -> Style {
 
 pub fn text_faint_style() -> Style {
     Style::default().fg(text_faint())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_theme_keeps_structural_surfaces_on_terminal_background() {
+        assert_eq!(
+            surface_base_for(ThemeName::System),
+            Color::default_background()
+        );
+        assert_eq!(
+            surface_raised_for(ThemeName::System),
+            Color::default_background()
+        );
+        assert_eq!(
+            surface_deep_for(ThemeName::System),
+            Color::default_background()
+        );
+        assert_eq!(selection_bg_for(ThemeName::System), Color::ansi(6));
+        assert_ne!(
+            selection_bg_for(ThemeName::System),
+            Color::default_background()
+        );
+        assert!(!empty_state_logo_enabled_for(ThemeName::System));
+    }
+
+    #[test]
+    fn lash_theme_keeps_custom_structural_surfaces() {
+        assert_eq!(surface_base_for(ThemeName::Lash), FORM);
+        assert_eq!(surface_raised_for(ThemeName::Lash), FORM_RAISED);
+        assert_eq!(surface_deep_for(ThemeName::Lash), FORM_DEEP);
+        assert_eq!(selection_bg_for(ThemeName::Lash), SELECTION_BG);
+        assert!(empty_state_logo_enabled_for(ThemeName::Lash));
+    }
+
+    #[test]
+    fn system_theme_uses_dim_terminal_chrome_rules() {
+        let style = chrome_rule_for(ThemeName::System);
+        assert_eq!(style.fg, Some(Color::ansi(8)));
+        assert!(style.dim);
+        assert_eq!(style.bg, None);
+
+        let style = chrome_rule_for(ThemeName::Lash);
+        assert_eq!(style.fg, Some(ASH));
+        assert!(!style.dim);
+        assert_eq!(style.bg, None);
+    }
 }
