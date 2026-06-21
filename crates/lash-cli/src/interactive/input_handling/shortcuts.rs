@@ -66,10 +66,7 @@ pub(super) async fn handle_global_shortcut_key(
         return Ok(Some(false));
     }
 
-    if !key.modifiers.contains(KeyModifiers::SHIFT)
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'p'))
-    {
+    if is_command_palette_shortcut(key) {
         let items = command_palette_items(app, ctx.provider);
         app.show_command_palette(items);
         return Ok(Some(false));
@@ -207,6 +204,24 @@ pub(super) async fn handle_global_shortcut_key(
     }
 
     Ok(None)
+}
+
+fn is_command_palette_shortcut(key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        return false;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'p'))
+    {
+        return true;
+    }
+
+    // Some terminal stacks deliver Ctrl+P as the raw DLE byte rather than
+    // `Char('p')` with a CONTROL modifier. Treat that byte as the same chord.
+    key.code == KeyCode::Char('\u{10}')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::SUPER)
 }
 
 pub(crate) fn command_palette_items(
@@ -402,6 +417,46 @@ pub(crate) fn command_palette_items(
     ]);
 
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    use super::is_command_palette_shortcut;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn command_palette_shortcut_accepts_modified_ctrl_p() {
+        assert!(is_command_palette_shortcut(key(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn command_palette_shortcut_accepts_raw_ctrl_p_byte() {
+        assert!(is_command_palette_shortcut(key(
+            KeyCode::Char('\u{10}'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn command_palette_shortcut_rejects_plain_p() {
+        assert!(!is_command_palette_shortcut(key(
+            KeyCode::Char('p'),
+            KeyModifiers::NONE
+        )));
+    }
 }
 
 /// Insert an `[Image #n]` marker for a pasted clipboard image and encode it

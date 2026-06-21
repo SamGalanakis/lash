@@ -293,7 +293,7 @@ pub(super) async fn handle_input_mode_key(
             }
             ctx.app.editor.history_down();
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if !c.is_control() => {
             if let Some(recorder) = ctx.ui_trace.as_mut() {
                 recorder.record_input_insert_text(c.to_string());
             }
