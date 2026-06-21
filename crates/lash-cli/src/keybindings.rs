@@ -134,6 +134,7 @@ pub(crate) fn shortcut_help_rows(
             "Ctrl+C",
             "Close popup/overlay, cancel turn, clear draft, or quit",
         ),
+        ShortcutHelpRow::new("Ctrl+P", "Open command and settings palette"),
         ShortcutHelpRow::new("Esc", "Close overlay or cancel running turn"),
         ShortcutHelpRow::new("Enter", "Submit; early-inject while running"),
         ShortcutHelpRow::new("Tab", "Queue for next turn; submit draft when idle"),

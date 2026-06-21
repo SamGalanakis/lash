@@ -274,6 +274,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let (mut lash_config, mut active_provider) =
         provider::resolve_config_and_provider(&args, existing_config, shortcut_api_key.as_deref())
             .await?;
+    crate::theme::set_active_theme(lash_config.theme);
 
     // CLI env/flags override stored config
     if let Some(ref key) = args.tavily_api_key {

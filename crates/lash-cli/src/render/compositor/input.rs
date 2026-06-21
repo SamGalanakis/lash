@@ -26,7 +26,7 @@ fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
         );
     }
     for (x, y, width) in render::input_selection_rects(app, area) {
-        frame.patch_row_style_range(x, y, width, |style| style.bg(theme::SELECTION_BG));
+        frame.patch_row_style_range(x, y, width, |style| style.bg(theme::selection_bg()));
     }
     if let Some(badge) = snapshot.badge {
         let width = badge.width() as u16;

@@ -3,11 +3,16 @@
 //! pastes, queued-turn edit, and Esc.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lash::provider::ProviderHandle;
 use tokio::task;
 
 use crate::app::App;
+use crate::command;
+use crate::config::ThemeName;
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
+use crate::model_selection::provider_display_label;
+use crate::overlay::{CommandPaletteAction, CommandPaletteItem};
 
 use crate::interactive::helpers::{
     is_copy_shortcut, queued_turn_edit_matches, should_preserve_selection_for_key,
@@ -58,6 +63,15 @@ pub(super) async fn handle_global_shortcut_key(
     if app.has_text_selection() && copy_shortcut {
         tracing::debug!("selection copy took precedence over generic key handling");
         copy_active_selection(app, terminal.size().ok());
+        return Ok(Some(false));
+    }
+
+    if !key.modifiers.contains(KeyModifiers::SHIFT)
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'p'))
+    {
+        let items = command_palette_items(app, ctx.provider);
+        app.show_command_palette(items);
         return Ok(Some(false));
     }
 
@@ -193,6 +207,201 @@ pub(super) async fn handle_global_shortcut_key(
     }
 
     Ok(None)
+}
+
+pub(crate) fn command_palette_items(
+    app: &App,
+    provider: &ProviderHandle,
+) -> Vec<CommandPaletteItem> {
+    let mut items = Vec::new();
+
+    for theme in ThemeName::all() {
+        items.push(
+            CommandPaletteItem::new(
+                "Settings",
+                format!("Theme: {}", theme.label()),
+                theme.description(),
+                CommandPaletteAction::Theme(theme),
+            )
+            .footer(theme.as_str())
+            .current(theme == crate::theme::active_theme()),
+        );
+    }
+
+    items.push(
+        CommandPaletteItem::new(
+            "Settings",
+            "Model",
+            format!("Current: {}", app.model),
+            CommandPaletteAction::InsertDraft("/model ".to_string()),
+        )
+        .footer("/model <name>")
+        .current(true),
+    );
+
+    let supported_variants = provider.supported_variants(&app.model);
+    if supported_variants.is_empty() {
+        items.push(
+            CommandPaletteItem::new(
+                "Settings",
+                "Variant",
+                "This model does not expose configurable variants.",
+                CommandPaletteAction::Builtin(command::Command::Variant(None)),
+            )
+            .footer("/variant")
+            .current(true),
+        );
+    } else {
+        items.push(
+            CommandPaletteItem::new(
+                "Settings",
+                "Variant: Default",
+                "Use the provider-recommended default variant.",
+                CommandPaletteAction::Builtin(command::Command::Variant(Some(
+                    "default".to_string(),
+                ))),
+            )
+            .footer("/variant default")
+            .current(app.model_variant.is_none()),
+        );
+        for variant in supported_variants {
+            items.push(
+                CommandPaletteItem::new(
+                    "Settings",
+                    format!("Variant: {variant}"),
+                    format!("Set `{}` to `{variant}`.", app.model),
+                    CommandPaletteAction::Builtin(command::Command::Variant(Some(
+                        (*variant).to_string(),
+                    ))),
+                )
+                .footer(format!("/variant {variant}"))
+                .current(app.model_variant.as_deref() == Some(*variant)),
+            );
+        }
+    }
+
+    items.push(
+        CommandPaletteItem::new(
+            "Settings",
+            "Provider",
+            format!("Current: {}", provider_display_label(provider)),
+            CommandPaletteAction::Builtin(command::Command::ChangeProvider),
+        )
+        .footer("/provider"),
+    );
+    items.push(
+        CommandPaletteItem::new(
+            "Settings",
+            "Execution Mode",
+            format!(
+                "Current: {}. Locked for this session.",
+                app.execution_mode_label
+            ),
+            CommandPaletteAction::Builtin(command::Command::Mode(None)),
+        )
+        .footer("/mode"),
+    );
+    items.push(
+        CommandPaletteItem::new(
+            "Settings",
+            "Logout Provider",
+            "Remove stored credentials for the active provider.",
+            CommandPaletteAction::Builtin(command::Command::Logout),
+        )
+        .footer("/logout"),
+    );
+
+    items.extend([
+        CommandPaletteItem::new(
+            "Session",
+            "New Session",
+            "Reset conversation and start fresh.",
+            CommandPaletteAction::Builtin(command::Command::Clear),
+        )
+        .footer("/clear"),
+        CommandPaletteItem::new(
+            "Session",
+            "Resume Session",
+            "Search previous sessions.",
+            CommandPaletteAction::Builtin(command::Command::Resume(None)),
+        )
+        .footer("/resume"),
+        CommandPaletteItem::new(
+            "Session",
+            "Browse Tree",
+            "Browse and switch conversation branches.",
+            CommandPaletteAction::Builtin(command::Command::Tree),
+        )
+        .footer("/tree"),
+        CommandPaletteItem::new(
+            "Session",
+            "Fork Session",
+            "Open this session in a new terminal.",
+            CommandPaletteAction::Builtin(command::Command::Fork),
+        )
+        .footer("/fork"),
+        CommandPaletteItem::new(
+            "Session",
+            "Compact Context",
+            "Open a compaction frame seeded by a summary.",
+            CommandPaletteAction::Builtin(command::Command::Compact(None)),
+        )
+        .footer("/compact"),
+        CommandPaletteItem::new(
+            "Session",
+            "Retry Last Turn",
+            "Replay the previous turn payload.",
+            CommandPaletteAction::Builtin(command::Command::Retry),
+        )
+        .footer("/retry"),
+    ]);
+
+    items.extend([
+        CommandPaletteItem::new(
+            "Help",
+            "Runtime Info",
+            "Show session, provider, model, path, and tool info.",
+            CommandPaletteAction::Builtin(command::Command::Info),
+        )
+        .footer("/info"),
+        CommandPaletteItem::new(
+            "Help",
+            "Keyboard Controls",
+            "Show keyboard shortcuts.",
+            CommandPaletteAction::Builtin(command::Command::Controls),
+        )
+        .footer("/controls"),
+        CommandPaletteItem::new(
+            "Help",
+            "Commands Help",
+            "Show commands and loaded skills.",
+            CommandPaletteAction::Builtin(command::Command::Help),
+        )
+        .footer("/help"),
+        CommandPaletteItem::new(
+            "Help",
+            "Skills",
+            "Browse loaded skills.",
+            CommandPaletteAction::Builtin(command::Command::Skills),
+        )
+        .footer("/skills"),
+        CommandPaletteItem::new(
+            "Help",
+            "Version",
+            "Show lash-cli and lash-sansio versions.",
+            CommandPaletteAction::Builtin(command::Command::Version),
+        )
+        .footer("/version"),
+        CommandPaletteItem::new(
+            "Help",
+            "Exit",
+            "Quit Lash.",
+            CommandPaletteAction::Builtin(command::Command::Exit),
+        )
+        .footer("/exit"),
+    ]);
+
+    items
 }
 
 /// Insert an `[Image #n]` marker for a pasted clipboard image and encode it

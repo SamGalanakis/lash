@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 
 use lash_core::{Message, MessageRole, PartKind, SessionMessageTreeNode};
 
+use crate::command;
+use crate::config::ThemeName;
 use crate::prompt_model::{PromptRequest, PromptResponse, PromptSelectionMode};
 use crate::session_log::SessionInfo;
 
@@ -286,6 +288,166 @@ impl PromptState {
                 Self::format_note_display(base, note.as_deref())
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandPaletteAction {
+    Builtin(command::Command),
+    InsertDraft(String),
+    Theme(ThemeName),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandPaletteItem {
+    pub title: String,
+    pub description: String,
+    pub category: String,
+    pub footer: Option<String>,
+    pub current: bool,
+    pub action: CommandPaletteAction,
+}
+
+impl CommandPaletteItem {
+    pub fn new(
+        category: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+        action: CommandPaletteAction,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            description: description.into(),
+            category: category.into(),
+            footer: None,
+            current: false,
+            action,
+        }
+    }
+
+    pub fn footer(mut self, footer: impl Into<String>) -> Self {
+        self.footer = Some(footer.into());
+        self
+    }
+
+    pub fn current(mut self, current: bool) -> Self {
+        self.current = current;
+        self
+    }
+
+    fn search_text(&self) -> String {
+        format!(
+            "{} {} {} {}",
+            self.title,
+            self.description,
+            self.category,
+            self.footer.as_deref().unwrap_or_default()
+        )
+        .to_ascii_lowercase()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandPaletteState {
+    pub title: String,
+    pub query: String,
+    pub selected: usize,
+    pub items: Vec<CommandPaletteItem>,
+}
+
+impl CommandPaletteState {
+    pub fn new(items: Vec<CommandPaletteItem>) -> Self {
+        Self {
+            title: "Commands".to_string(),
+            query: String::new(),
+            selected: 0,
+            items,
+        }
+    }
+
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                let haystack = item.search_text();
+                terms
+                    .iter()
+                    .all(|term| haystack.contains(term))
+                    .then_some(idx)
+            })
+            .collect()
+    }
+
+    pub fn filtered_count(&self) -> usize {
+        self.filtered_indices().len()
+    }
+
+    pub fn selected_position(&self) -> Option<(usize, usize)> {
+        let count = self.filtered_count();
+        (count > 0).then(|| (self.selected.min(count - 1) + 1, count))
+    }
+
+    pub fn selected_item(&self) -> Option<&CommandPaletteItem> {
+        let indices = self.filtered_indices();
+        let idx = *indices.get(self.selected.min(indices.len().saturating_sub(1)))?;
+        self.items.get(idx)
+    }
+
+    pub fn selected_action(&self) -> Option<CommandPaletteAction> {
+        self.selected_item().map(|item| item.action.clone())
+    }
+
+    pub fn up(&mut self) {
+        let count = self.filtered_count();
+        if count > 0 {
+            self.selected = if self.selected == 0 {
+                count - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
+
+    pub fn down(&mut self) {
+        let count = self.filtered_count();
+        if count > 0 {
+            self.selected = (self.selected + 1) % count;
+        }
+    }
+
+    pub fn page_up(&mut self, amount: usize) {
+        self.selected = self.selected.saturating_sub(amount);
+    }
+
+    pub fn page_down(&mut self, amount: usize) {
+        let count = self.filtered_count();
+        if count > 0 {
+            self.selected = (self.selected + amount).min(count - 1);
+        }
+    }
+
+    pub fn home(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.selected = self.filtered_count().saturating_sub(1);
+    }
+
+    pub fn push_query_char(&mut self, ch: char) {
+        self.query.push(ch);
+        self.selected = 0;
+    }
+
+    pub fn pop_query_char(&mut self) {
+        self.query.pop();
+        self.selected = 0;
     }
 }
 
@@ -709,10 +871,89 @@ pub fn tree_message_preview(message: &Message) -> String {
 
 #[derive(Debug)]
 pub enum OverlayState {
+    CommandPalette(CommandPaletteState),
     Document(DocumentState),
     SessionPicker(SessionPickerState),
     Tree(TreeState),
     SkillPicker(PickerState<(String, String)>),
     ProcessOverview(ProcessOverviewState),
     Prompt(PromptState),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(
+        category: &str,
+        title: &str,
+        description: &str,
+        action: CommandPaletteAction,
+    ) -> CommandPaletteItem {
+        CommandPaletteItem::new(category, title, description, action)
+    }
+
+    #[test]
+    fn command_palette_filters_across_title_description_and_category() {
+        let mut palette = CommandPaletteState::new(vec![
+            item(
+                "Settings",
+                "Theme: Lash",
+                "Use the Lash palette.",
+                CommandPaletteAction::Theme(ThemeName::Lash),
+            ),
+            item(
+                "Session",
+                "Resume Session",
+                "Search previous work.",
+                CommandPaletteAction::Builtin(command::Command::Resume(None)),
+            ),
+            item(
+                "Help",
+                "Runtime Info",
+                "Show provider and model details.",
+                CommandPaletteAction::Builtin(command::Command::Info),
+            ),
+        ]);
+
+        palette.push_query_char('p');
+        palette.push_query_char('r');
+        palette.push_query_char('o');
+        palette.push_query_char('v');
+
+        assert_eq!(palette.filtered_indices(), vec![2]);
+        assert_eq!(
+            palette.selected_action(),
+            Some(CommandPaletteAction::Builtin(command::Command::Info))
+        );
+    }
+
+    #[test]
+    fn command_palette_navigation_wraps_visible_matches() {
+        let mut palette = CommandPaletteState::new(vec![
+            item(
+                "Settings",
+                "Theme: Lash",
+                "",
+                CommandPaletteAction::Theme(ThemeName::Lash),
+            ),
+            item(
+                "Settings",
+                "Theme: System",
+                "",
+                CommandPaletteAction::Theme(ThemeName::System),
+            ),
+        ]);
+
+        palette.up();
+        assert_eq!(
+            palette.selected_action(),
+            Some(CommandPaletteAction::Theme(ThemeName::System))
+        );
+        palette.down();
+        assert_eq!(
+            palette.selected_action(),
+            Some(CommandPaletteAction::Theme(ThemeName::Lash))
+        );
+    }
 }
