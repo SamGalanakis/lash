@@ -87,6 +87,44 @@ impl<'module> Linker<'module> {
                     ))))),
                 )
             }
+            Expr::ListComprehension { element, clauses } => {
+                let mut lowered_clauses = Vec::with_capacity(clauses.len());
+                let mut previous_bindings = Vec::new();
+                for clause in clauses {
+                    match clause {
+                        ListComprehensionClause::For { binding, iterable } => {
+                            let (iterable, iterable_binding) = self.lower_expr(iterable, scope)?;
+                            let item_ty =
+                                self.index_type(&binding_type(iterable_binding.as_ref()), scope.span)?;
+                            previous_bindings.push((
+                                binding.to_string(),
+                                scope.bind(binding.as_str(), self.binding_for_type(&item_ty)),
+                            ));
+                            lowered_clauses.push(ListComprehensionClause::For {
+                                binding: binding.clone(),
+                                iterable,
+                            });
+                        }
+                        ListComprehensionClause::If { condition } => {
+                            let condition = self.lower_expr(condition, scope)?.0;
+                            lowered_clauses.push(ListComprehensionClause::If { condition });
+                        }
+                    }
+                }
+                let (element, binding) = self.lower_expr(element, scope)?;
+                for (name, previous) in previous_bindings.into_iter().rev() {
+                    scope.restore(name.as_str(), previous);
+                }
+                (
+                    Expr::ListComprehension {
+                        element: Box::new(element),
+                        clauses: lowered_clauses,
+                    },
+                    Some(Binding::Value(TypeExpr::List(Box::new(binding_type(
+                        binding.as_ref(),
+                    ))))),
+                )
+            }
             Expr::Record(entries) => {
                 let mut lowered = Vec::with_capacity(entries.len());
                 let mut fields = Vec::with_capacity(entries.len());

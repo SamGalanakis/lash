@@ -440,6 +440,30 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 let values = self.pop_n(len)?;
                 self.stack.push(Value::List(values.into()));
             }
+            Instruction::ListAppend => {
+                if self.stack.len() < 2 {
+                    return Err(RuntimeError::ValueError {
+                        message: "vm stack underflow".to_string(),
+                    });
+                }
+                let list_index = self.stack.len() - 2;
+                if self.stack[list_index..]
+                    .iter()
+                    .any(|value| matches!(value, Value::Projected(_)))
+                    || !matches!(self.stack[list_index], Value::List(_))
+                {
+                    return Ok(None);
+                }
+                let item = self.pop_stack()?;
+                let Some(Value::List(items)) = self.stack.last_mut() else {
+                    unreachable!("list append target was checked above");
+                };
+                let values = items.make_mut();
+                if values.len() == values.capacity() {
+                    values.reserve(1);
+                }
+                values.push(item);
+            }
             Instruction::BuildRecord(keys) => {
                 let record = self.drain_record_from_stack(keys)?;
                 self.stack.push(Value::Record(Arc::new(record)));
@@ -1066,6 +1090,12 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 self.stack.truncate(index_start);
                 self.record_assignment(slot);
                 self.last_value = Some(last_value);
+            }
+            Instruction::ListAppend => {
+                let item = self.pop_stack()?;
+                let list = self.pop_stack()?;
+                let value = execute_push_builtin_async(list, item).await?;
+                self.stack.push(value);
             }
             Instruction::Unary(op) => {
                 let value = self.pop_stack()?;

@@ -2,8 +2,8 @@ use thiserror::Error;
 
 use crate::HostRequirements;
 use crate::ast::{
-    AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, LabelMetadata, ProcessDecl, Program,
-    ResourceRefExpr, TypeExpr, TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, LabelMetadata,
+    ListComprehensionClause, ProcessDecl, Program, ResourceRefExpr, TypeExpr, TypeField, UnaryOp,
 };
 
 /// Error returned when canonical IR cannot be represented as Lashlang source.
@@ -334,6 +334,27 @@ impl<'a> SourceFormatter<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(format!("[{}]", items.join(", ")))
             }
+            Expr::ListComprehension { element, clauses } => {
+                let mut out = String::new();
+                out.push('[');
+                out.push_str(&self.expr_source(element)?);
+                for clause in clauses {
+                    match clause {
+                        ListComprehensionClause::For { binding, iterable } => {
+                            out.push_str(" for ");
+                            out.push_str(&format_identifier("comprehension binding", binding)?);
+                            out.push_str(" in ");
+                            out.push_str(&self.expr_source(iterable)?);
+                        }
+                        ListComprehensionClause::If { condition } => {
+                            out.push_str(" if ");
+                            out.push_str(&self.expr_source(condition)?);
+                        }
+                    }
+                }
+                out.push(']');
+                Ok(out)
+            }
             Expr::Record(entries) if is_trigger_event_placeholder(entries) => {
                 Ok("trigger.event".to_string())
             }
@@ -488,6 +509,7 @@ impl<'a> SourceFormatter<'a> {
             | Expr::String(_)
             | Expr::Variable(_)
             | Expr::List(_)
+            | Expr::ListComprehension { .. }
             | Expr::Record(_)
             | Expr::StartProcess(_)
             | Expr::ProcessRef { .. }
@@ -511,6 +533,7 @@ impl<'a> SourceFormatter<'a> {
             | Expr::String(_)
             | Expr::Variable(_)
             | Expr::List(_)
+            | Expr::ListComprehension { .. }
             | Expr::Record(_)
             | Expr::StartProcess(_)
             | Expr::ProcessRef { .. }

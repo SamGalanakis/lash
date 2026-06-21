@@ -160,6 +160,9 @@ impl Compiler {
                 }
                 self.code.push(Instruction::BuildList(items.len()));
             }
+            Expr::ListComprehension { element, clauses } => {
+                self.compile_list_comprehension(element, clauses);
+            }
             Expr::Record(entries) => {
                 for (_, value) in entries {
                     self.compile_expr(value);

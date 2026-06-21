@@ -533,6 +533,56 @@ async fn profiled_tool_effect_keeps_sync_instruction_counts() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn profile_report_tracks_list_comprehension_append_and_iteration() {
+    let source = r#"
+        values = [n * 2 for n in range(0, 6) if n > 1]
+        submit values
+        "#;
+    let compiled = compile_source(source).expect("program should compile");
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ListAppend)),
+        "comprehension should compile to ListAppend"
+    );
+
+    let mut state = State::new();
+    let (outcome, report) = profile_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("profile should succeed");
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::Finished(Value::List(
+            vec![
+                Value::Number(4.0),
+                Value::Number(6.0),
+                Value::Number(8.0),
+                Value::Number(10.0),
+            ]
+            .into()
+        ))
+    );
+
+    let count = |name| {
+        report
+            .instruction_stats()
+            .iter()
+            .find(|stat| stat.name == name)
+            .map_or(0, |stat| stat.count)
+    };
+    assert_eq!(
+        count("append_assign"),
+        4,
+        "{:?}",
+        report.instruction_stats()
+    );
+    assert!(count("begin_iter") > 0, "{:?}", report.instruction_stats());
+    assert!(count("iter_next") > 0, "{:?}", report.instruction_stats());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn await_unknown_handle_reports_runtime_error() {
     let program = crate::parse(
         r#"

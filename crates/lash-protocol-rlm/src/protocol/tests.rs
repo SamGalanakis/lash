@@ -373,6 +373,19 @@ fn execution_section_mentions_while_and_bounded_loop_guidance() {
 }
 
 #[test]
+fn execution_section_documents_list_comprehensions() {
+    let section = rlm_execution_section_for_host_environment(
+        RlmPromptFeatures::default(),
+        &full_prompt_host_environment(),
+    );
+
+    assert!(section.contains("[expr for name in iterable]"));
+    assert!(section.contains("multiple `for`/`if` clauses run left-to-right like Python"));
+    assert!(section.contains("Comprehension bindings are local"));
+    assert!(!section.contains("Do not use comprehensions"));
+}
+
+#[test]
 fn cell_extraction_returns_none_for_prose_only() {
     assert!(extract_lashlang_cell("plain prose").is_none());
     assert_eq!(

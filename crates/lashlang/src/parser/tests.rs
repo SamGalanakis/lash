@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Declaration, Expr};
+    use crate::ast::{Declaration, Expr, ListComprehensionClause};
 
     fn block(program: &Program) -> &[Expr] {
         let Expr::Block(expressions) = &program.main else {
@@ -107,6 +107,32 @@ mod tests {
                 .iter()
                 .all(|expr| matches!(expr, Expr::StartProcess(_)))
         );
+    }
+
+    #[test]
+    fn list_comprehension_parses_ordered_for_and_if_clauses() {
+        let program = parse(
+            "result = [format(\"{}:{}\", a, b) for a in xs if a > 0 for b in ys if b != a]",
+        )
+        .expect("list comprehension should parse");
+        let Expr::Assign { expr, .. } = &block(&program)[0] else {
+            panic!("expected assignment");
+        };
+        let Expr::ListComprehension { element, clauses } = expr.as_ref() else {
+            panic!("expected list comprehension");
+        };
+        assert!(matches!(element.as_ref(), Expr::BuiltinCall { .. }));
+        assert_eq!(clauses.len(), 4);
+        assert!(matches!(
+            &clauses[0],
+            ListComprehensionClause::For { binding, .. } if binding.as_str() == "a"
+        ));
+        assert!(matches!(&clauses[1], ListComprehensionClause::If { .. }));
+        assert!(matches!(
+            &clauses[2],
+            ListComprehensionClause::For { binding, .. } if binding.as_str() == "b"
+        ));
+        assert!(matches!(&clauses[3], ListComprehensionClause::If { .. }));
     }
 
     #[test]

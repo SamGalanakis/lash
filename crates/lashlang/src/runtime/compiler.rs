@@ -18,8 +18,8 @@ use smallvec::SmallVec;
 
 use crate::artifact::CompiledModuleContext;
 use crate::ast::{
-    AssignPathStep, AssignTarget, BinaryOp, Expr, LabelMetadata, ProcessStartExpr, Program,
-    TypeExpr, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, Expr, LabelMetadata, ListComprehensionClause,
+    ProcessStartExpr, Program, TypeExpr, UnaryOp,
 };
 use crate::lexer::Span;
 use crate::tracking::{LashlangAstPath, LashlangExecutionContext, LashlangExecutionSite};

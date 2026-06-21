@@ -22,8 +22,9 @@ pub use artifact::{
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ExprFolder, ExprVisitor,
-    LabelMetadata, ProcessDecl, ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, TypeDecl,
-    TypeExpr, TypeField, UnaryOp, fold_expr_children, format_type_expr, walk_expr,
+    LabelMetadata, ListComprehensionClause, ProcessDecl, ProcessParam, ProcessStartExpr, Program,
+    ResourceRefExpr, TypeDecl, TypeExpr, TypeField, UnaryOp, fold_expr_children, format_type_expr,
+    walk_expr,
 };
 pub use compile::{
     ModuleCompileDiagnostic, ModuleCompileError, ModuleCompileOutput, ModuleCompileRequest,

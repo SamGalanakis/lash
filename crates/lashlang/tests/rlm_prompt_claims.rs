@@ -1216,17 +1216,16 @@ submit { chars: len(check.output), tail: slice(check.output, 4096, null) }"#,
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_example_loop_builds_collection_without_comprehension() {
+async fn prompt_claim_list_comprehensions_build_collections() {
     let host = MockHost::default()
         .with_file("Cargo.toml", "abc")
         .with_file("README.md", "abcdef");
     let Value::List(items) = run(
         &host,
-        r#"items = []
-for path in ["Cargo.toml", "README.md"] {
-  text = await files.read({ path: path })?
-  items = push(items, { path: path, chars: len(text) })
-}
+        r#"items = [
+  { path: path, chars: len(await files.read({ path: path })?) }
+  for path in ["Cargo.toml", "README.md"]
+]
 submit items"#,
     ) else {
         panic!("expected list");

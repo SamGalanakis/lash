@@ -1,7 +1,7 @@
 use crate::ast::{
     AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, ExpressionSourceSpan,
-    LabelMetadata, ProcessDecl, ProcessParam, ProcessSignalDecl, ProcessStartExpr, Program,
-    TypeDecl, TypeExpr, TypeField, UnaryOp,
+    LabelMetadata, ListComprehensionClause, ProcessDecl, ProcessParam, ProcessSignalDecl,
+    ProcessStartExpr, Program, TypeDecl, TypeExpr, TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -155,6 +155,11 @@ impl ParsedExpr {
 struct ParsedAssignTarget {
     target: AssignTarget,
     index_spans: Vec<ParsedExpr>,
+}
+
+struct ParsedListComprehensionClause {
+    clause: ListComprehensionClause,
+    expr_span: ParsedExpr,
 }
 
 fn push_root_expression(
@@ -1241,8 +1246,53 @@ impl Parser {
     fn parse_list(&mut self) -> Result<ParsedExpr, ParseError> {
         let start = self.peek().span.start;
         self.expect_exact(TokenKind::LBracket, "`[`")?;
+        if matches!(self.peek_kind(), TokenKind::RBracket) {
+            self.expect_exact(TokenKind::RBracket, "`]`")?;
+            return Ok(ParsedExpr::node(
+                Expr::List(Vec::new()),
+                self.span_from(start),
+                [],
+            ));
+        }
+
+        let first = self.parse_expr()?;
+        if matches!(self.peek_kind(), TokenKind::For) {
+            let parsed_clauses = self.parse_list_comprehension_clauses()?;
+            self.expect_exact(TokenKind::RBracket, "`]`")?;
+            let clauses = parsed_clauses
+                .iter()
+                .map(|parsed| parsed.clause.clone())
+                .collect::<Vec<_>>();
+            let mut children = parsed_clauses
+                .into_iter()
+                .enumerate()
+                .map(|(index, parsed)| (index as u32, parsed.expr_span))
+                .collect::<Vec<_>>();
+            children.push((children.len() as u32, first.clone()));
+            return Ok(ParsedExpr::node(
+                Expr::ListComprehension {
+                    element: Box::new(first.expr.clone()),
+                    clauses,
+                },
+                self.span_from(start),
+                children,
+            ));
+        }
+
         let mut items = Vec::new();
         let mut children = Vec::new();
+        children.push((0, first));
+        items.push(children.last().expect("item").1.expr.clone());
+        if matches!(self.peek_kind(), TokenKind::Comma) {
+            self.bump();
+        } else {
+            self.expect_exact(TokenKind::RBracket, "`]`")?;
+            return Ok(ParsedExpr::node(
+                Expr::List(items),
+                self.span_from(start),
+                children,
+            ));
+        }
         while !matches!(self.peek_kind(), TokenKind::RBracket) {
             let item = self.parse_expr()?;
             children.push((items.len() as u32, item));
@@ -1259,6 +1309,36 @@ impl Parser {
             self.span_from(start),
             children,
         ))
+    }
+
+    fn parse_list_comprehension_clauses(
+        &mut self,
+    ) -> Result<Vec<ParsedListComprehensionClause>, ParseError> {
+        let mut clauses = Vec::new();
+        while matches!(self.peek_kind(), TokenKind::For) {
+            self.bump();
+            let binding = self.expect_ident()?;
+            self.expect_exact(TokenKind::In, "`in`")?;
+            let iterable = self.parse_expr()?;
+            clauses.push(ParsedListComprehensionClause {
+                clause: ListComprehensionClause::For {
+                    binding,
+                    iterable: iterable.expr.clone(),
+                },
+                expr_span: iterable,
+            });
+            while matches!(self.peek_kind(), TokenKind::If) {
+                self.bump();
+                let condition = self.parse_expr()?;
+                clauses.push(ParsedListComprehensionClause {
+                    clause: ListComprehensionClause::If {
+                        condition: condition.expr.clone(),
+                    },
+                    expr_span: condition,
+                });
+            }
+        }
+        Ok(clauses)
     }
 
     fn parse_record(&mut self) -> Result<ParsedExpr, ParseError> {

@@ -602,6 +602,89 @@ impl Compiler {
         self.clear_const_slots();
     }
 
+    fn compile_list_comprehension(&mut self, element: &Expr, clauses: &[ListComprehensionClause]) {
+        self.code.push(Instruction::BuildList(0));
+        self.compile_list_comprehension_clause(element, clauses, 0);
+        self.clear_const_slots();
+    }
+
+    fn compile_list_comprehension_clause(
+        &mut self,
+        element: &Expr,
+        clauses: &[ListComprehensionClause],
+        index: usize,
+    ) {
+        let Some(clause) = clauses.get(index) else {
+            self.compile_expr(element);
+            self.code.push(Instruction::ListAppend);
+            return;
+        };
+
+        match clause {
+            ListComprehensionClause::For { binding, iterable } => {
+                self.compile_list_comprehension_for(binding, iterable, element, clauses, index + 1);
+            }
+            ListComprehensionClause::If { condition } => {
+                let jump_to_next_iteration = self.compile_condition_jump_if_false(condition);
+                self.clear_const_slots();
+                self.compile_list_comprehension_clause(element, clauses, index + 1);
+                self.patch_jump(jump_to_next_iteration, self.code.len());
+                self.clear_const_slots();
+            }
+        }
+    }
+
+    fn compile_list_comprehension_for(
+        &mut self,
+        binding: &str,
+        iterable: &Expr,
+        element: &Expr,
+        clauses: &[ListComprehensionClause],
+        next_clause: usize,
+    ) {
+        let binding = self.push_slot(binding);
+        if let Expr::BuiltinCall { name, args } = iterable
+            && name.as_str() == "range"
+        {
+            for arg in args {
+                self.compile_expr(arg);
+            }
+            self.clear_const_slots();
+            self.set_const_slot(binding, None);
+            self.code.push(Instruction::BeginRangeIter {
+                binding,
+                argc: args.len(),
+            });
+            self.compile_list_comprehension_for_body(element, clauses, next_clause);
+            return;
+        }
+
+        self.compile_expr(iterable);
+        self.clear_const_slots();
+        self.set_const_slot(binding, None);
+        self.code.push(Instruction::BeginIter(binding));
+        self.compile_list_comprehension_for_body(element, clauses, next_clause);
+    }
+
+    fn compile_list_comprehension_for_body(
+        &mut self,
+        element: &Expr,
+        clauses: &[ListComprehensionClause],
+        next_clause: usize,
+    ) {
+        let loop_start = self.code.len();
+        let iter_next = self.code.len();
+        self.code.push(Instruction::IterNext {
+            jump_to: usize::MAX,
+        });
+        self.compile_list_comprehension_clause(element, clauses, next_clause);
+        self.code.push(Instruction::Jump(loop_start));
+        let loop_end = self.code.len();
+        self.code.push(Instruction::EndIter);
+        self.patch_jump(iter_next, loop_end);
+        self.clear_const_slots();
+    }
+
     fn compile_while_expr(&mut self, condition: &Expr, body: &Expr, leave_value: bool) {
         self.clear_const_slots();
         let loop_start = self.code.len();
@@ -646,6 +729,7 @@ impl Compiler {
                     .collect::<Option<Vec<_>>>()?
                     .into(),
             )),
+            Expr::ListComprehension { .. } => None,
             Expr::Record(entries) => {
                 let mut record = record_with_capacity(entries.len());
                 for (key, value) in entries {

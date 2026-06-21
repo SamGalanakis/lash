@@ -480,6 +480,29 @@ impl<'module> Linker<'module> {
                     .map(|item| self.infer_expr_type(item, scope))
                     .collect::<Result<Vec<_>, _>>()?,
             ))),
+            Expr::ListComprehension { element, clauses } => {
+                let mut previous_bindings = Vec::new();
+                for clause in clauses {
+                    match clause {
+                        ListComprehensionClause::For { binding, iterable } => {
+                            let iterable_ty = self.infer_expr_type(iterable, scope)?;
+                            let item_ty = self.index_type(&iterable_ty, scope.span)?;
+                            previous_bindings.push((
+                                binding.to_string(),
+                                scope.bind(binding.as_str(), self.binding_for_type(&item_ty)),
+                            ));
+                        }
+                        ListComprehensionClause::If { condition } => {
+                            self.infer_expr_type(condition, scope)?;
+                        }
+                    }
+                }
+                let element_ty = self.infer_expr_type(element, scope)?;
+                for (name, previous) in previous_bindings.into_iter().rev() {
+                    scope.restore(name.as_str(), previous);
+                }
+                TypeExpr::List(Box::new(element_ty))
+            }
             Expr::Record(entries) => TypeExpr::Object(
                 entries
                     .iter()

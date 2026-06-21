@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::ast::{
-    AssignPathStep, BinaryOp, Declaration, Expr, LabelMetadata, ProcessDecl, Program,
-    ResourceRefExpr, TypeExpr, UnaryOp,
+    AssignPathStep, BinaryOp, Declaration, Expr, LabelMetadata, ListComprehensionClause,
+    ProcessDecl, Program, ResourceRefExpr, TypeExpr, UnaryOp,
 };
 use crate::linker::{LashlangAbilities, LashlangHostCatalog, LashlangLanguageFeatures};
 
@@ -700,6 +700,24 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
                 write_expr(writer, item, normalizer);
             }
         }
+        Expr::ListComprehension { element, clauses } => {
+            writer.atom("list-comprehension");
+            writer.usize(clauses.len());
+            for clause in clauses {
+                match clause {
+                    ListComprehensionClause::For { binding, iterable } => {
+                        writer.atom("for");
+                        writer.atom(&normalizer.name_token(binding.as_str()));
+                        write_expr(writer, iterable, normalizer);
+                    }
+                    ListComprehensionClause::If { condition } => {
+                        writer.atom("if");
+                        write_expr(writer, condition, normalizer);
+                    }
+                }
+            }
+            write_expr(writer, element, normalizer);
+        }
         Expr::Record(entries) => {
             writer.atom("record");
             writer.usize(entries.len());
@@ -973,6 +991,20 @@ impl NameNormalizer {
                 self.bind_local(binding.as_str());
                 self.collect_expr(body);
             }
+            Expr::ListComprehension { element, clauses } => {
+                for clause in clauses {
+                    match clause {
+                        ListComprehensionClause::For { binding, iterable } => {
+                            self.collect_expr(iterable);
+                            self.bind_local(binding.as_str());
+                        }
+                        ListComprehensionClause::If { condition } => {
+                            self.collect_expr(condition);
+                        }
+                    }
+                }
+                self.collect_expr(element);
+            }
             _ => {
                 for child in expr.children() {
                     self.collect_expr(child);
@@ -1198,6 +1230,32 @@ impl<'program> RequirementsCollector<'program> {
             Expr::List(items) => {
                 for item in items {
                     self.collect_expr(item, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::ListComprehension { element, clauses } => {
+                let mut previous = Vec::new();
+                for clause in clauses {
+                    match clause {
+                        ListComprehensionClause::For { binding, iterable } => {
+                            self.collect_expr(iterable, scope);
+                            previous.push((
+                                binding.to_string(),
+                                scope.insert(binding.to_string(), RequirementBinding::Value),
+                            ));
+                        }
+                        ListComprehensionClause::If { condition } => {
+                            self.collect_expr(condition, scope);
+                        }
+                    }
+                }
+                self.collect_expr(element, scope);
+                for (binding, previous) in previous.into_iter().rev() {
+                    if let Some(previous) = previous {
+                        scope.insert(binding, previous);
+                    } else {
+                        scope.remove(binding.as_str());
+                    }
                 }
                 Some(RequirementBinding::Value)
             }

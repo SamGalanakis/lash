@@ -990,6 +990,93 @@ async fn executes_if_for_and_list_concat() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn list_comprehension_builds_filtered_lists_without_clobbering_outer_bindings() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        n = "outer"
+        doubled = [n * 2 for n in [1, 2, 3, 4] if n % 2 == 0]
+        submit { doubled: doubled, n: n }
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("execution should succeed"),
+    );
+
+    let record = value.as_record().expect("expected record");
+    assert_eq!(
+        record["doubled"],
+        Value::List(vec![Value::Number(4.0), Value::Number(8.0)].into())
+    );
+    assert_eq!(record["n"], Value::String("outer".to_string().into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn list_comprehension_nested_clauses_preserve_python_ordering() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        pairs = [format("{}:{}", a, b) for a in ["x", "y"] for b in range(0, 3) if b != 1]
+        submit pairs
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::String("x:0".into()),
+                Value::String("x:2".into()),
+                Value::String("y:0".into()),
+                Value::String("y:2".into()),
+            ]
+            .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn list_comprehension_allows_effectful_iterables_filters_and_elements() {
+    let host = TestHost::default()
+        .with_file("Cargo.toml", "abc")
+        .with_file("README.md", "");
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        paths = ["Cargo.toml", "README.md"]
+        sizes = [
+          len(await files.read({ path: path })?)
+          for path in paths
+          if len(await files.read({ path: path })?) > 0
+        ]
+        submit sizes
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(value, Value::List(vec![Value::Number(3.0)].into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn break_exits_loop_and_restores_loop_binding() {
     let host = TestHost::default();
     let mut state = State::new();

@@ -151,6 +151,10 @@ pub enum Expr {
     String(AstString),
     Variable(AstString),
     List(Vec<Expr>),
+    ListComprehension {
+        element: Box<Expr>,
+        clauses: Vec<ListComprehensionClause>,
+    },
     Record(Vec<(AstString, Expr)>),
     Assign {
         target: AssignTarget,
@@ -229,6 +233,12 @@ pub enum Expr {
     TypeLiteral(Box<TypeExpr>),
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ListComprehensionClause {
+    For { binding: AstString, iterable: Expr },
+    If { condition: Expr },
+}
+
 impl Expr {
     /// Yields every direct child expression of `self` in evaluation order.
     ///
@@ -259,6 +269,15 @@ impl Expr {
             | Expr::TypeLiteral(_) => {}
             Expr::Block(expressions) | Expr::List(expressions) => {
                 buffer.extend(expressions.iter());
+            }
+            Expr::ListComprehension { element, clauses } => {
+                for clause in clauses {
+                    match clause {
+                        ListComprehensionClause::For { iterable, .. } => buffer.push(iterable),
+                        ListComprehensionClause::If { condition } => buffer.push(condition),
+                    }
+                }
+                buffer.push(element);
             }
             Expr::LabelAnnotated { expr, .. } => buffer.push(expr),
             Expr::Record(entries) => buffer.extend(entries.iter().map(|(_, value)| value)),
@@ -399,6 +418,13 @@ where
                 .map(|expr| folder.fold_expr(expr))
                 .collect(),
         ),
+        Expr::ListComprehension { element, clauses } => Expr::ListComprehension {
+            element: Box::new(folder.fold_expr(*element)),
+            clauses: clauses
+                .into_iter()
+                .map(|clause| fold_list_comprehension_clause(folder, clause))
+                .collect(),
+        },
         Expr::Record(entries) => Expr::Record(
             entries
                 .into_iter()
@@ -506,6 +532,24 @@ where
         | Expr::ResourceRef(_)
         | Expr::WaitSignal { .. }
         | Expr::TypeLiteral(_)) => leaf,
+    }
+}
+
+fn fold_list_comprehension_clause<F>(
+    folder: &mut F,
+    clause: ListComprehensionClause,
+) -> ListComprehensionClause
+where
+    F: ExprFolder + ?Sized,
+{
+    match clause {
+        ListComprehensionClause::For { binding, iterable } => ListComprehensionClause::For {
+            binding,
+            iterable: folder.fold_expr(iterable),
+        },
+        ListComprehensionClause::If { condition } => ListComprehensionClause::If {
+            condition: folder.fold_expr(condition),
+        },
     }
 }
 

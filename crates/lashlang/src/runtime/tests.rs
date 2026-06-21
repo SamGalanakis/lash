@@ -600,6 +600,7 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             compact_json(&chunk.constants[constant])
         ),
         Instruction::BuildList(count) => format!("build_list {count}"),
+        Instruction::ListAppend => "list_append".to_string(),
         Instruction::BuildRecord(keys) => format!("build_record {}", keys_snapshot(chunk, keys)),
         Instruction::LoadField { slot, field } => format!(
             "load_field {slot}:{} .{}",

@@ -8,8 +8,8 @@ use crate::artifact::{
     HostRequirements, ModuleArtifact, host_requirements_for_program_with_catalog,
 };
 use crate::ast::{
-    AssignPathStep, AstString, Declaration, Expr, ProcessDecl, ProcessParam, Program,
-    ResourceRefExpr, TypeExpr, TypeField, format_type_expr,
+    AssignPathStep, AstString, Declaration, Expr, ListComprehensionClause, ProcessDecl,
+    ProcessParam, Program, ResourceRefExpr, TypeExpr, TypeField, format_type_expr,
 };
 use crate::lexer::Span;
 

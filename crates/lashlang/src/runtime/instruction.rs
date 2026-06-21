@@ -138,6 +138,7 @@ pub(crate) enum Instruction {
         constant: usize,
     },
     BuildList(usize),
+    ListAppend,
     BuildRecord(usize),
     LoadField {
         slot: usize,
@@ -328,6 +329,7 @@ impl Instruction {
             | Instruction::StoreConst { .. }
             | Instruction::PathAssign { .. } => InstructionProfileTag::StoreName,
             Instruction::BuildList(_) => InstructionProfileTag::BuildList,
+            Instruction::ListAppend => InstructionProfileTag::AppendAssign,
             Instruction::BuildRecord(_) => InstructionProfileTag::BuildRecord,
             Instruction::LoadField { .. } | Instruction::Field(_) => InstructionProfileTag::Field,
             Instruction::Index => InstructionProfileTag::Index,

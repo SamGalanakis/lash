@@ -502,6 +502,34 @@ async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutatio
 }
 
 #[test]
+fn list_comprehension_compiles_to_iterator_and_append_bytecode() {
+    let compiled = compile_source(
+        r#"
+        submit [n * 2 for n in range(0, 4) if n % 2 == 0]
+        "#,
+    )
+    .expect("program should compile");
+    let listing = compiled_instruction_listing(&compiled);
+
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::BeginRangeIter { .. })),
+        "range comprehension should use iterator bytecode:\n{listing}"
+    );
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ListAppend)),
+        "comprehension should append into the result list directly:\n{listing}"
+    );
+}
+
+#[test]
 fn effectful_loop_bodies_compile_to_generic_iterator_bytecode() {
     let program = crate::parse(
         r#"

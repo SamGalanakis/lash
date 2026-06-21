@@ -1,55 +1,3 @@
-pub const LASHLANG_BUILTINS_SECTION: &str = r#"### Builtins
-
-Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bounds mean start/end; negative bounds count from the end.
-
-- `len(x)` — length of string/list/record (0 for null); use `image.size` for images
-- `empty(x)` — true if length is 0
-- `slice(s, start, end)` — substring or sublist
-- `range(end)` / `range(start, end)` / `range(start, end, step)` — integer list, end-exclusive; positive or negative `step`, never `0`
-- `ceil_div(a, b)` / `floor_div(a, b)` — integer division helpers for chunk/count math; divisor must not be `0`
-- `push(list, item)` — new list with one item appended
-- `split(s, sep)` / `join(list, sep)` — string split/join
-- `find(s, needle, start?)` — zero-based character index of the first literal match, or `null`; `start` defaults to `0` and is a non-negative character index; an empty `needle` returns `start` when it is in bounds
-- `grep_text(s, needle)` — literal in-memory line search; `needle` must be non-empty; returns one record per matching line: `{ line: int, text: str, match: str, start: int, end: int }`, where `line` is 1-based, `text` is the line without its line ending, and `start`/`end` are zero-based character offsets within that line's `text` with `end` exclusive
-- `trim(s)` — strip whitespace
-- `starts_with(s, prefix)` / `ends_with(s, suffix)` / `contains(haystack, needle)`
-- `keys(record)` / `values(record)`
-- `to_string(x)` / `to_int(x)` / `to_float(x)`
-- `json_parse(s)` — parse a JSON string into a value
-- `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces. Do not wrap args in a list: use `format("It is {}.", trim(now.output))`, not `format("It is {}.", [trim(now.output)])`.
-- `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
-"#;
-
-pub const LASHLANG_BUILTINS_NO_IMAGES_SECTION: &str = r#"### Builtins
-
-Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bounds mean start/end; negative bounds count from the end.
-
-- `len(x)` — length of string/list/record (0 for null)
-- `empty(x)` — true if length is 0
-- `slice(s, start, end)` — substring or sublist
-- `range(end)` / `range(start, end)` / `range(start, end, step)` — integer list, end-exclusive; positive or negative `step`, never `0`
-- `ceil_div(a, b)` / `floor_div(a, b)` — integer division helpers for chunk/count math; divisor must not be `0`
-- `push(list, item)` — new list with one item appended
-- `split(s, sep)` / `join(list, sep)` — string split/join
-- `find(s, needle, start?)` — zero-based character index of the first literal match, or `null`; `start` defaults to `0` and is a non-negative character index; an empty `needle` returns `start` when it is in bounds
-- `grep_text(s, needle)` — literal in-memory line search; `needle` must be non-empty; returns one record per matching line: `{ line: int, text: str, match: str, start: int, end: int }`, where `line` is 1-based, `text` is the line without its line ending, and `start`/`end` are zero-based character offsets within that line's `text` with `end` exclusive
-- `trim(s)` — strip whitespace
-- `starts_with(s, prefix)` / `ends_with(s, suffix)` / `contains(haystack, needle)`
-- `keys(record)` / `values(record)`
-- `to_string(x)` / `to_int(x)` / `to_float(x)`
-- `json_parse(s)` — parse a JSON string into a value
-- `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces. Do not wrap args in a list: use `format("It is {}.", trim(now.output))`, not `format("It is {}.", [trim(now.output)])`.
-- `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
-"#;
-
-pub const LASHLANG_COMMON_MISTAKES_SECTION: &str = r#"### Common mistakes
-
-- Do not use comprehensions; build collections with explicit loops.
-- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Showcased Tools** or the **Host Surface**.
-- Do not submit final results that depend on operations, files, edits, validation, or generated artifacts before observing the relevant result.
-- Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters.
-"#;
-
 pub const LASHLANG_TYPE_LITERALS_SECTION: &str = r#"### Type literals
 
 `Type { field: shape, ... }` describes a record shape. Field separators are commas (trailing comma OK).
@@ -102,13 +50,9 @@ pub fn rlm_execution_section_for_host_environment(
     if let Some(section) = render_host_environment_section(surface) {
         sections.push(section);
     }
-    sections.push(if features.images {
-        LASHLANG_BUILTINS_SECTION.to_string()
-    } else {
-        LASHLANG_BUILTINS_NO_IMAGES_SECTION.to_string()
-    });
+    sections.push(render_builtins_section(features.images));
     if features.common_patterns {
-        sections.push(render_common_patterns(has_operations));
+        sections.push(render_common_mistakes_section(has_operations));
     }
     if features.type_literals {
         sections.push(LASHLANG_TYPE_LITERALS_SECTION.to_string());
@@ -245,82 +189,174 @@ fn render_language_section(
     language_features: &lashlang::LashlangLanguageFeatures,
 ) -> String {
     let mut bullets = Vec::new();
+    push_value_language_bullets(&mut bullets, images);
+    bullets.push(strings_language_bullet());
+    bullets.push(assignment_language_bullet());
+    bullets.push(list_comprehension_language_bullet());
+    if has_operations {
+        bullets.push(module_operations_language_bullet());
+    }
+    if abilities.sleep {
+        bullets.push(sleep_language_bullet());
+    }
+    if abilities.processes {
+        push_process_language_bullets(&mut bullets, abilities);
+    }
+    if language_features.label_annotations {
+        bullets.push(label_annotations_language_bullet());
+    }
+    if abilities.triggers && abilities.processes {
+        bullets.push(trigger_registry_language_bullet());
+    }
+    if has_operations {
+        bullets.push(operation_scheduling_language_bullet(abilities.processes));
+    }
+    bullets.extend(base_tail_language_bullets());
+    format!("### Language\n\n{}", bullets.join("\n"))
+}
+
+fn push_value_language_bullets(bullets: &mut Vec<String>, images: bool) {
     if images {
         bullets.push("- Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.".to_string());
         bullets.push("- Images: image-producing tools may return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ \"type\": \"image\", \"id\": ..., \"label\": ..., \"size\": ..., \"width\": ..., \"height\": ... }`. `len(image)` is invalid; use `.size`.".to_string());
     } else {
         bullets.push("- Values: null, booleans, numbers, strings, lists, and records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.".to_string());
     }
-    bullets.push("- Strings: `\"...\"` and `'...'` support `\\n`, `\\r`, `\\t`, escaped matching quotes, and `\\\\`; `\"\"\"...\"\"\"` and `'''...'''` are multiline with the same escapes. Raw strings `r\"...\"`, `r'...'`, `r\"\"\"...\"\"\"`, and `r'''...'''` preserve content exactly. Use raw strings for JSON, Markdown, patches, shell scripts, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers. Use `format(...)` for interpolation; there are no f-strings.".to_string());
-    bullets.push("- Assign with `name = expr`. Variables persist across `<lashlang>` blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.".to_string());
-    if has_operations {
-        bullets.push("- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
-    }
-    if abilities.sleep {
-        bullets.push("- Sleep: pause foreground code or process code with `sleep for \"5s\"` or `sleep until deadline`. Durations accept milliseconds, `ms`, `s`, `m`, or `h`; deadlines accept RFC3339 text or Unix epoch milliseconds.".to_string());
-    }
-    if abilities.processes {
-        let mut forms = vec![
-            "`yield value`",
-            "`wake value`",
-            "`finish value`",
-            "`fail value`",
-        ];
-        if abilities.process_signals {
-            forms.push("`payload = wait_signal(\"name\")`");
-        }
-        let trigger_process_note = if abilities.triggers {
-            " matching trigger occurrences can also create process runs through registered triggers."
-        } else {
-            ""
-        };
-        let signal_declaration_note = if abilities.process_signals {
-            " Add typed inbound signals with `signals { name: TYPE }` when the process receives external messages, e.g. `process worker() signals { approve: { ok: bool } } { payload = wait_signal(\"approve\") finish payload }`."
-        } else {
-            ""
-        };
-        bullets.push(format!(
-            "- Background processes: `process name(param: TYPE) {{ ... }}` declares a reusable process definition.{signal_declaration_note} `handle = start name(param: value)` creates one process run from that definition and returns its run handle;{trigger_process_note} For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the process success value. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Parallelism comes from starting all independent process handles before waiting for any of them; join a list or record of handles with `results = await handles`. `await handle` waits and returns a result wrapper like `{{ ok: true, value: ... }}`; when you need fields from the `finish` value, use `result = (await handle)?` and then read `result.field`. Cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({{}})?` for running runs, `await processes.list({{ definition: name }})?` for runs of a definition, and `await processes.list({{ status: \"any\" }})?` for visible run history.",
-            join_words(&forms),
-        ));
-        if abilities.process_signals {
-            bullets.push("- Signalling processes: `signal_run(handle, \"name\", payload)` sends a typed `signal.name` event to a running process and may be used from the foreground turn as well as inside a process body, like `await handle` and `cancel handle`. The receiving side, `payload = wait_signal(\"name\")`, parks a process until that named signal arrives and is only valid inside a process body.".to_string());
-        }
-    }
-    if language_features.label_annotations {
-        bullets.push("- Execution labels: use `@label(title: \"Label\")` or `@label(title: \"Label\", description: \"Details\")` to name important Lashlang phases and graph steps. At top level, label meaningful setup, resource calls, submissions, branches, loops, or process declarations. Inside a `process` body, label durable steps such as awaited module calls, `start`, `sleep`, `wait_signal`, `signal_run`, `wake`, `yield`, `finish`, `fail`, `if`, loops, and setup statements that explain the process. Titles/descriptions must be string literals; do not use variables, interpolation, icons, colors, layout hints, or extra keys.".to_string());
-    }
-    if abilities.triggers && abilities.processes {
-        let trigger_register = lashlang::TriggerHostOperation::Register.host_operation();
-        let trigger_list = lashlang::TriggerHostOperation::List.host_operation();
-        let trigger_cancel = lashlang::TriggerHostOperation::Cancel.host_operation();
-        bullets.push(format!("- Trigger registry: a trigger registration connects a typed source value to a process definition plus explicit inputs. Register with `handle = await {trigger_register}({{ source: source, target: daily_digest, inputs: {{ tick: trigger.event }}, name: \"daily_digest\" }})?`. Constructors build source values; the host/plugin that owns the source lists stored subscriptions by source type/key and emits trigger occurrences when source-specific events happen. `target` is a process definition value. `inputs` is required and maps every process param exactly once. `trigger.event` is the direct whole-event value inside `inputs`; fixed inputs can pass concrete authorities like `gmail.work` or `agents` for account-parametric processes. Use `await {trigger_list}({{}})?` to discover visible registrations, or filter with `{{ target: daily_digest }}`, `{{ name: \"daily_digest\" }}`, `{{ source_type: \"cron.Schedule\" }}`, and `{{ enabled: true }}`. Use `await {trigger_cancel}({{ handle: handle }})?` to disable future occurrence delivery for that registration."));
-    }
-    if has_operations {
-        let scheduling = if abilities.processes {
-            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent module operations, use aggregate await: `results = await { first: module.a({ ... }), second: module.b({ ... }), label: \"kept\" }`; direct receiver-call leaves in nested lists/records fan out through the host scheduler, pure value leaves are preserved, and results keep the same shape. Put `?` on each operation leaf you want unwrapped, e.g. `first: module.a({ ... })?`; all siblings finish before the first source-order failure is reported. Process parallelism still comes from starting all independent process handles before joining them with `await handles` or `await { key: handle }`."
-        } else {
-            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent module operations, use aggregate await: `results = await { first: module.a({ ... }), second: module.b({ ... }), label: \"kept\" }`; direct receiver-call leaves in nested lists/records fan out through the host scheduler, pure value leaves are preserved, and results keep the same shape. Put `?` on each operation leaf you want unwrapped, e.g. `first: module.a({ ... })?`; all siblings finish before the first source-order failure is reported."
-        };
-        bullets.push(scheduling.to_string());
-    }
-    bullets.push("- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
-    bullets.push("- Bare expressions are valid statements in normal blocks.".to_string());
-    bullets.push("- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available read-only values may be listed separately without value previews. Variables keep their full runtime value; `print` a variable (or the part you need) to see contents the prompt only summarizes.".to_string());
-    format!("### Language\n\n{}", bullets.join("\n"))
 }
 
-fn render_common_patterns(has_operations: bool) -> String {
-    if has_operations {
-        return LASHLANG_COMMON_MISTAKES_SECTION.to_string();
-    }
-    r#"### Common mistakes
+fn strings_language_bullet() -> String {
+    "- Strings: `\"...\"` and `'...'` support `\\n`, `\\r`, `\\t`, escaped matching quotes, and `\\\\`; `\"\"\"...\"\"\"` and `'''...'''` are multiline with the same escapes. Raw strings `r\"...\"`, `r'...'`, `r\"\"\"...\"\"\"`, and `r'''...'''` preserve content exactly. Use raw strings for JSON, Markdown, patches, shell scripts, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers. Use `format(...)` for interpolation; there are no f-strings.".to_string()
+}
 
-- Do not use comprehensions; build collections with explicit loops.
-- Do not infer module operations from generic Lashlang syntax. No module operations are available in this turn.
-- Do not submit final results that depend on current variables or validation before inspecting the relevant value.
-- Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters."#
-        .to_string()
+fn assignment_language_bullet() -> String {
+    "- Assign with `name = expr`. Variables persist across `<lashlang>` blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.".to_string()
+}
+
+fn list_comprehension_language_bullet() -> String {
+    "- List comprehensions: `[expr for name in iterable]` and `[expr for name in iterable if condition]`; multiple `for`/`if` clauses run left-to-right like Python. Comprehension bindings are local and do not overwrite outer variables. Use explicit loops when you need mutation, `break`, or `continue`.".to_string()
+}
+
+fn module_operations_language_bullet() -> String {
+    "- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string()
+}
+
+fn sleep_language_bullet() -> String {
+    "- Sleep: pause foreground code or process code with `sleep for \"5s\"` or `sleep until deadline`. Durations accept milliseconds, `ms`, `s`, `m`, or `h`; deadlines accept RFC3339 text or Unix epoch milliseconds.".to_string()
+}
+
+fn push_process_language_bullets(
+    bullets: &mut Vec<String>,
+    abilities: &lashlang::LashlangAbilities,
+) {
+    let mut forms = vec![
+        "`yield value`",
+        "`wake value`",
+        "`finish value`",
+        "`fail value`",
+    ];
+    if abilities.process_signals {
+        forms.push("`payload = wait_signal(\"name\")`");
+    }
+    let trigger_process_note = if abilities.triggers {
+        " matching trigger occurrences can also create process runs through registered triggers."
+    } else {
+        ""
+    };
+    let signal_declaration_note = if abilities.process_signals {
+        " Add typed inbound signals with `signals { name: TYPE }` when the process receives external messages, e.g. `process worker() signals { approve: { ok: bool } } { payload = wait_signal(\"approve\") finish payload }`."
+    } else {
+        ""
+    };
+    bullets.push(format!(
+        "- Background processes: `process name(param: TYPE) {{ ... }}` declares a reusable process definition.{signal_declaration_note} `handle = start name(param: value)` creates one process run from that definition and returns its run handle;{trigger_process_note} For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the process success value. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Parallelism comes from starting all independent process handles before waiting for any of them; join a list or record of handles with `results = await handles`. `await handle` waits and returns a result wrapper like `{{ ok: true, value: ... }}`; when you need fields from the `finish` value, use `result = (await handle)?` and then read `result.field`. Cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({{}})?` for running runs, `await processes.list({{ definition: name }})?` for runs of a definition, and `await processes.list({{ status: \"any\" }})?` for visible run history.",
+        join_words(&forms),
+    ));
+    if abilities.process_signals {
+        bullets.push("- Signalling processes: `signal_run(handle, \"name\", payload)` sends a typed `signal.name` event to a running process and may be used from the foreground turn as well as inside a process body, like `await handle` and `cancel handle`. The receiving side, `payload = wait_signal(\"name\")`, parks a process until that named signal arrives and is only valid inside a process body.".to_string());
+    }
+}
+
+fn label_annotations_language_bullet() -> String {
+    "- Execution labels: use `@label(title: \"Label\")` or `@label(title: \"Label\", description: \"Details\")` to name important Lashlang phases and graph steps. At top level, label meaningful setup, resource calls, submissions, branches, loops, or process declarations. Inside a `process` body, label durable steps such as awaited module calls, `start`, `sleep`, `wait_signal`, `signal_run`, `wake`, `yield`, `finish`, `fail`, `if`, loops, and setup statements that explain the process. Titles/descriptions must be string literals; do not use variables, interpolation, icons, colors, layout hints, or extra keys.".to_string()
+}
+
+fn trigger_registry_language_bullet() -> String {
+    let trigger_register = lashlang::TriggerHostOperation::Register.host_operation();
+    let trigger_list = lashlang::TriggerHostOperation::List.host_operation();
+    let trigger_cancel = lashlang::TriggerHostOperation::Cancel.host_operation();
+    format!(
+        "- Trigger registry: a trigger registration connects a typed source value to a process definition plus explicit inputs. Register with `handle = await {trigger_register}({{ source: source, target: daily_digest, inputs: {{ tick: trigger.event }}, name: \"daily_digest\" }})?`. Constructors build source values; the host/plugin that owns the source lists stored subscriptions by source type/key and emits trigger occurrences when source-specific events happen. `target` is a process definition value. `inputs` is required and maps every process param exactly once. `trigger.event` is the direct whole-event value inside `inputs`; fixed inputs can pass concrete authorities like `gmail.work` or `agents` for account-parametric processes. Use `await {trigger_list}({{}})?` to discover visible registrations, or filter with `{{ target: daily_digest }}`, `{{ name: \"daily_digest\" }}`, `{{ source_type: \"cron.Schedule\" }}`, and `{{ enabled: true }}`. Use `await {trigger_cancel}({{ handle: handle }})?` to disable future occurrence delivery for that registration."
+    )
+}
+
+fn operation_scheduling_language_bullet(processes: bool) -> String {
+    let process_note = if processes {
+        " Process parallelism still comes from starting all independent process handles before joining them with `await handles` or `await { key: handle }`."
+    } else {
+        ""
+    };
+    format!(
+        "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent module operations, use aggregate await: `results = await {{ first: module.a({{ ... }}), second: module.b({{ ... }}), label: \"kept\" }}`; direct receiver-call leaves in nested lists/records fan out through the host scheduler, pure value leaves are preserved, and results keep the same shape. Put `?` on each operation leaf you want unwrapped, e.g. `first: module.a({{ ... }})?`; all siblings finish before the first source-order failure is reported.{process_note}"
+    )
+}
+
+fn base_tail_language_bullets() -> [String; 3] {
+    [
+        "- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string(),
+        "- Bare expressions are valid statements in normal blocks.".to_string(),
+        "- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available read-only values may be listed separately without value previews. Variables keep their full runtime value; `print` a variable (or the part you need) to see contents the prompt only summarizes.".to_string(),
+    ]
+}
+
+fn render_builtins_section(images: bool) -> String {
+    let len_detail = if images {
+        "length of string/list/record (0 for null); use `image.size` for images"
+    } else {
+        "length of string/list/record (0 for null)"
+    };
+    let bullets = [
+        format!("- `len(x)` — {len_detail}"),
+        "- `empty(x)` — true if length is 0".to_string(),
+        "- `slice(s, start, end)` — substring or sublist".to_string(),
+        "- `range(end)` / `range(start, end)` / `range(start, end, step)` — integer list, end-exclusive; positive or negative `step`, never `0`".to_string(),
+        "- `ceil_div(a, b)` / `floor_div(a, b)` — integer division helpers for chunk/count math; divisor must not be `0`".to_string(),
+        "- `push(list, item)` — new list with one item appended".to_string(),
+        "- `split(s, sep)` / `join(list, sep)` — string split/join".to_string(),
+        "- `find(s, needle, start?)` — zero-based character index of the first literal match, or `null`; `start` defaults to `0` and is a non-negative character index; an empty `needle` returns `start` when it is in bounds".to_string(),
+        "- `grep_text(s, needle)` — literal in-memory line search; `needle` must be non-empty; returns one record per matching line: `{ line: int, text: str, match: str, start: int, end: int }`, where `line` is 1-based, `text` is the line without its line ending, and `start`/`end` are zero-based character offsets within that line's `text` with `end` exclusive".to_string(),
+        "- `trim(s)` — strip whitespace".to_string(),
+        "- `starts_with(s, prefix)` / `ends_with(s, suffix)` / `contains(haystack, needle)`".to_string(),
+        "- `keys(record)` / `values(record)`".to_string(),
+        "- `to_string(x)` / `to_int(x)` / `to_float(x)`".to_string(),
+        "- `json_parse(s)` — parse a JSON string into a value".to_string(),
+        "- `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces. Do not wrap args in a list: use `format(\"It is {}.\", trim(now.output))`, not `format(\"It is {}.\", [trim(now.output)])`.".to_string(),
+        "- `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error".to_string(),
+    ];
+
+    format!(
+        "### Builtins\n\nCall as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bounds mean start/end; negative bounds count from the end.\n\n{}\n",
+        bullets.join("\n")
+    )
+}
+
+fn render_common_mistakes_section(has_operations: bool) -> String {
+    let tool_scope = if has_operations {
+        "- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Showcased Tools** or the **Host Surface**."
+    } else {
+        "- Do not infer module operations from generic Lashlang syntax. No module operations are available in this turn."
+    };
+    let verified_inputs = if has_operations {
+        "- Do not submit final results that depend on operations, files, edits, validation, or generated artifacts before observing the relevant result."
+    } else {
+        "- Do not submit final results that depend on current variables or validation before inspecting the relevant value."
+    };
+    let bullets = [
+        tool_scope,
+        verified_inputs,
+        "- Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters.",
+    ];
+
+    format!("### Common mistakes\n\n{}\n", bullets.join("\n"))
 }
 
 fn render_decomposition_section(has_operations: bool, processes: bool) -> String {
