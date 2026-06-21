@@ -12,7 +12,7 @@ use crate::input_items::insert_inline_marker;
 use crate::interactive::helpers::{
     is_copy_shortcut, queued_turn_edit_matches, should_preserve_selection_for_key,
 };
-use crate::interactive::runtime::copy_selected_text_or_last_response;
+use crate::interactive::runtime::{copy_active_selection, copy_selected_text_or_last_response};
 
 use super::turns::restore_last_durable_full_turn;
 use super::{SessionCtx, dismiss_active_modal};
@@ -57,8 +57,7 @@ pub(super) async fn handle_global_shortcut_key(
     // Active selection copy should win before generic Ctrl+C handling.
     if app.has_text_selection() && copy_shortcut {
         tracing::debug!("selection copy took precedence over generic key handling");
-        copy_selected_text_or_last_response(app, terminal.size().ok());
-        app.clear_text_selection();
+        copy_active_selection(app, terminal.size().ok());
         return Ok(Some(false));
     }
 

@@ -13,9 +13,10 @@ pub(crate) struct ClipboardEnv {
 
 pub(crate) fn copy_text_robustly(text: &str) -> Result<&'static str, String> {
     let mut errors = Vec::new();
+    let mut osc52_ok = false;
 
     match copy_via_terminal_osc52(text) {
-        Ok(()) => return Ok("osc52"),
+        Ok(()) => osc52_ok = true,
         Err(err) => errors.push(format!("osc52: {err}")),
     }
 
@@ -27,6 +28,10 @@ pub(crate) fn copy_text_robustly(text: &str) -> Result<&'static str, String> {
     match copy_via_external_command(text) {
         Ok(method) => return Ok(method),
         Err(err) => errors.push(format!("external_command: {err}")),
+    }
+
+    if osc52_ok {
+        return Ok("osc52");
     }
 
     Err(errors.join("; "))
@@ -98,6 +103,35 @@ fn current_clipboard_env() -> ClipboardEnv {
     }
 }
 
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+))]
+fn copy_via_system_clipboard(text: &str) -> Result<(), String> {
+    use std::sync::{Mutex, OnceLock};
+
+    static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+    let clipboard = CLIPBOARD.get_or_init(|| Mutex::new(None));
+    let mut clipboard = clipboard
+        .lock()
+        .map_err(|_| "clipboard lock poisoned".to_string())?;
+    if clipboard.is_none() {
+        *clipboard = Some(arboard::Clipboard::new().map_err(|err| err.to_string())?);
+    }
+
+    clipboard
+        .as_mut()
+        .expect("clipboard initialized")
+        .set_text(text.to_string())
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "android",
+    target_os = "emscripten",
+    windows
+))]
 fn copy_via_system_clipboard(text: &str) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
     clipboard

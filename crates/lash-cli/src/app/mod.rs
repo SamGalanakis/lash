@@ -95,6 +95,19 @@ impl PlanDockState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToastState {
+    pub message: String,
+    pub kind: ToastKind,
+    pub expires_at: std::time::Instant,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcessView {
     pub process_id: String,
@@ -635,6 +648,8 @@ pub struct App {
     pending_retry_status: Option<String>,
     /// Current text selection state.
     pub selection: TextSelection,
+    /// Transient local UI feedback, rendered as a top-right toast.
+    pub toast: Option<ToastState>,
     /// Set after a visible selection is cleared by a mouse press on
     /// non-selectable UI. The corresponding mouse-up must be swallowed so the
     /// press does not also activate a button or plugin surface.
@@ -801,6 +816,17 @@ impl App {
             self.dirty = true;
         }
 
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.expires_at <= std::time::Instant::now())
+        {
+            self.toast = None;
+            self.dirty = true;
+        } else if self.toast.is_some() {
+            self.dirty = true;
+        }
+
         if self.live.turn.as_ref().is_some_and(|turn| {
             turn.transient_until
                 .is_some_and(|until| until <= std::time::Instant::now())
@@ -878,10 +904,20 @@ impl App {
             manual_interrupt_requested: false,
             pending_retry_status: None,
             selection: TextSelection::default(),
+            toast: None,
             suppress_mouse_up_after_selection_clear: false,
             history_area: Rect::default(),
             file_index: None,
         }
+    }
+
+    pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.toast = Some(ToastState {
+            message: message.into(),
+            kind,
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(5),
+        });
+        self.dirty = true;
     }
 
     /// Install the background-walked file index used for `@`-completion.

@@ -99,6 +99,18 @@ mod tests {
     }
 
     #[test]
+    fn toast_renders_as_top_right_overlay() {
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        app.show_toast("Copied to clipboard", ToastKind::Info);
+
+        let snapshot = lash_tui::render_snapshot(80, 12, |frame| draw(frame, &mut app));
+        let line = snapshot.visible_line_trimmed(3);
+
+        assert!(line.contains("Copied to clipboard"), "line: {line}");
+        assert!(line.ends_with("│"), "line: {line}");
+    }
+
+    #[test]
     fn stale_working_status_does_not_make_idle_cli_working() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();

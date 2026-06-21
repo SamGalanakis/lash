@@ -91,7 +91,7 @@ fn cli_interactive_pty_smoke_runs_turn_and_exits() {
 }
 
 #[test]
-fn cli_interactive_pty_escape_clears_mouse_input_selection() {
+fn cli_interactive_pty_mouse_selection_copies_and_escape_keeps_draft() {
     let lash_home = test_lash_home("standard-echo");
     let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Standard, None);
     let input = "abc123 selectable text";
@@ -123,9 +123,12 @@ fn cli_interactive_pty_escape_clears_mouse_input_selection() {
             row: text_row,
         })
         .expect("mouse up on draft input");
+    harness
+        .wait_for_text("Copied to clipboard", Duration::from_secs(10))
+        .expect("wait for selection copy toast");
     let selected_snapshot = harness
-        .screenshot("input-selection")
-        .expect("selection screenshot");
+        .screenshot("input-selection-copied")
+        .expect("selection copied screenshot");
     assert!(
         selected_snapshot.text.exists()
             && selected_snapshot.svg.exists()

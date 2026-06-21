@@ -8,6 +8,7 @@ use lash_core::{
 
 use super::helpers::SessionObservationBridge;
 use super::*;
+use crate::app::ToastKind;
 use crate::event::AppEventTx;
 use crate::input_items::build_items_from_editor_input;
 use crate::turn_runner::{
@@ -369,9 +370,35 @@ pub(crate) async fn generate_session_name(sessions_dir: &std::path::Path) -> Str
     }
 }
 
+/// Copy the current text selection only. Used by mouse-up copy-on-select.
+pub(super) fn copy_active_selection(app: &mut App, terminal_size: Option<(u16, u16)>) -> bool {
+    let input_text = app.selected_input_text();
+    let document_text = document_selection_text(app, terminal_size);
+    let history_text = history_selection_text(app, terminal_size);
+    tracing::debug!(
+        selection_visible = app.selection.visible,
+        selection_active = app.selection.active,
+        input_selected_chars = input_text.as_ref().map(|text| text.chars().count()),
+        document_selected_chars = document_text.as_ref().map(|text| text.chars().count()),
+        history_selected_chars = history_text.as_ref().map(|text| text.chars().count()),
+        has_terminal_size = terminal_size.is_some(),
+        "selection copy path invoked"
+    );
+    let text = input_text.or(document_text).or(history_text);
+    let Some(text) = text else {
+        return false;
+    };
+    copy_text_with_toast(app, &text);
+    app.clear_text_selection();
+    true
+}
+
 /// Copy the current input selection when present, otherwise the history
 /// selection, and finally the last assistant response.
-pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Option<(u16, u16)>) {
+pub(super) fn copy_selected_text_or_last_response(
+    app: &mut App,
+    terminal_size: Option<(u16, u16)>,
+) {
     let input_text = app.selected_input_text();
     let document_text = document_selection_text(app, terminal_size);
     let history_text = history_selection_text(app, terminal_size);
@@ -387,13 +414,23 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
         "copy path invoked"
     );
     if let Some(text) = copy_candidate_text(app, terminal_size) {
-        let copied_chars = text.chars().count();
-        match crate::clipboard::copy_text_robustly(&text) {
-            Ok(method) => tracing::debug!(copied_chars, method, "clipboard write succeeded"),
-            Err(err) => tracing::warn!(error = %err, copied_chars, "clipboard write failed"),
-        }
+        copy_text_with_toast(app, &text);
     } else {
         tracing::debug!("copy path had no selected or fallback text");
+    }
+}
+
+fn copy_text_with_toast(app: &mut App, text: &str) {
+    let copied_chars = text.chars().count();
+    match crate::clipboard::copy_text_robustly(text) {
+        Ok(method) => {
+            tracing::debug!(copied_chars, method, "clipboard write succeeded");
+            app.show_toast("Copied to clipboard", ToastKind::Info);
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, copied_chars, "clipboard write failed");
+            app.show_toast("Failed to copy to clipboard", ToastKind::Error);
+        }
     }
 }
 

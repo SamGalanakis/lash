@@ -757,6 +757,19 @@ fn selection_mouse_up_suppression_is_one_shot() {
 }
 
 #[test]
+fn toast_expires_on_tick() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.show_toast("Copied to clipboard", ToastKind::Info);
+    app.toast.as_mut().expect("toast").expires_at =
+        std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+    app.on_tick();
+
+    assert!(app.toast.is_none());
+    assert!(app.dirty);
+}
+
+#[test]
 fn backspace_deletes_image_marker_atomically() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("hello [Image #2] world".into());
