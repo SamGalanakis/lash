@@ -723,6 +723,40 @@ fn restore_prepared_turn_clears_history_selection() {
 }
 
 #[test]
+fn text_selection_contract_tracks_output_and_input_selection() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.selection.anchor = (1, 0);
+    app.selection.end = (4, 0);
+    app.selection.visible = true;
+    app.set_input("input selection".into());
+    app.start_input_selection(0);
+    app.update_input_selection(5);
+    app.finish_input_selection();
+
+    assert!(app.has_output_selection());
+    assert!(app.has_visible_output_selection());
+    assert!(app.has_text_selection());
+    assert!(app.has_visible_text_selection());
+
+    app.clear_text_selection();
+
+    assert!(!app.has_output_selection());
+    assert!(!app.has_input_selection());
+    assert!(app.dirty);
+}
+
+#[test]
+fn selection_mouse_up_suppression_is_one_shot() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+
+    assert!(!app.take_suppressed_mouse_up_after_selection_clear());
+    app.suppress_mouse_up_after_selection_clear();
+
+    assert!(app.take_suppressed_mouse_up_after_selection_clear());
+    assert!(!app.take_suppressed_mouse_up_after_selection_clear());
+}
+
+#[test]
 fn backspace_deletes_image_marker_atomically() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("hello [Image #2] world".into());

@@ -433,10 +433,10 @@ pub(super) const FOLLOW_OUTPUT_CONTEXT_LINES: usize = 2;
 #[cfg(test)]
 mod tests;
 
-/// Mouse text selection state for the history viewport.
+/// Mouse text selection state for selectable output surfaces.
 ///
-/// Coordinates are in **content space**: (column, virtual_row) where
-/// `virtual_row = screen_row - history_area.y + scroll_offset`.
+/// Coordinates are in **content space**: (column, virtual_row) where the
+/// virtual row is relative to the owning selectable surface.
 /// This makes the selection stable across scrolling.
 #[derive(Clone, Debug, Default)]
 pub struct TextSelection {
@@ -448,6 +448,16 @@ pub struct TextSelection {
     pub active: bool,
     /// Whether a completed selection is being displayed.
     pub visible: bool,
+}
+
+impl TextSelection {
+    pub fn has_range(&self) -> bool {
+        (self.active || self.visible) && self.anchor != self.end
+    }
+
+    pub fn has_visible_range(&self) -> bool {
+        self.visible && self.anchor != self.end
+    }
 }
 
 /// Incrementally maintained render caches for the history viewport.
@@ -625,6 +635,10 @@ pub struct App {
     pending_retry_status: Option<String>,
     /// Current text selection state.
     pub selection: TextSelection,
+    /// Set after a visible selection is cleared by a mouse press on
+    /// non-selectable UI. The corresponding mouse-up must be swallowed so the
+    /// press does not also activate a button or plugin surface.
+    suppress_mouse_up_after_selection_clear: bool,
     /// Cached history area rect from the last draw, used to map mouse coords.
     pub history_area: Rect,
     /// Background-walked index of the project root used for fuzzy `@`-path
@@ -864,6 +878,7 @@ impl App {
             manual_interrupt_requested: false,
             pending_retry_status: None,
             selection: TextSelection::default(),
+            suppress_mouse_up_after_selection_clear: false,
             history_area: Rect::default(),
             file_index: None,
         }
@@ -880,6 +895,40 @@ impl App {
     /// Clear any active history text selection.
     pub fn clear_selection(&mut self) {
         self.selection = TextSelection::default();
+    }
+
+    pub fn has_output_selection(&self) -> bool {
+        self.selection.has_range()
+    }
+
+    pub fn has_visible_output_selection(&self) -> bool {
+        self.selection.has_visible_range()
+    }
+
+    pub fn has_text_selection(&self) -> bool {
+        self.has_output_selection() || self.has_input_selection()
+    }
+
+    pub fn has_visible_text_selection(&self) -> bool {
+        self.has_visible_output_selection() || self.has_input_selection()
+    }
+
+    pub fn clear_text_selection(&mut self) {
+        let had_selection =
+            self.has_text_selection() || self.selection.active || self.input_selection_active();
+        self.clear_selection();
+        self.clear_input_selection();
+        if had_selection {
+            self.dirty = true;
+        }
+    }
+
+    pub fn suppress_mouse_up_after_selection_clear(&mut self) {
+        self.suppress_mouse_up_after_selection_clear = true;
+    }
+
+    pub fn take_suppressed_mouse_up_after_selection_clear(&mut self) -> bool {
+        std::mem::take(&mut self.suppress_mouse_up_after_selection_clear)
     }
 
     /// Get the current input text and reset input state.

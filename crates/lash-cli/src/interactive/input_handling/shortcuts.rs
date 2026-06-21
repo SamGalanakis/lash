@@ -42,16 +42,23 @@ pub(super) async fn handle_global_shortcut_key(
         preserve_selection = should_preserve_selection_for_key(key),
         "received key event"
     );
+    if key.code == KeyCode::Esc && app.has_text_selection() {
+        tracing::debug!("clearing text selection on Escape");
+        app.clear_text_selection();
+        return Ok(Some(false));
+    }
+
     // Clear any active history selection on plain keypress.
-    if app.selection.visible && !should_preserve_selection_for_key(key) {
+    if app.has_visible_output_selection() && !should_preserve_selection_for_key(key) {
         tracing::debug!("clearing selection on plain keypress");
         app.clear_selection();
     }
 
     // Active selection copy should win before generic Ctrl+C handling.
-    if (app.selection.visible || app.has_input_selection()) && copy_shortcut {
+    if app.has_text_selection() && copy_shortcut {
         tracing::debug!("selection copy took precedence over generic key handling");
         copy_selected_text_or_last_response(app, terminal.size().ok());
+        app.clear_text_selection();
         return Ok(Some(false));
     }
 

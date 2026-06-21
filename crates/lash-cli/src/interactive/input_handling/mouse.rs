@@ -129,6 +129,16 @@ pub(in crate::interactive) fn handle_mouse_event(
     // decorations on top of the alt-screen. Repaint on any mouse event
     // so ignored motion events do not leave visual artifacts behind.
     app.dirty = true;
+    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+        && app.take_suppressed_mouse_up_after_selection_clear()
+    {
+        tracing::debug!(
+            row = mouse.row,
+            column = mouse.column,
+            "mouse up suppressed after clearing text selection"
+        );
+        return Ok(());
+    }
     let ha = app.history_area;
     let (term_width, term_height) = terminal.size()?;
     let prompt_area = render::input_area(app, term_width, term_height);
@@ -237,7 +247,24 @@ pub(in crate::interactive) fn handle_mouse_event(
         }
     }
 
-    if let Some(event) = normalize_event(&TermEvent::Mouse(mouse))
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && app.has_visible_text_selection()
+        && !in_history
+        && !in_input
+    {
+        app.clear_text_selection();
+        app.suppress_mouse_up_after_selection_clear();
+        tracing::debug!(
+            row = mouse.row,
+            column = mouse.column,
+            "cleared text selection and suppressed click target"
+        );
+        return Ok(());
+    }
+
+    let selection_drag_active = app.selection.active || app.input_selection_active();
+    if !selection_drag_active
+        && let Some(event) = normalize_event(&TermEvent::Mouse(mouse))
         && handle_surface_input(ui_extensions, &event, runtime.as_ref(), app)
     {
         return Ok(());
