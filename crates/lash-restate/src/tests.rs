@@ -594,6 +594,7 @@ struct RecordingContext {
     runs: Mutex<Vec<String>>,
     started: Mutex<Vec<ProcessRegistration>>,
     started_execution_contexts: Mutex<Vec<ProcessExecutionContext>>,
+    process_command_log: Mutex<Vec<String>>,
     cancelled: Mutex<Vec<(String, Option<String>)>>,
     resolved_events: Mutex<Vec<RestateProcessEventResolveRequest>>,
     awaited_events: Mutex<HashMap<String, Resolution>>,
@@ -658,6 +659,10 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
     {
         let process_id = registration.id.clone();
         let endpoint = self.endpoint.clone();
+        self.process_command_log
+            .lock()
+            .expect("process command log lock")
+            .push(format!("send:{process_id}"));
         self.started
             .lock()
             .expect("started lock")
@@ -731,6 +736,10 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
     where
         'ctx: 'run,
     {
+        self.process_command_log
+            .lock()
+            .expect("process command log lock")
+            .push(format!("call:{process_id}"));
         let result = restate_process_terminal_await_key(&process_id)
             .map_err(TerminalError::from_error)
             .and_then(|key| {
@@ -1463,6 +1472,233 @@ async fn restate_controller_schedules_process_workflow_without_running_executor(
     assert!(
         context.runs.lock().expect("runs lock").is_empty(),
         "process workflow scheduling must not call Restate context from inside ctx.run"
+    );
+}
+
+#[tokio::test]
+async fn restate_controller_replays_process_start_await_command_sequence() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let registry = process_registry();
+    let process_id = "task-start-await-replay";
+
+    let start = || {
+        RuntimeEffectEnvelope::new(
+            runtime_invocation(RuntimeEffectKind::Process, "process-start-replay"),
+            RuntimeEffectCommand::process(ProcessCommand::Start {
+                registration: external_registration(process_id),
+                grant: None,
+                execution_context: Box::new(ProcessExecutionContext::default()),
+            }),
+        )
+    };
+    let await_terminal = || {
+        RuntimeEffectEnvelope::new(
+            runtime_invocation(RuntimeEffectKind::Process, "process-await-replay"),
+            RuntimeEffectCommand::process(ProcessCommand::Await {
+                process_id: process_id.to_string(),
+            }),
+        )
+    };
+    let terminal = ProcessAwaitOutput::Success {
+        value: serde_json::json!({ "done": true }),
+        control: None,
+    };
+
+    host.execute_effect(
+        start(),
+        RuntimeEffectLocalExecutor::processes(registry.clone()),
+    )
+    .await
+    .expect("first start");
+    registry
+        .complete_process(process_id, terminal.clone())
+        .await
+        .expect("complete child process");
+    context.resolve_process_terminal(process_id, &terminal);
+    host.execute_effect(
+        await_terminal(),
+        RuntimeEffectLocalExecutor::processes(registry.clone()),
+    )
+    .await
+    .expect("first await");
+
+    // Simulates Restate replay of the same parent handler after a later
+    // suspension resumes. The already persisted registry record has an
+    // external_ref at this point, but the handler must still issue the same
+    // Restate send before the await call so the journal command sequence stays
+    // send -> call -> ... on every replay.
+    host.execute_effect(
+        start(),
+        RuntimeEffectLocalExecutor::processes(registry.clone()),
+    )
+    .await
+    .expect("replay start");
+    host.execute_effect(
+        await_terminal(),
+        RuntimeEffectLocalExecutor::processes(registry.clone()),
+    )
+    .await
+    .expect("replay await");
+
+    assert_eq!(
+        context
+            .process_command_log
+            .lock()
+            .expect("process command log lock")
+            .as_slice(),
+        &[
+            format!("send:{process_id}"),
+            format!("call:{process_id}"),
+            format!("send:{process_id}"),
+            format!("call:{process_id}"),
+        ],
+        "child process start/await must replay the same Restate command sequence"
+    );
+}
+
+#[tokio::test]
+async fn restate_controller_start_emits_send_when_external_ref_already_exists() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let registry = process_registry();
+    let process_id = "task-start-existing-ref";
+    let registration = external_registration(process_id);
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register process");
+    registry
+        .set_external_ref(
+            process_id,
+            ProcessExternalRef {
+                backend: "restate".to_string(),
+                id: format!("LashProcessWorkflow/{process_id}"),
+                metadata: Some(serde_json::json!({
+                    "invocation_id": format!("invocation-{process_id}")
+                })),
+            },
+        )
+        .await
+        .expect("pre-set external ref");
+
+    host.execute_effect(
+        RuntimeEffectEnvelope::new(
+            runtime_invocation(RuntimeEffectKind::Process, "process-start-existing-ref"),
+            RuntimeEffectCommand::process(ProcessCommand::Start {
+                registration,
+                grant: None,
+                execution_context: Box::new(ProcessExecutionContext::default()),
+            }),
+        ),
+        RuntimeEffectLocalExecutor::processes(registry),
+    )
+    .await
+    .expect("start with existing external ref");
+
+    assert_eq!(
+        context
+            .process_command_log
+            .lock()
+            .expect("process command log lock")
+            .as_slice(),
+        &[format!("send:{process_id}")],
+        "pre-existing external_ref must not suppress the journaled Restate send"
+    );
+}
+
+async fn run_parent_shaped_start_await_suspend_flow(
+    host: &RestateRuntimeEffectController<'_, Arc<RecordingContext>>,
+    registry: Arc<dyn ProcessRegistry>,
+    process_id: &str,
+    suspend_key: AwaitEventKey,
+) {
+    host.execute_effect(
+        RuntimeEffectEnvelope::new(
+            runtime_invocation(RuntimeEffectKind::Process, "parent-flow-start-child"),
+            RuntimeEffectCommand::process(ProcessCommand::Start {
+                registration: external_registration(process_id),
+                grant: None,
+                execution_context: Box::new(ProcessExecutionContext::default()),
+            }),
+        ),
+        RuntimeEffectLocalExecutor::processes(registry.clone()),
+    )
+    .await
+    .expect("parent flow start child");
+
+    host.execute_effect(
+        RuntimeEffectEnvelope::new(
+            runtime_invocation(RuntimeEffectKind::Process, "parent-flow-await-child"),
+            RuntimeEffectCommand::process(ProcessCommand::Await {
+                process_id: process_id.to_string(),
+            }),
+        ),
+        RuntimeEffectLocalExecutor::processes(registry),
+    )
+    .await
+    .expect("parent flow await child");
+
+    host.execute_effect(
+        RuntimeEffectEnvelope::new(
+            runtime_invocation(RuntimeEffectKind::AwaitEvent, "parent-flow-suspend"),
+            RuntimeEffectCommand::AwaitEvent { key: suspend_key },
+        ),
+        RuntimeEffectLocalExecutor::await_event(tokio_util::sync::CancellationToken::new(), None),
+    )
+    .await
+    .expect("parent flow await resume event");
+}
+
+#[tokio::test]
+async fn restate_controller_replays_parent_shaped_start_await_suspend_flow() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let registry = process_registry();
+    let process_id = "task-parent-flow-replay";
+    let terminal = ProcessAwaitOutput::Success {
+        value: serde_json::json!({ "done": true }),
+        control: None,
+    };
+    let suspend_key = restate_await_event_key(
+        &ExecutionScope::process(process_id),
+        AwaitEventWaitIdentity::Custom {
+            key: "parent-resume-input".to_string(),
+        },
+    )
+    .expect("parent suspend key");
+    context.resolve_process_terminal(process_id, &terminal);
+    context
+        .awaited_events
+        .lock()
+        .expect("awaited events lock")
+        .insert(
+            suspend_key.promise_key(),
+            Resolution::Ok(serde_json::json!({ "answer": "resume" })),
+        );
+
+    run_parent_shaped_start_await_suspend_flow(
+        &host,
+        registry.clone(),
+        process_id,
+        suspend_key.clone(),
+    )
+    .await;
+    run_parent_shaped_start_await_suspend_flow(&host, registry, process_id, suspend_key).await;
+
+    assert_eq!(
+        context
+            .process_command_log
+            .lock()
+            .expect("process command log lock")
+            .as_slice(),
+        &[
+            format!("send:{process_id}"),
+            format!("call:{process_id}"),
+            format!("send:{process_id}"),
+            format!("call:{process_id}"),
+        ],
+        "a parent-shaped replay after suspension must preserve child start/await command order"
     );
 }
 
@@ -2955,36 +3191,47 @@ async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
         .await
         .expect("register");
 
-    // Minimal mock ingress: capture the first request (request line +
-    // headers), then reply 202 Accepted so the reqwest submit succeeds.
-    let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // Minimal mock ingress: capture two submissions, then reply 202 Accepted
+    // so the reqwest submit succeeds. The second submit exercises the
+    // registry's exact-repeat external_ref path for a still-running process.
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let captured_server = captured.clone();
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.expect("accept");
-        let mut buf = vec![0u8; 8192];
-        let n = socket.read(&mut buf).await.expect("read request");
-        *captured_server.lock().expect("captured lock") =
-            Some(String::from_utf8_lossy(&buf[..n]).into_owned());
-        socket
-            .write_all(
-                b"HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: 49\r\n\r\n{\"invocationId\":\"inv_task_1\",\"status\":\"Accepted\"}",
-            )
-            .await
-            .expect("write response");
-        socket.flush().await.expect("flush");
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.expect("read request");
+            captured_server
+                .lock()
+                .expect("captured lock")
+                .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+            socket
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: 49\r\n\r\n{\"invocationId\":\"inv_task_1\",\"status\":\"Accepted\"}",
+                )
+                .await
+                .expect("write response");
+            socket.flush().await.expect("flush");
+        }
     });
 
     let runner = RestateProcessIngressRunner::new(format!("http://{addr}"), registry.clone());
     runner.claim_and_run_pending().await.expect("drive pending");
+    runner
+        .claim_and_run_pending()
+        .await
+        .expect("drive pending again");
     server.await.expect("mock ingress server task");
 
-    let request = captured
-        .lock()
-        .expect("captured lock")
-        .clone()
-        .expect("a workflow run was submitted to the ingress");
+    let requests = captured.lock().expect("captured lock").clone();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the non-terminal process must be submitted on both scans"
+    );
+    let request = &requests[0];
     assert!(
         request.starts_with("POST /LashProcessWorkflow/task-1/run/send "),
         "submits the keyed workflow run: {request}"
@@ -2992,6 +3239,11 @@ async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
     assert!(
         !request.contains("idempotency-key:"),
         "workflow sends must not carry an idempotency header; Restate coalesces by workflow key: {request}"
+    );
+    assert!(
+        requests[1].starts_with("POST /LashProcessWorkflow/task-1/run/send "),
+        "repeat scan submits the same keyed workflow run: {}",
+        requests[1]
     );
 
     // The durable backend reference is recorded so the process is observably

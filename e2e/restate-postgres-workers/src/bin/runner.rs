@@ -8,13 +8,13 @@ use lash_core::{
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
     RestateAdminClient, RestateEffectHost, RestateIngressClient, RestateInvocationId,
-    RestateProcessDeployment,
+    RestateInvocationStatus, RestateProcessDeployment,
 };
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
-    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_TOOL_BATCH_TEXT,
-    ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
-    build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
+    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT,
+    EXPECTED_TOOL_BATCH_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse,
+    TurnScenario, build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
     process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use serde_json::{Value, json};
@@ -206,6 +206,33 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &durable_input_request.workflow_id).await?;
     assert_durable_input_response(&durable_response)?;
 
+    let parent_durable_input_request = TurnRequest {
+        workflow_id: "e2e-parent-durable-input-after-child".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::ParentDurableInputAfterChild,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &parent_durable_input_request).await?;
+    let parent_durable_key =
+        wait_for_durable_input_key(storage.pool(), &parent_durable_input_request.workflow_id)
+            .await?;
+    let parent_durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
+        .resolve_await_event(
+            &parent_durable_key,
+            lash_core::Resolution::Ok(json!({ "answer": "parent-approved" })),
+        )
+        .await
+        .context("resolve parent durable input await key")?;
+    anyhow::ensure!(
+        matches!(parent_durable_resolve, lash_core::ResolveOutcome::Accepted),
+        "parent durable input resolve was not accepted: {parent_durable_resolve:?}"
+    );
+    let parent_durable_response =
+        wait_for_terminal_result(storage.pool(), &parent_durable_input_request.workflow_id).await?;
+    assert_parent_durable_input_response(&parent_durable_response)?;
+    assert_no_active_lash_restate_invocations(&admin_url).await?;
+    assert_no_problem_lash_restate_invocations(&admin_url).await?;
+
     let tool_batch_request = TurnRequest {
         workflow_id: "e2e-tool-batch".to_string(),
         fail_once: false,
@@ -228,7 +255,7 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &tool_batch_failover_request.workflow_id).await?;
     assert_tool_batch_response(&tool_batch_failover_response)?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 12).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 13).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -470,6 +497,43 @@ async fn assert_no_active_lash_restate_invocations(admin_url: &str) -> Result<()
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn assert_no_problem_lash_restate_invocations(admin_url: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .context("build Restate admin client")?;
+    let admin = RestateAdminClient::with_client(client, admin_url.to_string());
+    let service_filter = [TURN_WORKFLOW_NAME, "LashProcessWorkflow"]
+        .into_iter()
+        .map(|prefix| {
+            format!(
+                "target_service_name LIKE {}",
+                sql_string_literal(&format!("{prefix}%"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let problems = admin
+        .query_json::<RestateInvocationStatus>(&format!(
+            "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure \
+             FROM sys_invocation \
+             WHERE ({service_filter}) \
+               AND (status IN ('backing-off', 'failed') OR completion_result = 'failure' OR completion_failure IS NOT NULL) \
+             ORDER BY modified_at DESC"
+        ))
+        .await
+        .context("query Restate problem Lash invocations")?;
+    anyhow::ensure!(
+        problems.is_empty(),
+        "Restate has failed or backing-off Lash invocations: {problems:#?}"
+    );
+    Ok(())
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 async fn wait_for_terminal_result(pool: &sqlx::PgPool, workflow_id: &str) -> Result<TurnResponse> {
@@ -726,6 +790,41 @@ fn assert_durable_input_response(response: &TurnResponse) -> Result<()> {
             .and_then(Value::as_str)
             .is_some_and(|request_id| request_id.ends_with(":request-1")),
         "durable input request id mismatch: {}",
+        response.submitted_value
+    );
+    Ok(())
+}
+
+fn assert_parent_durable_input_response(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == EXPECTED_PARENT_DURABLE_INPUT_TEXT,
+        "workflow `{}` parent durable input final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    let parent = response
+        .submitted_value
+        .get("parent")
+        .context("parent durable input response missing parent result")?;
+    anyhow::ensure!(
+        parent.get("child").and_then(Value::as_str) == Some("ready"),
+        "parent child result mismatch: {}",
+        response.submitted_value
+    );
+    let durable = parent
+        .get("durable")
+        .context("parent durable input response missing durable result")?;
+    anyhow::ensure!(
+        durable.get("answer").and_then(Value::as_str) == Some("parent-approved"),
+        "parent durable input answer mismatch: {}",
+        response.submitted_value
+    );
+    anyhow::ensure!(
+        durable
+            .get("request_id")
+            .and_then(Value::as_str)
+            .is_some_and(|request_id| request_id.ends_with(":request-1")),
+        "parent durable input request id mismatch: {}",
         response.submitted_value
     );
     Ok(())
@@ -1197,6 +1296,7 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
         "async_completion",
         "durable_input_request",
         "kitchen_sink",
+        "parent_durable_input_after_child",
         "queued_wake",
         "trigger_setup",
         "signal_suspend",
@@ -1276,24 +1376,27 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
 }
 
 async fn assert_durable_input_steps(pool: &sqlx::PgPool) -> Result<()> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT step_id, count
-         FROM lash_e2e_durable_step_counts
-         WHERE workflow_id = 'e2e-durable-input'
-         ORDER BY step_id",
-    )
-    .fetch_all(pool)
-    .await
-    .context("load durable input step counts")?;
-    let counts = rows
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    for step_id in ["complete", "create"] {
-        let count = counts.get(step_id).copied().unwrap_or_default();
-        anyhow::ensure!(
-            count == 1,
-            "durable input step `{step_id}` ran {count} times; counts={counts:?}"
-        );
+    for workflow_id in ["e2e-durable-input", "e2e-parent-durable-input-after-child"] {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT step_id, count
+             FROM lash_e2e_durable_step_counts
+             WHERE workflow_id = $1
+             ORDER BY step_id",
+        )
+        .bind(workflow_id)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("load durable input step counts for `{workflow_id}`"))?;
+        let counts = rows
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for step_id in ["complete", "create"] {
+            let count = counts.get(step_id).copied().unwrap_or_default();
+            anyhow::ensure!(
+                count == 1,
+                "workflow `{workflow_id}` durable input step `{step_id}` ran {count} times; counts={counts:?}"
+            );
+        }
     }
     Ok(())
 }

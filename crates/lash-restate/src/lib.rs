@@ -1841,14 +1841,11 @@ where
     C: RestateControllerContext<'ctx> + ?Sized,
 {
     let process_id = registration.id.clone();
-    let record = registry.register_process(registration.clone()).await?;
+    registry.register_process(registration.clone()).await?;
     if let Some(grant) = grant {
         registry
             .grant_handle(&grant.session_scope, &process_id, grant.descriptor)
             .await?;
-    }
-    if record.external_ref.is_some() {
-        return Ok(record);
     }
     let invocation_id = context
         .start_process_workflow(registration, execution_context)

@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 use lash_restate_postgres_workers_e2e::{
     DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
-    HealthResponse, TurnRequest, TurnResponse, TurnScenario, build_e2e_core,
-    default_session_child_originator_scope_pattern, default_session_originator_scope_id,
-    ensure_e2e_schema, env, process_registry_from_storage, record_terminal_result,
-    record_turn_activity, record_worker_event, required_env, s3_store_from_env,
+    EXPECTED_PARENT_DURABLE_INPUT_TEXT, HealthResponse, TurnRequest, TurnResponse, TurnScenario,
+    build_e2e_core, default_session_child_originator_scope_pattern,
+    default_session_originator_scope_id, ensure_e2e_schema, env, process_registry_from_storage,
+    record_terminal_result, record_turn_activity, record_worker_event, required_env,
+    s3_store_from_env,
 };
 
 const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
@@ -242,6 +243,7 @@ impl AppState {
                 TurnScenario::SignalProcess => "signal-sent",
                 TurnScenario::AsyncCompletion => EXPECTED_ASYNC_TEXT,
                 TurnScenario::DurableInputRequest => EXPECTED_DURABLE_INPUT_TEXT,
+                TurnScenario::ParentDurableInputAfterChild => EXPECTED_PARENT_DURABLE_INPUT_TEXT,
                 TurnScenario::ToolBatch => {
                     lash_restate_postgres_workers_e2e::EXPECTED_TOOL_BATCH_TEXT
                 }
@@ -387,6 +389,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         ),
         TurnScenario::DurableInputRequest => format!(
             "Run the E2E durable input request scenario. workflow_id={} durable_input_request=true",
+            request.workflow_id
+        ),
+        TurnScenario::ParentDurableInputAfterChild => format!(
+            "Run the E2E parent durable input after child scenario. workflow_id={} parent_durable_input_after_child=true",
             request.workflow_id
         ),
         TurnScenario::ToolBatch => format!(
