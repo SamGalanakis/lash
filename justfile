@@ -161,7 +161,24 @@ restate-postgres-workers-e2e:
   }
   trap cleanup EXIT
 
+  pull_with_retry() {
+    image="$1"
+    attempts="${2:-3}"
+    for attempt in $(seq 1 "$attempts"); do
+      if docker pull "$image"; then
+        return 0
+      fi
+      if [ "$attempt" -eq "$attempts" ]; then
+        return 1
+      fi
+      sleep $((attempt * 2))
+    done
+  }
+
   $compose down -v --remove-orphans >/dev/null 2>&1 || true
+  # Several services share the host-binary runtime image. Pull it once with
+  # retries so a transient Docker Hub HEAD error doesn't fail compose startup.
+  pull_with_retry ubuntu:24.04
   $compose up -d postgres minio minio-init restate mock-provider worker-a worker-b worker-proxy
   deadline=$((SECONDS + 60))
   while true; do
