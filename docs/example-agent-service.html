@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">agent<span class="slash">/</span>service</h1>
-    <p class="opener__lede">The runnable browser example in <code>examples/agent-service</code> shows the app-facing <code>lash</code> API in a realistic host: Axum routes, OpenRouter, RLM mode, typed session plugin activation, app-owned tools, semantic streaming, per-chat model selection, SQLite runtime stores, separate product persistence, and optional Restate-backed turns.</p>
+    <p class="opener__lede">The runnable browser example in <code>examples/agent-service</code> shows the app-facing <code>lash</code> API in a realistic host: Axum routes, OpenRouter, RLM mode, typed session plugin activation, app-owned tools, semantic streaming through session observation live replay, per-chat model selection, SQLite runtime stores, separate product persistence, and optional Restate-backed turns.</p>
   </section>
 
   <main class="body" id="content">
@@ -52,7 +52,7 @@
             <article class="panel"><h3>Session per chat</h3><p>Each request opens a <code>LashSession</code> from the chat id and store. The app does not keep live runtime sessions in a process map.</p></article>
             <article class="panel"><h3>Per-chat model</h3><p>The product DB stores <code>model</code> and <code>model_variant</code>; turns apply the current selection through <code>TurnBuilder::model(...)</code>.</p></article>
             <article class="panel"><h3>App-owned board</h3><p>The board lives in the app database. Prompt hooks and tools load the canonical <code>chat_boards</code> row by session id; message payload snapshots are only for browser replay.</p></article>
-            <article class="panel"><h3>Semantic stream</h3><p>The browser renders <code>TurnEvent</code>s for live assistant prose, reasoning deltas, code blocks, tool cards, usage, and submitted terminal values. Prose completion is settled from the returned <code>TurnOutput</code>, not from a separate final stream event.</p></article>
+            <article class="panel"><h3>Semantic stream</h3><p>The browser renders live <code>RemoteSessionObservationEvent</code> rows from an opaque session cursor for assistant prose, reasoning deltas, code blocks, tool cards, usage, and submitted terminal values. Prose completion is settled from the returned <code>TurnOutput</code>, not from a separate final stream event.</p></article>
             <article class="panel"><h3>Split persistence</h3><p><code>lash-sqlite-store</code> persists runtime state; the app database stores chat rows, board snapshots, model choice, titles, and rendered activity rows.</p></article>
           </div>
         </div>
@@ -73,6 +73,12 @@
 let artifact_store = std::sync::Arc::new(
     lash_sqlite_store::Store::open(&amp;data_dir.join("lash-artifacts.db")).await?,
 );
+let process_env_store = std::sync::Arc::new(
+    lash_sqlite_store::Store::open(&amp;data_dir.join("process-env.db")).await?,
+);
+let trigger_store = std::sync::Arc::new(
+    lash_sqlite_store::SqliteTriggerStore::open(&amp;data_dir.join("triggers.db")).await?,
+);
 
 let core = lash::RlmCore::builder()
     .provider(provider)
@@ -90,6 +96,8 @@ let core = lash::RlmCore::builder()
         lash::durability::InlineEffectHost::default(),
     ))
     .lashlang_artifact_store(artifact_store)
+    .process_env_store(process_env_store)
+    .trigger_store(trigger_store)
     .attachment_store(std::sync::Arc::new(
         lash::persistence::FileAttachmentStore::new(data_dir.join("attachments")),
     ))
@@ -104,6 +112,7 @@ let core = lash::RlmCore::builder()
             <p>The route stores the user message and UI replay board snapshot first, updates the canonical <code>chat_boards</code> row, opens the Lash session, then runs a turn with the chat's model selection.</p>
           </div>
           <pre data-lang="rust" data-snippet="example_agent_service#service-turn"><code>let session = state.open_session(&amp;chat_id).await?;
+let replay_cursor = session.observe().current_observation().cursor;
 
 use lash::rlm::RlmTurnBuilderExt as _;
 
@@ -126,6 +135,7 @@ let assistant_text = assistant_text_for_persistence(
     &amp;turn_state.lock().expect("turn state lock").assistant_prose,
 );</code></pre>
           <p>The board is app-owned SQLite state. User message payloads keep board snapshots so the browser can replay the game, while the plugin prompt and <code>read_board</code> / <code>play_move</code> tools read and mutate the canonical row. <code>assistant_text_for_persistence</code> derives the product chat row from terminal semantics: submitted values render from <code>TurnFinish::SubmittedValue</code>, while prose comes from <code>TurnFinish::AssistantMessage</code> with streamed prose only as a live UI preview.</p>
+          <p>The route starts live replay from <code>replay_cursor</code> and emits an NDJSON <code>replay_cursor</code> row followed by <code>observation</code> rows converted through <code>RemoteSessionObservationEvent</code>. Restate mode reuses this observation stream for semantic progress while its app outbox persists product rows for route restart and workflow handoff.</p>
         </div>
 
         <div class="section" id="restate-mode">

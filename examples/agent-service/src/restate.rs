@@ -7,6 +7,7 @@ use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use bytes::Bytes;
+use lash::observe::SessionCursor;
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{TurnInput, TurnOutput};
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::db::{ChatMessage, ChatModelSelection};
 use crate::routes::{
     ChannelTurnEvents, StreamItem, TurnPersistenceState, assistant_text_for_persistence,
-    model_spec_for_chat_selection,
+    model_spec_for_chat_selection, spawn_live_replay_forwarder, wait_for_live_replay_flush,
 };
 use crate::state::{AppError, AppResult, AppStateData};
 
@@ -107,9 +108,16 @@ pub(crate) async fn send_message_restate(
         })
         .await?;
 
+    let replay_cursor = state
+        .open_session(&chat_id)
+        .await?
+        .observe()
+        .current_observation()
+        .cursor;
+
     let request = AgentServiceTurnWorkflowRequest::new(
         turn_id.clone(),
-        chat_id,
+        chat_id.clone(),
         text,
         model_selection.model,
         model_selection.model_variant,
@@ -137,13 +145,29 @@ pub(crate) async fn send_message_restate(
         )));
     }
 
-    stream_turn_outbox(state, turn_id).await
+    stream_turn_outbox(state, chat_id, turn_id, replay_cursor).await
 }
 
 #[cfg(feature = "restate")]
-async fn stream_turn_outbox(state: AppStateData, turn_id: String) -> AppResult<Response> {
+async fn stream_turn_outbox(
+    state: AppStateData,
+    chat_id: String,
+    turn_id: String,
+    replay_cursor: SessionCursor,
+) -> AppResult<Response> {
     let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
+    let (item_tx, mut item_rx) = mpsc::channel::<StreamItem>(64);
+    let replay_session = state.open_session(&chat_id).await?;
+    let mut replay = spawn_live_replay_forwarder(replay_session, replay_cursor, item_tx.clone());
     tokio::spawn(async move {
+        let tx_for_replay = tx.clone();
+        tokio::spawn(async move {
+            while let Some(item) = item_rx.recv().await {
+                if write_stream_item(&tx_for_replay, &item).await.is_err() {
+                    break;
+                }
+            }
+        });
         let mut last_id = 0_i64;
         loop {
             match state
@@ -160,17 +184,32 @@ async fn stream_turn_outbox(state: AppStateData, turn_id: String) -> AppResult<R
                         if event.is_done {
                             done = true;
                         }
-                        let mut line = event.item_json;
-                        line.push('\n');
-                        if tx.send(Ok(Bytes::from(line))).await.is_err() {
-                            return;
+                        let is_turn_event =
+                            serde_json::from_str::<serde_json::Value>(&event.item_json)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("type")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string)
+                                })
+                                .as_deref()
+                                == Some("event");
+                        if !is_turn_event {
+                            let mut line = event.item_json;
+                            line.push('\n');
+                            if tx.send(Ok(Bytes::from(line))).await.is_err() {
+                                return;
+                            }
                         }
                     }
                     if done {
+                        wait_for_live_replay_flush(&mut replay).await;
                         return;
                     }
                 }
                 Err(err) => {
+                    replay.abort();
                     let mut line = json!({
                         "type": "error",
                         "message": err.message,
@@ -190,6 +229,21 @@ async fn stream_turn_outbox(state: AppStateData, turn_id: String) -> AppResult<R
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(ReceiverStream::new(rx)))
         .expect("valid streaming response"))
+}
+
+async fn write_stream_item(
+    tx: &mpsc::Sender<Result<Bytes, Infallible>>,
+    item: &StreamItem,
+) -> Result<(), ()> {
+    let mut line = serde_json::to_string(item).unwrap_or_else(|err| {
+        json!({
+            "type": "error",
+            "message": err.to_string(),
+        })
+        .to_string()
+    });
+    line.push('\n');
+    tx.send(Ok(Bytes::from(line))).await.map_err(|_| ())
 }
 
 #[cfg(feature = "restate")]

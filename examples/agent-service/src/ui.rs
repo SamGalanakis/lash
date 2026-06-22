@@ -530,6 +530,18 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
       }
       streaming.lastElementChild.textContent += delta;
     }
+    function handleTurnEvent(event) {
+      if (event.type === 'assistant_prose_delta') appendStreamText(event.text);
+      if (event.type === 'reasoning_delta') appendReasoning(event.text);
+      if (event.type === 'code_block_started') pendingCodeBlock = event;
+      if (event.type === 'code_block_completed') completeCodeBlock(event);
+      if (event.type === 'tool_call_completed') appendCompletedTool({ ...event, phase:'completed' });
+      if (event.type === 'submitted_value') appendStreamText(renderTerminalValue(event.value));
+      if (event.type === 'tool_value') appendStreamText(renderTerminalValue(event.value));
+    }
+    function handleObservation(event) {
+      if (event.type === 'turn_activity') handleTurnEvent(event.activity);
+    }
     async function sendText(text) {
       if (!activeChat) await newChat();
       if (!text) return;
@@ -562,13 +574,8 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
           if (!line.trim()) continue;
           const item = JSON.parse(line);
           if (item.type === 'message') appendMessage(item.message);
-          if (item.type === 'event' && item.event.type === 'assistant_prose_delta') appendStreamText(item.event.text);
-          if (item.type === 'event' && item.event.type === 'reasoning_delta') appendReasoning(item.event.text);
-          if (item.type === 'event' && item.event.type === 'code_block_started') pendingCodeBlock = item.event;
-          if (item.type === 'event' && item.event.type === 'code_block_completed') completeCodeBlock(item.event);
-          if (item.type === 'event' && item.event.type === 'tool_call_completed') appendCompletedTool({ ...item.event, phase:'completed' });
-          if (item.type === 'event' && item.event.type === 'submitted_value') appendStreamText(renderTerminalValue(item.event.value));
-          if (item.type === 'event' && item.event.type === 'tool_value') appendStreamText(renderTerminalValue(item.event.value));
+          if (item.type === 'event') handleTurnEvent(item.event);
+          if (item.type === 'observation') handleObservation(item.event);
           if (item.type === 'error') alert(item.message);
           messagesEl.scrollTop = messagesEl.scrollHeight;
         }

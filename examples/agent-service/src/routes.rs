@@ -9,11 +9,16 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, Response};
 use bytes::Bytes;
+use lash::observe::{
+    SessionCursor, SessionObservationEventPayload, SessionObservationSubscription,
+};
 use lash::rlm::RlmTurnBuilderExt as _;
-use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
+use lash::{LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
+use lash_remote_protocol::RemoteSessionObservationEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -59,9 +64,24 @@ pub(crate) struct AppSettings {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum StreamItem {
-    Event { event: Box<TurnActivity> },
-    Message { message: ChatMessage },
-    Error { message: String },
+    Event {
+        event: Box<TurnActivity>,
+    },
+    Observation {
+        event: Box<RemoteSessionObservationEvent>,
+    },
+    ReplayCursor {
+        cursor: String,
+    },
+    ReplayGap {
+        cursor: String,
+    },
+    Message {
+        message: ChatMessage,
+    },
+    Error {
+        message: String,
+    },
     Done,
 }
 
@@ -204,8 +224,10 @@ pub(crate) async fn send_message(
     }
 
     let session = state.open_session(&chat_id).await?;
+    let replay_cursor = session.observe().current_observation().cursor;
     let turn_model = model_spec_for_chat_selection(&model_selection)?;
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
+    let mut replay = spawn_live_replay_forwarder(session.clone(), replay_cursor, tx.clone());
     let run_state = state.clone();
     tokio::spawn(async move {
         let _ = tx
@@ -214,8 +236,7 @@ pub(crate) async fn send_message(
             })
             .await;
         let turn_state = Arc::new(Mutex::new(TurnPersistenceState::default()));
-        let ui_events = ChannelTurnEvents::streaming(
-            tx.clone(),
+        let ui_events = ChannelTurnEvents::persistence(
             run_state.clone(),
             chat_id.clone(),
             Arc::clone(&turn_state),
@@ -259,8 +280,10 @@ pub(crate) async fn send_message(
                             .await;
                     }
                 }
+                wait_for_live_replay_flush(&mut replay).await;
             }
             Err(err) => {
+                replay.abort();
                 let _ = tx
                     .send(StreamItem::Error {
                         message: err.to_string(),
@@ -315,14 +338,13 @@ impl TurnPersistenceState {
 }
 
 impl ChannelTurnEvents {
-    pub(crate) fn streaming(
-        tx: mpsc::Sender<StreamItem>,
+    pub(crate) fn persistence(
         state: AppStateData,
         chat_id: String,
         turn_state: Arc<Mutex<TurnPersistenceState>>,
     ) -> Self {
         Self {
-            tx: Some(tx),
+            tx: None,
             state,
             chat_id,
             turn_id: None,
@@ -558,6 +580,93 @@ impl TurnActivitySink for ChannelTurnEvents {
     }
 }
 
+pub(crate) fn spawn_live_replay_forwarder(
+    session: LashSession,
+    cursor: SessionCursor,
+    tx: mpsc::Sender<StreamItem>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        forward_live_replay_until_commit(session, cursor, tx).await;
+    })
+}
+
+pub(crate) async fn wait_for_live_replay_flush(replay: &mut JoinHandle<()>) {
+    if tokio::time::timeout(std::time::Duration::from_secs(5), &mut *replay)
+        .await
+        .is_err()
+    {
+        replay.abort();
+    }
+}
+
+async fn forward_live_replay_until_commit(
+    session: LashSession,
+    cursor: SessionCursor,
+    tx: mpsc::Sender<StreamItem>,
+) {
+    if tx
+        .send(StreamItem::ReplayCursor {
+            cursor: cursor.to_string(),
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let observable = session.observe();
+    let mut subscription = match observable.subscribe_from_cursor(&cursor) {
+        Ok(SessionObservationSubscription::Subscribed(subscription)) => subscription,
+        Ok(SessionObservationSubscription::Gap { gap, .. }) => {
+            let _ = tx
+                .send(StreamItem::ReplayGap {
+                    cursor: gap.latest_cursor.to_string(),
+                })
+                .await;
+            return;
+        }
+        Err(err) => {
+            let _ = tx
+                .send(StreamItem::Error {
+                    message: err.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+    let mut sequence = 0_u64;
+    loop {
+        let event = match subscription.next_event().await {
+            Ok(event) => event,
+            Err(err) => {
+                let _ = tx
+                    .send(StreamItem::Error {
+                        message: err.to_string(),
+                    })
+                    .await;
+                break;
+            }
+        };
+        let committed = matches!(
+            event.payload,
+            SessionObservationEventPayload::Committed { .. }
+        );
+        let remote = RemoteSessionObservationEvent::from_core(sequence, event);
+        sequence = sequence.saturating_add(1);
+        if tx
+            .send(StreamItem::Observation {
+                event: Box::new(remote),
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+        if committed {
+            break;
+        }
+    }
+}
+
 fn normalize_model_selection(
     model: Option<&str>,
     model_variant: Option<&str>,
@@ -635,4 +744,143 @@ fn terminal_value_text(value: &serde_json::Value) -> String {
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| value.to_string())
+}
+
+#[cfg(all(test, feature = "restate"))]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::to_bytes;
+    use lash::RlmCore;
+    use lash_core::LlmOutputPart;
+    use lash_core::llm::types::LlmResponse;
+
+    use super::*;
+    use crate::db::AppDb;
+    use crate::state::AgentServiceDurability;
+
+    #[tokio::test]
+    async fn message_route_streams_session_observations_with_mock_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path();
+        let provider = lash_core::testing::TestProvider::builder()
+            .kind("agent-service-route-mock")
+            .complete(|_request| async {
+                let text = r#"<lashlang>
+submit "done through route"
+</lashlang>"#;
+                Ok(LlmResponse {
+                    full_text: text.to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: text.to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            })
+            .build()
+            .into_handle();
+        let core = RlmCore::builder()
+            .provider(provider)
+            .model(
+                lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+                    .expect("model spec"),
+            )
+            .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+                data_dir.join("lash-sessions"),
+            )))
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .process_env_store(Arc::new(
+                lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
+                    .await
+                    .expect("process env store"),
+            ))
+            .lashlang_artifact_store(Arc::new(
+                lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+                    .await
+                    .expect("artifact store"),
+            ))
+            .trigger_store(Arc::new(
+                lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
+                    .await
+                    .expect("trigger store"),
+            ))
+            .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+                data_dir.join("attachments"),
+            )))
+            .build()
+            .expect("core");
+        let db = Arc::new(Mutex::new(
+            AppDb::open(&data_dir.join("app.db")).expect("app db"),
+        ));
+        let state = AppStateData::from_shared_db(
+            core,
+            Arc::clone(&db),
+            "mock-model".to_string(),
+            None,
+            AgentServiceDurability::Local,
+            None,
+        );
+        let chat = state
+            .with_db(|db| db.create_chat("route replay", "mock-model", None))
+            .await
+            .expect("create chat");
+        let response = send_message(
+            State(state.clone()),
+            AxumPath(chat.id.clone()),
+            Json(SendMessageRequest {
+                text: "exercise live replay".to_string(),
+                board: crate::board::default_board(),
+                model: None,
+                model_variant: None,
+            }),
+        )
+        .await
+        .expect("send message");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let lines = std::str::from_utf8(&body)
+            .expect("utf8")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json line"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.get("type").and_then(serde_json::Value::as_str)
+                    == Some("replay_cursor")),
+            "stream should expose an opaque live replay cursor: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| {
+                line.get("type").and_then(serde_json::Value::as_str) == Some("observation")
+                    && line
+                        .pointer("/event/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("turn_activity")
+                    && line
+                        .pointer("/event/activity/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("submitted_value")
+            }),
+            "stream should contain remote observation turn activity: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| {
+                line.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                    && line
+                        .pointer("/message/role")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("assistant")
+                    && line
+                        .pointer("/message/text")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("done through route")
+            }),
+            "stream should include the persisted assistant message: {lines:#?}"
+        );
+    }
 }
