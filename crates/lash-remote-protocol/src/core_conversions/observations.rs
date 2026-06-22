@@ -15,6 +15,51 @@ impl RemoteTurnActivity {
     }
 }
 
+impl From<&lash_core::SessionCursor> for RemoteSessionCursor {
+    fn from(value: &lash_core::SessionCursor) -> Self {
+        Self::new(value.to_string())
+    }
+}
+
+impl From<lash_core::SessionCursor> for RemoteSessionCursor {
+    fn from(value: lash_core::SessionCursor) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl TryFrom<RemoteSessionCursor> for lash_core::SessionCursor {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteSessionCursor) -> Result<Self, Self::Error> {
+        value.validate()?;
+        serde_json::from_value(serde_json::Value::String(value.cursor)).map_err(|err| {
+            RemoteProtocolError::InvalidEnvelope {
+                type_name: "RemoteSessionCursor",
+                message: format!("invalid cursor payload: {err}"),
+            }
+        })
+    }
+}
+
+impl RemoteSessionObservation {
+    pub fn from_core(observation: lash_core::SessionObservation) -> Self {
+        observation.into()
+    }
+}
+
+impl From<lash_core::SessionObservation> for RemoteSessionObservation {
+    fn from(value: lash_core::SessionObservation) -> Self {
+        let lash_core::SessionObservation { read_view, cursor } = value;
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            session_id: read_view.session_id().to_string(),
+            cursor: cursor.to_string(),
+            turn_index: read_view.turn_index() as u64,
+            usage: read_view.token_usage().clone().into(),
+        }
+    }
+}
+
 impl From<lash_core::SessionQueueEventKind> for RemoteSessionQueueEventKind {
     fn from(value: lash_core::SessionQueueEventKind) -> Self {
         match value {

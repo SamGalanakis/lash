@@ -423,22 +423,44 @@ async fn forward_session_observations(
     {
         return;
     }
-    let mut sequence = 0_u64;
-    let mut stream = session.observe().subscribe_and_recover(cursor);
+    let mut stream = match session
+        .observe()
+        .subscribe_and_recover_remote(RemoteSessionCursor::new(cursor.to_string()))
+    {
+        Ok(stream) => stream,
+        Err(err) => {
+            let _ = tx
+                .send(StreamItem::Error {
+                    message: err.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
     while let Some(item) = stream.next().await {
-        let event = match item {
-            Ok(SessionObservationStreamItem::Event(event)) => event,
-            Ok(SessionObservationStreamItem::Gap { gap, .. }) => {
+        match item {
+            Ok(RemoteSessionObservationStreamItem::Event(event)) => {
                 if tx
-                    .send(StreamItem::ReplayGap {
-                        gap: Box::new(gap.into()),
+                    .send(StreamItem::Observation {
+                        event: Box::new(event),
                     })
                     .await
                     .is_err()
                 {
                     break;
                 }
-                continue;
+            }
+            Ok(RemoteSessionObservationStreamItem::Gap { observation, gap }) => {
+                if tx
+                    .send(StreamItem::ReplayGap {
+                        observation: Box::new(observation),
+                        gap: Box::new(gap),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
             Err(err) => {
                 let _ = tx
@@ -448,17 +470,6 @@ async fn forward_session_observations(
                     .await;
                 break;
             }
-        };
-        let remote = RemoteSessionObservationEvent::from_core(sequence, event);
-        sequence = sequence.saturating_add(1);
-        if tx
-            .send(StreamItem::Observation {
-                event: Box::new(remote),
-            })
-            .await
-            .is_err()
-        {
-            break;
         }
     }
 }

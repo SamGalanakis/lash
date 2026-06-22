@@ -28,7 +28,21 @@ async fn persist_cursor(_cursor: &lash::observe::SessionCursor) -> anyhow::Resul
     Ok(())
 }
 
+async fn persist_remote_cursor(_cursor: &lash::remote::RemoteSessionCursor) -> anyhow::Result<()> {
+    Ok(())
+}
+
 async fn update_frame(_frame_id: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn replace_from_remote_observation(
+    _observation: &lash::remote::RemoteSessionObservation,
+) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn send_remote_session_line(_line: String) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -143,11 +157,40 @@ async fn stream_turn_as_ndjson(session: &LashSession) -> anyhow::Result<Vec<u8>>
 // docs:end:remote-ndjson-sink
 
 // docs:start:remote-session-event
-fn encode_observation_event(
-    sequence: u64,
-    event: lash::observe::SessionObservationEvent,
-) -> anyhow::Result<String> {
-    let remote = lash_remote_protocol::RemoteSessionObservationEvent::from_core(sequence, event);
-    Ok(serde_json::to_string(&remote)?)
+use lash::observe::RemoteSessionObservationStreamItem;
+
+async fn stream_remote_session_observations(
+    session: &LashSession,
+    stored_cursor: Option<lash::remote::RemoteSessionCursor>,
+) -> anyhow::Result<lash::remote::RemoteSessionCursor> {
+    let observable = session.observe();
+    let mut cursor = match stored_cursor {
+        Some(cursor) => cursor,
+        None => {
+            let observation = observable.current_remote_observation();
+            replace_from_remote_observation(&observation).await?;
+            lash::remote::RemoteSessionCursor::new(observation.cursor)
+        }
+    };
+
+    persist_remote_cursor(&cursor).await?;
+
+    let mut live = observable.subscribe_and_recover_remote(cursor.clone())?;
+    while let Some(item) = live.next().await {
+        match item? {
+            RemoteSessionObservationStreamItem::Event(event) => {
+                cursor = lash::remote::RemoteSessionCursor::new(event.cursor.clone());
+                send_remote_session_line(serde_json::to_string(&event)?).await?;
+            }
+            RemoteSessionObservationStreamItem::Gap { observation, gap } => {
+                cursor = lash::remote::RemoteSessionCursor::new(gap.latest_cursor.clone());
+                replace_from_remote_observation(&observation).await?;
+                send_remote_session_line(serde_json::to_string(&gap)?).await?;
+            }
+        }
+        persist_remote_cursor(&cursor).await?;
+    }
+
+    Ok(cursor)
 }
 // docs:end:remote-session-event

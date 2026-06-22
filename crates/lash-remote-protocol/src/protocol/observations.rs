@@ -18,6 +18,23 @@ impl RemoteSessionCursor {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteSessionObservation {
+    pub protocol_version: u32,
+    pub session_id: String,
+    pub cursor: String,
+    pub turn_index: u64,
+    pub usage: RemoteUsage,
+}
+
+impl RemoteSessionObservation {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        require_non_empty("RemoteSessionObservation", "session_id", &self.session_id)?;
+        require_non_empty("RemoteSessionObservation", "cursor", &self.cursor)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteSessionObservationEvent {
     pub protocol_version: u32,

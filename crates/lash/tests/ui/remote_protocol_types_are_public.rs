@@ -41,6 +41,25 @@ fn main() {
         kind: lash::remote::RemoteSessionQueueEventKind::Enqueued,
         batch_ids: vec!["batch".to_string()],
     };
+    let observation = lash::remote::RemoteSessionObservation {
+        protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        cursor: "lashsc1:0:0:session".to_string(),
+        turn_index: 0,
+        usage: lash::remote::RemoteUsage::default(),
+    };
+    observation.validate().unwrap();
+    let _remote_stream_item = lash::observe::RemoteSessionObservationStreamItem::Gap {
+        observation,
+        gap: lash::remote::RemoteLiveReplayGap {
+            protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
+            session_id: "session".to_string(),
+            requested_cursor: "lashsc1:0:0:session".to_string(),
+            latest_cursor: "lashsc1:0:0:session".to_string(),
+            latest_revision: 0,
+            reason: lash::remote::RemoteLiveReplayGapReason::Unavailable,
+        },
+    };
     let _process = lash::remote::RemoteSessionObservationEventPayload::ProcessChanged {
         kind: lash::remote::RemoteSessionProcessEventKind::Started,
         process_ids: vec!["process".to_string()],

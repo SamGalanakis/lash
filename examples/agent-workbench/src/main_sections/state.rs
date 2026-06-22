@@ -120,6 +120,7 @@ enum StreamItem {
         cursor: String,
     },
     ReplayGap {
+        observation: Box<RemoteSessionObservation>,
         gap: Box<RemoteLiveReplayGap>,
     },
     Message { message: ChatMessage },

@@ -152,7 +152,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">session observation</div>
-        <div class="listing__body"><p><code>RemoteSessionCursor</code>, <code>RemoteSessionObservationEvent</code>, and <code>RemoteLiveReplayGap</code> are the remote reconnect surface. They carry opaque cursor strings, session revisions, bounded replay events, and explicit gap recovery without serializing a full <code>SessionReadView</code>. See <a href="./streaming.html#session-reconnect">Streaming and reconnect</a> for the host/frontend folding recipe.</p></div>
+        <div class="listing__body"><p><code>RemoteSessionCursor</code>, <code>RemoteSessionObservation</code>, <code>RemoteSessionObservationEvent</code>, and <code>RemoteLiveReplayGap</code> are the remote reconnect surface. They carry opaque cursor strings, session revisions, bounded replay events, explicit remote observation snapshots, and gap recovery without serializing a full <code>SessionReadView</code>. See <a href="./streaming.html#session-reconnect">Streaming and reconnect</a> for the host/frontend folding recipe.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">prompt layer</div>

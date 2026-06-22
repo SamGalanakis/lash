@@ -59,7 +59,7 @@
         <article class="panel"><h3>Trigger buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences; a registered trigger wakes a process with the validated event payload.</p></article>
         <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang host environment as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
         <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
-        <article class="panel"><h3>Browser reconnect</h3><p><code>/api/events</code> merges workbench product rows with <code>RemoteSessionObservationEvent</code> rows from <code>subscribe_and_recover</code>; the browser persists the latest cursor and reloads <code>/api/state</code> on <code>replay_gap</code>.</p></article>
+        <article class="panel"><h3>Browser reconnect</h3><p><code>/api/events</code> merges workbench product rows with <code>RemoteSessionObservationEvent</code> rows from <code>subscribe_and_recover_remote</code>; the browser persists the latest cursor and reloads <code>/api/state</code> on <code>replay_gap</code>.</p></article>
         <article class="panel"><h3>Restate turn control</h3><p>User turns, queued catalog refreshes, button triggers, inbox deliveries, session deletion, and cron jobs submit through Restate ingress. The host stores returned invocation ids, and <code>stop turn</code> cancels the active invocation through Restate Admin.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>SessionProcessAdmin</code> facade.</p></article>
       </div>
@@ -81,7 +81,7 @@
         </div>
         <div class="listing__row">
           <div class="listing__label">stream rows</div>
-          <div class="listing__body"><p>The response merges host-defined rows such as <code>message</code>, <code>error</code>, and <code>done</code> with Lash rows: <code>observation</code> carries a <code>RemoteSessionObservationEvent</code>, while <code>replay_gap</code> carries <code>RemoteLiveReplayGap</code>.</p></div>
+          <div class="listing__body"><p>The response merges host-defined rows such as <code>message</code>, <code>error</code>, and <code>done</code> with Lash rows: <code>observation</code> carries a <code>RemoteSessionObservationEvent</code>, while <code>replay_gap</code> carries <code>RemoteLiveReplayGap</code> plus a <code>RemoteSessionObservation</code> snapshot.</p></div>
         </div>
         <div class="listing__row">
           <div class="listing__label">gap recovery</div>

@@ -24,7 +24,7 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 lash-core = { workspace = true }
 lash-lashlang-runtime = { workspace = true, optional = true }
-lash-remote-protocol = { workspace = true }
+lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 lash-tool-support = { workspace = true }
 lash-protocol-rlm = { workspace = true, optional = true }
 lash-protocol-standard = { workspace = true }
@@ -52,7 +52,6 @@ testing = ["lash-core/testing"]
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
-lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 lash-subagents = { workspace = true }
 lash-tools = { workspace = true }
 lash-sqlite-store = { workspace = true }

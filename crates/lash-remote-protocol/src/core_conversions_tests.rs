@@ -677,6 +677,48 @@ fn remote_activity_preserves_semantic_fields_and_collapses_runtime_diagnostics()
 }
 
 #[test]
+fn remote_session_observation_from_core_maps_snapshot_metadata() {
+    let store = lash_core::InMemoryLiveReplayStore::default();
+    let event = lash_core::LiveReplayStore::append(
+        &store,
+        "session",
+        lash_core::SessionRevision::new(4),
+        lash_core::SessionObservationEventPayload::QueueChanged {
+            kind: lash_core::SessionQueueEventKind::Enqueued,
+            batch_ids: vec!["batch-1".to_string()],
+        },
+    )
+    .expect("append observation event");
+    let snapshot = lash_core::SessionSnapshot {
+        session_id: "session".to_string(),
+        turn_index: 12,
+        token_usage: lash_core::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            cached_input_tokens: 2,
+            reasoning_tokens: 1,
+        },
+        ..lash_core::SessionSnapshot::default()
+    };
+    let observation = lash_core::SessionObservation {
+        read_view: lash_core::SessionReadView::from_snapshot(&snapshot),
+        cursor: event.cursor.clone(),
+    };
+
+    let remote = RemoteSessionObservation::from_core(observation);
+    remote.validate().expect("valid remote observation");
+    assert_eq!(remote.session_id, "session");
+    assert_eq!(remote.cursor, event.cursor.to_string());
+    assert_eq!(remote.turn_index, 12);
+    assert_eq!(remote.usage.input_tokens, 10);
+
+    let remote_cursor = RemoteSessionCursor::from(&event.cursor);
+    let core_cursor =
+        lash_core::SessionCursor::try_from(remote_cursor.clone()).expect("core cursor");
+    assert_eq!(core_cursor.to_string(), remote_cursor.cursor);
+}
+
+#[test]
 fn remote_session_observation_from_core_maps_all_payload_variants() {
     fn event(
         payload: lash_core::SessionObservationEventPayload,

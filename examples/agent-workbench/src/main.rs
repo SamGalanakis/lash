@@ -22,7 +22,7 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
-use lash::observe::{SessionCursor, SessionObservationStreamItem};
+use lash::observe::{RemoteSessionObservationStreamItem, SessionCursor};
 use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
@@ -37,7 +37,10 @@ use lash::{
     },
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
-use lash_remote_protocol::{RemoteLiveReplayGap, RemoteSessionObservationEvent};
+use lash_remote_protocol::{
+    RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
+    RemoteSessionObservationEvent,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
