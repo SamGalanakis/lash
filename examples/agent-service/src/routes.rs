@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use lash::observe::{SessionCursor, SessionObservationEventPayload, SessionObservationStreamItem};
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
-use lash_remote_protocol::RemoteSessionObservationEvent;
+use lash_remote_protocol::{RemoteLiveReplayGap, RemoteSessionObservationEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -62,9 +62,6 @@ pub(crate) struct AppSettings {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum StreamItem {
-    Event {
-        event: Box<TurnActivity>,
-    },
     Observation {
         event: Box<RemoteSessionObservationEvent>,
     },
@@ -72,7 +69,7 @@ pub(crate) enum StreamItem {
         cursor: String,
     },
     ReplayGap {
-        cursor: String,
+        gap: Box<RemoteLiveReplayGap>,
     },
     Message {
         message: ChatMessage,
@@ -84,12 +81,6 @@ pub(crate) enum StreamItem {
 }
 
 impl StreamItem {
-    fn event(event: TurnActivity) -> Self {
-        Self::Event {
-            event: Box::new(event),
-        }
-    }
-
     pub(crate) fn is_done(&self) -> bool {
         matches!(self, Self::Done)
     }
@@ -313,7 +304,6 @@ pub(crate) async fn send_message(
 }
 
 pub(crate) struct ChannelTurnEvents {
-    tx: Option<mpsc::Sender<StreamItem>>,
     state: AppStateData,
     chat_id: String,
     turn_id: Option<String>,
@@ -342,7 +332,6 @@ impl ChannelTurnEvents {
         turn_state: Arc<Mutex<TurnPersistenceState>>,
     ) -> Self {
         Self {
-            tx: None,
             state,
             chat_id,
             turn_id: None,
@@ -358,7 +347,6 @@ impl ChannelTurnEvents {
         turn_state: Arc<Mutex<TurnPersistenceState>>,
     ) -> Self {
         Self {
-            tx: None,
             state,
             chat_id,
             turn_id: Some(turn_id),
@@ -366,27 +354,16 @@ impl ChannelTurnEvents {
         }
     }
 
-    async fn emit_item(&self, item: StreamItem) {
+    async fn emit_error(&self, message: String) {
         if let Some(turn_id) = self.turn_id.clone() {
-            let item_for_db = item.clone();
-            if let Err(err) = self
+            let item = StreamItem::Error { message };
+            let _ = self
                 .state
                 .with_db(move |db| {
-                    let is_done = item_for_db.is_done();
-                    db.insert_turn_event(&turn_id, &item_for_db, is_done)
+                    let is_done = item.is_done();
+                    db.insert_turn_event(&turn_id, &item, is_done)
                 })
-                .await
-                && let Some(tx) = &self.tx
-            {
-                let _ = tx
-                    .send(StreamItem::Error {
-                        message: err.message,
-                    })
-                    .await;
-            }
-        }
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(item).await;
+                .await;
         }
     }
 
@@ -398,7 +375,6 @@ impl ChannelTurnEvents {
                 .expect("turn state lock")
                 .assistant_prose
                 .push_str(text);
-            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         // Keep persisted message order tied to event start order. The browser
@@ -438,13 +414,9 @@ impl ChannelTurnEvents {
                         .map(|_| ())
                 };
                 if let Err(err) = result {
-                    self.emit_item(StreamItem::Error {
-                        message: err.message,
-                    })
-                    .await;
+                    self.emit_error(err.message).await;
                 }
             }
-            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if let TurnEvent::CodeBlockStarted { code, .. } = &event {
@@ -466,13 +438,9 @@ impl ChannelTurnEvents {
                         .code_message = Some(message.id);
                 }
                 Err(err) => {
-                    self.emit_item(StreamItem::Error {
-                        message: err.message,
-                    })
-                    .await;
+                    self.emit_error(err.message).await;
                 }
             }
-            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::ToolCallStarted { .. }) {
@@ -493,13 +461,9 @@ impl ChannelTurnEvents {
                         .insert(activity.correlation_id.0.clone(), message.id);
                 }
                 Err(err) => {
-                    self.emit_item(StreamItem::Error {
-                        message: err.message,
-                    })
-                    .await;
+                    self.emit_error(err.message).await;
                 }
             }
-            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::ToolCallCompleted { .. }) {
@@ -524,12 +488,8 @@ impl ChannelTurnEvents {
                 })
                 .await;
             if let Err(err) = result {
-                self.emit_item(StreamItem::Error {
-                    message: err.message,
-                })
-                .await;
+                self.emit_error(err.message).await;
             }
-            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::CodeBlockCompleted { .. }) {
@@ -552,22 +512,16 @@ impl ChannelTurnEvents {
                 })
                 .await;
             if let Err(err) = result {
-                self.emit_item(StreamItem::Error {
-                    message: err.message,
-                })
-                .await;
+                self.emit_error(err.message).await;
             }
-            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(
             &event,
             TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
         ) {
-            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
-        let _ = self.emit_item(StreamItem::event(activity)).await;
     }
 }
 
@@ -632,7 +586,7 @@ async fn forward_live_replay_until_commit(
             SessionObservationStreamItem::Gap { gap, .. } => {
                 let _ = tx
                     .send(StreamItem::ReplayGap {
-                        cursor: gap.latest_cursor.to_string(),
+                        gap: Box::new(gap.into()),
                     })
                     .await;
                 continue;
@@ -847,6 +801,12 @@ submit "done through route"
             "stream should expose an opaque live replay cursor: {lines:#?}"
         );
         assert!(
+            lines.iter().all(|line| {
+                line.get("type").and_then(serde_json::Value::as_str) != Some("event")
+            }),
+            "stream should not expose legacy direct turn events: {lines:#?}"
+        );
+        assert!(
             lines.iter().any(|line| {
                 line.get("type").and_then(serde_json::Value::as_str) == Some("observation")
                     && line
@@ -874,5 +834,32 @@ submit "done through route"
             }),
             "stream should include the persisted assistant message: {lines:#?}"
         );
+    }
+
+    #[test]
+    fn replay_gap_stream_item_uses_remote_gap_payload() {
+        let item = StreamItem::ReplayGap {
+            gap: Box::new(RemoteLiveReplayGap {
+                protocol_version: lash_remote_protocol::REMOTE_PROTOCOL_VERSION,
+                session_id: "session-1".to_string(),
+                requested_cursor: "cursor-before".to_string(),
+                latest_cursor: "cursor-after".to_string(),
+                latest_revision: 7,
+                reason: lash_remote_protocol::RemoteLiveReplayGapReason::Trimmed,
+            }),
+        };
+        let value = serde_json::to_value(item).expect("json");
+
+        assert_eq!(value.pointer("/type"), Some(&json!("replay_gap")));
+        assert_eq!(
+            value.pointer("/gap/requested_cursor"),
+            Some(&json!("cursor-before"))
+        );
+        assert_eq!(
+            value.pointer("/gap/latest_cursor"),
+            Some(&json!("cursor-after"))
+        );
+        assert_eq!(value.pointer("/gap/latest_revision"), Some(&json!(7)));
+        assert_eq!(value.pointer("/gap/reason"), Some(&json!("trimmed")));
     }
 }

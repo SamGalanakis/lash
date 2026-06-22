@@ -77,8 +77,10 @@ async fn reconnect_session(
         }
     };
 
+    persist_cursor(&cursor).await?;
+
     let mut live = observable.subscribe_and_recover(cursor.clone());
-    if let Some(item) = live.next().await {
+    while let Some(item) = live.next().await {
         match item? {
             SessionObservationStreamItem::Event(event) => {
                 cursor = event.cursor.clone();
@@ -89,9 +91,9 @@ async fn reconnect_session(
                 cursor = gap.latest_cursor;
             }
         }
+        persist_cursor(&cursor).await?;
     }
 
-    persist_cursor(&cursor).await?;
     Ok(cursor)
 }
 // docs:end:session-reconnect

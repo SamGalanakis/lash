@@ -46,6 +46,8 @@ Thumbs.db
 /.openrouter-chat-ui/
 /.agent-service/
 /.agent-workbench/
+/.agent-service.schema*-backup-*/
+/.agent-workbench.schema*-backup-*/
 /.claude/
 /skills/harness-opt/
 /.tmp/

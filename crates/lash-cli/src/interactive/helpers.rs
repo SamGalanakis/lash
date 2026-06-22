@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use lash::observe::{
-    SessionCursor, SessionObservationEventPayload, SessionObservationSubscription,
-};
+use futures_util::StreamExt as _;
+use lash::observe::{SessionCursor, SessionObservationEventPayload, SessionObservationStreamItem};
 use lash::{LashSession, TurnActivity, TurnActivityId, TurnEvent, TurnInput};
 use lash_core::{LiveReplayGap, SessionPolicy, SessionSnapshot};
 use lash_tui_extensions::{
@@ -39,41 +38,9 @@ impl SessionObservationBridge {
         app_tx: AppEventTx,
     ) {
         let observable = session.observe();
-        let subscription = match observable.subscribe_from_cursor(&cursor) {
-            Ok(SessionObservationSubscription::Subscribed(subscription)) => subscription,
-            Ok(SessionObservationSubscription::Gap { observation, gap }) => {
-                emit_observation_gap(&app_tx, &gap);
-                match observable.subscribe_from_cursor(&observation.cursor) {
-                    Ok(SessionObservationSubscription::Subscribed(subscription)) => subscription,
-                    Ok(SessionObservationSubscription::Gap { gap, .. }) => {
-                        emit_observation_gap(&app_tx, &gap);
-                        let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
-                        return;
-                    }
-                    Err(err) => {
-                        let _ = app_tx.send(AppEvent::SystemMessage {
-                            message: format!("Live session observation failed: {err}"),
-                        });
-                        let _ = app_tx.send(AppEvent::RequestUiSnapshot);
-                        let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
-                        let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
-                        return;
-                    }
-                }
-            }
-            Err(err) => {
-                let _ = app_tx.send(AppEvent::SystemMessage {
-                    message: format!("Live session observation failed: {err}"),
-                });
-                let _ = app_tx.send(AppEvent::RequestUiSnapshot);
-                let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
-                let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
-                return;
-            }
-        };
+        let mut subscription = observable.subscribe_and_recover(cursor);
 
         tokio::spawn(async move {
-            let mut subscription = subscription;
             let mut coalescer = TurnActivityCoalescer::new(stream_id, app_tx.clone());
             loop {
                 tokio::select! {
@@ -81,9 +48,9 @@ impl SessionObservationBridge {
                     _ = &mut coalescer.flush, if coalescer.flush_armed => {
                         coalescer.flush().await;
                     }
-                    next = subscription.next_event() => {
+                    next = subscription.next() => {
                         match next {
-                            Ok(event) => match event.payload {
+                            Some(Ok(SessionObservationStreamItem::Event(event))) => match event.payload {
                                 SessionObservationEventPayload::TurnActivity(activity) => {
                                     coalescer.emit(activity).await;
                                 }
@@ -105,13 +72,22 @@ impl SessionObservationBridge {
                                     break;
                                 }
                             },
-                            Err(err) => {
+                            Some(Ok(SessionObservationStreamItem::Gap { gap, .. })) => {
+                                coalescer.flush().await;
+                                emit_observation_gap(&app_tx, &gap);
+                            }
+                            Some(Err(err)) => {
                                 coalescer.flush().await;
                                 let _ = app_tx.send(AppEvent::SystemMessage {
                                     message: format!("Live session observation ended early: {err}"),
                                 });
                                 let _ = app_tx.send(AppEvent::RequestUiSnapshot);
                                 let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
+                                let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
+                                break;
+                            }
+                            None => {
+                                coalescer.flush().await;
                                 let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
                                 break;
                             }

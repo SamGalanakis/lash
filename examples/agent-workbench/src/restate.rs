@@ -605,7 +605,6 @@ async fn run_user_turn(
         .await?;
     let turn_state = Arc::new(Mutex::new(TurnStreamState::default()));
     let ui_events = ChannelTurnEvents {
-        state: state.clone(),
         turn_state: Arc::clone(&turn_state),
     };
     let mut input = TurnInput::text(request.text.clone());
@@ -783,7 +782,6 @@ async fn run_queued_turn(
         .map_err(AppError::internal)?;
     let turn_state = Arc::new(Mutex::new(TurnStreamState::default()));
     let ui_events = ChannelTurnEvents {
-        state: state.clone(),
         turn_state: Arc::clone(&turn_state),
     };
     state.trace(

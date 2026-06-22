@@ -1915,6 +1915,9 @@
     let busy = false;
     let resetInFlight = false;
     let controller = null;
+    let eventStreamController = null;
+    let eventStreamGeneration = 0;
+    let replayCursor = null;
     let lastRequest = null;
     let workStale = false;
     let workRefreshGeneration = 0;
@@ -2464,15 +2467,6 @@
       if (event.type === "error") renderError(event.message, { retry: true });
     }
 
-    function replaySnapshotTimeline(items) {
-      pendingCodeBlock = null;
-      pendingTools = [];
-      for (const item of items || []) {
-        handleStreamItem(item);
-      }
-      finishTransientRows();
-    }
-
     async function postCommand(url, payload) {
       if (busy) {
         renderNote("turn already running");
@@ -2513,10 +2507,21 @@
       }
     }
 
-    async function connectEvents() {
-      while (true) {
+    function restartEventStream(resetCursor = false) {
+      if (resetCursor) replayCursor = null;
+      eventStreamGeneration += 1;
+      if (eventStreamController) eventStreamController.abort();
+      eventStreamController = new AbortController();
+      connectEvents(eventStreamGeneration, eventStreamController.signal);
+    }
+
+    async function connectEvents(generation, signal) {
+      while (generation === eventStreamGeneration && !signal.aborted) {
         try {
-          const response = await fetch("/api/events", { cache: "no-store" });
+          const url = replayCursor
+            ? "/api/events?cursor=" + encodeURIComponent(replayCursor)
+            : "/api/events";
+          const response = await fetch(url, { cache: "no-store", signal });
           if (!response.ok || !response.body) throw new Error("event stream failed (" + response.status + ")");
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
@@ -2531,6 +2536,7 @@
           }
           handleStreamLine(buffer);
         } catch (error) {
+          if (signal.aborted) return;
           renderNote("event stream reconnecting");
         }
         await new Promise(resolve => setTimeout(resolve, 900));
@@ -2551,11 +2557,28 @@
 
     function handleStreamItem(item) {
       if (item.type === "message") renderMessage(item.message);
-      if (item.type === "event") handleTurnEvent(item.event);
+      if (item.type === "replay_cursor") replayCursor = item.cursor;
+      if (item.type === "replay_gap") recoverReplayGap(item.gap);
+      if (item.type === "observation") handleObservation(item.event);
       if (item.type === "error") renderError(item.message, { retry: true });
       if (item.type === "done") {
         finishTransientRows();
         setBusy(false, "ready");
+      }
+    }
+
+    function handleObservation(event) {
+      replayCursor = event.cursor || replayCursor;
+      if (event.type === "turn_activity") handleTurnEvent(event.activity);
+    }
+
+    async function recoverReplayGap(gap) {
+      replayCursor = gap?.latest_cursor || replayCursor;
+      try {
+        applyStateSnapshot(await fetchStateSnapshot(), true);
+      } catch (error) {
+        renderError("couldn't recover the event stream after a replay gap: " +
+          (error.message || error), { retry: true });
       }
     }
 
@@ -2622,6 +2645,7 @@
         clearExecutionState();
         lastRequest = null;
         sessionId.textContent = state.settings.session_id || "—";
+        restartEventStream(true);
         setBusy(false, "ready");
       } catch (error) {
         renderError(cleanErrorText(error.message || error));
@@ -2973,6 +2997,7 @@
 
     const knownModels = new Set();
     const modelHint = document.getElementById("modelHint");
+    let modelListenersBound = false;
 
     function validateModel() {
       const value = modelInput.value.trim();
@@ -2983,20 +3008,8 @@
       syncCommandAvailability();
     }
 
-    async function loadState() {
-      let state;
-      try {
-        const response = await fetch("/api/state");
-        if (!response.ok) throw new Error("state request failed (" + response.status + ")");
-        state = await response.json();
-      } catch (error) {
-        webState.textContent = "unavailable";
-        sessionId.textContent = "—";
-        streamState.textContent = "could not load session";
-        renderError("couldn't load the workbench session: " + (error.message || error) +
-          ". check the server is running, then reload.");
-        throw error;
-      }
+    function applyStateSnapshot(state, replaceTranscript = false) {
+      if (replaceTranscript) clearTranscript();
       modelInput.value = state.settings.model || "";
       const modelList = document.getElementById("modelList");
       modelList.innerHTML = "";
@@ -3018,14 +3031,32 @@
         variantSelect.appendChild(option);
       }
       validateModel();
-      modelInput.addEventListener("input", validateModel);
-      variantSelect.addEventListener("change", validateModel);
+      if (!modelListenersBound) {
+        modelInput.addEventListener("input", validateModel);
+        variantSelect.addEventListener("change", validateModel);
+        modelListenersBound = true;
+      }
       webState.textContent = state.settings.web_configured ? "ready" : "not configured";
       sessionId.textContent = state.settings.session_id;
-      if (Array.isArray(state.timeline) && state.timeline.length) {
-        replaySnapshotTimeline(state.timeline);
-      } else {
-        for (const message of state.messages) renderMessage(message);
+      for (const message of state.messages) renderMessage(message);
+    }
+
+    async function fetchStateSnapshot() {
+      const response = await fetch("/api/state");
+      if (!response.ok) throw new Error("state request failed (" + response.status + ")");
+      return await response.json();
+    }
+
+    async function loadState() {
+      try {
+        applyStateSnapshot(await fetchStateSnapshot());
+      } catch (error) {
+        webState.textContent = "unavailable";
+        sessionId.textContent = "—";
+        streamState.textContent = "could not load session";
+        renderError("couldn't load the workbench session: " + (error.message || error) +
+          ". check the server is running, then reload.");
+        throw error;
       }
     }
 
@@ -4099,7 +4130,7 @@
 
     loadState().catch(() => {}).finally(() => {
       refreshWork();
-      connectEvents();
+      restartEventStream(true);
     });
     setInterval(refreshWork, 1400);
     setInterval(loadAccounts, 1500);

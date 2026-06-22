@@ -4,7 +4,6 @@ struct AppState {
     process_observer: lash::process::ProcessWorkObserver,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
-    timeline: Arc<Mutex<Vec<StreamItem>>>,
     selected_model: Arc<Mutex<ModelSelection>>,
     web_configured: bool,
     trace_sink: Option<Arc<dyn TraceSink>>,
@@ -47,7 +46,6 @@ impl ModelSelection {
 struct StateSnapshot {
     settings: Settings,
     messages: Vec<ChatMessage>,
-    timeline: Vec<StreamItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,6 +61,11 @@ struct TurnRequest {
     text: String,
     model: Option<String>,
     model_variant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    cursor: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -110,18 +113,18 @@ struct InjectMessageRequest {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StreamItem {
-    Event { event: Box<TurnActivity> },
+    Observation {
+        event: Box<RemoteSessionObservationEvent>,
+    },
+    ReplayCursor {
+        cursor: String,
+    },
+    ReplayGap {
+        gap: Box<RemoteLiveReplayGap>,
+    },
     Message { message: ChatMessage },
     Error { message: String },
     Done,
-}
-
-impl StreamItem {
-    fn event(event: TurnActivity) -> Self {
-        Self::Event {
-            event: Box::new(event),
-        }
-    }
 }
 
 #[derive(Clone, Default)]

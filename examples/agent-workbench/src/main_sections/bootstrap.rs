@@ -178,7 +178,6 @@ async fn async_main() -> AnyhowResult<()> {
         process_observer,
         session_ids,
         messages: Arc::new(Mutex::new(Vec::new())),
-        timeline: Arc::new(Mutex::new(Vec::new())),
         selected_model: Arc::new(Mutex::new(ModelSelection {
             model,
             model_variant: Some(model_variant),
