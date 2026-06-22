@@ -69,6 +69,7 @@ flowchart TB
           </div>
           <p>The store box is shared by the whole fleet, so it must be a <strong>networked backend</strong> every worker can reach. <code>lash-postgres-store</code> supplies the distributed <code>RuntimePersistence</code>, <code>ProcessRegistry</code>, <code>TriggerStore</code>, and <code>LashlangArtifactStore</code>; <code>lash-s3-store</code> supplies the shared attachment byte store. The local-file SQLite store remains right for embedded and single-host deployments.</p>
           <p>Concurrent writers are prevented before effects: the session execution lease lets exactly one runtime owner execute mutating work for a session at a time. <code>commit_runtime_state</code> still performs head CAS in the same transaction as lease-fence verification, so stale writers fail safely if a lease is lost or a backend violates the single-lane contract.</p>
+          <p>By default every opened runtime gets a fresh owner id. A durable workflow engine that already serializes retries for one invocation can set <code>SessionBuilder::session_execution_owner_id(...)</code> so the same logical workflow re-enters its own live lease after a host crash; independent requests must keep distinct owners.</p>
           <div class="diagram">
             <div class="diagram-title">Per-session request lifecycle</div>
             <div class="mermaid">

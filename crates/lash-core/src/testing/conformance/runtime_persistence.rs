@@ -362,6 +362,14 @@ async fn runtime_persistence_reports_declared_durability(
 
 async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
     let first = claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
+    let reentered = store
+        .try_claim_session_execution_lease("root", "owner-a", 120_000)
+        .await
+        .expect("same owner may re-enter live session lease")
+        .expect("same owner receives existing session lease");
+    assert_eq!(reentered.lease_token, first.lease_token);
+    assert_eq!(reentered.fencing_token, first.fencing_token);
+    assert!(reentered.expires_at_epoch_ms >= first.expires_at_epoch_ms);
     assert!(
         store
             .try_claim_session_execution_lease("root", "owner-b", 60_000)
@@ -371,13 +379,13 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
         "a live session execution lease must exclude concurrent owners"
     );
     let renewed = store
-        .renew_session_execution_lease(&first.fence(), 60_000)
+        .renew_session_execution_lease(&reentered.fence(), 120_000)
         .await
         .expect("renew live session lease");
     assert_eq!(renewed.lease_token, first.lease_token);
-    assert!(renewed.expires_at_epoch_ms >= first.expires_at_epoch_ms);
+    assert!(renewed.expires_at_epoch_ms >= reentered.expires_at_epoch_ms);
 
-    let mut stale_fence = first.fence();
+    let mut stale_fence = reentered.fence();
     stale_fence.lease_token.push_str(":stale");
     let err = store
         .renew_session_execution_lease(&stale_fence, 60_000)

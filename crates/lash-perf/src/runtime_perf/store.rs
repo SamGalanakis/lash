@@ -398,6 +398,17 @@ impl RuntimePersistence for RuntimePerfStore {
             .expect("lock perf session execution leases");
         let current = leases.entry(session_id.to_string()).or_default();
         if current.lease_token.is_some() && current.expires_at_epoch_ms > now {
+            if current.owner_id.as_deref() == Some(owner_id) {
+                current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+                return Ok(Some(SessionExecutionLease {
+                    session_id: session_id.to_string(),
+                    owner_id: owner_id.to_string(),
+                    lease_token: current.lease_token.clone().expect("live lease token set"),
+                    fencing_token: current.fencing_token,
+                    claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+                    expires_at_epoch_ms: current.expires_at_epoch_ms,
+                }));
+            }
             return Ok(None);
         }
         current.fencing_token = current.fencing_token.saturating_add(1);

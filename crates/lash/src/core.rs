@@ -302,6 +302,7 @@ impl LashCore {
             session_id: session_id.into(),
             spec: SessionSpec::inherit(),
             parent_session_id: None,
+            session_execution_owner_id: None,
             store: None,
             provider: None,
             active_plugins: Vec::new(),

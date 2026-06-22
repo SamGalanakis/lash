@@ -171,6 +171,7 @@ if let Some(process_report) = report.process {
         <p>At most one mutating runner holds the session execution lease at a time. Stores still check the expected head revision in the same transaction as the fenced commit; mismatch rolls back with no partial state.</p>
       </div>
       <p>Concurrent turns from two workers on the same session id normally resolve at the lease boundary. A busy session returns <code>session_execution_busy</code>; a runner that loses the lease before commit returns <code>session_execution_lease_lost</code>. If the head CAS backstop fires, the loser receives a turn-level error such as <code>store_commit_failed</code>; these are not <code>TurnStop</code> variants.</p>
+      <p>Durable workflow hosts that already serialize one logical invocation can open the session with <code>SessionBuilder::session_execution_owner_id(...)</code>. That lets a replay on another physical worker re-enter its own live lease after a crash. Do not share that owner id across independent foreground requests; the default per-open owner id is the safe choice for ordinary hosts.</p>
       <pre data-lang="rust" data-snippet="persistence#commit-conflict-retry"><code>use lash::runtime::RuntimeErrorCode;
 
 match session.turn(input).run().await {

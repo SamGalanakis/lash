@@ -1,6 +1,16 @@
 use super::*;
 
 impl LashRuntime {
+    /// Override the owner id used for durable session execution leases.
+    ///
+    /// Normal embedded runtimes use a fresh UUID so concurrent opens of the
+    /// same session exclude each other. Durable orchestrators may set a stable
+    /// owner for one serialized logical workflow so a replay on another host can
+    /// re-enter its own live lease after a crash.
+    pub fn set_runtime_scope_id(&mut self, runtime_scope_id: impl Into<String>) {
+        self.runtime_scope_id = Arc::<str>::from(runtime_scope_id.into());
+    }
+
     pub fn unregister_plugin_session(&self) -> Result<(), crate::PluginError> {
         if let Some(session) = self.session.as_ref() {
             session

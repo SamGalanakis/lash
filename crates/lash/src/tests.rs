@@ -280,6 +280,12 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         if let Some(existing) = leases.get(session_id)
             && existing.expires_at_epoch_ms > now_epoch_ms()
         {
+            if existing.owner_id == owner_id {
+                let mut lease = existing.clone();
+                lease.expires_at_epoch_ms = now_epoch_ms().saturating_add(lease_ttl_ms);
+                leases.insert(session_id.to_string(), lease.clone());
+                return Ok(Some(lease));
+            }
             return Ok(None);
         }
         let next_fencing_token = leases

@@ -364,13 +364,32 @@ impl RuntimePersistence for PostgresSessionStore {
              VALUES ($1, $2, $1 || ':' || $2 || ':' || $3::TEXT || ':1', 1, $3, $4)
              ON CONFLICT (session_id) DO UPDATE SET
                 lease_owner_id = EXCLUDED.lease_owner_id,
-                lease_token = $1 || ':' || $2 || ':' || $3::TEXT || ':' ||
-                    (lash_session_execution_leases.lease_fencing_token + 1)::TEXT,
-                lease_fencing_token = lash_session_execution_leases.lease_fencing_token + 1,
-                lease_claimed_at_ms = EXCLUDED.lease_claimed_at_ms,
+                lease_token = CASE
+                    WHEN lash_session_execution_leases.lease_owner_id = $2
+                     AND lash_session_execution_leases.lease_token IS NOT NULL
+                     AND lash_session_execution_leases.lease_expires_at_ms > $3
+                    THEN lash_session_execution_leases.lease_token
+                    ELSE $1 || ':' || $2 || ':' || $3::TEXT || ':' ||
+                        (lash_session_execution_leases.lease_fencing_token + 1)::TEXT
+                END,
+                lease_fencing_token = CASE
+                    WHEN lash_session_execution_leases.lease_owner_id = $2
+                     AND lash_session_execution_leases.lease_token IS NOT NULL
+                     AND lash_session_execution_leases.lease_expires_at_ms > $3
+                    THEN lash_session_execution_leases.lease_fencing_token
+                    ELSE lash_session_execution_leases.lease_fencing_token + 1
+                END,
+                lease_claimed_at_ms = CASE
+                    WHEN lash_session_execution_leases.lease_owner_id = $2
+                     AND lash_session_execution_leases.lease_token IS NOT NULL
+                     AND lash_session_execution_leases.lease_expires_at_ms > $3
+                    THEN lash_session_execution_leases.lease_claimed_at_ms
+                    ELSE EXCLUDED.lease_claimed_at_ms
+                END,
                 lease_expires_at_ms = EXCLUDED.lease_expires_at_ms
              WHERE lash_session_execution_leases.lease_token IS NULL
                 OR lash_session_execution_leases.lease_expires_at_ms <= $3
+                OR lash_session_execution_leases.lease_owner_id = $2
              RETURNING lease_owner_id, lease_token, lease_fencing_token,
                        lease_claimed_at_ms, lease_expires_at_ms",
         )

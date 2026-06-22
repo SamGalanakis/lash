@@ -362,6 +362,25 @@ impl RuntimePersistence for Store {
                     if current.as_ref().is_some_and(|lease| {
                         lease.lease_token.is_some() && lease.expires_at_ms > now
                     }) {
+                        let current = current.expect("checked current lease is present");
+                        if current.owner_id.as_deref() == Some(owner_id.as_str()) {
+                            let expires_at = now.saturating_add(lease_ttl_ms);
+                            tx.execute(
+                                "UPDATE session_execution_leases
+                                 SET lease_expires_at_ms = ?2
+                                 WHERE session_id = ?1",
+                                params![session_id, expires_at as i64],
+                            )
+                            .map_err(sqlite_error)?;
+                            return Ok(Some(SessionExecutionLease {
+                                session_id,
+                                owner_id,
+                                lease_token: current.lease_token.expect("live lease token set"),
+                                fencing_token: current.fencing_token,
+                                claimed_at_epoch_ms: current.claimed_at_ms,
+                                expires_at_epoch_ms: expires_at,
+                            }));
+                        }
                         return Ok(None);
                     }
                     let fencing_token = current

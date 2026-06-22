@@ -6,6 +6,7 @@ pub struct SessionBuilder {
     pub(crate) session_id: String,
     pub(crate) spec: SessionSpec,
     pub(crate) parent_session_id: Option<String>,
+    pub(crate) session_execution_owner_id: Option<String>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
@@ -32,6 +33,18 @@ impl SessionBuilder {
 
     pub fn parent(mut self, parent_session_id: impl Into<String>) -> Self {
         self.parent_session_id = Some(parent_session_id.into());
+        self
+    }
+
+    /// Use a stable owner id for durable session execution leases.
+    ///
+    /// This is only for hosts that already serialize one logical execution
+    /// lane, such as a durable workflow engine retrying the same invocation on
+    /// another process. Normal embedders should keep the default per-open UUID;
+    /// reusing an owner id across independently running handles makes them the
+    /// same lease owner.
+    pub fn session_execution_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.session_execution_owner_id = Some(owner_id.into());
         self
     }
 
@@ -176,7 +189,10 @@ impl SessionBuilder {
         let drivers = self.core.work_driver.drivers().await;
         env.process_work_driver = drivers.process.clone();
         env.queued_work_driver = drivers.queued.clone();
-        let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
+        let mut runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
+        if let Some(owner_id) = self.session_execution_owner_id {
+            runtime.set_runtime_scope_id(owner_id);
+        }
         if drivers.drive_process_on_open
             && let Some(driver) = drivers.process.as_ref()
         {
@@ -312,6 +328,11 @@ impl RlmSessionBuilder {
 
     pub fn parent(mut self, parent_session_id: impl Into<String>) -> Self {
         self.builder = self.builder.parent(parent_session_id);
+        self
+    }
+
+    pub fn session_execution_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.builder = self.builder.session_execution_owner_id(owner_id);
         self
     }
 

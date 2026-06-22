@@ -114,8 +114,10 @@ impl AppState {
                 .await
                 .map(Json);
         }
+        let session_execution_owner_id = format!("E2eTurnWorkflow/{}/run", request.workflow_id);
         let session = core
             .session(DEFAULT_SESSION_ID)
+            .session_execution_owner_id(session_execution_owner_id)
             .open()
             .await
             .map_err(terminal_error)?;
