@@ -37,6 +37,7 @@ dependencies = [
  "dotenvy",
  "lash-core",
  "lash-provider-openai",
+ "lash-remote-protocol",
  "lash-restate",
  "lash-runtime",
  "lash-sqlite-store",

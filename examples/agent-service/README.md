@@ -81,6 +81,16 @@ commit addressed to the same operation.
 Turn progress is written to an app-owned
 SQLite outbox keyed by `turn_id`, so the NDJSON route can stream progress after
 route restart or while the workflow is running in the Restate handler.
+Semantic progress is sourced from the Lash session observation API rather than
+from a route-local side channel: the route captures
+`session.observe().current_observation().cursor` before the turn, emits that
+opaque cursor as `replay_cursor`, and forwards live
+`RemoteSessionObservationEvent` values as `observation` NDJSON rows until the
+session commit is observed. If the cursor is no longer in the bounded replay
+window, the stream emits `replay_gap` with the latest cursor so a reconnecting
+client can replace from a fresh observation. Restate mode uses the same live
+replay path for turn activity and keeps the app outbox focused on durable
+product rows such as user messages, assistant messages, errors, and `done`.
 
 Then open `http://127.0.0.1:3000`.
 

@@ -29,6 +29,12 @@ async fn service_core(
     let artifact_store = std::sync::Arc::new(
         lash_sqlite_store::Store::open(&data_dir.join("lash-artifacts.db")).await?,
     );
+    let process_env_store = std::sync::Arc::new(
+        lash_sqlite_store::Store::open(&data_dir.join("process-env.db")).await?,
+    );
+    let trigger_store = std::sync::Arc::new(
+        lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db")).await?,
+    );
 
     let core = lash::RlmCore::builder()
         .provider(provider)
@@ -46,6 +52,8 @@ async fn service_core(
             lash::durability::InlineEffectHost::default(),
         ))
         .lashlang_artifact_store(artifact_store)
+        .process_env_store(process_env_store)
+        .trigger_store(trigger_store)
         .attachment_store(std::sync::Arc::new(
             lash::persistence::FileAttachmentStore::new(data_dir.join("attachments")),
         ))
@@ -90,6 +98,7 @@ async fn service_turn(
 ) -> anyhow::Result<()> {
     // docs:start:service-turn
     let session = state.open_session(&chat_id).await?;
+    let replay_cursor = session.observe().current_observation().cursor;
 
     use lash::rlm::RlmTurnBuilderExt as _;
 
@@ -112,5 +121,6 @@ async fn service_turn(
         &turn_state.lock().expect("turn state lock").assistant_prose,
     );
     // docs:end:service-turn
+    let _ = replay_cursor;
     Ok(())
 }
