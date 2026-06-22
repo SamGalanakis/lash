@@ -100,12 +100,12 @@ The browser stream is deliberately split the same way a production host would
 split it: product rows such as user messages, assistant messages, trigger
 notes, errors, and `done` come from the workbench app stream, while Lash turn
 activity comes from `session.observe().current_observation().cursor` plus
-`ObservableSession::subscribe_and_recover(...)`. `/api/events` accepts the
-last cursor as `?cursor=...`, emits `replay_cursor`, forwards
+`ObservableSession::subscribe_and_recover_remote(...)`. `/api/events` accepts
+the last cursor as `?cursor=...`, emits `replay_cursor`, forwards
 `RemoteSessionObservationEvent` rows as `observation`, and reports missed
-bounded-replay windows as `replay_gap` with `RemoteLiveReplayGap`. Resetting the
-workbench rotates the session id and restarts the browser stream from a fresh
-cursor.
+bounded-replay windows as `replay_gap` with `RemoteLiveReplayGap` plus a fresh
+remote observation snapshot. Resetting the workbench rotates the session id and
+restarts the browser stream from a fresh cursor.
 
 The **accounts** tab is a mocked multi-account inbox world you control live.
 Type a name (for example `Work`) and press **add account** to connect one;

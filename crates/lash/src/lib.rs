@@ -74,7 +74,11 @@ pub mod prelude {
 /// recovery for host frontends. Entry point: [`LashSession::observe`] /
 /// [`ObservableSession`].
 pub mod observe {
-    pub use crate::session::{SessionObservationStream, SessionObservationStreamItem};
+    pub use crate::session::{
+        RemoteSessionObservationEventStream, RemoteSessionObservationStream,
+        RemoteSessionObservationStreamItem, RemoteSessionObservationSubscription,
+        SessionObservationStream, SessionObservationStreamItem,
+    };
     pub use lash_core::{
         LiveReplayGap, LiveReplayGapReason, SessionCursor, SessionObservation,
         SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
@@ -211,18 +215,18 @@ pub mod remote {
         RemoteProviderMetadata, RemoteProviderReasoningReplay, RemoteProviderReplayMeta,
         RemoteResponseTextMeta, RemoteRuntimeEffectKind, RemoteRuntimeInvocation,
         RemoteRuntimeReplay, RemoteRuntimeScope, RemoteRuntimeSubject,
-        RemoteSchemaProjectionOverride, RemoteSessionCursor, RemoteSessionObservationEvent,
-        RemoteSessionObservationEventPayload, RemoteSessionProcessEventKind,
-        RemoteSessionQueueEventKind, RemoteSessionScope, RemoteTokenLedgerEntry,
-        RemoteToolActivation, RemoteToolArgumentProjectionPolicy, RemoteToolAvailability,
-        RemoteToolCallOutcome, RemoteToolCallSummary, RemoteToolFailureClass, RemoteToolGrant,
-        RemoteToolOutputContract, RemoteToolRegistry, RemoteToolRetryPolicy, RemoteToolScheduling,
-        RemoteTriggerCancelSubscriptionRequest, RemoteTriggerCancelSubscriptionResult,
-        RemoteTriggerEmitReport, RemoteTriggerInputBinding, RemoteTriggerInputTemplate,
-        RemoteTriggerListSubscriptionsResponse, RemoteTriggerOccurrenceRecord,
-        RemoteTriggerOccurrenceRequest, RemoteTriggerRegisterSubscriptionRequest,
-        RemoteTriggerRegisterSubscriptionResult, RemoteTriggerRegistration,
-        RemoteTriggerSubscriptionDraft, RemoteTriggerSubscriptionFilter,
+        RemoteSchemaProjectionOverride, RemoteSessionCursor, RemoteSessionObservation,
+        RemoteSessionObservationEvent, RemoteSessionObservationEventPayload,
+        RemoteSessionProcessEventKind, RemoteSessionQueueEventKind, RemoteSessionScope,
+        RemoteTokenLedgerEntry, RemoteToolActivation, RemoteToolArgumentProjectionPolicy,
+        RemoteToolAvailability, RemoteToolCallOutcome, RemoteToolCallSummary,
+        RemoteToolFailureClass, RemoteToolGrant, RemoteToolOutputContract, RemoteToolRegistry,
+        RemoteToolRetryPolicy, RemoteToolScheduling, RemoteTriggerCancelSubscriptionRequest,
+        RemoteTriggerCancelSubscriptionResult, RemoteTriggerEmitReport, RemoteTriggerInputBinding,
+        RemoteTriggerInputTemplate, RemoteTriggerListSubscriptionsResponse,
+        RemoteTriggerOccurrenceRecord, RemoteTriggerOccurrenceRequest,
+        RemoteTriggerRegisterSubscriptionRequest, RemoteTriggerRegisterSubscriptionResult,
+        RemoteTriggerRegistration, RemoteTriggerSubscriptionDraft, RemoteTriggerSubscriptionFilter,
         RemoteTriggerSubscriptionRecord, RemoteTriggerTargetSummary, RemoteTurnActivity,
         RemoteTurnEvent, RemoteTurnFinish, RemoteTurnInput, RemoteTurnIssue, RemoteTurnOutcome,
         RemoteTurnRequest, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,

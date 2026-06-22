@@ -766,6 +766,94 @@ async fn session_observation_recovery_stream_replays_buffered_events_before_live
 }
 
 #[tokio::test]
+async fn session_observation_remote_subscription_replays_dto_events() -> Result<()> {
+    let core = standard_core();
+    let session = core
+        .session("session-observation-remote-subscribe")
+        .open()
+        .await?;
+    let observation = session.observe().current_remote_observation();
+    assert_eq!(
+        observation.session_id,
+        "session-observation-remote-subscribe"
+    );
+
+    session
+        .turn(TurnInput::text("remote observed"))
+        .run()
+        .await?;
+    let crate::observe::RemoteSessionObservationSubscription::Subscribed(mut subscription) =
+        session.observe().subscribe_from_remote_cursor(
+            &crate::remote::RemoteSessionCursor::new(observation.cursor.clone()),
+        )?
+    else {
+        panic!("recent remote cursor should subscribe without a gap");
+    };
+
+    loop {
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(2), subscription.next_event())
+                .await
+                .expect("timed out waiting for remote replayed event")
+                .expect("remote replayed event");
+        if remote_observation_assistant_delta(&event).as_deref() == Some("echo: remote observed") {
+            assert_eq!(
+                event.protocol_version,
+                crate::remote::REMOTE_PROTOCOL_VERSION
+            );
+            assert_eq!(event.session_id, "session-observation-remote-subscribe");
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_observation_remote_recovery_stream_yields_dto_gap() -> Result<()> {
+    let core = explicit_ephemeral_facets(StandardCore::builder())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .live_replay_store(Arc::new(lash_core::InMemoryLiveReplayStore::new(
+            lash_core::InMemoryLiveReplayStoreConfig {
+                max_events_per_session: 1,
+                ..lash_core::InMemoryLiveReplayStoreConfig::default()
+            },
+        )))
+        .build()?;
+    let session = core
+        .session("session-observation-remote-gap")
+        .open()
+        .await?;
+    let observation = session.observe().current_remote_observation();
+
+    session
+        .turn(TurnInput::text("trimmed before remote subscribe"))
+        .run()
+        .await?;
+    let mut stream =
+        session
+            .observe()
+            .subscribe_and_recover_remote(crate::remote::RemoteSessionCursor::new(
+                observation.cursor,
+            ))?;
+    let item = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("timed out waiting for remote gap stream item")
+        .expect("remote recovery stream should stay open")?;
+    let crate::observe::RemoteSessionObservationStreamItem::Gap { observation, gap } = item else {
+        panic!("trimmed remote cursor should yield a gap item");
+    };
+
+    assert_eq!(
+        gap.reason,
+        crate::remote::RemoteLiveReplayGapReason::Trimmed
+    );
+    assert_eq!(gap.latest_cursor, observation.cursor);
+    assert_eq!(observation.session_id, "session-observation-remote-gap");
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_observation_recovery_stream_yields_gap_for_trimmed_cursor() -> Result<()> {
     let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
@@ -806,6 +894,20 @@ fn observation_assistant_delta(event: &lash_core::SessionObservationEvent) -> Op
         lash_core::SessionObservationEventPayload::TurnActivity(activity) => {
             match &activity.event {
                 TurnEvent::AssistantProseDelta { text } => Some(text.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn remote_observation_assistant_delta(
+    event: &crate::remote::RemoteSessionObservationEvent,
+) -> Option<String> {
+    match &event.event {
+        crate::remote::RemoteSessionObservationEventPayload::TurnActivity { activity } => {
+            match &activity.event {
+                crate::remote::RemoteTurnEvent::AssistantProseDelta { text } => Some(text.clone()),
                 _ => None,
             }
         }

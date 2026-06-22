@@ -86,13 +86,14 @@ from a route-local side channel: the route captures
 `session.observe().current_observation().cursor` before the turn, emits that
 opaque cursor as `replay_cursor`, and forwards live
 `RemoteSessionObservationEvent` values from
-`ObservableSession::subscribe_and_recover(...)` as `observation` NDJSON rows
+`ObservableSession::subscribe_and_recover_remote(...)` as `observation` NDJSON rows
 until the session commit is observed. If the cursor is no longer in the bounded
 replay window, the stream emits `replay_gap` with the public
-`RemoteLiveReplayGap` payload, including the requested cursor, latest cursor,
-latest revision, and reason. Restate mode uses the same live replay path for
-turn activity and keeps the app outbox focused on durable product rows such as
-user messages, assistant messages, errors, and `done`.
+`RemoteLiveReplayGap` payload plus a fresh remote observation snapshot,
+including the requested cursor, latest cursor, latest revision, and reason.
+Restate mode uses the same live replay path for turn activity and keeps the app
+outbox focused on durable product rows such as user messages, assistant
+messages, errors, and `done`.
 
 Then open `http://127.0.0.1:3000`.
 

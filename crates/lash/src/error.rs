@@ -62,6 +62,8 @@ pub enum EmbedError {
     Runtime(#[from] lash_core::RuntimeError),
     #[error("runtime plugin/control error: {0}")]
     Plugin(#[from] lash_core::PluginError),
+    #[error("remote protocol error: {0}")]
+    RemoteProtocol(#[from] lash_remote_protocol::RemoteProtocolError),
     #[error("failed to encode protocol turn options: {0}")]
     ProtocolTurnOptions(#[from] serde_json::Error),
     #[error("runtime control unavailable: {0}")]

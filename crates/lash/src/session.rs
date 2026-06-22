@@ -5,6 +5,10 @@ use crate::support::*;
 use futures_util::Stream;
 use lash_core::runtime::{DeliveryPolicy, QueuedWorkBatch, SlotPolicy};
 use lash_core::{LiveReplayGap, LiveReplayStoreError, SessionObservationEvent};
+use lash_remote_protocol::{
+    RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
+    RemoteSessionObservationEvent,
+};
 
 pub struct SessionBuilder {
     pub(crate) core: LashCore,
@@ -723,6 +727,10 @@ impl ObservableSession {
         self.runtime.current_session_observation()
     }
 
+    pub fn current_remote_observation(&self) -> RemoteSessionObservation {
+        RemoteSessionObservation::from_core(self.current_observation())
+    }
+
     pub fn resume_from_cursor(&self, cursor: &SessionCursor) -> Result<SessionResume> {
         self.runtime
             .resume_session_observation(cursor)
@@ -736,6 +744,27 @@ impl ObservableSession {
         self.runtime
             .subscribe_session_observation(cursor)
             .map_err(live_replay_error)
+    }
+
+    pub fn subscribe_from_remote_cursor(
+        &self,
+        cursor: &RemoteSessionCursor,
+    ) -> Result<RemoteSessionObservationSubscription> {
+        cursor.validate()?;
+        let cursor = lash_core::SessionCursor::try_from(cursor.clone())?;
+        match self.subscribe_from_cursor(&cursor)? {
+            SessionObservationSubscription::Subscribed(subscription) => {
+                Ok(RemoteSessionObservationSubscription::Subscribed(
+                    RemoteSessionObservationEventStream::new(subscription),
+                ))
+            }
+            SessionObservationSubscription::Gap { observation, gap } => {
+                Ok(RemoteSessionObservationSubscription::Gap {
+                    observation: observation.into(),
+                    gap: gap.into(),
+                })
+            }
+        }
     }
 
     /// Subscribe to session observation events and keep the subscription alive
@@ -753,6 +782,20 @@ impl ObservableSession {
             subscription: None,
             done: false,
         }
+    }
+
+    /// Subscribe to remote DTO session observation events and keep the
+    /// subscription alive across recoverable live-replay gaps.
+    pub fn subscribe_and_recover_remote(
+        &self,
+        cursor: RemoteSessionCursor,
+    ) -> Result<RemoteSessionObservationStream> {
+        cursor.validate()?;
+        let cursor = lash_core::SessionCursor::try_from(cursor)?;
+        Ok(RemoteSessionObservationStream {
+            inner: self.subscribe_and_recover(cursor),
+            next_sequence: 0,
+        })
     }
 
     pub fn session_id(&self) -> String {
@@ -805,6 +848,98 @@ pub enum SessionObservationStreamItem {
         observation: SessionObservation,
         gap: LiveReplayGap,
     },
+}
+
+pub enum RemoteSessionObservationSubscription {
+    Subscribed(RemoteSessionObservationEventStream),
+    Gap {
+        observation: RemoteSessionObservation,
+        gap: RemoteLiveReplayGap,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum RemoteSessionObservationStreamItem {
+    /// A replayed or live session observation event encoded as remote DTOs.
+    Event(RemoteSessionObservationEvent),
+    /// A recoverable replay gap with a fresh remote observation snapshot.
+    Gap {
+        observation: RemoteSessionObservation,
+        gap: RemoteLiveReplayGap,
+    },
+}
+
+pub struct RemoteSessionObservationEventStream {
+    inner: lash_core::LiveReplaySubscription,
+    next_sequence: u64,
+}
+
+impl RemoteSessionObservationEventStream {
+    fn new(inner: lash_core::LiveReplaySubscription) -> Self {
+        Self {
+            inner,
+            next_sequence: 0,
+        }
+    }
+
+    pub async fn next_event(&mut self) -> Result<RemoteSessionObservationEvent> {
+        futures_util::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx))
+            .await
+            .transpose()?
+            .ok_or_else(|| live_replay_error(LiveReplayStoreError::Closed))
+    }
+}
+
+impl Stream for RemoteSessionObservationEventStream {
+    type Item = Result<RemoteSessionObservationEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Ok(event))) => {
+                let remote = RemoteSessionObservationEvent::from_core(self.next_sequence, event);
+                self.next_sequence = self.next_sequence.saturating_add(1);
+                Poll::Ready(Some(Ok(remote)))
+            }
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(live_replay_error(err)))),
+            Poll::Ready(None) => Poll::Ready(None),
+        }
+    }
+}
+
+/// Remote DTO stream returned by [`ObservableSession::subscribe_and_recover_remote`].
+pub struct RemoteSessionObservationStream {
+    inner: SessionObservationStream,
+    next_sequence: u64,
+}
+
+impl RemoteSessionObservationStream {
+    pub fn cursor(&self) -> RemoteSessionCursor {
+        RemoteSessionCursor::from(self.inner.cursor())
+    }
+}
+
+impl Stream for RemoteSessionObservationStream {
+    type Item = Result<RemoteSessionObservationStreamItem>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Ok(SessionObservationStreamItem::Event(event)))) => {
+                let remote = RemoteSessionObservationEvent::from_core(self.next_sequence, event);
+                self.next_sequence = self.next_sequence.saturating_add(1);
+                Poll::Ready(Some(Ok(RemoteSessionObservationStreamItem::Event(remote))))
+            }
+            Poll::Ready(Some(Ok(SessionObservationStreamItem::Gap { observation, gap }))) => {
+                Poll::Ready(Some(Ok(RemoteSessionObservationStreamItem::Gap {
+                    observation: observation.into(),
+                    gap: gap.into(),
+                })))
+            }
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
+        }
+    }
 }
 
 /// Stream returned by [`ObservableSession::subscribe_and_recover`].

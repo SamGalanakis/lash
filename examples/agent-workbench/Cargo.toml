@@ -26,7 +26,7 @@ lashlang = { workspace = true }
 lash-plugin-process-controls = { workspace = true, features = ["lashlang"] }
 lash-provider-openai = { workspace = true }
 lash-restate = { workspace = true }
-lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
+lash-remote-protocol = { workspace = true }
 lash-sqlite-store = { workspace = true }
 lash-subagents = { workspace = true }
 lash-tools = { path = "../../crates/lash-tools", default-features = false, features = ["lashlang"] }
@@ -42,6 +42,7 @@ uuid = { workspace = true, features = ["v4"] }
 lash-core = { workspace = true, features = ["testing"] }
 lash-lashlang-runtime = { workspace = true }
 lash = { workspace = true, features = ["rlm", "testing"] }
+lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 
 [features]
 default = []

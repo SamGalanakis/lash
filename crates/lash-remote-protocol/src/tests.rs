@@ -247,6 +247,24 @@ fn remote_trigger_dtos_json_round_trip() {
 
 #[test]
 fn remote_session_observation_dtos_json_round_trip_typed_kinds() {
+    let observation = RemoteSessionObservation {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        cursor: "lashsc1:3:7:session".to_string(),
+        turn_index: 3,
+        usage: RemoteUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            cached_input_tokens: 2,
+            reasoning_tokens: 1,
+        },
+    };
+    observation.validate().expect("valid observation");
+    let decoded: RemoteSessionObservation =
+        serde_json::from_value(serde_json::to_value(&observation).expect("serialize observation"))
+            .expect("deserialize observation");
+    assert_eq!(decoded, observation);
+
     let event = RemoteSessionObservationEvent {
         protocol_version: REMOTE_PROTOCOL_VERSION,
         session_id: "session".to_string(),
@@ -770,6 +788,7 @@ fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteTurnRequest>();
     assert_schema_has_protocol_version::<RemoteTurnResult>();
     assert_schema_has_protocol_version::<RemoteSessionCursor>();
+    assert_schema_has_protocol_version::<RemoteSessionObservation>();
     assert_schema_has_protocol_version::<RemoteSessionObservationEvent>();
     assert_schema_has_protocol_version::<RemoteLiveReplayGap>();
     assert_schema_has_protocol_version::<RemoteToolGrant>();

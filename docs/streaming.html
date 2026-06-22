@@ -188,11 +188,11 @@ async fn reconnect_session(
       </div>
       <div class="listing__row">
         <div class="listing__label">refresh</div>
-        <div class="listing__body"><p>In-process callers receive <code>SessionObservationStreamItem::Gap { observation, gap }</code> and can replace UI state from <code>observation.read_view</code>. Remote hosts usually expose a product/read-view endpoint instead; refresh that endpoint because <code>RemoteLiveReplayGap</code> intentionally does not serialize <code>SessionReadView</code>.</p></div>
+        <div class="listing__body"><p>In-process callers receive <code>SessionObservationStreamItem::Gap { observation, gap }</code> and can replace UI state from <code>observation.read_view</code>. Remote callers receive <code>RemoteSessionObservationStreamItem::Gap { observation, gap }</code>; use the <code>RemoteSessionObservation</code> cursor/usage snapshot and refresh any app-owned product projection because the remote DTO intentionally does not serialize <code>SessionReadView</code>.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">continue</div>
-        <div class="listing__body"><p>Store <code>gap.latest_cursor</code> and keep folding new events. <code>subscribe_and_recover</code> performs the resubscribe loop internally after yielding the gap item.</p></div>
+        <div class="listing__body"><p>Store <code>gap.latest_cursor</code> and keep folding new events. <code>subscribe_and_recover</code> and <code>subscribe_and_recover_remote</code> perform the resubscribe loop internally after yielding the gap item.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">remote gap</div>
@@ -207,7 +207,7 @@ async fn reconnect_session(
       <p>Lash provides semantic DTOs. The host owns HTTP routes, auth, tenancy, retention, and wire framing.</p>
     </div>
     <p>NDJSON is the recommended framing for activity streams because each <code>RemoteTurnActivity</code> or <code>RemoteSessionObservationEvent</code> remains ordinary JSON and newline boundaries are easy to proxy. SSE is also acceptable when the browser integration benefits from native <code>EventSource</code> reconnect; use the same DTOs as event data.</p>
-    <p>A common browser endpoint sends host-defined product rows such as <code>message</code>, <code>error</code>, and <code>done</code> beside Lash rows such as <code>replay_cursor</code>, <code>observation</code>, and <code>replay_gap</code>. Product rows are owned by the app. The Lash rows should use <code>RemoteSessionObservationEvent</code> and <code>RemoteLiveReplayGap</code> so cursors, revisions, and event payloads keep the same remote contract across HTTP, queues, and workflow callbacks.</p>
+    <p>A common browser endpoint sends host-defined product rows such as <code>message</code>, <code>error</code>, and <code>done</code> beside Lash rows such as <code>replay_cursor</code>, <code>observation</code>, and <code>replay_gap</code>. Product rows are owned by the app. The Lash rows should use <code>RemoteSessionObservationEvent</code>, <code>RemoteSessionObservation</code>, and <code>RemoteLiveReplayGap</code> so cursors, revisions, event payloads, and gap snapshots keep the same remote contract across HTTP, queues, and workflow callbacks.</p>
     <pre data-lang="rust" data-snippet="streaming#remote-ndjson-sink"><code>use lash_remote_protocol::RemoteTurnActivitySink;
 
 async fn stream_turn_as_ndjson(session: &amp;LashSession) -&gt; anyhow::Result&lt;Vec&lt;u8&gt;&gt; {
@@ -226,13 +226,42 @@ async fn stream_turn_as_ndjson(session: &amp;LashSession) -&gt; anyhow::Result&l
     sink.into_inner()
         .map_err(|_| anyhow::anyhow!("remote stream writer still borrowed"))
 }</code></pre>
-    <p>For session observation streams, convert each core event to the remote DTO at your service edge. The <code>sequence</code> argument below is only the sequence inside that one response stream; clients still persist the event's <code>cursor</code>.</p>
-    <pre data-lang="rust" data-snippet="streaming#remote-session-event"><code>fn encode_observation_event(
-    sequence: u64,
-    event: lash::observe::SessionObservationEvent,
-) -&gt; anyhow::Result&lt;String&gt; {
-    let remote = lash_remote_protocol::RemoteSessionObservationEvent::from_core(sequence, event);
-    Ok(serde_json::to_string(&amp;remote)?)
+    <p>For session observation streams, use the DTO recovery helper at your service edge. It assigns per-response event sequence values, returns remote gap snapshots, and keeps clients on opaque persisted cursors.</p>
+    <pre data-lang="rust" data-snippet="streaming#remote-session-event"><code>use lash::observe::RemoteSessionObservationStreamItem;
+
+async fn stream_remote_session_observations(
+    session: &amp;LashSession,
+    stored_cursor: Option&lt;lash::remote::RemoteSessionCursor&gt;,
+) -&gt; anyhow::Result&lt;lash::remote::RemoteSessionCursor&gt; {
+    let observable = session.observe();
+    let mut cursor = match stored_cursor {
+        Some(cursor) =&gt; cursor,
+        None =&gt; {
+            let observation = observable.current_remote_observation();
+            replace_from_remote_observation(&amp;observation).await?;
+            lash::remote::RemoteSessionCursor::new(observation.cursor)
+        }
+    };
+
+    persist_remote_cursor(&amp;cursor).await?;
+
+    let mut live = observable.subscribe_and_recover_remote(cursor.clone())?;
+    while let Some(item) = live.next().await {
+        match item? {
+            RemoteSessionObservationStreamItem::Event(event) =&gt; {
+                cursor = lash::remote::RemoteSessionCursor::new(event.cursor.clone());
+                send_remote_session_line(serde_json::to_string(&amp;event)?).await?;
+            }
+            RemoteSessionObservationStreamItem::Gap { observation, gap } =&gt; {
+                cursor = lash::remote::RemoteSessionCursor::new(gap.latest_cursor.clone());
+                replace_from_remote_observation(&amp;observation).await?;
+                send_remote_session_line(serde_json::to_string(&amp;gap)?).await?;
+            }
+        }
+        persist_remote_cursor(&amp;cursor).await?;
+    }
+
+    Ok(cursor)
 }</code></pre>
   </div>
 

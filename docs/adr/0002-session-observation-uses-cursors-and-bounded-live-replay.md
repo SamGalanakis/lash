@@ -25,6 +25,6 @@ Live replay is best-effort and bounded. `LiveReplayStore` is not `RuntimePersist
 
 `TurnBuilder::stream_to`, pull-style `stream`, `run`, and `TurnOutput.activities` remain turn convenience APIs. They are not the reconnect surface.
 
-Remote protocol turn requests no longer carry a turn-level activity cursor field. `RemoteTurnActivity.sequence` remains only per-stream ordering. Remote session observation uses `RemoteSessionCursor`, `RemoteSessionObservationEvent`, and `RemoteLiveReplayGap`; the protocol does not serialize a full `SessionReadView`.
+Remote protocol turn requests no longer carry a turn-level activity cursor field. `RemoteTurnActivity.sequence` remains only per-stream ordering. Remote session observation uses `RemoteSessionCursor`, `RemoteSessionObservation`, `RemoteSessionObservationEvent`, and `RemoteLiveReplayGap`; the protocol does not serialize a full `SessionReadView`.
 
 Live replay append failures must not fail turn execution or durable commits. They are logged, and later reconnect falls back to gap recovery from durable state.

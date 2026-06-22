@@ -10,10 +10,13 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, Response};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use lash::observe::{SessionCursor, SessionObservationEventPayload, SessionObservationStreamItem};
+use lash::observe::{RemoteSessionObservationStreamItem, SessionCursor};
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
-use lash_remote_protocol::{RemoteLiveReplayGap, RemoteSessionObservationEvent};
+use lash_remote_protocol::{
+    RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
+    RemoteSessionObservationEvent, RemoteSessionObservationEventPayload,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -69,6 +72,7 @@ pub(crate) enum StreamItem {
         cursor: String,
     },
     ReplayGap {
+        observation: Box<RemoteSessionObservation>,
         gap: Box<RemoteLiveReplayGap>,
     },
     Message {
@@ -566,8 +570,19 @@ async fn forward_live_replay_until_commit(
         return;
     }
     let observable = session.observe();
-    let mut subscription = observable.subscribe_and_recover(cursor);
-    let mut sequence = 0_u64;
+    let mut subscription = match observable
+        .subscribe_and_recover_remote(RemoteSessionCursor::new(cursor.to_string()))
+    {
+        Ok(subscription) => subscription,
+        Err(err) => {
+            let _ = tx
+                .send(StreamItem::Error {
+                    message: err.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
     loop {
         let item = match subscription.next().await {
             Some(Ok(item)) => item,
@@ -581,34 +596,33 @@ async fn forward_live_replay_until_commit(
             }
             None => break,
         };
-        let event = match item {
-            SessionObservationStreamItem::Event(event) => event,
-            SessionObservationStreamItem::Gap { gap, .. } => {
+        match item {
+            RemoteSessionObservationStreamItem::Event(event) => {
+                let committed = matches!(
+                    &event.event,
+                    RemoteSessionObservationEventPayload::Committed
+                );
+                if tx
+                    .send(StreamItem::Observation {
+                        event: Box::new(event),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if committed {
+                    break;
+                }
+            }
+            RemoteSessionObservationStreamItem::Gap { observation, gap } => {
                 let _ = tx
                     .send(StreamItem::ReplayGap {
-                        gap: Box::new(gap.into()),
+                        observation: Box::new(observation),
+                        gap: Box::new(gap),
                     })
                     .await;
-                continue;
             }
-        };
-        let committed = matches!(
-            event.payload,
-            SessionObservationEventPayload::Committed { .. }
-        );
-        let remote = RemoteSessionObservationEvent::from_core(sequence, event);
-        sequence = sequence.saturating_add(1);
-        if tx
-            .send(StreamItem::Observation {
-                event: Box::new(remote),
-            })
-            .await
-            .is_err()
-        {
-            break;
-        }
-        if committed {
-            break;
         }
     }
 }
@@ -839,6 +853,13 @@ submit "done through route"
     #[test]
     fn replay_gap_stream_item_uses_remote_gap_payload() {
         let item = StreamItem::ReplayGap {
+            observation: Box::new(RemoteSessionObservation {
+                protocol_version: lash_remote_protocol::REMOTE_PROTOCOL_VERSION,
+                session_id: "session-1".to_string(),
+                cursor: "cursor-after".to_string(),
+                turn_index: 3,
+                usage: lash_remote_protocol::RemoteUsage::default(),
+            }),
             gap: Box::new(RemoteLiveReplayGap {
                 protocol_version: lash_remote_protocol::REMOTE_PROTOCOL_VERSION,
                 session_id: "session-1".to_string(),
@@ -858,6 +879,14 @@ submit "done through route"
         assert_eq!(
             value.pointer("/gap/latest_cursor"),
             Some(&json!("cursor-after"))
+        );
+        assert_eq!(
+            value.pointer("/observation/cursor"),
+            Some(&json!("cursor-after"))
+        );
+        assert_eq!(
+            value.pointer("/observation/session_id"),
+            Some(&json!("session-1"))
         );
         assert_eq!(value.pointer("/gap/latest_revision"), Some(&json!(7)));
         assert_eq!(value.pointer("/gap/reason"), Some(&json!("trimmed")));
