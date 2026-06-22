@@ -9,9 +9,8 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, Response};
 use bytes::Bytes;
-use lash::observe::{
-    SessionCursor, SessionObservationEventPayload, SessionObservationSubscription,
-};
+use futures_util::StreamExt;
+use lash::observe::{SessionCursor, SessionObservationEventPayload, SessionObservationStreamItem};
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
 use lash_remote_protocol::RemoteSessionObservationEvent;
@@ -19,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::board::BoardState;
@@ -614,36 +612,30 @@ async fn forward_live_replay_until_commit(
         return;
     }
     let observable = session.observe();
-    let mut subscription = match observable.subscribe_from_cursor(&cursor) {
-        Ok(SessionObservationSubscription::Subscribed(subscription)) => subscription,
-        Ok(SessionObservationSubscription::Gap { gap, .. }) => {
-            let _ = tx
-                .send(StreamItem::ReplayGap {
-                    cursor: gap.latest_cursor.to_string(),
-                })
-                .await;
-            return;
-        }
-        Err(err) => {
-            let _ = tx
-                .send(StreamItem::Error {
-                    message: err.to_string(),
-                })
-                .await;
-            return;
-        }
-    };
+    let mut subscription = observable.subscribe_and_recover(cursor);
     let mut sequence = 0_u64;
     loop {
-        let event = match subscription.next_event().await {
-            Ok(event) => event,
-            Err(err) => {
+        let item = match subscription.next().await {
+            Some(Ok(item)) => item,
+            Some(Err(err)) => {
                 let _ = tx
                     .send(StreamItem::Error {
                         message: err.to_string(),
                     })
                     .await;
                 break;
+            }
+            None => break,
+        };
+        let event = match item {
+            SessionObservationStreamItem::Event(event) => event,
+            SessionObservationStreamItem::Gap { gap, .. } => {
+                let _ = tx
+                    .send(StreamItem::ReplayGap {
+                        cursor: gap.latest_cursor.to_string(),
+                    })
+                    .await;
+                continue;
             }
         };
         let committed = matches!(

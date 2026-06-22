@@ -12,6 +12,7 @@ default = []
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 lash = { workspace = true, features = ["rlm"] }
 lash-core = { workspace = true, features = ["otel-trace"] }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }

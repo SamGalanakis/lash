@@ -1,4 +1,8 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use crate::support::*;
+use futures_util::Stream;
 
 pub use lash_core::{AssistantOutput, TurnIssue};
 
@@ -495,6 +499,14 @@ impl TurnStream {
                 format!("turn stream task failed: {err}"),
             ))
         })?
+    }
+}
+
+impl Stream for TurnStream {
+    type Item = Result<TurnActivity>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.activities.poll_recv(cx)
     }
 }
 

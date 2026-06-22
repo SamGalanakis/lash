@@ -1,9 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
+use futures_util::Stream;
 use tokio::sync::broadcast;
+use tokio_util::sync::ReusableBoxFuture;
 
 use crate::runtime::{LashRuntime, RuntimeSessionState};
 
@@ -234,7 +238,14 @@ pub enum LiveReplaySubscribeResult {
 
 pub struct LiveReplaySubscription {
     replay: VecDeque<SessionObservationEvent>,
-    receiver: broadcast::Receiver<SessionObservationEvent>,
+    receiver: ReusableBoxFuture<
+        'static,
+        (
+            Result<SessionObservationEvent, broadcast::error::RecvError>,
+            broadcast::Receiver<SessionObservationEvent>,
+        ),
+    >,
+    closed: bool,
 }
 
 impl LiveReplaySubscription {
@@ -244,20 +255,49 @@ impl LiveReplaySubscription {
     ) -> Self {
         Self {
             replay: replay.into(),
-            receiver,
+            receiver: ReusableBoxFuture::new(live_replay_recv(receiver)),
+            closed: false,
         }
     }
 
     pub async fn next_event(&mut self) -> Result<SessionObservationEvent, LiveReplayStoreError> {
+        futures_util::StreamExt::next(self)
+            .await
+            .unwrap_or(Err(LiveReplayStoreError::Closed))
+    }
+}
+
+async fn live_replay_recv(
+    mut receiver: broadcast::Receiver<SessionObservationEvent>,
+) -> (
+    Result<SessionObservationEvent, broadcast::error::RecvError>,
+    broadcast::Receiver<SessionObservationEvent>,
+) {
+    let result = receiver.recv().await;
+    (result, receiver)
+}
+
+impl Stream for LiveReplaySubscription {
+    type Item = Result<SessionObservationEvent, LiveReplayStoreError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(event) = self.replay.pop_front() {
-            return Ok(event);
+            return Poll::Ready(Some(Ok(event)));
         }
-        match self.receiver.recv().await {
-            Ok(event) => Ok(event),
+        if self.closed {
+            return Poll::Ready(None);
+        }
+        let (result, receiver) = ready!(self.receiver.poll(cx));
+        self.receiver.set(live_replay_recv(receiver));
+        match result {
+            Ok(event) => Poll::Ready(Some(Ok(event))),
             Err(broadcast::error::RecvError::Lagged(count)) => {
-                Err(LiveReplayStoreError::SubscriberLagged(count))
+                Poll::Ready(Some(Err(LiveReplayStoreError::SubscriberLagged(count))))
             }
-            Err(broadcast::error::RecvError::Closed) => Err(LiveReplayStoreError::Closed),
+            Err(broadcast::error::RecvError::Closed) => {
+                self.closed = true;
+                Poll::Ready(Some(Err(LiveReplayStoreError::Closed)))
+            }
         }
     }
 }

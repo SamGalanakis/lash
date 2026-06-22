@@ -1,6 +1,7 @@
 //! [`LiveReplayStore`] conformance: cursors, replay, subscriptions, trims.
 
 use super::*;
+use futures_util::StreamExt as _;
 
 /// Run the full [`LiveReplayStore`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty store on each call.
@@ -333,9 +334,10 @@ async fn next_live_replay_event(
     subscription: &mut crate::LiveReplaySubscription,
     context: &str,
 ) -> SessionObservationEvent {
-    tokio::time::timeout(Duration::from_secs(1), subscription.next_event())
+    tokio::time::timeout(Duration::from_secs(1), subscription.next())
         .await
         .unwrap_or_else(|_| panic!("{context}: timed out waiting for live replay event"))
+        .unwrap_or_else(|| panic!("{context}: live replay subscriber closed"))
         .unwrap_or_else(|err| panic!("{context}: live replay subscriber failed: {err}"))
 }
 

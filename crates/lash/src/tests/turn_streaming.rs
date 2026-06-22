@@ -1,5 +1,6 @@
 use super::*;
 use crate::rlm::RlmTurnBuilderExt as _;
+use futures_util::StreamExt as _;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
@@ -601,7 +602,7 @@ async fn turn_builder_stream_emits_activities_and_finishes() -> Result<()> {
     let mut stream = session.turn(TurnInput::text("stream me")).stream()?;
 
     let mut activities = Vec::new();
-    while let Some(activity) = stream.next_activity().await {
+    while let Some(activity) = stream.next().await {
         activities.push(activity?);
     }
     let result = stream.finish().await?;
@@ -715,6 +716,88 @@ async fn session_observation_subscription_replays_buffered_events_before_live_ev
             break;
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_observation_recovery_stream_replays_buffered_events_before_live_events()
+-> Result<()> {
+    let core = standard_core();
+    let session = core
+        .session("session-observation-recovered-stream")
+        .open()
+        .await?;
+    let cursor = session.observe().current_observation().cursor;
+
+    session
+        .turn(TurnInput::text("first recovered"))
+        .run()
+        .await?;
+    let mut stream = session.observe().subscribe_and_recover(cursor);
+
+    loop {
+        let item = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("timed out waiting for replayed stream item")
+            .expect("replayed stream should stay open")?;
+        if let crate::observe::SessionObservationStreamItem::Event(event) = item
+            && observation_assistant_delta(&event).as_deref() == Some("echo: first recovered")
+        {
+            break;
+        }
+    }
+
+    session
+        .turn(TurnInput::text("second recovered"))
+        .run()
+        .await?;
+    loop {
+        let item = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("timed out waiting for live stream item")
+            .expect("live stream should stay open")?;
+        if let crate::observe::SessionObservationStreamItem::Event(event) = item
+            && observation_assistant_delta(&event).as_deref() == Some("echo: second recovered")
+        {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_observation_recovery_stream_yields_gap_for_trimmed_cursor() -> Result<()> {
+    let core = explicit_ephemeral_facets(StandardCore::builder())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .live_replay_store(Arc::new(lash_core::InMemoryLiveReplayStore::new(
+            lash_core::InMemoryLiveReplayStoreConfig {
+                max_events_per_session: 1,
+                ..lash_core::InMemoryLiveReplayStoreConfig::default()
+            },
+        )))
+        .build()?;
+    let session = core
+        .session("session-observation-recovered-gap")
+        .open()
+        .await?;
+    let cursor = session.observe().current_observation().cursor;
+
+    session
+        .turn(TurnInput::text("trimmed before subscribe"))
+        .run()
+        .await?;
+    let mut stream = session.observe().subscribe_and_recover(cursor);
+    let item = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("timed out waiting for gap stream item")
+        .expect("recovery stream should stay open")?;
+    let crate::observe::SessionObservationStreamItem::Gap { observation, gap } = item else {
+        panic!("trimmed cursor should yield a gap item");
+    };
+
+    assert_eq!(gap.reason, lash_core::LiveReplayGapReason::Trimmed);
+    assert_eq!(gap.latest_cursor, observation.cursor);
     Ok(())
 }
 

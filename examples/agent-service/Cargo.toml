@@ -11,6 +11,7 @@ axum = "0.8"
 bytes = { workspace = true }
 chrono = { workspace = true }
 dotenvy = "0.15"
+futures-util = { workspace = true }
 lash-restate = { workspace = true, optional = true }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 lash-sqlite-store = { workspace = true }

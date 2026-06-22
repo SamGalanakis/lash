@@ -74,10 +74,11 @@ pub mod prelude {
 /// recovery for host frontends. Entry point: [`LashSession::observe`] /
 /// [`ObservableSession`].
 pub mod observe {
+    pub use crate::session::{SessionObservationStream, SessionObservationStreamItem};
     pub use lash_core::{
-        SessionCursor, SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
-        SessionObservationSubscription, SessionProcessEventKind, SessionQueueEventKind,
-        SessionResume, SessionRevision,
+        LiveReplayGap, LiveReplayGapReason, SessionCursor, SessionObservation,
+        SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
+        SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision,
     };
 }
 

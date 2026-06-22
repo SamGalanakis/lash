@@ -44,11 +44,13 @@ async fn stream_one_turn(
 }
 
 async fn pull_one_turn(session: &LashSession) -> anyhow::Result<lash::TurnResult> {
+    use futures_util::StreamExt as _;
+
     let mut stream = session
         .turn(TurnInput::text("Summarize the incident."))
         .stream()?;
 
-    while let Some(activity) = stream.next_activity().await {
+    while let Some(activity) = stream.next().await {
         render_activity(activity?).await?;
     }
 
@@ -57,7 +59,8 @@ async fn pull_one_turn(session: &LashSession) -> anyhow::Result<lash::TurnResult
 // docs:end:turn-local-stream
 
 // docs:start:session-reconnect
-use lash::observe::{SessionObservationSubscription, SessionResume};
+use futures_util::StreamExt as _;
+use lash::observe::SessionObservationStreamItem;
 
 async fn reconnect_session(
     session: &LashSession,
@@ -74,28 +77,17 @@ async fn reconnect_session(
         }
     };
 
-    match observable.resume_from_cursor(&cursor)? {
-        SessionResume::Replayed { events } => {
-            for event in events {
+    let mut live = observable.subscribe_and_recover(cursor.clone());
+    if let Some(item) = live.next().await {
+        match item? {
+            SessionObservationStreamItem::Event(event) => {
                 cursor = event.cursor.clone();
                 fold_session_event(event).await?;
             }
-        }
-        SessionResume::Gap { observation, gap } => {
-            replace_from_read_view(&observation.read_view).await?;
-            cursor = gap.latest_cursor;
-        }
-    }
-
-    match observable.subscribe_from_cursor(&cursor)? {
-        SessionObservationSubscription::Subscribed(mut live) => {
-            let event = live.next_event().await?;
-            cursor = event.cursor.clone();
-            fold_session_event(event).await?;
-        }
-        SessionObservationSubscription::Gap { observation, gap } => {
-            replace_from_read_view(&observation.read_view).await?;
-            cursor = gap.latest_cursor;
+            SessionObservationStreamItem::Gap { observation, gap } => {
+                replace_from_read_view(&observation.read_view).await?;
+                cursor = gap.latest_cursor;
+            }
         }
     }
 
