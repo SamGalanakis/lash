@@ -1,5 +1,10 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use crate::support::*;
+use futures_util::Stream;
 use lash_core::runtime::{DeliveryPolicy, QueuedWorkBatch, SlotPolicy};
+use lash_core::{LiveReplayGap, LiveReplayStoreError, SessionObservationEvent};
 
 pub struct SessionBuilder {
     pub(crate) core: LashCore,
@@ -733,6 +738,23 @@ impl ObservableSession {
             .map_err(live_replay_error)
     }
 
+    /// Subscribe to session observation events and keep the subscription alive
+    /// across recoverable live-replay gaps.
+    ///
+    /// The returned stream yields [`SessionObservationStreamItem::Gap`] when
+    /// the cursor missed the bounded replay window. Callers should replace
+    /// their UI/projection from the included fresh observation, persist
+    /// `gap.latest_cursor`, and keep polling the same stream; it resubscribes
+    /// from that cursor internally.
+    pub fn subscribe_and_recover(&self, cursor: SessionCursor) -> SessionObservationStream {
+        SessionObservationStream {
+            observable: self.clone(),
+            cursor,
+            subscription: None,
+            done: false,
+        }
+    }
+
     pub fn session_id(&self) -> String {
         self.snapshot().session_id().to_string()
     }
@@ -771,6 +793,84 @@ impl ObservableSession {
 
     pub fn process_scope(&self) -> SessionScope {
         self.snapshot().process_scope()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionObservationStreamItem {
+    /// A replayed or live session observation event.
+    Event(SessionObservationEvent),
+    /// A recoverable replay gap with a fresh durable observation.
+    Gap {
+        observation: SessionObservation,
+        gap: LiveReplayGap,
+    },
+}
+
+/// Stream returned by [`ObservableSession::subscribe_and_recover`].
+pub struct SessionObservationStream {
+    observable: ObservableSession,
+    cursor: SessionCursor,
+    subscription: Option<lash_core::LiveReplaySubscription>,
+    done: bool,
+}
+
+impl SessionObservationStream {
+    pub fn cursor(&self) -> &SessionCursor {
+        &self.cursor
+    }
+}
+
+impl Stream for SessionObservationStream {
+    type Item = Result<SessionObservationStreamItem>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if self.done {
+                return Poll::Ready(None);
+            }
+            if self.subscription.is_none() {
+                match self.observable.subscribe_from_cursor(&self.cursor) {
+                    Ok(SessionObservationSubscription::Subscribed(subscription)) => {
+                        self.subscription = Some(subscription);
+                    }
+                    Ok(SessionObservationSubscription::Gap { observation, gap }) => {
+                        self.cursor = gap.latest_cursor.clone();
+                        return Poll::Ready(Some(Ok(SessionObservationStreamItem::Gap {
+                            observation,
+                            gap,
+                        })));
+                    }
+                    Err(err) => {
+                        self.done = true;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                }
+            }
+
+            let Some(subscription) = self.subscription.as_mut() else {
+                continue;
+            };
+            match Pin::new(subscription).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(event))) => {
+                    self.cursor = event.cursor.clone();
+                    return Poll::Ready(Some(Ok(SessionObservationStreamItem::Event(event))));
+                }
+                Poll::Ready(Some(Err(LiveReplayStoreError::SubscriberLagged(_)))) => {
+                    self.subscription = None;
+                    continue;
+                }
+                Poll::Ready(Some(Err(err))) => {
+                    self.done = true;
+                    return Poll::Ready(Some(Err(live_replay_error(err))));
+                }
+                Poll::Ready(None) => {
+                    self.done = true;
+                    return Poll::Ready(None);
+                }
+            }
+        }
     }
 }
 

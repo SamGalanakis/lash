@@ -62,25 +62,28 @@
 }
 
 async fn pull_one_turn(session: &amp;LashSession) -&gt; anyhow::Result&lt;lash::TurnResult&gt; {
+    use futures_util::StreamExt as _;
+
     let mut stream = session
         .turn(TurnInput::text("Summarize the incident."))
         .stream()?;
 
-    while let Some(activity) = stream.next_activity().await {
+    while let Some(activity) = stream.next().await {
         render_activity(activity?).await?;
     }
 
     Ok(stream.finish().await?)
 }</code></pre>
-    <p><code>stream_to</code> awaits the sink's <code>emit()</code>. If a UI transport can block, push into a bounded channel and drain it from a separate task; the channel bound becomes your backpressure policy.</p>
+    <p>Use <code>stream_to</code> when you already have a sink object, <code>stream</code> when you want a pull-style <code>futures_util::Stream</code>, and <code>run</code> when you only need the collected <code>TurnOutput</code>. <code>stream_to</code> awaits the sink's <code>emit()</code>. If a UI transport can block, push into a bounded channel and drain it from a separate task; the channel bound becomes your backpressure policy.</p>
   </div>
 
   <div class="section" id="session-reconnect">
     <div class="section-header">
       <h2>Session Reconnect</h2>
-      <p><code>ObservableSession</code> is the browser reconnect surface. It returns the current read view plus an opaque cursor, replays recent session observation events after a cursor, or reports a gap with a fresh observation.</p>
+      <p><code>ObservableSession</code> is the browser reconnect surface. It returns the current read view plus an opaque cursor, replays recent session observation events after a cursor, or reports a gap with a fresh observation. Persistent transports should use <code>subscribe_and_recover</code>; <code>resume_from_cursor</code> remains the one-shot poll alternative.</p>
     </div>
-    <pre data-lang="rust" data-snippet="streaming#session-reconnect"><code>use lash::observe::{SessionObservationSubscription, SessionResume};
+    <pre data-lang="rust" data-snippet="streaming#session-reconnect"><code>use futures_util::StreamExt as _;
+use lash::observe::SessionObservationStreamItem;
 
 async fn reconnect_session(
     session: &amp;LashSession,
@@ -97,28 +100,17 @@ async fn reconnect_session(
         }
     };
 
-    match observable.resume_from_cursor(&amp;cursor)? {
-        SessionResume::Replayed { events } =&gt; {
-            for event in events {
+    let mut live = observable.subscribe_and_recover(cursor.clone());
+    if let Some(item) = live.next().await {
+        match item? {
+            SessionObservationStreamItem::Event(event) =&gt; {
                 cursor = event.cursor.clone();
                 fold_session_event(event).await?;
             }
-        }
-        SessionResume::Gap { observation, gap } =&gt; {
-            replace_from_read_view(&amp;observation.read_view).await?;
-            cursor = gap.latest_cursor;
-        }
-    }
-
-    match observable.subscribe_from_cursor(&amp;cursor)? {
-        SessionObservationSubscription::Subscribed(mut live) =&gt; {
-            let event = live.next_event().await?;
-            cursor = event.cursor.clone();
-            fold_session_event(event).await?;
-        }
-        SessionObservationSubscription::Gap { observation, gap } =&gt; {
-            replace_from_read_view(&amp;observation.read_view).await?;
-            cursor = gap.latest_cursor;
+            SessionObservationStreamItem::Gap { observation, gap } =&gt; {
+                replace_from_read_view(&amp;observation.read_view).await?;
+                cursor = gap.latest_cursor;
+            }
         }
     }
 
@@ -193,7 +185,7 @@ async fn reconnect_session(
       </div>
       <div class="listing__row">
         <div class="listing__label">continue</div>
-        <div class="listing__body"><p>Store <code>gap.latest_cursor</code>, subscribe from that cursor, and keep folding new events.</p></div>
+        <div class="listing__body"><p>Store <code>gap.latest_cursor</code> and keep folding new events. <code>subscribe_and_recover</code> performs the resubscribe loop internally after yielding the gap item.</p></div>
       </div>
     </div>
   </div>

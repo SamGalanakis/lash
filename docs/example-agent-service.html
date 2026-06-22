@@ -135,7 +135,7 @@ let assistant_text = assistant_text_for_persistence(
     &amp;turn_state.lock().expect("turn state lock").assistant_prose,
 );</code></pre>
           <p>The board is app-owned SQLite state. User message payloads keep board snapshots so the browser can replay the game, while the plugin prompt and <code>read_board</code> / <code>play_move</code> tools read and mutate the canonical row. <code>assistant_text_for_persistence</code> derives the product chat row from terminal semantics: submitted values render from <code>TurnFinish::SubmittedValue</code>, while prose comes from <code>TurnFinish::AssistantMessage</code> with streamed prose only as a live UI preview.</p>
-          <p>The route starts live replay from <code>replay_cursor</code> and emits an NDJSON <code>replay_cursor</code> row followed by <code>observation</code> rows converted through <code>RemoteSessionObservationEvent</code>. Restate mode reuses this observation stream for semantic progress while its app outbox persists product rows for route restart and workflow handoff.</p>
+          <p>The route starts live replay from <code>replay_cursor</code> through <code>ObservableSession::subscribe_and_recover(...)</code> and emits an NDJSON <code>replay_cursor</code> row followed by <code>observation</code> rows converted through <code>RemoteSessionObservationEvent</code>. Restate mode reuses this observation stream for semantic progress while its app outbox persists product rows for route restart and workflow handoff.</p>
         </div>
 
         <div class="section" id="restate-mode">
