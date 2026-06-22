@@ -30,6 +30,7 @@
       <h2>Choose The Surface</h2>
       <p>Lash exposes three related streaming surfaces. Pick the smallest one that matches the boundary you are crossing.</p>
     </div>
+    <p>The runnable browser examples use this split directly: turn-local streams are convenient inside the process that started a turn, while browser reconnect is always session-level observation with an opaque cursor. App/product rows and Lash observation rows can share one NDJSON or SSE response, but they remain separate contracts.</p>
     <div class="listing">
       <div class="listing__row">
         <div class="listing__label">one active turn</div>
@@ -74,7 +75,7 @@ async fn pull_one_turn(session: &amp;LashSession) -&gt; anyhow::Result&lt;lash::
 
     Ok(stream.finish().await?)
 }</code></pre>
-    <p>Use <code>stream_to</code> when you already have a sink object, <code>stream</code> when you want a pull-style <code>futures_util::Stream</code>, and <code>run</code> when you only need the collected <code>TurnOutput</code>. <code>stream_to</code> awaits the sink's <code>emit()</code>. If a UI transport can block, push into a bounded channel and drain it from a separate task; the channel bound becomes your backpressure policy.</p>
+    <p>Use <code>stream_to</code> when you already have a sink object, <code>stream</code> when you want a pull-style <code>futures_util::Stream</code>, and <code>run</code> when you only need the collected <code>TurnOutput</code>. <code>TurnStream</code> implements <code>Stream&lt;Item = Result&lt;TurnActivity&gt;&gt;</code>; <code>next_activity()</code> is a compatibility wrapper. <code>stream_to</code> awaits the sink's <code>emit()</code>. If a UI transport can block, push into a bounded channel and drain it from a separate task; the channel bound becomes your backpressure policy.</p>
   </div>
 
   <div class="section" id="session-reconnect">
@@ -100,8 +101,10 @@ async fn reconnect_session(
         }
     };
 
+    persist_cursor(&amp;cursor).await?;
+
     let mut live = observable.subscribe_and_recover(cursor.clone());
-    if let Some(item) = live.next().await {
+    while let Some(item) = live.next().await {
         match item? {
             SessionObservationStreamItem::Event(event) =&gt; {
                 cursor = event.cursor.clone();
@@ -112,9 +115,9 @@ async fn reconnect_session(
                 cursor = gap.latest_cursor;
             }
         }
+        persist_cursor(&amp;cursor).await?;
     }
 
-    persist_cursor(&amp;cursor).await?;
     Ok(cursor)
 }</code></pre>
     <aside class="contract">
@@ -172,7 +175,7 @@ async fn reconnect_session(
   <div class="section" id="gap-recovery">
     <div class="section-header">
       <h2>Gap Recovery</h2>
-      <p>Live replay is bounded. A stale, trimmed, or otherwise unavailable cursor returns <code>LiveReplayGap</code> / <code>RemoteLiveReplayGap</code> plus a latest observation.</p>
+      <p>Live replay is bounded. A stale, trimmed, or otherwise unavailable cursor yields a recoverable gap instead of making the client guess what happened.</p>
     </div>
     <div class="listing">
       <div class="listing__row">
@@ -181,11 +184,15 @@ async fn reconnect_session(
       </div>
       <div class="listing__row">
         <div class="listing__label">refresh</div>
-        <div class="listing__body"><p>Replace UI state from the latest observation or from the host's read-view endpoint. This is the durable projection.</p></div>
+        <div class="listing__body"><p>In-process callers receive <code>SessionObservationStreamItem::Gap { observation, gap }</code> and can replace UI state from <code>observation.read_view</code>. Remote hosts usually expose a product/read-view endpoint instead; refresh that endpoint because <code>RemoteLiveReplayGap</code> intentionally does not serialize <code>SessionReadView</code>.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">continue</div>
         <div class="listing__body"><p>Store <code>gap.latest_cursor</code> and keep folding new events. <code>subscribe_and_recover</code> performs the resubscribe loop internally after yielding the gap item.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">remote gap</div>
+        <div class="listing__body"><p><code>RemoteLiveReplayGap</code> carries <code>session_id</code>, <code>requested_cursor</code>, <code>latest_cursor</code>, <code>latest_revision</code>, and <code>reason</code> (<code>trimmed</code> or <code>unavailable</code>). Treat it as a synchronization marker, not as durable transcript data.</p></div>
       </div>
     </div>
   </div>
@@ -196,6 +203,7 @@ async fn reconnect_session(
       <p>Lash provides semantic DTOs. The host owns HTTP routes, auth, tenancy, retention, and wire framing.</p>
     </div>
     <p>NDJSON is the recommended framing for activity streams because each <code>RemoteTurnActivity</code> or <code>RemoteSessionObservationEvent</code> remains ordinary JSON and newline boundaries are easy to proxy. SSE is also acceptable when the browser integration benefits from native <code>EventSource</code> reconnect; use the same DTOs as event data.</p>
+    <p>A common browser endpoint sends host-defined product rows such as <code>message</code>, <code>error</code>, and <code>done</code> beside Lash rows such as <code>replay_cursor</code>, <code>observation</code>, and <code>replay_gap</code>. Product rows are owned by the app. The Lash rows should use <code>RemoteSessionObservationEvent</code> and <code>RemoteLiveReplayGap</code> so cursors, revisions, and event payloads keep the same remote contract across HTTP, queues, and workflow callbacks.</p>
     <pre data-lang="rust" data-snippet="streaming#remote-ndjson-sink"><code>use lash_remote_protocol::RemoteTurnActivitySink;
 
 async fn stream_turn_as_ndjson(session: &amp;LashSession) -&gt; anyhow::Result&lt;Vec&lt;u8&gt;&gt; {

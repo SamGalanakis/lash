@@ -184,23 +184,10 @@ async fn stream_turn_outbox(
                         if event.is_done {
                             done = true;
                         }
-                        let is_turn_event =
-                            serde_json::from_str::<serde_json::Value>(&event.item_json)
-                                .ok()
-                                .and_then(|value| {
-                                    value
-                                        .get("type")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_string)
-                                })
-                                .as_deref()
-                                == Some("event");
-                        if !is_turn_event {
-                            let mut line = event.item_json;
-                            line.push('\n');
-                            if tx.send(Ok(Bytes::from(line))).await.is_err() {
-                                return;
-                            }
+                        let mut line = event.item_json;
+                        line.push('\n');
+                        if tx.send(Ok(Bytes::from(line))).await.is_err() {
+                            return;
                         }
                     }
                     if done {

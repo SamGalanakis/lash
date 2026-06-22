@@ -81,7 +81,7 @@ flowchart LR
   Runtime --> Turn["turn(TurnInput).stream_to(&sink) / .run()"]
   Runtime --> Observe["observe()<br/>SessionObservation + cursor"]
   Turn --> Result["TurnResult / TurnOutput<br/>result (+ activities)"]
-  Turn --> Events["TurnActivitySink<br/>text, reasoning, tools, usage, done"]
+  Turn --> Events["TurnActivitySink<br/>text, reasoning, tools, usage, terminal values"]
             </div>
           </div>
           <dl class="def-list">
@@ -92,13 +92,13 @@ flowchart LR
             <dt><code>LashSession</code></dt>
             <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, <code>observe()</code>, and <code>admin()</code>. Carries an optional parent session id.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn config: cancellation token, mode options, plugin input, RLM bindings. <code>.stream_to(&amp;sink)</code> drives against a <code>TurnActivitySink</code>; <code>.run()</code> returns a <code>TurnOutput</code> with terminal result and ordered activities.</dd>
+            <dd>Per-turn config: cancellation token, mode options, plugin input, RLM bindings. <code>.stream_to(&amp;sink)</code> drives against a <code>TurnActivitySink</code>; <code>.stream()</code> returns a pull-style <code>futures_util::Stream</code>; <code>.run()</code> returns a <code>TurnOutput</code> with terminal result and ordered activities.</dd>
             <dt><code>TurnInput</code></dt>
             <dd>Text plus image refs. Hosts resolve UI syntax like <code>@path</code> before constructing the turn.</dd>
             <dt><code>TurnActivity</code></dt>
             <dd>Semantic activity records with stable ids and correlation ids. Raw session events are runtime/tracing internals.</dd>
             <dt><code>SessionObservation</code></dt>
-            <dd>Current session read view plus opaque cursor. Recent session observation events can be replayed for reconnect; stale cursors return a live replay gap and a fresh observation.</dd>
+            <dd>Current session read view plus opaque cursor. Recent session observation events can be replayed for reconnect; persistent hosts should use <code>subscribe_and_recover</code>, which yields recoverable live replay gaps and resubscribes from the latest cursor.</dd>
           </dl>
           <pre><code>let core = StandardCore::builder()
     .provider(provider)
@@ -114,7 +114,7 @@ let result = session
     .stream_to(&events)
     .await?;</code></pre>
           <div class="two-col">
-            <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code>: opens a session per chat id, records <code>TurnEvent</code>s through a sink, wires app DB + <code>SessionStoreFactory</code> + Axum + browser streaming. Walkthrough: <a href="../embedding.html">Lash API</a>.</p></article>
+            <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code>: opens a session per chat id, runs turns through the facade, streams browser reconnect rows from session observation DTOs, and keeps product chat/board state in the app database beside <code>SessionStoreFactory</code>. Walkthrough: <a href="../embedding.html">Lash API</a>.</p></article>
             <article class="panel"><h3>Boundary rule</h3><p>Above runtime internals, below an app framework. The facade should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP/frontend protocols.</p></article>
           </div>
         </div>

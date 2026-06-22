@@ -88,11 +88,11 @@ opaque cursor as `replay_cursor`, and forwards live
 `RemoteSessionObservationEvent` values from
 `ObservableSession::subscribe_and_recover(...)` as `observation` NDJSON rows
 until the session commit is observed. If the cursor is no longer in the bounded
-replay window, the stream emits `replay_gap` with the latest cursor so a
-reconnecting client can replace from a fresh observation. Restate mode uses the
-same live replay path for turn activity and keeps the app outbox focused on
-durable product rows such as user messages, assistant messages, errors, and
-`done`.
+replay window, the stream emits `replay_gap` with the public
+`RemoteLiveReplayGap` payload, including the requested cursor, latest cursor,
+latest revision, and reason. Restate mode uses the same live replay path for
+turn activity and keeps the app outbox focused on durable product rows such as
+user messages, assistant messages, errors, and `done`.
 
 Then open `http://127.0.0.1:3000`.
 

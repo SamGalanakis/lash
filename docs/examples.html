@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
   <section class="opener">
     <h1 class="opener__title">example<span class="slash">/</span>apps</h1>
-    <p class="opener__lede">Two runnable apps in <code>examples/</code> drive the <code>lash</code> facade end to end: full hosts with a browser UI, real persistence, and optional durable execution, not toy snippets. <code>agent-service</code> is the focused starting point; <code>agent-workbench</code> adds background processes, triggers, and Restate-backed cron triggers.</p>
+    <p class="opener__lede">Two runnable apps in <code>examples/</code> drive the <code>lash</code> facade end to end: full hosts with a browser UI, real persistence, remote DTO streams, and optional durable execution, not toy snippets. <code>agent-service</code> is the focused starting point; <code>agent-workbench</code> adds background processes, triggers, and Restate-backed cron triggers while keeping the same session live replay pattern.</p>
   </section>
 
   <main class="body" id="content">
@@ -32,9 +32,9 @@
       </div>
       <dl class="def-list">
         <dt><a href="./example-agent-service.html">agent service</a></dt>
-        <dd>Localhost SQLite chat app: the smallest realistic host. RLM mode, a typed session plugin, app-owned board tools, semantic streaming, per-chat model choice, and optional Restate-backed turns.</dd>
+        <dd>Localhost SQLite chat app: the smallest realistic host. RLM mode, a typed session plugin, app-owned board tools, session observation live replay, per-chat model choice, and optional Restate-backed turns.</dd>
         <dt><a href="./example-agent-workbench.html">agent workbench</a></dt>
-        <dd>RLM chat workbench for durable background work: background processes, subagents, web tools, trigger buttons, a mock inbox that fires <code>mail.received</code> triggers, Restate-backed turns/cancellation, and Restate-backed cron triggers. Restate is required and starts automatically in Docker.</dd>
+        <dd>RLM chat workbench for durable background work: background processes, subagents, web tools, trigger buttons, a mock inbox that fires <code>mail.received</code> triggers, Restate-backed turns/cancellation, Restate-backed cron triggers, and cursor-based browser reconnect over <code>/api/events</code>. Restate is required and starts automatically in Docker.</dd>
       </dl>
     </div>
 
@@ -46,7 +46,7 @@
       <div class="module-grid">
         <article class="panel"><h3>RLM + typed plugin</h3><p>Builds an <code>RlmCore</code> and activates a <code>DemoPlugin</code> per chat through <code>SessionBuilder::plugin::&lt;DemoPlugin&gt;(...)</code>.</p></article>
         <article class="panel"><h3>App-owned tools</h3><p>A tic-tac-toe board lives in the app's <code>chat_boards</code> table; the plugin's <code>ToolProvider</code> exposes <code>board.read</code> / <code>board.play</code> over it.</p></article>
-        <article class="panel"><h3>Semantic stream</h3><p>The browser renders <code>TurnEvent</code>s: reasoning deltas, assistant prose, tool cards, usage, and the RLM <code>submit</code> value.</p></article>
+        <article class="panel"><h3>Session replay stream</h3><p>The browser renders <code>RemoteSessionObservationEvent</code> rows from <code>session.observe()</code>, stores the opaque <code>replay_cursor</code>, and handles <code>replay_gap</code> with the public <code>RemoteLiveReplayGap</code> payload. Product rows stay app-owned.</p></article>
         <article class="panel"><h3>Optional Restate</h3><p>Built with the <code>restate</code> feature <em>and</em> run with <code>--durability restate</code> (or <code>AGENT_SERVICE_DURABILITY=restate</code>), browser turns run through Restate ingress with a handler-scoped effect controller; board state stays app-owned. Durability defaults to <code>local</code> otherwise.</p></article>
       </div>
       <pre data-lang="console"><code>OPENROUTER_API_KEY=... cargo run -p agent-service
@@ -62,6 +62,7 @@
       <div class="module-grid">
         <article class="panel"><h3>Background work</h3><p>The model starts named Lashlang <code>process</code>es and spawns subagents; the right rail polls the process registry for live runs.</p></article>
         <article class="panel"><h3>Trigger buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences that start processes for matching trigger registrations.</p></article>
+        <article class="panel"><h3>Session replay stream</h3><p>The browser's <code>/api/events</code> stream merges host product rows with Lash session observation rows; reconnect passes the latest cursor and gap recovery reloads <code>/api/state</code>.</p></article>
         <article class="panel"><h3>Restate control</h3><p>User turns, queued refreshes, trigger deliveries, cron jobs, and session deletion submit through Restate ingress; the stop button cancels the tracked invocation through Restate Admin.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel reads <code>TraceLashlangGraphStore</code>, a trace-derived view of foreground blocks, durable runs, and child links.</p></article>
       </div>

@@ -164,6 +164,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
     let activeChat = null;
     let settings = { default_model:'anthropic/claude-sonnet-4.6', default_model_variant:'high', model_variants:['low','medium','high'] };
     let streaming = null;
+    let replayCursor = null;
     let reasoning = null;
     let pendingCodeBlock = null;
     let pendingTools = [];
@@ -574,7 +575,8 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
           if (!line.trim()) continue;
           const item = JSON.parse(line);
           if (item.type === 'message') appendMessage(item.message);
-          if (item.type === 'event') handleTurnEvent(item.event);
+          if (item.type === 'replay_cursor') replayCursor = item.cursor;
+          if (item.type === 'replay_gap') replayCursor = item.gap?.latest_cursor ?? replayCursor;
           if (item.type === 'observation') handleObservation(item.event);
           if (item.type === 'error') alert(item.message);
           messagesEl.scrollTop = messagesEl.scrollHeight;

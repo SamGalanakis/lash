@@ -10,16 +10,34 @@ async fn app_state(State(state): State<AppState>) -> Json<StateSnapshot> {
     Json(StateSnapshot {
         settings: state.settings(),
         messages: state.messages_snapshot(),
-        timeline: state.timeline_snapshot(),
     })
 }
 
-async fn session_events(State(state): State<AppState>) -> Response {
-    let mut events = state.event_tx.subscribe();
+async fn session_events(
+    State(state): State<AppState>,
+    Query(query): Query<EventsQuery>,
+) -> Result<Response, AppError> {
+    let session = state
+        .core
+        .session(state.current_session_id())
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    let observable = session.observe();
+    let cursor = match query.cursor.as_deref().filter(|cursor| !cursor.trim().is_empty()) {
+        Some(cursor) => serde_json::from_value::<SessionCursor>(json!(cursor))
+            .map_err(|err| AppError::bad_request(format!("invalid session cursor: {err}")))?,
+        None => observable.current_observation().cursor,
+    };
+    let mut product_events = state.event_tx.subscribe();
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
+    let observation_tx = tx.clone();
+    tokio::spawn(async move {
+        forward_session_observations(session, cursor, observation_tx).await;
+    });
     tokio::spawn(async move {
         loop {
-            match events.recv().await {
+            match product_events.recv().await {
                 Ok(item) => {
                     if tx.send(item).await.is_err() {
                         break;
@@ -36,7 +54,7 @@ async fn session_events(State(state): State<AppState>) -> Response {
             }
         }
     });
-    ndjson_response(rx)
+    Ok(ndjson_response(rx))
 }
 
 async fn send_turn(
@@ -314,13 +332,11 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
         .await
         .map_err(AppError::internal)?;
     state.messages.lock().expect("messages lock").clear();
-    state.timeline.lock().expect("timeline lock").clear();
     state.lashlang_execution.clear();
     state.mail_world.clear();
     Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages: Vec::new(),
-        timeline: Vec::new(),
     }))
 }
 
@@ -393,13 +409,66 @@ fn ndjson_response(rx: mpsc::Receiver<StreamItem>) -> Response {
         .expect("valid streaming response")
 }
 
+async fn forward_session_observations(
+    session: lash::LashSession,
+    cursor: SessionCursor,
+    tx: mpsc::Sender<StreamItem>,
+) {
+    if tx
+        .send(StreamItem::ReplayCursor {
+            cursor: cursor.to_string(),
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut sequence = 0_u64;
+    let mut stream = session.observe().subscribe_and_recover(cursor);
+    while let Some(item) = stream.next().await {
+        let event = match item {
+            Ok(SessionObservationStreamItem::Event(event)) => event,
+            Ok(SessionObservationStreamItem::Gap { gap, .. }) => {
+                if tx
+                    .send(StreamItem::ReplayGap {
+                        gap: Box::new(gap.into()),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            Err(err) => {
+                let _ = tx
+                    .send(StreamItem::Error {
+                        message: err.to_string(),
+                    })
+                    .await;
+                break;
+            }
+        };
+        let remote = RemoteSessionObservationEvent::from_core(sequence, event);
+        sequence = sequence.saturating_add(1);
+        if tx
+            .send(StreamItem::Observation {
+                event: Box::new(remote),
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 #[derive(Default)]
 struct TurnStreamState {
     assistant_prose: String,
 }
 
 struct ChannelTurnEvents {
-    state: AppState,
     turn_state: Arc<Mutex<TurnStreamState>>,
 }
 
@@ -413,7 +482,6 @@ impl TurnActivitySink for ChannelTurnEvents {
                 .assistant_prose
                 .push_str(text);
         }
-        self.state.publish(StreamItem::event(activity));
     }
 }
 

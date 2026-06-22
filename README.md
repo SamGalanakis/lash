@@ -69,7 +69,14 @@ Full walkthrough in the [quickstart](https://lash.run/quickstart.html); the comp
 
 ## Examples
 
-Two runnable apps under `examples/` drive the facade end-to-end — full hosts with a browser UI, real persistence, and optional durable execution. The docs walk through both at <https://lash.run/examples.html>.
+Two runnable apps under `examples/` drive the facade end-to-end: full hosts with
+a browser UI, real persistence, remote DTO streams, and optional durable
+execution. Start with `agent-service` for the smallest production-shaped browser
+embedding: app-owned product state, a Lash session per chat, and session
+observation live replay for reconnect. Move to `agent-workbench` when you want
+the advanced Restate host with durable processes, triggers, cron, and the same
+cursor-based browser stream. The docs walk through both at
+<https://lash.run/examples.html>.
 
 ```bash
 # SQLite-backed chat app: RLM, app-owned tools, streaming, optional Restate turns

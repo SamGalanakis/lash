@@ -96,6 +96,17 @@ trace-derived observation store for foreground blocks, durable process runs,
 and child execution links; command operations still go through the session's
 `SessionProcessAdmin` facade.
 
+The browser stream is deliberately split the same way a production host would
+split it: product rows such as user messages, assistant messages, trigger
+notes, errors, and `done` come from the workbench app stream, while Lash turn
+activity comes from `session.observe().current_observation().cursor` plus
+`ObservableSession::subscribe_and_recover(...)`. `/api/events` accepts the
+last cursor as `?cursor=...`, emits `replay_cursor`, forwards
+`RemoteSessionObservationEvent` rows as `observation`, and reports missed
+bounded-replay windows as `replay_gap` with `RemoteLiveReplayGap`. Resetting the
+workbench rotates the session id and restarts the browser stream from a fresh
+cursor.
+
 The **accounts** tab is a mocked multi-account inbox world you control live.
 Type a name (for example `Work`) and press **add account** to connect one;
 **delete** disconnects it. Each account card has a compose form that delivers a

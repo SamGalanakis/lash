@@ -2,6 +2,7 @@
 mod tests {
     use super::*;
     use lash::persistence::RuntimePersistence;
+    use lash::rlm::RlmTurnBuilderExt;
     use lash::tracing::{
         TraceBranchSelection, TraceLashlangChildExecution, TraceLashlangEdgeSelection,
         TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangGraphChildLink,
@@ -393,7 +394,6 @@ mod tests {
             process_observer,
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
-            timeline: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
                 model_variant: None,
@@ -413,8 +413,191 @@ mod tests {
 
         state.publish(StreamItem::Done);
 
-        assert!(state.timeline_snapshot().is_empty());
         assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn event_stream_forwards_session_observation_live_replay() {
+        run_async_test_on_stack_budget("workbench-observation-stream-test", || {
+            event_stream_forwards_session_observation_live_replay_inner()
+        });
+    }
+
+    async fn event_stream_forwards_session_observation_live_replay_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-observation-stream-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-observation-stream-test")
+            .complete(|_request| async {
+                Ok(text_response(
+                    r#"<lashlang>
+submit "observed through live replay"
+</lashlang>"#,
+                ))
+            })
+            .build()
+            .into_handle();
+        let store_factory: Arc<dyn lash::persistence::SessionStoreFactory> = Arc::new(
+            lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("lash-sessions")),
+        );
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(
+                lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            )
+            .provider(provider)
+            .model(model.clone())
+            .store_factory(Arc::clone(&store_factory))
+            .build()
+            .expect("build core");
+        let session = core
+            .session("workbench-observation-stream")
+            .open()
+            .await
+            .expect("open session");
+        let cursor = session.observe().current_observation().cursor;
+        let (tx, mut rx) = mpsc::channel(64);
+        let forwarder = tokio::spawn(forward_session_observations(session.clone(), cursor, tx));
+
+        session
+            .turn(lash::TurnInput::text("exercise observation stream"))
+            .model(model)
+            .require_submit()
+            .expect("require submit")
+            .run()
+            .await
+            .expect("turn");
+
+        let mut saw_cursor = false;
+        let mut saw_submitted_value_observation = false;
+        for _ in 0..64 {
+            let item = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timed out waiting for stream item")
+                .expect("stream item");
+            match item {
+                StreamItem::ReplayCursor { cursor } => {
+                    assert!(!cursor.is_empty(), "cursor should be opaque but non-empty");
+                    saw_cursor = true;
+                }
+                StreamItem::Observation { event } => {
+                    let value = serde_json::to_value(&event).expect("remote event json");
+                    if value.pointer("/type").and_then(Value::as_str) == Some("turn_activity")
+                        && value.pointer("/activity/type").and_then(Value::as_str)
+                            == Some("submitted_value")
+                    {
+                        saw_submitted_value_observation = true;
+                    }
+                }
+                StreamItem::ReplayGap { .. } | StreamItem::Message { .. } | StreamItem::Error { .. } | StreamItem::Done => {}
+            }
+            if saw_cursor && saw_submitted_value_observation {
+                break;
+            }
+        }
+        forwarder.abort();
+
+        assert!(saw_cursor, "stream should expose a replay cursor");
+        assert!(
+            saw_submitted_value_observation,
+            "stream should expose turn activity through session observation"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn event_stream_forwards_session_observation_replay_gap() {
+        run_async_test_on_stack_budget("workbench-observation-gap-test", || {
+            event_stream_forwards_session_observation_replay_gap_inner()
+        });
+    }
+
+    async fn event_stream_forwards_session_observation_replay_gap_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-observation-gap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-observation-gap-test")
+            .complete(|_request| async {
+                Ok(text_response(
+                    r#"<lashlang>
+submit "gap source"
+</lashlang>"#,
+                ))
+            })
+            .build()
+            .into_handle();
+        let store_factory: Arc<dyn lash::persistence::SessionStoreFactory> = Arc::new(
+            lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("lash-sessions")),
+        );
+        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
+            .rlm_protocol_config(
+                lash::rlm::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            )
+            .provider(provider)
+            .model(model.clone())
+            .store_factory(Arc::clone(&store_factory))
+            .live_replay_store(Arc::new(lash_core::InMemoryLiveReplayStore::new(
+                lash_core::InMemoryLiveReplayStoreConfig {
+                    max_events_per_session: 1,
+                    ..lash_core::InMemoryLiveReplayStoreConfig::default()
+                },
+            )))
+            .build()
+            .expect("build core");
+        let session = core
+            .session("workbench-observation-gap")
+            .open()
+            .await
+            .expect("open session");
+        let cursor = session.observe().current_observation().cursor;
+        let requested_cursor = cursor.to_string();
+
+        session
+            .turn(lash::TurnInput::text("trim cursor"))
+            .model(model)
+            .require_submit()
+            .expect("require submit")
+            .run()
+            .await
+            .expect("turn");
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let forwarder = tokio::spawn(forward_session_observations(session.clone(), cursor, tx));
+        let mut saw_gap = false;
+        for _ in 0..8 {
+            let item = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timed out waiting for stream item")
+                .expect("stream item");
+            if let StreamItem::ReplayGap { gap } = item {
+                assert_eq!(gap.requested_cursor, requested_cursor);
+                assert!(
+                    !gap.latest_cursor.is_empty(),
+                    "gap should include the latest recoverable cursor"
+                );
+                assert_eq!(
+                    gap.reason,
+                    lash_remote_protocol::RemoteLiveReplayGapReason::Trimmed
+                );
+                saw_gap = true;
+                break;
+            }
+        }
+        forwarder.abort();
+
+        assert!(saw_gap, "trimmed cursor should emit replay_gap");
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -469,7 +652,6 @@ mod tests {
             process_observer,
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
-            timeline: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
                 model_variant: None,
@@ -722,7 +904,6 @@ submit initial
             process_observer,
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
-            timeline: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
                 model_variant: None,
@@ -941,7 +1122,6 @@ submit initial
             process_observer,
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
-            timeline: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
                 model_variant: None,
@@ -1077,7 +1257,6 @@ submit initial
             process_observer,
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
-            timeline: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
                 model_variant: None,
@@ -1272,13 +1451,6 @@ submit initial
                 text: "before reset".to_string(),
                 at: "2026-05-27T00:00:00Z".to_string(),
             }])),
-            timeline: Arc::new(Mutex::new(vec![StreamItem::event(
-                TurnActivity::independent(TurnEvent::CodeBlockStarted {
-                    language: "lashlang".to_string(),
-                    code: "finish true".to_string(),
-                    graph_key: None,
-                }),
-            )])),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
                 model_variant: None,
@@ -1348,9 +1520,7 @@ submit initial
 
         assert_ne!(snapshot.settings.session_id, old_session_id);
         assert!(snapshot.messages.is_empty());
-        assert!(snapshot.timeline.is_empty());
         assert!(state.messages_snapshot().is_empty());
-        assert!(state.timeline_snapshot().is_empty());
         assert!(
             state.mail_world.account_summaries().is_empty(),
             "reset must clear mail accounts along with the chat session"
@@ -1711,7 +1881,6 @@ submit initial
             process_observer,
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
-            timeline: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "mock-model".to_string(),
                 model_variant: Some("high".to_string()),

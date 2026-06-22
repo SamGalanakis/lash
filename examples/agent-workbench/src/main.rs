@@ -14,13 +14,15 @@ use std::time::Duration;
 use anyhow::{Context, Result as AnyhowResult, anyhow};
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
+use futures_util::StreamExt;
+use lash::observe::{SessionCursor, SessionObservationStreamItem};
 use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
@@ -35,10 +37,10 @@ use lash::{
     },
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+use lash_remote_protocol::{RemoteLiveReplayGap, RemoteSessionObservationEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 const SESSION_ID_PREFIX: &str = "workbench";

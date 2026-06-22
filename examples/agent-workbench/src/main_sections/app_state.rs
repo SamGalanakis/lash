@@ -29,10 +29,6 @@ impl AppState {
         self.messages.lock().expect("messages lock").clone()
     }
 
-    fn timeline_snapshot(&self) -> Vec<StreamItem> {
-        self.timeline.lock().expect("timeline lock").clone()
-    }
-
     fn trace(&self, name: &str, payload: Value) {
         emit_workbench_trace(
             &self.trace_sink,
@@ -43,12 +39,6 @@ impl AppState {
     }
 
     fn publish(&self, item: StreamItem) {
-        if !matches!(item, StreamItem::Done) {
-            self.timeline
-                .lock()
-                .expect("timeline lock")
-                .push(item.clone());
-        }
         let _ = self.event_tx.send(item);
     }
 

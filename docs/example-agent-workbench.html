@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
   <section class="opener">
     <h1 class="opener__title">agent<span class="slash">/</span>workbench</h1>
-    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes trigger button presses, and registers Restate-backed cron triggers. Restate is required. The bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
+    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes trigger button presses, registers Restate-backed cron triggers, and keeps the browser connected through app product rows plus Lash session observation live replay. Restate is required. The bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
   </section>
 
   <main class="body" id="content">
@@ -59,8 +59,34 @@
         <article class="panel"><h3>Trigger buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences; a registered trigger wakes a process with the validated event payload.</p></article>
         <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang host environment as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
         <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
+        <article class="panel"><h3>Browser reconnect</h3><p><code>/api/events</code> merges workbench product rows with <code>RemoteSessionObservationEvent</code> rows from <code>subscribe_and_recover</code>; the browser persists the latest cursor and reloads <code>/api/state</code> on <code>replay_gap</code>.</p></article>
         <article class="panel"><h3>Restate turn control</h3><p>User turns, queued catalog refreshes, button triggers, inbox deliveries, session deletion, and cron jobs submit through Restate ingress. The host stores returned invocation ids, and <code>stop turn</code> cancels the active invocation through Restate Admin.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>SessionProcessAdmin</code> facade.</p></article>
+      </div>
+    </div>
+
+    <div class="section" id="browser-stream-and-reconnect">
+      <div class="section-header">
+        <h2>Browser Stream And Reconnect</h2>
+        <p>The workbench keeps product state and Lash observation state separate on purpose. Product state is the durable app projection; live replay is the semantic session stream that lets a browser reconnect without making turn-local streaming a public resume protocol.</p>
+      </div>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">snapshot</div>
+          <div class="listing__body"><p><code>/api/state</code> returns the workbench's product snapshot: settings and messages. It does not expose a raw session timeline.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">stream start</div>
+          <div class="listing__body"><p><code>/api/events</code> accepts an optional <code>?cursor=...</code>. Without one, the route captures <code>session.observe().current_observation().cursor</code>, sends it as <code>replay_cursor</code>, and then subscribes. With one, it deserializes <code>SessionCursor</code> and resumes from that point.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">stream rows</div>
+          <div class="listing__body"><p>The response merges host-defined rows such as <code>message</code>, <code>error</code>, and <code>done</code> with Lash rows: <code>observation</code> carries a <code>RemoteSessionObservationEvent</code>, while <code>replay_gap</code> carries <code>RemoteLiveReplayGap</code>.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">gap recovery</div>
+          <div class="listing__body"><p>On <code>replay_gap</code>, the browser stores <code>gap.latest_cursor</code>, reloads <code>/api/state</code> for the durable product projection, and reconnects from the latest cursor. Reset rotates the session id and starts a fresh stream.</p></div>
+        </div>
       </div>
     </div>
 
