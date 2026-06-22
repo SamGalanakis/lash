@@ -2501,6 +2501,7 @@ dependencies = [
  "crossterm",
  "dhat",
  "dirs 6.0.0",
+ "futures-util",
  "image",
  "lash-autoresearch",
  "lash-core",

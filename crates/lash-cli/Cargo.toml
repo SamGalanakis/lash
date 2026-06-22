@@ -51,6 +51,7 @@ lash-autoresearch = { workspace = true }
 lash-export = { workspace = true }
 lash-file-index = { workspace = true }
 crossterm = "0.28"
+futures-util = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive", "env"] }
 anyhow = { workspace = true }

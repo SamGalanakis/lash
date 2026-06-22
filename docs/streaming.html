@@ -124,6 +124,10 @@ async fn reconnect_session(
       <strong>Contract</strong>
       <p>Store the latest session cursor after every folded event. Treat it as an opaque token scoped to one session; do not parse it, compare it across sessions, or use <code>RemoteTurnActivity.sequence</code> as a resume cursor.</p>
     </aside>
+    <aside class="contract">
+      <strong>Advanced Primitives</strong>
+      <p><code>resume_from_cursor</code>, <code>subscribe_from_cursor</code>, and <code>SessionObservationSubscription</code> are lower-level building blocks. Use them when a poll-based host wants one replay batch or when a custom transport needs to own the resubscribe policy. Browser, CLI, worker, and HTTP stream integrations should start with <code>subscribe_and_recover</code>.</p>
+    </aside>
   </div>
 
   <div class="section" id="frontend-folding">

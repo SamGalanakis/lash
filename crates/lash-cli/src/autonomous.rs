@@ -1,8 +1,9 @@
 use std::io::{self, BufRead, Write};
 
+use futures_util::StreamExt as _;
 use lash::{
     LashSession, TurnActivity, TurnEvent, TurnInput,
-    observe::{SessionObservationEventPayload, SessionObservationSubscription},
+    observe::{SessionObservationEventPayload, SessionObservationStreamItem},
     usage::{SessionUsageReport, TokenLedgerEntry, diff_usage_reports},
 };
 use lash_core::TurnOutcome;
@@ -288,33 +289,7 @@ async fn run_autonomous_turn(
 ) -> anyhow::Result<AutonomousTurnOutcome> {
     let observable = session.observe();
     let cursor = observable.current_observation().cursor;
-    let mut observation = match observable.subscribe_from_cursor(&cursor) {
-        Ok(SessionObservationSubscription::Subscribed(subscription)) => Some(subscription),
-        Ok(SessionObservationSubscription::Gap { observation, gap }) => {
-            eprintln!(
-                "warning: live session observation skipped buffered events ({:?}); continuing from current snapshot",
-                gap.reason
-            );
-            match observable.subscribe_from_cursor(&observation.cursor) {
-                Ok(SessionObservationSubscription::Subscribed(subscription)) => Some(subscription),
-                Ok(SessionObservationSubscription::Gap { gap, .. }) => {
-                    eprintln!(
-                        "warning: live session observation unavailable after gap ({:?})",
-                        gap.reason
-                    );
-                    None
-                }
-                Err(err) => {
-                    eprintln!("warning: live session observation failed: {err}");
-                    None
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!("warning: live session observation failed: {err}");
-            None
-        }
-    };
+    let mut observation = Some(observable.subscribe_and_recover(cursor));
     let (cancel, return_rx) = spawn_session_turn(session, turn_input, stream_id);
     #[cfg(unix)]
     {
@@ -337,13 +312,10 @@ async fn run_autonomous_turn(
         }
         tokio::select! {
             next = async {
-                match observation.as_mut() {
-                    Some(subscription) => Some(subscription.next_event().await),
-                    None => None,
-                }
+                observation.as_mut()?.next().await
             }, if !observation_finished => {
                 match next {
-                    Some(Ok(event)) => match event.payload {
+                    Some(Ok(SessionObservationStreamItem::Event(event))) => match event.payload {
                         SessionObservationEventPayload::TurnActivity(activity) => {
                             match output.handle(activity) {
                                 Ok(()) => {}
@@ -360,6 +332,12 @@ async fn run_autonomous_turn(
                         | SessionObservationEventPayload::ProcessChanged { .. }
                         | SessionObservationEventPayload::AgentFrameSwitched { .. } => {}
                     },
+                    Some(Ok(SessionObservationStreamItem::Gap { gap, .. })) => {
+                        eprintln!(
+                            "warning: live session observation skipped buffered events ({:?}); continuing from current snapshot",
+                            gap.reason
+                        );
+                    }
                     Some(Err(err)) => {
                         eprintln!("warning: live session observation ended early: {err}");
                         observation_finished = true;
