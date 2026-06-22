@@ -55,6 +55,17 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let mut record = load_process_tx(&mut tx, process_id)
             .await?
             .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        if let Some(existing) = &record.external_ref {
+            if existing == &external_ref {
+                tx.commit().await.map_err(plugin_sqlx_error)?;
+                return Ok(record);
+            }
+            return Err(process_external_ref_conflict(
+                process_id,
+                existing,
+                &external_ref,
+            ));
+        }
         record.external_ref = Some(external_ref);
         record.updated_at_ms = current_epoch_ms();
         save_process_tx(&mut tx, &record).await?;
@@ -783,4 +794,14 @@ impl ProcessRegistry for PostgresProcessRegistry {
         .map_err(plugin_sqlx_error)?;
         Ok(())
     }
+}
+
+fn process_external_ref_conflict(
+    process_id: &str,
+    existing: &ProcessExternalRef,
+    new: &ProcessExternalRef,
+) -> PluginError {
+    PluginError::Session(format!(
+        "process `{process_id}` external ref conflict: existing {existing:?}, new {new:?}"
+    ))
 }

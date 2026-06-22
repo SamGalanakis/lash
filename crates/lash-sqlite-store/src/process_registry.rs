@@ -264,7 +264,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         external_ref: ProcessExternalRef,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
-        let record = self
+        let (record, changed) = self
             .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -274,15 +274,27 @@ impl ProcessRegistry for SqliteProcessRegistry {
                                 "unknown process `{process_id}`"
                             ))
                         })?;
+                    if let Some(existing) = &record.external_ref {
+                        if existing == &external_ref {
+                            return Ok((record, false));
+                        }
+                        return Err(process_external_ref_conflict(
+                            &process_id,
+                            existing,
+                            &external_ref,
+                        ));
+                    }
                     record.external_ref = Some(external_ref);
                     record.updated_at_ms = current_epoch_ms();
                     Self::save_process_conn(tx, &record)?;
-                    Ok(record)
+                    Ok((record, true))
                 })()))
             })
             .await
             .map_err(process_sqlite_error)??;
-        self.notify.notify_waiters();
+        if changed {
+            self.notify.notify_waiters();
+        }
         Ok(record)
     }
 
@@ -1258,5 +1270,15 @@ fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> lash_core
 fn process_lease_expired(process_id: &str) -> lash_core::PluginError {
     lash_core::PluginError::Session(format!(
         "process lease for `{process_id}` is missing or expired"
+    ))
+}
+
+fn process_external_ref_conflict(
+    process_id: &str,
+    existing: &ProcessExternalRef,
+    new: &ProcessExternalRef,
+) -> lash_core::PluginError {
+    lash_core::PluginError::Session(format!(
+        "process `{process_id}` external ref conflict: existing {existing:?}, new {new:?}"
     ))
 }

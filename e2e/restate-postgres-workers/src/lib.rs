@@ -33,6 +33,7 @@ pub const EXPECTED_FINAL_TEXT: &str = "kitchen-sink-complete";
 pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";
 pub const EXPECTED_ASYNC_TEXT: &str = "async-completion-complete";
 pub const EXPECTED_DURABLE_INPUT_TEXT: &str = "durable-input-complete";
+pub const EXPECTED_PARENT_DURABLE_INPUT_TEXT: &str = "parent-durable-input-complete";
 pub const EXPECTED_TOOL_BATCH_TEXT: &str = "tool-batch-complete";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
@@ -77,6 +78,7 @@ pub enum TurnScenario {
     SignalProcess,
     AsyncCompletion,
     DurableInputRequest,
+    ParentDurableInputAfterChild,
     ToolBatch,
 }
 

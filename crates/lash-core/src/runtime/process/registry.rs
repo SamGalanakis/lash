@@ -23,6 +23,12 @@ pub trait ProcessRegistry: Send + Sync {
         registration: ProcessRegistration,
     ) -> Result<ProcessRecord, PluginError>;
 
+    /// Attach a durable backend reference to a registered process.
+    ///
+    /// Implementations must reject unknown process ids. The first assignment
+    /// stores the reference. Repeating the exact same assignment is an
+    /// idempotent no-op that returns the existing record unchanged. Assigning a
+    /// different reference after one has been stored is a registry model error.
     async fn set_external_ref(
         &self,
         process_id: &str,

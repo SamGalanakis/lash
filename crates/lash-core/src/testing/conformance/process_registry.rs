@@ -166,6 +166,39 @@ async fn external_refs_and_handle_grant_membership_round_trip(registry: Arc<dyn 
         .await
         .expect("set external ref");
     assert_eq!(updated.external_ref, Some(external_ref.clone()));
+    let repeated = registry
+        .set_external_ref("proc-external-ref", external_ref.clone())
+        .await
+        .expect("repeat identical external ref");
+    assert_eq!(
+        serde_json::to_value(&repeated).expect("serialize repeated process record"),
+        serde_json::to_value(&updated).expect("serialize updated process record"),
+        "repeating the same external ref must return the existing record unchanged"
+    );
+    let conflicting_external_ref = ProcessExternalRef {
+        backend: "worker".to_string(),
+        id: "job-456".to_string(),
+        metadata: Some(serde_json::json!({ "queue": "critical" })),
+    };
+    assert!(
+        registry
+            .set_external_ref("proc-external-ref", conflicting_external_ref)
+            .await
+            .is_err(),
+        "changing an already-set external ref must fail"
+    );
+    let metadata_conflicting_external_ref = ProcessExternalRef {
+        backend: "worker".to_string(),
+        id: "job-123".to_string(),
+        metadata: Some(serde_json::json!({ "queue": "standard" })),
+    };
+    assert!(
+        registry
+            .set_external_ref("proc-external-ref", metadata_conflicting_external_ref)
+            .await
+            .is_err(),
+        "changing only external ref metadata must fail"
+    );
     assert_eq!(
         registry
             .get_process("proc-external-ref")
@@ -728,6 +761,16 @@ async fn process_registry_survives_reopen(factory: ReopenableProcessRegistry) {
         )
         .await
         .expect("register");
+    let external_ref = ProcessExternalRef {
+        backend: "worker".to_string(),
+        id: "reopen-job-123".to_string(),
+        metadata: Some(serde_json::json!({ "queue": "reopen" })),
+    };
+    let updated = factory
+        .open
+        .set_external_ref("proc-reopen", external_ref.clone())
+        .await
+        .expect("set external ref before reopen");
     factory
         .open
         .grant_handle(
@@ -757,6 +800,41 @@ async fn process_registry_survives_reopen(factory: ReopenableProcessRegistry) {
         .await
         .expect("process exists after reopen");
     assert_eq!(reopened_record.id, "proc-reopen");
+    assert_eq!(
+        reopened_record.external_ref,
+        Some(external_ref.clone()),
+        "external ref must survive durable reopen"
+    );
+    let repeated = factory
+        .reopen
+        .set_external_ref("proc-reopen", external_ref.clone())
+        .await
+        .expect("repeat external ref after reopen");
+    assert_eq!(
+        serde_json::to_value(&repeated).expect("serialize repeated reopened process record"),
+        serde_json::to_value(&reopened_record).expect("serialize reopened process record"),
+        "repeating the same external ref after reopen must not mutate the process record"
+    );
+    assert_eq!(
+        serde_json::to_value(&updated.external_ref).expect("serialize original external ref"),
+        serde_json::to_value(&repeated.external_ref).expect("serialize repeated external ref"),
+        "the reopened repeat must preserve the original external ref"
+    );
+    assert!(
+        factory
+            .reopen
+            .set_external_ref(
+                "proc-reopen",
+                ProcessExternalRef {
+                    backend: "worker".to_string(),
+                    id: "reopen-job-456".to_string(),
+                    metadata: Some(serde_json::json!({ "queue": "reopen" })),
+                },
+            )
+            .await
+            .is_err(),
+        "conflicting external ref assignment after reopen must fail"
+    );
     let reopened_events = factory
         .reopen
         .events_after("proc-reopen", 0)

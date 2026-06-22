@@ -126,6 +126,16 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                 "unknown process `{process_id}`"
             )));
         };
+        if let Some(existing) = &record.record.external_ref {
+            if existing == &external_ref {
+                return Ok(record.record.clone());
+            }
+            return Err(process_external_ref_conflict(
+                process_id,
+                existing,
+                &external_ref,
+            ));
+        }
         record.record.external_ref = Some(external_ref);
         record.record.updated_at_ms = current_epoch_ms();
         Ok(record.record.clone())
@@ -696,5 +706,15 @@ fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> PluginErr
 fn process_lease_expired(process_id: &str) -> PluginError {
     PluginError::Session(format!(
         "process lease for `{process_id}` is missing or expired"
+    ))
+}
+
+fn process_external_ref_conflict(
+    process_id: &str,
+    existing: &ProcessExternalRef,
+    new: &ProcessExternalRef,
+) -> PluginError {
+    PluginError::Session(format!(
+        "process `{process_id}` external ref conflict: existing {existing:?}, new {new:?}"
     ))
 }

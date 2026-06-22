@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
     EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
-    EXPECTED_TOOL_BATCH_TEXT, EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call,
-    required_env,
+    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_TOOL_BATCH_TEXT, EXPECTED_WAKE_TEXT,
+    ensure_e2e_schema, env, record_provider_call, required_env,
 };
 
 #[derive(Clone)]
@@ -69,6 +69,10 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
         MockScenario::DurableInputRequest => (
             "durable_input_request",
             durable_input_request_script(&workflow_id),
+        ),
+        MockScenario::ParentDurableInputAfterChild => (
+            "parent_durable_input_after_child",
+            parent_durable_input_after_child_script(&workflow_id),
         ),
         MockScenario::ToolBatch => ("tool_batch", tool_batch_script(&workflow_id, fail_once)),
         MockScenario::KitchenSink => ("kitchen_sink", kitchen_sink_script(&workflow_id, fail_once)),
@@ -170,6 +174,7 @@ enum MockScenario {
     SignalSuspend,
     AsyncCompletion,
     DurableInputRequest,
+    ParentDurableInputAfterChild,
     ToolBatch,
 }
 
@@ -179,6 +184,10 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
         (
             "durable_input_request=true",
             MockScenario::DurableInputRequest,
+        ),
+        (
+            "parent_durable_input_after_child=true",
+            MockScenario::ParentDurableInputAfterChild,
         ),
         ("async_completion=true", MockScenario::AsyncCompletion),
         ("trigger_setup=true", MockScenario::TriggerSetup),
@@ -397,6 +406,41 @@ submit {{
     )
 }
 
+fn parent_durable_input_after_child_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Exercise parent replay after a completed child process and a durable input suspension.
+
+<lashlang>
+process immediate_child(value: str) {{
+  finish {{ child: value }}
+}}
+
+process parent(tools: Tools, workflow_id: str) {{
+  child_handle = start immediate_child(value: "ready")
+  child = (await child_handle)?
+  input = await tools.durable_input_request({{
+    workflow_id: workflow_id,
+    question: "approve parent durable input?"
+  }})?
+  finish {{
+    child: child.child,
+    durable: input
+  }}
+}}
+
+handle = start parent(tools: tools, workflow_id: "{workflow_id}")
+result = (await handle)?
+submit {{
+  workflow_id: "{workflow_id}",
+  parent: result,
+  final: "{EXPECTED_PARENT_DURABLE_INPUT_TEXT}"
+}}
+</lashlang>
+"#
+    )
+}
+
 fn tool_batch_script(workflow_id: &str, fail_once: bool) -> String {
     let crash = if fail_once {
         format!(
@@ -463,6 +507,16 @@ mod tests {
     }
 
     #[test]
+    fn scenario_marker_detects_parent_durable_input_after_child() {
+        let text = "workflow_id=e2e-parent-durable parent_durable_input_after_child=true";
+
+        assert_eq!(
+            latest_scenario_marker(text),
+            Some(MockScenario::ParentDurableInputAfterChild)
+        );
+    }
+
+    #[test]
     fn mock_scripts_use_paired_lashlang_tags() {
         let scripts = [
             kitchen_sink_script("e2e-test", false),
@@ -472,6 +526,7 @@ mod tests {
             queued_wake_script(),
             async_completion_script("e2e-test"),
             durable_input_request_script("e2e-test"),
+            parent_durable_input_after_child_script("e2e-test"),
             tool_batch_script("e2e-test", false),
             tool_batch_script("e2e-test", true),
         ];
