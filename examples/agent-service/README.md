@@ -10,6 +10,12 @@ Run it:
 OPENROUTER_API_KEY=... cargo run -p agent-service
 ```
 
+Validate the example build and unit tests:
+
+```bash
+cargo test -p agent-service --all-targets
+```
+
 Optional environment:
 
 ```bash

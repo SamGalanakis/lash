@@ -1125,7 +1125,7 @@ mod tests {
 
     #[test]
     fn project_tool_catalog_projects_all_members_with_catalog_metadata() {
-        fn dummy_tool(name: &str) -> crate::ToolDefinition {
+        fn member_fixture(name: &str) -> crate::ToolDefinition {
             crate::ToolDefinition::raw(
                 format!("tool:{name}"),
                 name,
@@ -1136,10 +1136,10 @@ mod tests {
         }
         let catalog = project_tool_catalog([
             crate::ToolCatalogEntry {
-                manifest: dummy_tool("read_file").manifest(),
+                manifest: member_fixture("read_file").manifest(),
             },
             crate::ToolCatalogEntry {
-                manifest: dummy_tool("search_tools").manifest(),
+                manifest: member_fixture("search_tools").manifest(),
             },
         ]);
         assert_eq!(catalog.len(), 2);
@@ -1158,7 +1158,7 @@ mod tests {
 
     #[test]
     fn project_tool_catalog_preserves_dynamic_output_contracts() {
-        fn dummy_tool(name: &str) -> crate::ToolDefinition {
+        fn member_fixture(name: &str) -> crate::ToolDefinition {
             crate::ToolDefinition::raw(
                 format!("tool:{name}"),
                 name,
@@ -1168,7 +1168,7 @@ mod tests {
             )
         }
         let catalog = project_tool_catalog([crate::ToolCatalogEntry {
-            manifest: dummy_tool("llm_query")
+            manifest: member_fixture("llm_query")
                 .with_output_from_input_schema(
                     "output",
                     Some(serde_json::json!({ "type": "string" })),

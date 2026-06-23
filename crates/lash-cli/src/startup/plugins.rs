@@ -214,9 +214,9 @@ mod tests {
     };
     use lash_core::ToolRegistry;
 
-    struct DummyToolProvider;
+    struct CatalogFixtureProvider;
 
-    fn dummy_tool(name: &str) -> ToolDefinition {
+    fn fixture_tool(name: &str) -> ToolDefinition {
         ToolDefinition::raw(
             format!("tool:{name}"),
             name,
@@ -228,16 +228,16 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl ToolProvider for DummyToolProvider {
+    impl ToolProvider for CatalogFixtureProvider {
         fn tool_manifests(&self) -> Vec<ToolManifest> {
-            dummy_tools()
+            fixture_tools()
                 .into_iter()
                 .map(|tool| tool.manifest())
                 .collect()
         }
 
         fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-            dummy_tools()
+            fixture_tools()
                 .into_iter()
                 .find(|tool| tool.name() == name)
                 .map(|tool| std::sync::Arc::new(tool.contract()))
@@ -248,12 +248,12 @@ mod tests {
         }
     }
 
-    fn dummy_tools() -> Vec<ToolDefinition> {
+    fn fixture_tools() -> Vec<ToolDefinition> {
         vec![
-            dummy_tool("read_file"),
-            dummy_tool("ask"),
-            dummy_tool("plan_exit"),
-            dummy_tool("showcase"),
+            fixture_tool("read_file"),
+            fixture_tool("ask"),
+            fixture_tool("plan_exit"),
+            fixture_tool("showcase"),
         ]
     }
 
@@ -393,7 +393,8 @@ mod tests {
 
     #[test]
     fn autonomous_policy_disables_interactive_tools() {
-        let tool_registry = ToolRegistry::from_tool_provider(Arc::new(DummyToolProvider)).unwrap();
+        let tool_registry =
+            ToolRegistry::from_tool_provider(Arc::new(CatalogFixtureProvider)).unwrap();
 
         let mut snapshot = tool_registry.export_state();
         retain_autonomous_tools(&mut snapshot);

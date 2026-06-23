@@ -22,6 +22,12 @@ just agent-workbench-restart 3000
 just agent-workbench-down 3000
 ```
 
+Validate the example build and unit tests:
+
+```bash
+cargo test -p agent-workbench --all-targets
+```
+
 For the old attached process style, use `just agent-workbench-foreground 3000`.
 
 The entrypoint checks for Restate ingress/admin on the configured ports. If

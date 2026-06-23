@@ -209,6 +209,10 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
               <div class="listing__body"><p><code>ToolRegistry</code> resolves manifests and execution providers; <code>ToolCatalog</code> is the model-facing projection used by provider requests, host <code>search_tools</code>-style discovery, and Lashlang host surfaces. Membership changes advance the registry generation and refresh the session catalog. (lash ships no discovery tools itself; the <code>lash-cli</code> MCP-discovery example is the reference implementation.)</p></div>
             </div>
             <div class="listing__row">
+              <div class="listing__label">MCP discovery example</div>
+              <div class="listing__body"><p>The CLI reference path keeps large MCP tool sets non-resident in RLM mode: <code>search_tools</code> indexes resident members plus an explicit deferred MCP catalog, the prompt renders a catalogue-preview contribution for that deferred tail, and chosen Lashlang call paths execute only through a recorded <code>DeferredToolResolver</code> grant. Validate the full loop with <code>cargo test -p lash-cli cli_mcp_discovery_loop_discovers_previews_searches_resolves_and_executes --features test-provider -- --nocapture</code>.</p></div>
+            </div>
+            <div class="listing__row">
               <div class="listing__label">apply vs restore</div>
               <div class="listing__body"><p><code>apply_state</code> is a generation-checked edit for a live registry. <code>restore_state</code> adopts a persisted generation during cold resume or worker rebuild; missing sources remain as orphaned non-members (excluded from the catalog) until a matching source returns.</p></div>
             </div>

@@ -15,8 +15,10 @@ use super::service::tool_discovery_provider_with_catalog;
 /// [`StaticPluginFactory`], so it does not hand-roll the `SessionPlugin` +
 /// `register` ceremony. Alongside the `search_tools` tool, it advertises the
 /// deferred (non-resident) MCP tools to the model through a catalogue-preview
-/// prompt contribution — the recommended way to make a large MCP tool set
-/// discoverable under the flat catalog.
+/// prompt contribution. `with_catalog(...)` is the CLI/RLM path for a large MCP
+/// tail: `search_tools` indexes resident tools plus that explicit tail, while
+/// the prompt preview lists only the deferred catalog so resident members keep
+/// their full RLM docs.
 pub struct ToolDiscoveryPluginFactory {
     inner: StaticPluginFactory,
 }
@@ -37,10 +39,11 @@ impl ToolDiscoveryPluginFactory {
                 move |ctx: lash_core::plugin::PromptHookContext| {
                     let discovery_catalog = Arc::clone(&discovery_catalog);
                     Box::pin(async move {
-                        // The projected resident catalog ranges over members. When
-                        // a non-resident discovery catalog is supplied, preview that
-                        // indexed tail; otherwise preserve the default resident
-                        // discovery behavior.
+                        // The projected resident catalog ranges over members. The
+                        // explicit non-resident catalog is a preview-only tail;
+                        // when absent, the provider falls back to previewing the
+                        // resident catalog for local hosts that install the
+                        // reference plugin without MCP deferral.
                         let resident_catalog = ctx
                             .sessions
                             .shared_tool_catalog(&ctx.session_id)
