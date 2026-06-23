@@ -2,19 +2,29 @@
 //! message sequence the model sees each iteration.
 //!
 //! Contract:
-//! - **Message roles.** Each prior step is a chat message, not one packed
-//!   blob. User messages render as `User`; prior lashlang steps and protocol events
-//!   render as `Assistant` (see `borrowed_history_entry_llm_role`).
+//! - **History == emission.** A prior executed step renders as an `Assistant`
+//!   message holding the canonical cell `{prose}\n<lashlang>\n{code}\n</lashlang>`
+//!   (`render_lashlang_cell_text`), followed by a `User` message holding that
+//!   step's printed output, images, error, and final value. A plain user turn
+//!   renders its content verbatim as a `User` message. There is no
+//!   `--- history[N] ---` meta-format: what the model sees as history is exactly
+//!   the grammar it must emit, so a continuation lands in that grammar.
+//! - **Folding.** A step is stored as two consecutive entries — an assistant
+//!   prose `Message` then a `RlmTrajectoryEntry`. They fold into one assistant
+//!   message. `visit_turn_view` is a push visitor with no lookahead, so the
+//!   prose is buffered (`PendingProse`) and either folded into the next step or
+//!   flushed as a standalone assistant message (a prose-only finish).
 //! - **Cache fence.** The last history message is marked with a
 //!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
 //!   provider can reuse the stable history prefix across iterations. Only the
-//!   volatile `=== CURRENT ITERATION ===` tail — iteration number, turn
-//!   events, finalization, required-output schema, context budget — is appended
-//!   uncached by `append_current_iteration_message`.
-//! - **Re-fetch handle.** Outputs lossy-projected for the history prompt are
-//!   tagged with `full: history[N].output[M]`. That handle resolves: the
-//!   `history` projected binding carries the full untruncated value, so the
-//!   model can recover it by re-printing the reference. Proven by
+//!   volatile `=== CURRENT ITERATION ===` tail — iteration number, turn events,
+//!   finalization, required-output schema, context budget — is appended uncached
+//!   by `append_current_iteration_message`.
+//! - **Re-fetch handle.** A lossy-projected step output is tagged
+//!   `full: history[N].output[M]` on its user message; the `history` projected
+//!   binding (`projection/context.rs`) carries the full untruncated value, keyed
+//!   by the step's `entry.index`, so the model can recover it by re-printing the
+//!   reference. Proven by
 //!   `projection::context::tests::history_step_output_resolves_full_untruncated_value`.
 //! - **Variables.** The live variable namespace is surfaced separately as the
 //!   "Bound Variables" prompt contribution (`crate::rlm_support::render_bound_variables`),
@@ -26,13 +36,10 @@ use std::sync::Arc;
 
 use lash_core::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole};
 use lash_core::{BorrowedChronologicalEntry, BorrowedChronologicalPayload, head_tail_truncate};
-#[cfg(test)]
-use lash_core::{ChronologicalEntry, ChronologicalPayload};
-#[cfg(test)]
-use lash_rlm_types::RlmHistoryItem;
-use lash_rlm_types::{RlmAttachmentRef, RlmHistoryRole, RlmImageRef};
+use lash_rlm_types::{RlmAttachmentRef, RlmImageRef};
 use lashlang::{Value as FlowValue, ValueProjectionContext};
 
+use crate::cell_scan::render_lashlang_cell_text;
 use crate::projection::{decode_rlm_protocol_event, json_to_flow_value};
 
 pub(super) struct RlmHistoryRenderInput<'a> {
@@ -58,43 +65,19 @@ pub(super) struct CurrentIterationMessageInput<'a> {
     pub(super) budget_suffix: Option<&'a str>,
 }
 
-#[cfg(test)]
-pub(super) struct RlmHistoryTestRenderInput<'a> {
-    pub(super) projection: &'a lash_core::ChronologicalProjection,
-    pub(super) max_output_chars: usize,
-    pub(super) protocol_iteration: usize,
-    pub(super) finalization: &'a str,
-    pub(super) required_output: Option<&'a str>,
-    pub(super) final_answer_format: Option<&'a str>,
-    pub(super) budget_suffix: Option<&'a str>,
+/// Assistant prose awaiting a fold into the next lashlang step. Buffered because
+/// `visit_turn_view` is a push visitor with no lookahead.
+struct PendingProse {
+    text: String,
+    image_blocks: Vec<LlmContentBlock>,
 }
 
 pub(super) fn build_rlm_history_messages_from_turn(
     input: RlmHistoryRenderInput<'_>,
     attachments: &mut Vec<LlmAttachment>,
 ) -> Vec<LlmMessage> {
-    let mut messages = Vec::new();
-    let mut saw_history = false;
-    let active_cause_ids = input
-        .turn_causes
-        .iter()
-        .map(|cause| cause.id.as_str())
-        .collect::<HashSet<_>>();
-    lash_core::visit_turn_view(input.events, input.turn_messages, |entry| {
-        if borrowed_entry_is_active_cause(entry, &active_cause_ids) {
-            return;
-        }
-        saw_history = true;
-        let mut blocks = vec![text_block(
-            render_borrowed_history_entry(entry, input.max_output_chars),
-            false,
-        )];
-        append_borrowed_entry_image_blocks(entry, attachments, &mut blocks);
-        messages.push(LlmMessage::new(
-            borrowed_history_entry_llm_role(entry),
-            blocks,
-        ));
-    });
+    let mut messages = render_history_messages(&input, attachments);
+    let saw_history = !messages.is_empty();
     append_current_iteration_message(
         &mut messages,
         CurrentIterationMessageInput {
@@ -110,36 +93,113 @@ pub(super) fn build_rlm_history_messages_from_turn(
     messages
 }
 
-#[cfg(test)]
-pub(super) fn build_rlm_history_messages(
-    input: RlmHistoryTestRenderInput<'_>,
+/// The history portion only (no current-iteration tail): each prior step as an
+/// assistant cell message + a user observation message, with prose folded in.
+pub(super) fn render_history_messages(
+    input: &RlmHistoryRenderInput<'_>,
     attachments: &mut Vec<LlmAttachment>,
 ) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
+    let active_cause_ids = input
+        .turn_causes
+        .iter()
+        .map(|cause| cause.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut pending: Option<PendingProse> = None;
 
-    if !input.projection.entries().is_empty() {
-        for entry in input.projection.entries() {
-            let mut blocks = vec![text_block(
-                render_history_entry(entry, input.max_output_chars),
-                false,
-            )];
-            append_entry_image_blocks(entry, attachments, &mut blocks);
-            messages.push(LlmMessage::new(history_entry_llm_role(entry), blocks));
+    lash_core::visit_turn_view(input.events, input.turn_messages, |entry| {
+        if borrowed_entry_is_active_cause(entry, &active_cause_ids) {
+            return;
         }
-    }
-    append_current_iteration_message(
-        &mut messages,
-        CurrentIterationMessageInput {
-            saw_history: !input.projection.entries().is_empty(),
-            protocol_iteration: input.protocol_iteration,
-            turn_causes: &[],
-            finalization: input.finalization,
-            required_output: input.required_output,
-            final_answer_format: input.final_answer_format,
-            budget_suffix: input.budget_suffix,
-        },
-    );
+        match entry.payload {
+            BorrowedChronologicalPayload::Message(message)
+                if matches!(message.role, lash_core::MessageRole::Assistant) =>
+            {
+                // Assistant prose: buffer to fold into the next lashlang step.
+                flush_pending_prose(&mut messages, &mut pending);
+                let mut image_blocks = Vec::new();
+                append_borrowed_entry_image_blocks(entry, attachments, &mut image_blocks);
+                pending = Some(PendingProse {
+                    text: message_history_text_parts(message.parts),
+                    image_blocks,
+                });
+            }
+            BorrowedChronologicalPayload::ProtocolEvent(event) => {
+                let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step)) =
+                    decode_rlm_protocol_event(event)
+                else {
+                    return;
+                };
+                // Fold buffered prose into one assistant message: prose + cell,
+                // byte-identical to the model's own emission.
+                let prose = pending.take();
+                let prose_text = prose.as_ref().map(|p| p.text.as_str()).unwrap_or("");
+                let cell = render_lashlang_cell_text(prose_text, step.code.trim());
+                let mut cell_blocks = vec![text_block(cell, false)];
+                if let Some(prose) = prose {
+                    cell_blocks.extend(prose.image_blocks);
+                }
+                messages.push(LlmMessage::new(LlmRole::Assistant, cell_blocks));
+
+                // The step's printed outputs become a user observation message.
+                let image_refs = step
+                    .images
+                    .iter()
+                    .map(|image| RlmImageRef {
+                        id: image.id.to_string(),
+                        media_type: image.media_type,
+                        width: image.width,
+                        height: image.height,
+                        bytes: image.byte_len as usize,
+                        label: image.label.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let obs_text = step_output_text(
+                    entry.index,
+                    &step.output,
+                    &image_refs,
+                    step.error.as_deref(),
+                    step.final_output.as_ref(),
+                );
+                let mut obs_blocks = vec![text_block(obs_text, false)];
+                append_borrowed_entry_image_blocks(entry, attachments, &mut obs_blocks);
+                messages.push(LlmMessage::new(LlmRole::User, obs_blocks));
+            }
+            BorrowedChronologicalPayload::Message(message) => {
+                // User / system / event turn: rendered verbatim by role.
+                flush_pending_prose(&mut messages, &mut pending);
+                let text = message_text(
+                    entry.index,
+                    &message_history_text_parts(message.parts),
+                    &message_attachment_refs(message.parts),
+                    input.max_output_chars,
+                );
+                let mut blocks = vec![text_block(text, false)];
+                append_borrowed_entry_image_blocks(entry, attachments, &mut blocks);
+                let role = match message.role {
+                    lash_core::MessageRole::User | lash_core::MessageRole::Event => LlmRole::User,
+                    lash_core::MessageRole::System => LlmRole::System,
+                    lash_core::MessageRole::Assistant => LlmRole::Assistant,
+                };
+                messages.push(LlmMessage::new(role, blocks));
+            }
+        }
+    });
+    flush_pending_prose(&mut messages, &mut pending);
     messages
+}
+
+/// Emit a buffered prose as a standalone assistant message (a prose-only
+/// finish). Carries nothing for empty prose with no images.
+fn flush_pending_prose(messages: &mut Vec<LlmMessage>, pending: &mut Option<PendingProse>) {
+    if let Some(prose) = pending.take() {
+        if prose.text.trim().is_empty() && prose.image_blocks.is_empty() {
+            return;
+        }
+        let mut blocks = vec![text_block(prose.text, false)];
+        blocks.extend(prose.image_blocks);
+        messages.push(LlmMessage::new(LlmRole::Assistant, blocks));
+    }
 }
 
 fn append_current_iteration_message(
@@ -205,31 +265,6 @@ fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBl
     }
 }
 
-#[cfg(test)]
-fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
-    match &entry.payload {
-        ChronologicalPayload::Message(message) => match message.role {
-            lash_core::MessageRole::User => LlmRole::User,
-            lash_core::MessageRole::Assistant => LlmRole::Assistant,
-            lash_core::MessageRole::System => LlmRole::System,
-            lash_core::MessageRole::Event => LlmRole::User,
-        },
-        ChronologicalPayload::ProtocolEvent(_) => LlmRole::Assistant,
-    }
-}
-
-fn borrowed_history_entry_llm_role(entry: BorrowedChronologicalEntry<'_>) -> LlmRole {
-    match entry.payload {
-        BorrowedChronologicalPayload::Message(message) => match message.role {
-            lash_core::MessageRole::User => LlmRole::User,
-            lash_core::MessageRole::Assistant => LlmRole::Assistant,
-            lash_core::MessageRole::System => LlmRole::System,
-            lash_core::MessageRole::Event => LlmRole::User,
-        },
-        BorrowedChronologicalPayload::ProtocolEvent(_) => LlmRole::Assistant,
-    }
-}
-
 fn mark_last_history_text_cache_breakpoint(messages: &mut [LlmMessage]) {
     for message in messages.iter_mut().rev() {
         let Some(blocks) = Arc::get_mut(&mut message.blocks) else {
@@ -245,221 +280,6 @@ fn mark_last_history_text_cache_breakpoint(messages: &mut [LlmMessage]) {
             {
                 *cache_breakpoint = true;
                 return;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-pub(super) fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) -> String {
-    if history.is_empty() {
-        return "No chronological history is available.".to_string();
-    }
-    let mut rendered = String::new();
-    for (index, item) in history.iter().enumerate() {
-        if !rendered.is_empty() {
-            rendered.push_str("\n\n");
-        }
-        rendered.push_str(&render_history_item(index, item, max_output_chars));
-    }
-    rendered
-}
-
-#[cfg(test)]
-fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: usize) -> String {
-    let mut rendered = String::new();
-    match item {
-        RlmHistoryItem::Message {
-            id: _,
-            role,
-            content,
-            attachments,
-        } => append_history_message(
-            &mut rendered,
-            index,
-            role,
-            content,
-            attachments,
-            max_output_chars,
-        ),
-        RlmHistoryItem::LashlangStep {
-            id: _,
-            protocol_iteration,
-            code,
-            output,
-            images,
-            error,
-            final_output,
-        } => append_repl_step(
-            &mut rendered,
-            ReplStepRender {
-                index,
-                protocol_iteration: *protocol_iteration,
-                code,
-                output,
-                images,
-                error: error.as_deref(),
-                final_output: final_output.as_ref(),
-            },
-        ),
-    }
-    rendered
-}
-
-#[cfg(test)]
-fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> String {
-    let mut rendered = String::new();
-    match &entry.payload {
-        ChronologicalPayload::Message(message) => {
-            let content = message_history_text(message);
-            let attachments = message
-                .parts
-                .iter()
-                .filter_map(|part| {
-                    let attachment = part.attachment.as_ref()?;
-                    Some(RlmAttachmentRef {
-                        id: part.id.clone(),
-                        media_type: attachment.reference.media_type,
-                        label: attachment.reference.label.clone(),
-                        reference: attachment.reference.id.to_string(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            append_history_message(
-                &mut rendered,
-                entry.index,
-                &history_role(message.role),
-                &content,
-                &attachments,
-                max_output_chars,
-            );
-        }
-        ChronologicalPayload::ProtocolEvent(event) => {
-            let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step)) =
-                decode_rlm_protocol_event(event)
-            else {
-                return rendered;
-            };
-            let images = step
-                .images
-                .iter()
-                .map(|image| RlmImageRef {
-                    id: image.id.to_string(),
-                    media_type: image.media_type,
-                    width: image.width,
-                    height: image.height,
-                    bytes: image.byte_len as usize,
-                    label: image.label.clone(),
-                })
-                .collect::<Vec<_>>();
-            append_repl_step(
-                &mut rendered,
-                ReplStepRender {
-                    index: entry.index,
-                    protocol_iteration: step.protocol_iteration,
-                    code: &step.code,
-                    output: &step.output,
-                    images: &images,
-                    error: step.error.as_deref(),
-                    final_output: step.final_output.as_ref(),
-                },
-            );
-        }
-    }
-    rendered
-}
-
-fn render_borrowed_history_entry(
-    entry: BorrowedChronologicalEntry<'_>,
-    max_output_chars: usize,
-) -> String {
-    let mut rendered = String::new();
-    match entry.payload {
-        BorrowedChronologicalPayload::Message(message) => {
-            let content = message_history_text_parts(message.parts);
-            let attachments = message
-                .parts
-                .iter()
-                .filter_map(|part| {
-                    let attachment = part.attachment.as_ref()?;
-                    Some(RlmAttachmentRef {
-                        id: part.id.clone(),
-                        media_type: attachment.reference.media_type,
-                        label: attachment.reference.label.clone(),
-                        reference: attachment.reference.id.to_string(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            append_history_message(
-                &mut rendered,
-                entry.index,
-                &history_role(message.role),
-                &content,
-                &attachments,
-                max_output_chars,
-            );
-        }
-        BorrowedChronologicalPayload::ProtocolEvent(event) => {
-            let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step)) =
-                decode_rlm_protocol_event(event)
-            else {
-                return rendered;
-            };
-            let images = step
-                .images
-                .iter()
-                .map(|image| RlmImageRef {
-                    id: image.id.to_string(),
-                    media_type: image.media_type,
-                    width: image.width,
-                    height: image.height,
-                    bytes: image.byte_len as usize,
-                    label: image.label.clone(),
-                })
-                .collect::<Vec<_>>();
-            append_repl_step(
-                &mut rendered,
-                ReplStepRender {
-                    index: entry.index,
-                    protocol_iteration: step.protocol_iteration,
-                    code: &step.code,
-                    output: &step.output,
-                    images: &images,
-                    error: step.error.as_deref(),
-                    final_output: step.final_output.as_ref(),
-                },
-            );
-        }
-    }
-    rendered
-}
-
-#[cfg(test)]
-pub(super) fn append_entry_image_blocks(
-    entry: &lash_core::ChronologicalEntry,
-    attachments: &mut Vec<LlmAttachment>,
-    blocks: &mut Vec<LlmContentBlock>,
-) {
-    match &entry.payload {
-        lash_core::ChronologicalPayload::Message(message) => {
-            for part in message.parts.iter() {
-                let Some(attachment) = part.attachment.as_ref() else {
-                    continue;
-                };
-                let attachment_idx = attachments.len();
-                attachments.push(LlmAttachment::reference(attachment.reference.clone()));
-                blocks.push(LlmContentBlock::Image { attachment_idx });
-            }
-        }
-        lash_core::ChronologicalPayload::ProtocolEvent(event) => {
-            if let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry)) =
-                decode_rlm_protocol_event(event)
-            {
-                for image in &entry.images {
-                    let attachment_idx = attachments.len();
-                    attachments.push(LlmAttachment::reference(image.clone()));
-                    blocks.push(LlmContentBlock::Image { attachment_idx });
-                }
             }
         }
     }
@@ -495,25 +315,19 @@ fn append_borrowed_entry_image_blocks(
     }
 }
 
-fn append_history_message(
-    out: &mut String,
+/// Verbatim content for a plain (non-step) message. No `--- history[N] ---`
+/// wrapper; keeps the truncation re-fetch handle and the attachment listing.
+fn message_text(
     index: usize,
-    role: &RlmHistoryRole,
     content: &str,
     attachments: &[RlmAttachmentRef],
     max_output_chars: usize,
-) {
+) -> String {
     let (preview, raw_len) = head_tail_truncate(content, max_output_chars);
-    let full_ref = truncated_ref(
-        raw_len,
-        max_output_chars,
-        &format!("history[{index}].content"),
-    );
-    let _ = write!(
-        out,
-        "--- history[{index}] · {} message · {raw_len} chars{full_ref} ---\n\n{preview}",
-        message_role_label(role).to_lowercase(),
-    );
+    let mut out = preview.to_string();
+    if raw_len > max_output_chars {
+        let _ = write!(out, "\n\n(full: history[{index}].content)");
+    }
     if !attachments.is_empty() {
         out.push_str("\n\nAttachments:");
         for (attachment_index, attachment) in attachments.iter().enumerate() {
@@ -525,11 +339,81 @@ fn append_history_message(
             );
         }
     }
+    out
 }
 
-#[cfg(test)]
-fn message_history_text(message: &lash_core::Message) -> String {
-    message_history_text_parts(message.parts.as_slice())
+/// The user observation message for a step: printed outputs (with re-fetch
+/// handles), images, error, and final value. Never empty.
+fn step_output_text(
+    index: usize,
+    output: &[String],
+    images: &[RlmImageRef],
+    error: Option<&str>,
+    final_output: Option<&serde_json::Value>,
+) -> String {
+    let mut out = String::new();
+    for (output_index, item) in output.iter().enumerate() {
+        let (preview, projected_lossy) = project_history_output(item);
+        let raw_len = item.chars().count();
+        let full_ref = projected_ref(
+            projected_lossy,
+            &format!("history[{index}].output[{output_index}]"),
+        );
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        let _ = write!(
+            out,
+            "history[{index}].output[{output_index}] ({raw_len} chars{full_ref}):\n{preview}"
+        );
+    }
+    if !images.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("Images:");
+        for (image_index, image) in images.iter().enumerate() {
+            let rendered = serde_json::to_string(image)
+                .unwrap_or_else(|_| "{\"error\":\"unrenderable image\"}".to_string());
+            let _ = write!(out, "\n- history[{index}].images[{image_index}]: {rendered}");
+        }
+    }
+    if let Some(error) = error {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("Error:\n");
+        out.push_str(error);
+    }
+    if let Some(final_output) = final_output {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("Final output:\n");
+        out.push_str(
+            &serde_json::to_string_pretty(final_output)
+                .unwrap_or_else(|_| final_output.to_string()),
+        );
+    }
+    if out.is_empty() {
+        out.push_str("(no printed output)");
+    }
+    out
+}
+
+fn message_attachment_refs(parts: &[lash_core::Part]) -> Vec<RlmAttachmentRef> {
+    parts
+        .iter()
+        .filter_map(|part| {
+            let attachment = part.attachment.as_ref()?;
+            Some(RlmAttachmentRef {
+                id: part.id.clone(),
+                media_type: attachment.reference.media_type,
+                label: attachment.reference.label.clone(),
+                reference: attachment.reference.id.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn message_history_text_parts(parts: &[lash_core::Part]) -> String {
@@ -547,118 +431,12 @@ fn message_history_text_parts(parts: &[lash_core::Part]) -> String {
     chunks.join("\n\n")
 }
 
-fn history_role(role: lash_core::MessageRole) -> RlmHistoryRole {
-    match role {
-        lash_core::MessageRole::User => RlmHistoryRole::User,
-        lash_core::MessageRole::System => RlmHistoryRole::System,
-        lash_core::MessageRole::Assistant => RlmHistoryRole::Assistant,
-        lash_core::MessageRole::Event => RlmHistoryRole::Event,
-    }
-}
-
-fn message_role_label(role: &RlmHistoryRole) -> &'static str {
-    match role {
-        RlmHistoryRole::User => "User",
-        RlmHistoryRole::Assistant => "Assistant",
-        RlmHistoryRole::System => "System",
-        RlmHistoryRole::Event => "Event",
-    }
-}
-
-struct ReplStepRender<'a> {
-    index: usize,
-    protocol_iteration: usize,
-    code: &'a str,
-    output: &'a [String],
-    images: &'a [RlmImageRef],
-    error: Option<&'a str>,
-    final_output: Option<&'a serde_json::Value>,
-}
-
-fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
-    let ReplStepRender {
-        index,
-        protocol_iteration,
-        code,
-        output,
-        images,
-        error,
-        final_output,
-    } = step;
-    let _ = write!(
-        out,
-        "--- history[{index}] · lashlang step · protocol_iteration {protocol_iteration} ---\n\nCode:\n{}",
-        indent_source(code.trim()),
-    );
-
-    // One block per `print` (or raw stdout emission). Tool calls used to
-    // get their own section here for retrieval-without-print, but that
-    // duplicated content the model could fetch via `print result` and
-    // bloated history; the `code` field above shows every receiver
-    // operation the model wrote.
-    for (output_index, item) in output.iter().enumerate() {
-        let (preview, projected_lossy) = project_history_output(item);
-        let raw_len = item.chars().count();
-        let full_ref = projected_ref(
-            projected_lossy,
-            &format!("history[{index}].output[{output_index}]"),
-        );
-        let _ = write!(
-            out,
-            "\n\nhistory[{index}].output[{output_index}] ({raw_len} chars{full_ref}):\n{preview}"
-        );
-    }
-
-    if !images.is_empty() {
-        out.push_str("\n\nImages:");
-        for (image_index, image) in images.iter().enumerate() {
-            let rendered = serde_json::to_string(image)
-                .unwrap_or_else(|_| "{\"error\":\"unrenderable image\"}".to_string());
-            let _ = write!(
-                out,
-                "\n- history[{index}].images[{image_index}]: {rendered}"
-            );
-        }
-    }
-
-    if let Some(error) = error {
-        out.push_str("\n\nError:\n");
-        out.push_str(error);
-    }
-    if let Some(final_output) = final_output {
-        out.push_str("\n\nFinal output:\n");
-        out.push_str(
-            &serde_json::to_string_pretty(final_output)
-                .unwrap_or_else(|_| final_output.to_string()),
-        );
-    }
-}
-
-fn truncated_ref(raw_len: usize, max_output_chars: usize, reference: &str) -> String {
-    if raw_len > max_output_chars {
-        format!(", full: {reference}")
-    } else {
-        String::new()
-    }
-}
-
 fn projected_ref(projected_lossy: bool, reference: &str) -> String {
     if projected_lossy {
         format!(", full: {reference}")
     } else {
         String::new()
     }
-}
-
-fn indent_source(source: &str) -> String {
-    if source.is_empty() {
-        return "    (empty)".to_string();
-    }
-    source
-        .lines()
-        .map(|line| format!("    {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn project_history_output(item: &str) -> (String, bool) {
