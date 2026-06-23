@@ -17,7 +17,7 @@ impl ManagedSessionCapability {
             let result = commit_runtime_state_with_fresh_session_execution_lease(
                 Arc::clone(store),
                 commit,
-                "session_manager.register_materialized_session",
+                &materialized.runtime.runtime_lease_owner,
                 Arc::clone(&materialized.runtime.host.core.clock),
             )
             .await

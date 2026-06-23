@@ -2,6 +2,8 @@
 
 pub mod queued_work;
 
+const PROC_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+
 fn default_root_session_id() -> String {
     "root".to_string()
 }
@@ -297,9 +299,138 @@ pub struct RuntimeCommitResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaseOwnerIdentity {
+    pub owner_id: String,
+    pub incarnation_id: String,
+    #[serde(default)]
+    pub liveness: LeaseOwnerLiveness,
+}
+
+impl LeaseOwnerIdentity {
+    pub fn opaque(
+        owner_id: impl Into<String>,
+        incarnation_id: impl Into<String>,
+    ) -> LeaseOwnerIdentity {
+        LeaseOwnerIdentity {
+            owner_id: owner_id.into(),
+            incarnation_id: incarnation_id.into(),
+            liveness: LeaseOwnerLiveness::Opaque,
+        }
+    }
+
+    pub fn local_process(
+        owner_id: impl Into<String>,
+        incarnation_id: impl Into<String>,
+        host_id: impl Into<String>,
+    ) -> LeaseOwnerIdentity {
+        let liveness = LeaseOwnerLiveness::current_local_process(host_id.into())
+            .unwrap_or(LeaseOwnerLiveness::Opaque);
+        LeaseOwnerIdentity {
+            owner_id: owner_id.into(),
+            incarnation_id: incarnation_id.into(),
+            liveness,
+        }
+    }
+
+    pub fn same_incarnation(&self, other: &LeaseOwnerIdentity) -> bool {
+        self.owner_id == other.owner_id && self.incarnation_id == other.incarnation_id
+    }
+
+    pub fn is_definitely_dead_for_claimant(&self, claimant: &LeaseOwnerIdentity) -> bool {
+        self.liveness
+            .is_definitely_dead_for_claimant(&claimant.liveness)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LeaseOwnerLiveness {
+    LocalProcess {
+        host_id: String,
+        boot_id: String,
+        pid: u32,
+        process_start: String,
+    },
+    #[default]
+    Opaque,
+}
+
+impl LeaseOwnerLiveness {
+    pub fn current_local_process(host_id: impl Into<String>) -> Option<LeaseOwnerLiveness> {
+        let boot_id = std::fs::read_to_string(PROC_BOOT_ID_PATH)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let pid = std::process::id();
+        let process_start = read_linux_process_start(pid)?;
+        Some(LeaseOwnerLiveness::LocalProcess {
+            host_id: host_id.into(),
+            boot_id,
+            pid,
+            process_start,
+        })
+    }
+
+    pub fn local_process_for_test(
+        host_id: impl Into<String>,
+        boot_id: impl Into<String>,
+        pid: u32,
+        process_start: impl Into<String>,
+    ) -> LeaseOwnerLiveness {
+        LeaseOwnerLiveness::LocalProcess {
+            host_id: host_id.into(),
+            boot_id: boot_id.into(),
+            pid,
+            process_start: process_start.into(),
+        }
+    }
+
+    pub fn is_definitely_dead_for_claimant(&self, claimant: &LeaseOwnerLiveness) -> bool {
+        let (
+            LeaseOwnerLiveness::LocalProcess {
+                host_id,
+                boot_id,
+                pid,
+                process_start,
+            },
+            LeaseOwnerLiveness::LocalProcess {
+                host_id: claimant_host_id,
+                boot_id: claimant_boot_id,
+                ..
+            },
+        ) = (self, claimant)
+        else {
+            return false;
+        };
+        if host_id != claimant_host_id || boot_id != claimant_boot_id {
+            return false;
+        }
+        matches!(linux_process_is_live(*pid, process_start), Some(false))
+    }
+}
+
+fn read_linux_process_start(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_linux_process_start(&stat)
+}
+
+fn linux_process_is_live(pid: u32, expected_process_start: &str) -> Option<bool> {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => parse_linux_process_start(&stat).map(|start| start == expected_process_start),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+fn parse_linux_process_start(stat: &str) -> Option<String> {
+    let after_comm = stat.rsplit_once(") ")?.1;
+    after_comm.split_whitespace().nth(19).map(ToOwned::to_owned)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionExecutionLease {
     pub session_id: String,
-    pub owner_id: String,
+    pub owner: LeaseOwnerIdentity,
     pub lease_token: String,
     pub fencing_token: u64,
     pub claimed_at_epoch_ms: u64,
@@ -309,7 +440,7 @@ pub struct SessionExecutionLease {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionExecutionLeaseFence {
     pub session_id: String,
-    pub owner_id: String,
+    pub owner: LeaseOwnerIdentity,
     pub lease_token: String,
     pub fencing_token: u64,
 }
@@ -317,7 +448,7 @@ pub struct SessionExecutionLeaseFence {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionExecutionLeaseCompletion {
     pub session_id: String,
-    pub owner_id: String,
+    pub owner: LeaseOwnerIdentity,
     pub lease_token: String,
     pub fencing_token: u64,
 }
@@ -326,7 +457,7 @@ impl SessionExecutionLease {
     pub fn fence(&self) -> SessionExecutionLeaseFence {
         SessionExecutionLeaseFence {
             session_id: self.session_id.clone(),
-            owner_id: self.owner_id.clone(),
+            owner: self.owner.clone(),
             lease_token: self.lease_token.clone(),
             fencing_token: self.fencing_token,
         }
@@ -335,7 +466,7 @@ impl SessionExecutionLease {
     pub fn completion(&self) -> SessionExecutionLeaseCompletion {
         SessionExecutionLeaseCompletion {
             session_id: self.session_id.clone(),
-            owner_id: self.owner_id.clone(),
+            owner: self.owner.clone(),
             lease_token: self.lease_token.clone(),
             fencing_token: self.fencing_token,
         }
@@ -345,6 +476,21 @@ impl SessionExecutionLease {
 impl SessionExecutionLeaseCompletion {
     pub fn from_lease(lease: &SessionExecutionLease) -> Self {
         lease.completion()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SessionExecutionLeaseClaimOutcome {
+    Acquired(SessionExecutionLease),
+    Busy { holder: SessionExecutionLease },
+}
+
+impl SessionExecutionLeaseClaimOutcome {
+    pub fn acquired(self) -> Option<SessionExecutionLease> {
+        match self {
+            Self::Acquired(lease) => Some(lease),
+            Self::Busy { .. } => None,
+        }
     }
 }
 
@@ -789,14 +935,29 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
 
     /// Try to claim the durable single-writer execution lane for `session_id`.
     ///
-    /// Returns `Ok(None)` when another owner holds an unexpired lease. Expired
-    /// or released leases may be reclaimed and receive a higher fencing token.
+    /// Returns [`SessionExecutionLeaseClaimOutcome::Busy`] when another owner
+    /// holds an unexpired lease. Expired or released leases may be reclaimed
+    /// and receive a higher fencing token. An unexpired lease held by the same
+    /// owner id but a different incarnation is busy.
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<Option<SessionExecutionLease>, StoreError>;
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError>;
+
+    /// Reclaim an unexpired session execution lease whose observed holder is
+    /// definitely dead according to persisted local-process liveness metadata.
+    ///
+    /// Backends must CAS on `observed_holder` so a stale claimant cannot clear
+    /// a newer live lease that won the race after the busy observation.
+    async fn reclaim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner: &LeaseOwnerIdentity,
+        observed_holder: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError>;
 
     /// Extend a live session execution lease owned by the caller.
     ///
@@ -837,7 +998,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         &self,
         session_id: &str,
         _session_execution_lease: &SessionExecutionLeaseFence,
-        _owner_id: &str,
+        _owner: &LeaseOwnerIdentity,
         _boundary: crate::QueuedWorkClaimBoundary,
         _lease_ttl_ms: u64,
         _max_batches: usize,
@@ -859,7 +1020,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         &self,
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         boundary: crate::QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
         batch_ids: &[String],
@@ -871,7 +1032,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
             .claim_ready_queued_work(
                 session_id,
                 session_execution_lease,
-                owner_id,
+                owner,
                 boundary,
                 lease_ttl_ms,
                 batch_ids.len(),
@@ -1009,4 +1170,47 @@ pub async fn refresh_persisted_session_state(
         *state = fresh;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LeaseOwnerIdentity, LeaseOwnerLiveness};
+
+    fn local_liveness(
+        host_id: &str,
+        boot_id: &str,
+        pid: u32,
+        process_start: &str,
+    ) -> LeaseOwnerLiveness {
+        LeaseOwnerLiveness::local_process_for_test(host_id, boot_id, pid, process_start)
+    }
+
+    #[test]
+    fn lease_owner_identity_requires_same_incarnation() {
+        let first = LeaseOwnerIdentity::opaque("owner", "incarnation-a");
+        let same = LeaseOwnerIdentity::opaque("owner", "incarnation-a");
+        let next = LeaseOwnerIdentity::opaque("owner", "incarnation-b");
+
+        assert!(first.same_incarnation(&same));
+        assert!(!first.same_incarnation(&next));
+    }
+
+    #[test]
+    fn local_liveness_only_proves_same_host_boot_dead_processes() {
+        let holder = local_liveness(
+            "host-a",
+            "boot-a",
+            std::process::id(),
+            "not-the-current-process-start",
+        );
+        let same_host_boot = local_liveness("host-a", "boot-a", std::process::id(), "claimant");
+        let other_host = local_liveness("host-b", "boot-a", std::process::id(), "claimant");
+        let other_boot = local_liveness("host-a", "boot-b", std::process::id(), "claimant");
+
+        assert!(holder.is_definitely_dead_for_claimant(&same_host_boot));
+        assert!(!holder.is_definitely_dead_for_claimant(&other_host));
+        assert!(!holder.is_definitely_dead_for_claimant(&other_boot));
+        assert!(!holder.is_definitely_dead_for_claimant(&LeaseOwnerLiveness::Opaque));
+        assert!(!LeaseOwnerLiveness::Opaque.is_definitely_dead_for_claimant(&same_host_boot));
+    }
 }

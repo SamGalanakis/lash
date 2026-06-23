@@ -5,8 +5,8 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, SessionPlugin,
     StaticPluginFactory,
 };
+use lash_lashlang_runtime::catalogue_preview_contribution;
 
-use super::catalogue_preview::catalogue_preview_contribution;
 use super::service::tool_discovery_provider_with_catalog;
 
 /// Plugin factory for the `search_tools` discovery catalog.

@@ -296,11 +296,23 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
-        owner_id: &str,
+        owner: &lash_core::LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<Option<lash_core::SessionExecutionLease>, lash_core::StoreError> {
+    ) -> Result<lash_core::SessionExecutionLeaseClaimOutcome, lash_core::StoreError> {
         self.inner
-            .try_claim_session_execution_lease(session_id, owner_id, lease_ttl_ms)
+            .try_claim_session_execution_lease(session_id, owner, lease_ttl_ms)
+            .await
+    }
+
+    async fn reclaim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner: &lash_core::LeaseOwnerIdentity,
+        observed_holder: &lash_core::SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<lash_core::SessionExecutionLeaseClaimOutcome, lash_core::StoreError> {
+        self.inner
+            .reclaim_session_execution_lease(session_id, owner, observed_holder, lease_ttl_ms)
             .await
     }
 
@@ -332,7 +344,7 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
         &self,
         session_id: &str,
         session_execution_lease: &lash_core::SessionExecutionLeaseFence,
-        owner_id: &str,
+        owner: &lash_core::LeaseOwnerIdentity,
         boundary: lash_core::runtime::QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
         max_batches: usize,
@@ -341,7 +353,7 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
             .claim_ready_queued_work(
                 session_id,
                 session_execution_lease,
-                owner_id,
+                owner,
                 boundary,
                 lease_ttl_ms,
                 max_batches,

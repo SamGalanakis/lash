@@ -599,6 +599,7 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             slot_name(chunk, slot),
             compact_json(&chunk.constants[constant])
         ),
+        Instruction::BuildTuple(count) => format!("build_tuple {count}"),
         Instruction::BuildList(count) => format!("build_list {count}"),
         Instruction::ListAppend => "list_append".to_string(),
         Instruction::BuildRecord(keys) => format!("build_record {}", keys_snapshot(chunk, keys)),

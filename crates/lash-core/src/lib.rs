@@ -320,9 +320,9 @@ pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
 pub use session_model::{RuntimeSessionPolicy, SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
-    RuntimePersistence, SessionExecutionLease, SessionExecutionLeaseCompletion,
-    SessionExecutionLeaseFence, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError,
-    VacuumReport,
+    LeaseOwnerIdentity, LeaseOwnerLiveness, RuntimePersistence, SessionExecutionLease,
+    SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
+    SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
 };
 #[allow(unused_imports)]
 pub(crate) use store::{

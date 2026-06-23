@@ -1,7 +1,7 @@
 use super::process::ProcessWakeDelivery;
 use crate::{PluginMessage, TurnCause, TurnInput};
 
-pub const QUEUED_WORK_CLAIM_TTL_MS: u64 = 15 * 60 * 1000;
+pub const QUEUED_WORK_CLAIM_TTL_MS: u64 = 30 * 1000;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -204,7 +204,7 @@ pub struct QueuedWorkCompletion {
 pub struct QueuedWorkClaim {
     pub session_id: String,
     pub claim_id: String,
-    pub owner_id: String,
+    pub owner: crate::LeaseOwnerIdentity,
     pub lease_token: String,
     pub fencing_token: u64,
     pub claimed_at_epoch_ms: u64,

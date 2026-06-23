@@ -101,7 +101,7 @@ impl LashRuntime {
             match super::commit_runtime_state_with_fresh_session_execution_lease(
                 store,
                 commit,
-                "runtime.append_session_nodes",
+                &self.runtime_lease_owner,
                 Arc::clone(&self.host.core.clock),
             )
             .await
@@ -163,6 +163,7 @@ impl LashRuntime {
         let managed_turns = Arc::clone(&self.managed_turns);
         let process_sync_needed = Arc::clone(&self.process_sync_needed);
         let runtime_scope_id = Arc::clone(&self.runtime_scope_id);
+        let runtime_lease_owner = self.runtime_lease_owner.clone();
         let turn_phase_probe = self.turn_phase_probe.clone();
 
         let mut rebuilt = Self::from_host_state(policy, host, services, persisted_state).await?;
@@ -170,6 +171,7 @@ impl LashRuntime {
         rebuilt.managed_turns = managed_turns;
         rebuilt.process_sync_needed = process_sync_needed;
         rebuilt.runtime_scope_id = runtime_scope_id;
+        rebuilt.runtime_lease_owner = runtime_lease_owner;
         rebuilt.turn_phase_probe = turn_phase_probe;
 
         let exported = rebuilt.export_state();
@@ -468,7 +470,7 @@ impl LashRuntime {
             let result = super::commit_runtime_state_with_fresh_session_execution_lease(
                 store,
                 commit,
-                "runtime.plugin_runtime_events",
+                &self.runtime_lease_owner,
                 Arc::clone(&self.host.core.clock),
             )
             .await
@@ -496,7 +498,7 @@ impl LashRuntime {
         let result = super::commit_runtime_state_with_fresh_session_execution_lease(
             store,
             commit,
-            "runtime.plugin_operation_state",
+            &self.runtime_lease_owner,
             Arc::clone(&self.host.core.clock),
         )
         .await

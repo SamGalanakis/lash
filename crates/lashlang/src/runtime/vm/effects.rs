@@ -423,6 +423,13 @@ impl<H: ExecutionHost> Vm<'_, H> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
         Box::pin(async move {
             match handle {
+                Value::Tuple(handles) => {
+                    let mut values = Vec::with_capacity(handles.len());
+                    for handle in handles.iter().cloned() {
+                        values.push(self.await_value(handle).await);
+                    }
+                    Value::Tuple(values.into())
+                }
                 Value::List(handles) => {
                     let mut values = Vec::with_capacity(handles.len());
                     for handle in handles.iter().cloned() {
@@ -479,7 +486,9 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 .map_err(|error| RuntimeError::ValueError {
                     message: format!("`?` unwrapped failed tool result: {error}"),
                 }),
-            Value::List(_) | Value::Record(_) => unwrap_tool_result(self.await_value(handle).await),
+            Value::Tuple(_) | Value::List(_) | Value::Record(_) => {
+                unwrap_tool_result(self.await_value(handle).await)
+            }
             handle => self
                 .host
                 .perform(AbilityOp::Await(handle))
@@ -513,6 +522,11 @@ fn build_aggregate_await_shape<H: ExecutionHost>(
                     message: "aggregate await value index out of range".to_string(),
                 })
         }
+        CompiledAggregateAwaitShape::Tuple(values) => values
+            .iter()
+            .map(|value| build_aggregate_await_shape(value, stack_values, leaf_values, vm))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| Value::Tuple(values.into())),
         CompiledAggregateAwaitShape::List(values) => values
             .iter()
             .map(|value| build_aggregate_await_shape(value, stack_values, leaf_values, vm))

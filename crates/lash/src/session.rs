@@ -15,7 +15,7 @@ pub struct SessionBuilder {
     pub(crate) session_id: String,
     pub(crate) spec: SessionSpec,
     pub(crate) parent_session_id: Option<String>,
-    pub(crate) session_execution_owner_id: Option<String>,
+    pub(crate) session_execution_owner: Option<lash_core::LeaseOwnerIdentity>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
@@ -45,15 +45,13 @@ impl SessionBuilder {
         self
     }
 
-    /// Use a stable owner id for durable session execution leases.
+    /// Use an explicit owner identity for durable session execution leases.
     ///
-    /// This is only for hosts that already serialize one logical execution
-    /// lane, such as a durable workflow engine retrying the same invocation on
-    /// another process. Normal embedders should keep the default per-open UUID;
-    /// reusing an owner id across independently running handles makes them the
-    /// same lease owner.
-    pub fn session_execution_owner_id(mut self, owner_id: impl Into<String>) -> Self {
-        self.session_execution_owner_id = Some(owner_id.into());
+    /// This is only for hosts that already serialize one logical execution lane
+    /// and intentionally choose stable owner + incarnation values. Normal
+    /// embedders should keep the default per-open identity.
+    pub fn session_execution_owner(mut self, owner: lash_core::LeaseOwnerIdentity) -> Self {
+        self.session_execution_owner = Some(owner);
         self
     }
 
@@ -199,8 +197,8 @@ impl SessionBuilder {
         env.process_work_driver = drivers.process.clone();
         env.queued_work_driver = drivers.queued.clone();
         let mut runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
-        if let Some(owner_id) = self.session_execution_owner_id {
-            runtime.set_runtime_scope_id(owner_id);
+        if let Some(owner) = self.session_execution_owner {
+            runtime.set_runtime_lease_owner(owner);
         }
         if drivers.drive_process_on_open
             && let Some(driver) = drivers.process.as_ref()
@@ -340,8 +338,8 @@ impl RlmSessionBuilder {
         self
     }
 
-    pub fn session_execution_owner_id(mut self, owner_id: impl Into<String>) -> Self {
-        self.builder = self.builder.session_execution_owner_id(owner_id);
+    pub fn session_execution_owner(mut self, owner: lash_core::LeaseOwnerIdentity) -> Self {
+        self.builder = self.builder.session_execution_owner(owner);
         self
     }
 

@@ -1,6 +1,6 @@
 //! Field- and index-access on `Value`s, plus the assignment-path machinery.
-//! Every read of `record.field` / `list[index]` and every write of
-//! `record.field = …` / `list[index] = …` flows through these helpers.
+//! Every read of `record.field` / `tuple[index]` / `list[index]` and every
+//! write of `record.field = …` / `list[index] = …` flows through these helpers.
 //!
 //! The `*_direct` and `*_ref_direct` variants are the sync fast paths the VM
 //! uses for concrete operands; projected operands are resolved inline by the
@@ -111,6 +111,12 @@ pub(crate) fn read_index_direct(target: Value, index: Value) -> Result<Value, Ru
 
 pub(crate) fn read_index_ref_direct(target: &Value, index: &Value) -> Result<Value, RuntimeError> {
     match target {
+        Value::Tuple(values) => {
+            let idx = resolve_index(index, values.len())?;
+            Ok(idx
+                .and_then(|idx| values.get(idx).cloned())
+                .unwrap_or(Value::Null))
+        }
         Value::List(values) => {
             let idx = resolve_index(index, values.len())?;
             Ok(idx
@@ -249,6 +255,9 @@ pub(crate) fn assign_index(
             values.make_mut()[idx] = value;
             Ok(())
         }
+        Value::Tuple(_) => Err(RuntimeError::TypeError {
+            message: "can't assign tuple indexes; tuples are immutable".to_string(),
+        }),
         Value::Record(record) => {
             let key = coerce_string(index)?;
             Arc::make_mut(record).insert_str(key.as_ref(), value);
@@ -272,6 +281,9 @@ pub(crate) fn descend_index<'a>(
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
             Ok(&mut values.make_mut()[idx])
         }
+        Value::Tuple(_) => Err(RuntimeError::TypeError {
+            message: "can't assign through tuple indexes; tuples are immutable".to_string(),
+        }),
         Value::Record(record) => {
             let key = coerce_string(index)?;
             let record = Arc::make_mut(record);
@@ -302,6 +314,9 @@ pub(crate) fn add_assign_index_number(
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
             add_assign_value_number(&mut values.make_mut()[idx], right)
         }
+        Value::Tuple(_) => Err(RuntimeError::TypeError {
+            message: "can't assign tuple indexes; tuples are immutable".to_string(),
+        }),
         Value::Record(record) => {
             let key = coerce_string(index)?;
             let record = Arc::make_mut(record);

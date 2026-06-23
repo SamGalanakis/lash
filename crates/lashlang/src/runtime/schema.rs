@@ -76,11 +76,11 @@ impl PrimitiveMask {
             }
             Value::Number(number) if number.is_finite() => Self::NUMBER.0,
             Value::Bool(_) => Self::BOOLEAN.0,
-            Value::List(_) => Self::ARRAY.0,
+            Value::Tuple(_) | Value::List(_) => Self::ARRAY.0,
             Value::Record(_) | Value::Image(_) | Value::Resource(_) => Self::OBJECT.0,
             Value::Null => Self::NULL.0,
             Value::Projected(value) => match value.value_type_name() {
-                "list" => Self::ARRAY.0,
+                "tuple" | "list" => Self::ARRAY.0,
                 _ => Self::OBJECT.0,
             },
             Value::Number(_) => 0,
@@ -191,8 +191,11 @@ impl ValidationPlan {
                 allowed.iter().any(|candidate| candidate.as_ref() == value)
             }
             ValidationPlanKind::List(item_plan) => {
-                let Value::List(items) = value else {
-                    return false;
+                let items = match value {
+                    Value::Tuple(items) | Value::List(items) => items,
+                    _ => {
+                        return false;
+                    }
                 };
                 items.iter().all(|item| item_plan.accepts(item))
             }
@@ -250,8 +253,9 @@ impl ValidationPlan {
                 if !PrimitiveMask::ARRAY.matches(value) {
                     return describe_primitive_failure(value, PrimitiveMask::ARRAY, path);
                 }
-                let Value::List(items) = value else {
-                    return describe_primitive_failure(value, PrimitiveMask::ARRAY, path);
+                let items = match value {
+                    Value::Tuple(items) | Value::List(items) => items,
+                    _ => return describe_primitive_failure(value, PrimitiveMask::ARRAY, path),
                 };
                 for (index, item) in items.iter().enumerate() {
                     path.push(PathSegment::Index(index));
@@ -435,10 +439,10 @@ fn schema_value_type_name(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Image(_) => "object",
         Value::Resource(_) => "object",
-        Value::List(_) => "array",
+        Value::Tuple(_) | Value::List(_) => "array",
         Value::Record(_) => "object",
         Value::Projected(value) => match value.value_type_name() {
-            "list" => "array",
+            "tuple" | "list" => "array",
             _ => "object",
         },
     }

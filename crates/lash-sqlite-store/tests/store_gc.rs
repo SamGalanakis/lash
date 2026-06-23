@@ -1,8 +1,8 @@
 use lash_core::{
-    HydratedSessionCheckpoint, ModelSpec, PersistedSessionConfig, PersistedTurnState,
-    PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, RuntimeSessionState, SessionGraph,
-    SessionHead, SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, TokenUsage,
-    ToolState,
+    HydratedSessionCheckpoint, LeaseOwnerIdentity, ModelSpec, PersistedSessionConfig,
+    PersistedTurnState, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence,
+    RuntimeSessionState, SessionGraph, SessionHead, SessionPolicy, SessionStoreCreateRequest,
+    SessionStoreFactory, TokenUsage, ToolState,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
@@ -15,6 +15,10 @@ fn model_spec(id: &str) -> ModelSpec {
 
 fn test_model_spec() -> ModelSpec {
     model_spec("gpt-5.4-mini")
+}
+
+fn lease_owner(owner_id: &str) -> LeaseOwnerIdentity {
+    LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
 }
 
 #[tokio::test]
@@ -90,10 +94,12 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
         session_id: "auto-gc".to_string(),
         ..RuntimeSessionState::default()
     };
+    let owner = lease_owner("auto-gc-test");
     let session_lease = store
-        .try_claim_session_execution_lease("auto-gc", "auto-gc-test", 60_000)
+        .try_claim_session_execution_lease("auto-gc", &owner, 60_000)
         .await
         .expect("claim session execution lease")
+        .acquired()
         .expect("session execution lease");
 
     store

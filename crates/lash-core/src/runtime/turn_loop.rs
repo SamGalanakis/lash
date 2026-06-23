@@ -104,7 +104,8 @@ pub(in crate::runtime) fn queued_work_trace_payload(
     serde_json::json!({
         "boundary": boundary,
         "claim_id": claim.claim_id,
-        "owner_id": claim.owner_id,
+        "owner_id": claim.owner.owner_id,
+        "incarnation_id": claim.owner.incarnation_id,
         "batch_ids": queued_work_batch_ids(claim),
         "payload_types": claim.batches.iter()
             .flat_map(|batch| batch.items.iter())
@@ -193,7 +194,7 @@ impl LashRuntime {
         match SessionExecutionLeaseGuard::try_acquire(
             store,
             &self.state.session_id,
-            &self.runtime_scope_id,
+            &self.runtime_lease_owner,
             Arc::clone(&self.host.core.clock),
             cancel,
         )
@@ -635,7 +636,7 @@ impl LashRuntime {
                 .claim_ready_queued_work_by_batch_ids(
                     &self.state.session_id,
                     &session_execution_fence,
-                    &self.runtime_scope_id,
+                    &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::Idle,
                     crate::QUEUED_WORK_CLAIM_TTL_MS,
                     batch_ids,
@@ -646,7 +647,7 @@ impl LashRuntime {
                 .claim_ready_queued_work(
                     &self.state.session_id,
                     &session_execution_fence,
-                    &self.runtime_scope_id,
+                    &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::Idle,
                     crate::QUEUED_WORK_CLAIM_TTL_MS,
                     64,
@@ -1522,6 +1523,7 @@ impl LashRuntime {
             pending_queue_claims: initial_queue_claim.into_iter().collect(),
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             session_execution_lease: session_execution_fence,
+            runtime_lease_owner: self.runtime_lease_owner.clone(),
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let protocol_run_offset = 0;

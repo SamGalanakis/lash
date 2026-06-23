@@ -822,9 +822,49 @@ impl Parser {
         // ternary, ...) funnels through here, so one depth guard at this
         // chokepoint bounds total recursive-descent stack growth.
         self.enter_nesting()?;
+        let result = self.parse_tuple_expr();
+        self.leave_nesting();
+        result
+    }
+
+    fn parse_expr_no_tuple(&mut self) -> Result<ParsedExpr, ParseError> {
+        self.enter_nesting()?;
         let result = self.parse_ternary();
         self.leave_nesting();
         result
+    }
+
+    fn parse_tuple_expr(&mut self) -> Result<ParsedExpr, ParseError> {
+        let first = self.parse_ternary()?;
+        if !matches!(self.peek_kind(), TokenKind::Comma) {
+            return Ok(first);
+        }
+
+        let mut items = Vec::new();
+        let mut children = Vec::new();
+        children.push((0, first));
+        items.push(children.last().expect("tuple item").1.expr.clone());
+        let mut end = children.last().expect("tuple item").1.span.end;
+
+        while matches!(self.peek_kind(), TokenKind::Comma) {
+            end = self.bump().span.end;
+            if matches!(
+                self.peek_kind(),
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace | TokenKind::Eof
+            ) {
+                break;
+            }
+            let item = self.parse_ternary()?;
+            end = item.span.end;
+            children.push((items.len() as u32, item));
+            items.push(children.last().expect("tuple item").1.expr.clone());
+        }
+
+        let span = Span {
+            start: children.first().expect("tuple first").1.span.start,
+            end,
+        };
+        Ok(ParsedExpr::node(Expr::Tuple(items), span, children))
     }
 
     fn parse_ternary(&mut self) -> Result<ParsedExpr, ParseError> {
@@ -833,9 +873,9 @@ impl Parser {
             return Ok(condition);
         }
         self.bump();
-        let then_expr = self.parse_expr()?;
+        let then_expr = self.parse_expr_no_tuple()?;
         self.expect_exact(TokenKind::Colon, "`:`")?;
-        let else_expr = self.parse_expr()?;
+        let else_expr = self.parse_expr_no_tuple()?;
         let span = Span {
             start: condition.span.start,
             end: else_expr.span.end,
@@ -1228,7 +1268,15 @@ impl Parser {
                 }
             }
             TokenKind::LParen => {
-                self.bump();
+                let start = self.bump().span.start;
+                if matches!(self.peek_kind(), TokenKind::RParen) {
+                    self.bump();
+                    return Ok(ParsedExpr::node(
+                        Expr::Tuple(Vec::new()),
+                        self.span_from(start),
+                        [],
+                    ));
+                }
                 let expr = self.parse_expr()?;
                 self.expect_exact(TokenKind::RParen, "`)`")?;
                 Ok(expr)
@@ -1255,7 +1303,7 @@ impl Parser {
             ));
         }
 
-        let first = self.parse_expr()?;
+        let first = self.parse_expr_no_tuple()?;
         if matches!(self.peek_kind(), TokenKind::For) {
             let parsed_clauses = self.parse_list_comprehension_clauses()?;
             self.expect_exact(TokenKind::RBracket, "`]`")?;
@@ -1294,7 +1342,7 @@ impl Parser {
             ));
         }
         while !matches!(self.peek_kind(), TokenKind::RBracket) {
-            let item = self.parse_expr()?;
+            let item = self.parse_expr_no_tuple()?;
             children.push((items.len() as u32, item));
             items.push(children.last().expect("item").1.expr.clone());
             if matches!(self.peek_kind(), TokenKind::Comma) {
@@ -1365,7 +1413,7 @@ impl Parser {
         while !matches!(self.peek_kind(), TokenKind::RBrace) {
             let key = self.expect_key_name()?;
             self.expect_exact(TokenKind::Colon, "`:`")?;
-            let value = self.parse_expr()?;
+            let value = self.parse_expr_no_tuple()?;
             entries.push((key, value));
             if matches!(self.peek_kind(), TokenKind::Comma) {
                 self.bump();
@@ -1381,7 +1429,7 @@ impl Parser {
         let mut args = Vec::new();
         if !matches!(self.peek_kind(), TokenKind::RParen) {
             loop {
-                args.push(self.parse_expr()?);
+                args.push(self.parse_expr_no_tuple()?);
                 if matches!(self.peek_kind(), TokenKind::Comma) {
                     self.bump();
                     if matches!(self.peek_kind(), TokenKind::RParen) {
@@ -1401,7 +1449,7 @@ impl Parser {
         while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
             let key = self.expect_key_name()?;
             self.expect_exact(TokenKind::Colon, "`:`")?;
-            let value = self.parse_expr()?;
+            let value = self.parse_expr_no_tuple()?;
             entries.push((key, value));
             if matches!(self.peek_kind(), TokenKind::Comma) {
                 self.bump();

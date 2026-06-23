@@ -38,6 +38,7 @@ pub(crate) async fn execute_intrinsic(
             expect_arg_count("empty", values, 1)?;
             match &values[0] {
                 Value::String(value) => Ok(Value::Bool(value.is_empty())),
+                Value::Tuple(values) => Ok(Value::Bool(values.is_empty())),
                 Value::List(values) => Ok(Value::Bool(values.is_empty())),
                 Value::Record(record) => Ok(Value::Bool(record.is_empty())),
                 Value::Projected(value) => {
@@ -46,12 +47,13 @@ pub(crate) async fn execute_intrinsic(
                         .await
                         .map(Value::Bool)
                         .ok_or_else(|| RuntimeError::TypeError {
-                            message: "`empty` requires a string, list, record, or null".to_string(),
+                            message: "`empty` requires a string, tuple, list, record, or null"
+                                .to_string(),
                         })
                 }
                 Value::Null => Ok(Value::Bool(true)),
                 _ => Err(RuntimeError::TypeError {
-                    message: "`empty` requires a string, list, record, or null".to_string(),
+                    message: "`empty` requires a string, tuple, list, record, or null".to_string(),
                 }),
             }
         }
@@ -175,6 +177,12 @@ pub(crate) async fn execute_intrinsic(
             let target = materialize_projected_async(values[0].clone()).await;
             match &target {
                 Value::String(value) => Ok(Value::String(slice_string(value, start, end).into())),
+                Value::Tuple(items) => {
+                    let Some((start, end)) = clamp_slice_bounds(start, end, items.len()) else {
+                        return Ok(Value::Tuple(Vec::new().into()));
+                    };
+                    Ok(Value::Tuple(items[start..end].to_vec().into()))
+                }
                 Value::List(items) => {
                     let Some((start, end)) = clamp_slice_bounds(start, end, items.len()) else {
                         return Ok(Value::List(Vec::new().into()));
@@ -182,7 +190,7 @@ pub(crate) async fn execute_intrinsic(
                     Ok(Value::List(items[start..end].to_vec().into()))
                 }
                 _ => Err(RuntimeError::TypeError {
-                    message: "`slice` requires a string or list".to_string(),
+                    message: "`slice` requires a string, tuple, or list".to_string(),
                 }),
             }
         }
@@ -314,8 +322,9 @@ pub(crate) fn execute_len_direct(value: &Value) -> Result<Value, RuntimeError> {
     value_len(value)
         .map(|len| Value::Number(len as f64))
         .ok_or_else(|| RuntimeError::TypeError {
-            message: "`len` requires a string, list, record, or null; use `.size` for images"
-                .to_string(),
+            message:
+                "`len` requires a string, tuple, list, record, or null; use `.size` for images"
+                    .to_string(),
         })
 }
 
@@ -332,7 +341,7 @@ pub(crate) async fn execute_contains_builtin(
         Value::Null => Ok(Value::Bool(false)),
         _ => Err(RuntimeError::TypeError {
             message:
-                "`contains` requires a string/string, list/value, record/key, or null/value pair"
+                "`contains` requires a string/string, tuple/value, list/value, record/key, or null/value pair"
                     .to_string(),
         }),
     }
@@ -344,6 +353,7 @@ pub(crate) fn execute_contains_direct(
 ) -> Result<bool, RuntimeError> {
     match (haystack, needle) {
         (Value::String(haystack), needle) => Ok(haystack.contains(coerce_string(needle)?.as_ref())),
+        (Value::Tuple(items), needle) => Ok(items.contains(needle)),
         (Value::List(items), needle) => Ok(items.contains(needle)),
         (Value::Record(record), needle) => {
             Ok(record.get(coerce_string(needle)?.as_ref()).is_some())
@@ -351,7 +361,7 @@ pub(crate) fn execute_contains_direct(
         (Value::Null, _) => Ok(false),
         _ => Err(RuntimeError::TypeError {
             message:
-                "`contains` requires a string/string, list/value, record/key, or null/value pair"
+                "`contains` requires a string/string, tuple/value, list/value, record/key, or null/value pair"
                     .to_string(),
         }),
     }
@@ -474,6 +484,7 @@ fn byte_index_for_char(text: &str, target: usize) -> Option<usize> {
 pub(crate) fn value_len(value: &Value) -> Option<usize> {
     match value {
         Value::String(value) => Some(value.chars().count()),
+        Value::Tuple(values) => Some(values.len()),
         Value::List(values) => Some(values.len()),
         Value::Record(record) => Some(record.len()),
         Value::Null => Some(0),
@@ -484,8 +495,10 @@ pub(crate) fn value_len(value: &Value) -> Option<usize> {
 pub(crate) async fn iterable_values(value: Value) -> Result<ListValue, RuntimeError> {
     match value {
         Value::List(values) => Ok(values),
+        Value::Tuple(values) => Ok(values),
         Value::Projected(value) => match value.materialize_async().await {
             Value::List(values) => Ok(values),
+            Value::Tuple(values) => Ok(values),
             _ => Err(RuntimeError::NonListIteration),
         },
         _ => Err(RuntimeError::NonListIteration),
@@ -503,10 +516,13 @@ pub(crate) async fn execute_join_builtin_async(
         return Ok(value);
     }
     let items = materialize_projected_async(items.clone()).await;
-    let Value::List(items) = &items else {
-        return Err(RuntimeError::TypeError {
-            message: "`join` requires a list as the first argument".to_string(),
-        });
+    let items = match &items {
+        Value::List(items) | Value::Tuple(items) => items,
+        _ => {
+            return Err(RuntimeError::TypeError {
+                message: "`join` requires a tuple or list as the first argument".to_string(),
+            });
+        }
     };
     let sep = coerce_string(&sep)?;
     let mut joined = String::new();
@@ -886,6 +902,7 @@ pub(crate) fn coerce_string(value: &Value) -> Result<Cow<'_, str>, RuntimeError>
         Value::Number(value) => Ok(Cow::Owned(value.to_string())),
         Value::Image(_)
         | Value::Resource(_)
+        | Value::Tuple(_)
         | Value::List(_)
         | Value::Record(_)
         | Value::Projected(_) => Err(RuntimeError::TypeError {
@@ -978,6 +995,17 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, RuntimeErro
             values.extend(b.iter().cloned());
             Ok(Value::List(values.into()))
         }
+        (Value::Tuple(a), Value::Tuple(b)) => {
+            let mut values = Vec::with_capacity(a.len() + b.len());
+            values.extend(a.iter().cloned());
+            values.extend(b.iter().cloned());
+            Ok(Value::Tuple(values.into()))
+        }
+        (Value::List(_), Value::Tuple(_)) | (Value::Tuple(_), Value::List(_)) => {
+            Err(RuntimeError::TypeError {
+                message: "can't concatenate list and tuple".to_string(),
+            })
+        }
         (left, right) => Ok(Value::Number(as_number(&left)? + as_number(&right)?)),
     }
 }
@@ -989,6 +1017,7 @@ pub(crate) fn is_truthy(value: &Value) -> bool {
         Value::Number(value) => *value != 0.0 && !value.is_nan(),
         Value::String(value) => !value.is_empty(),
         Value::Image(_) | Value::Resource(_) | Value::List(_) | Value::Record(_) => true,
+        Value::Tuple(values) => !values.is_empty(),
         Value::Projected(value) => futures_executor::block_on(value.truthy()),
     }
 }
@@ -1040,6 +1069,7 @@ pub(crate) fn value_type_name(value: &Value) -> &str {
         Value::String(_) => "string",
         Value::Image(_) => "image",
         Value::Resource(_) => "resource",
+        Value::Tuple(_) => "tuple",
         Value::List(_) => "list",
         Value::Record(_) => "record",
         Value::Projected(value) => value.value_type_name(),
@@ -1049,6 +1079,7 @@ pub(crate) fn value_type_name(value: &Value) -> &str {
 pub(crate) fn value_contains_projected(value: &Value) -> bool {
     match value {
         Value::Projected(_) => true,
+        Value::Tuple(values) => values.iter().any(value_contains_projected),
         Value::List(values) => values.iter().any(value_contains_projected),
         Value::Record(record) => record.values().any(value_contains_projected),
         Value::Null

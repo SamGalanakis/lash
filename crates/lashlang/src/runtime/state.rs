@@ -11,6 +11,8 @@ const PROJECTED_SNAPSHOT_TAG: &str = "__lashlang_snapshot_projected__";
 const PROJECTED_SNAPSHOT_NAME: &str = "name";
 const PROJECTED_SNAPSHOT_TYPE_NAME: &str = "type_name";
 const PROJECTED_SNAPSHOT_PROJECTION_REF: &str = "projection_ref";
+const TUPLE_SNAPSHOT_TAG: &str = "__lashlang_snapshot_tuple__";
+const TUPLE_SNAPSHOT_ITEMS: &str = "items";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -97,6 +99,15 @@ fn snapshot_value_from_json(value: serde_json::Value) -> Value {
                 .into(),
         ),
         serde_json::Value::Object(map) => {
+            if let Some(items) = tuple_snapshot_marker(&map) {
+                return Value::Tuple(
+                    items
+                        .into_iter()
+                        .map(snapshot_value_from_json)
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
+            }
             if let Some((name, type_name, projection_ref)) = projected_snapshot_marker(&map) {
                 return Value::Projected(
                     ProjectedValue::unavailable_after_restore_with_projection_ref(
@@ -112,6 +123,21 @@ fn snapshot_value_from_json(value: serde_json::Value) -> Value {
                 .unwrap_or_else(|| Value::Record(Arc::new(snapshot_record_from_json(map))))
         }
     }
+}
+
+fn tuple_snapshot_marker(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<serde_json::Value>> {
+    if map.len() != 2 {
+        return None;
+    }
+    if !map.get(TUPLE_SNAPSHOT_TAG)?.as_bool()? {
+        return None;
+    }
+    let serde_json::Value::Array(items) = map.get(TUPLE_SNAPSHOT_ITEMS)?.clone() else {
+        return None;
+    };
+    Some(items)
 }
 
 fn projected_snapshot_marker(

@@ -474,6 +474,12 @@ impl<'module> Linker<'module> {
                     span: scope.span,
                 })?,
             Expr::HostDescriptorConstructor { type_name, .. } => TypeExpr::Ref(type_name.clone()),
+            Expr::Tuple(items) => TypeExpr::List(Box::new(union_type(
+                items
+                    .iter()
+                    .map(|item| self.infer_expr_type(item, scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))),
             Expr::List(items) => TypeExpr::List(Box::new(union_type(
                 items
                     .iter()

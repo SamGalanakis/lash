@@ -119,7 +119,7 @@ impl UsageCapability {
         let result = commit_runtime_state_with_fresh_session_execution_lease(
             Arc::clone(store),
             commit,
-            "session_manager.persist_usage_ledger",
+            &current.runtime_lease_owner,
             Arc::clone(&current.host.core.clock),
         )
         .await

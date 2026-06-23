@@ -933,7 +933,7 @@ fn collect_printed_images_inner<'a>(
                     })?;
                 images.push(reference);
             }
-            FlowValue::List(values) => {
+            FlowValue::Tuple(values) | FlowValue::List(values) => {
                 for value in values.iter() {
                     collect_printed_images_inner(value, attachment_store, seen, images).await?;
                 }

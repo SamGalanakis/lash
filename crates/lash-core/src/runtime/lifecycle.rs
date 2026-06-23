@@ -1,14 +1,14 @@
 use super::*;
 
 impl LashRuntime {
-    /// Override the owner id used for durable session execution leases.
+    /// Override the owner identity used for durable session execution leases.
     ///
-    /// Normal embedded runtimes use a fresh UUID so concurrent opens of the
-    /// same session exclude each other. Durable orchestrators may set a stable
-    /// owner for one serialized logical workflow so a replay on another host can
-    /// re-enter its own live lease after a crash.
-    pub fn set_runtime_scope_id(&mut self, runtime_scope_id: impl Into<String>) {
-        self.runtime_scope_id = Arc::<str>::from(runtime_scope_id.into());
+    /// Normal embedded runtimes use a fresh owner and incarnation so concurrent
+    /// opens of the same session exclude each other. Durable orchestrators may
+    /// set a stable `(owner_id, incarnation_id)` pair for one serialized logical
+    /// workflow.
+    pub fn set_runtime_lease_owner(&mut self, owner: crate::LeaseOwnerIdentity) {
+        self.runtime_lease_owner = owner;
     }
 
     pub fn unregister_plugin_session(&self) -> Result<(), crate::PluginError> {
@@ -126,13 +126,19 @@ impl LashRuntime {
             ))
             .await;
         let protocol_turn_options = state.protocol_turn_options.clone();
+        let runtime_scope_id = uuid::Uuid::new_v4().to_string();
+        let runtime_lease_owner = crate::LeaseOwnerIdentity::opaque(
+            runtime_scope_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+        );
         Ok(Self {
             session: Some(session),
             policy,
             host,
             services,
             state,
-            runtime_scope_id: Arc::<str>::from(uuid::Uuid::new_v4().to_string()),
+            runtime_scope_id: Arc::<str>::from(runtime_scope_id),
+            runtime_lease_owner,
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             protocol_turn_options,
@@ -310,7 +316,7 @@ impl LashRuntime {
         let result = commit_runtime_state_with_fresh_session_execution_lease(
             Arc::clone(&store),
             commit,
-            "runtime.park",
+            &self.runtime_lease_owner,
             Arc::clone(&self.host.core.clock),
         )
         .await

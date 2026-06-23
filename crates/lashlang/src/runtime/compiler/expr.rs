@@ -154,6 +154,12 @@ impl Compiler {
                     self.code.push(Instruction::LoadName(name));
                 }
             }
+            Expr::Tuple(items) => {
+                for item in items {
+                    self.compile_expr(item);
+                }
+                self.code.push(Instruction::BuildTuple(items.len()));
+            }
             Expr::List(items) => {
                 for item in items {
                     self.compile_expr(item);

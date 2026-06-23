@@ -1127,8 +1127,9 @@ async fn image_values_are_immutable_and_len_is_unsupported() {
     assert_eq!(
         err,
         RuntimeError::TypeError {
-            message: "`len` requires a string, list, record, or null; use `.size` for images"
-                .to_string()
+            message:
+                "`len` requires a string, tuple, list, record, or null; use `.size` for images"
+                    .to_string()
         }
     );
 }

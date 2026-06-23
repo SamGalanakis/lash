@@ -72,6 +72,21 @@ impl<'module> Linker<'module> {
             | Expr::Break
             | Expr::Continue
             | Expr::TypeLiteral(_) => (expr.clone(), Some(Binding::Value(literal_type(expr)))),
+            Expr::Tuple(items) => {
+                let mut lowered = Vec::with_capacity(items.len());
+                let mut item_types = Vec::with_capacity(items.len());
+                for item in items {
+                    let (item, binding) = self.lower_expr(item, scope)?;
+                    lowered.push(item);
+                    item_types.push(binding_type(binding.as_ref()));
+                }
+                (
+                    Expr::Tuple(lowered),
+                    Some(Binding::Value(TypeExpr::List(Box::new(union_type(
+                        item_types,
+                    ))))),
+                )
+            }
             Expr::List(items) => {
                 let mut lowered = Vec::with_capacity(items.len());
                 let mut item_types = Vec::with_capacity(items.len());

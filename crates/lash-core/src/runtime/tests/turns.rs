@@ -1,5 +1,9 @@
 use super::*;
 
+fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
+    crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
+}
+
 #[derive(Debug)]
 struct ManualClock {
     epoch_ms: std::sync::atomic::AtomicU64,
@@ -1025,14 +1029,16 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
 async fn foreground_turn_returns_session_execution_busy_when_lane_is_held() {
     let (mut runtime, store) =
         standard_runtime_with_transport_and_queue_store(mock_provider(Vec::new())).await;
+    let owner = lease_owner("other-runtime");
     let held_lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
-        "other-runtime",
+        &owner,
         60_000,
     )
     .await
     .expect("claim session execution lease")
+    .acquired()
     .expect("session execution lease");
 
     let err = runtime
@@ -1074,14 +1080,16 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
         TurnInput::text("queued while busy"),
     )
     .await;
+    let owner = lease_owner("foreground-runtime");
     let held_lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
-        "foreground-runtime",
+        &owner,
         60_000,
     )
     .await
     .expect("claim session execution lease")
+    .acquired()
     .expect("session execution lease");
 
     let busy_result = runtime
@@ -1143,14 +1151,16 @@ async fn session_command_claim_lease_expiry_surfaces_session_execution_lease_los
         runtime_store,
     )
     .await;
+    let owner = lease_owner("session-command-drain-test");
     let lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
-        "session-command-drain-test",
+        &owner,
         crate::runtime::RUNTIME_TURN_LEASE_TTL_MS,
     )
     .await
     .expect("claim session execution lease")
+    .acquired()
     .expect("session execution lease");
     clock.expire_after_timestamp_calls(0);
 
@@ -1263,14 +1273,16 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
     let commits_before_lease_loss = *store.runtime_commit_count.lock().expect("commit count");
 
     clock.advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+    let owner = lease_owner("stealing-runtime");
     let stolen = crate::store::RuntimePersistence::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
-        "stealing-runtime",
+        &owner,
         60_000,
     )
     .await
     .expect("steal expired session execution lease")
+    .acquired()
     .expect("expired session execution lease should be claimable");
     provider_continue_tx
         .send(())

@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use lash_core::runtime::{QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload};
 use lash_core::{
-    DeliveryPolicy, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, RuntimeSessionState,
-    SlotPolicy, StoreError, ToolState, TurnInput,
+    DeliveryPolicy, LeaseOwnerIdentity, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence,
+    RuntimeSessionState, SlotPolicy, StoreError, ToolState, TurnInput,
 };
 use lash_sqlite_store::Store;
 
@@ -39,6 +39,10 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .build()
         .expect("runtime")
         .block_on(future)
+}
+
+fn lease_owner(owner_id: &str) -> LeaseOwnerIdentity {
+    LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
 }
 
 fn commit_at(session_id: &str, expected_head_revision: Option<u64>) -> RuntimeCommit {
@@ -67,8 +71,10 @@ fn head_revision_cas_holds_across_two_connections() {
     let path = unique_db_path("cas");
     let session_fence = {
         let store = block_on(Store::open(&path)).expect("lease store");
-        block_on(store.try_claim_session_execution_lease("root", "session-owner", 60_000))
+        let owner = lease_owner("session-owner");
+        block_on(store.try_claim_session_execution_lease("root", &owner, 60_000))
             .expect("claim session execution lease")
+            .acquired()
             .expect("session execution lease")
             .fence()
     };
@@ -146,10 +152,12 @@ async fn gc_keeps_live_committed_checkpoint_blobs() {
         execution_state_snapshot: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         ..RuntimeSessionState::default()
     };
+    let owner = lease_owner("gc-test");
     let session_lease = store
-        .try_claim_session_execution_lease("root", "gc-test", 60_000)
+        .try_claim_session_execution_lease("root", &owner, 60_000)
         .await
         .expect("claim session execution lease")
+        .acquired()
         .expect("session execution lease");
     let commit = RuntimeCommit {
         expected_head_revision: Some(0),
@@ -215,9 +223,10 @@ async fn second_claim_on_held_batch_is_not_won() {
         .await
         .expect("enqueue");
     let session_lease = store
-        .try_claim_session_execution_lease("root", "session-owner", 60_000)
+        .try_claim_session_execution_lease("root", &lease_owner("session-owner"), 60_000)
         .await
         .expect("claim session execution lease")
+        .acquired()
         .expect("session execution lease");
     let session_fence = session_lease.fence();
 
@@ -225,7 +234,7 @@ async fn second_claim_on_held_batch_is_not_won() {
         .claim_ready_queued_work(
             "root",
             &session_fence,
-            "owner-a",
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -239,7 +248,7 @@ async fn second_claim_on_held_batch_is_not_won() {
         .claim_ready_queued_work(
             "root",
             &session_fence,
-            "owner-b",
+            &lease_owner("owner-b"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -274,8 +283,10 @@ fn concurrent_claims_never_double_own_a_batch() {
     });
     let session_fence = {
         let store = block_on(Store::open(&path)).expect("lease store");
-        block_on(store.try_claim_session_execution_lease("root", "session-owner", 60_000))
+        let owner = lease_owner("session-owner");
+        block_on(store.try_claim_session_execution_lease("root", &owner, 60_000))
             .expect("claim session execution lease")
+            .acquired()
             .expect("session execution lease")
             .fence()
     };
@@ -293,7 +304,7 @@ fn concurrent_claims_never_double_own_a_batch() {
                     .claim_ready_queued_work(
                         "root",
                         &session_fence,
-                        owner,
+                        &lease_owner(owner),
                         QueuedWorkClaimBoundary::Idle,
                         60_000,
                         10,
@@ -357,8 +368,8 @@ async fn unsupported_schema_error_reports_real_versions() {
         "error must report the found version 99: {message}"
     );
     assert!(
-        message.contains("schema version 4") || message.contains("version 4"),
-        "error must report the real expected version 4: {message}"
+        message.contains("schema version 5") || message.contains("version 5"),
+        "error must report the real expected version 5: {message}"
     );
     assert!(
         !message.contains("version 1 only"),
@@ -394,5 +405,5 @@ fn concurrent_first_open_never_observes_version_zero_schema() {
     let user_version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 4);
+    assert_eq!(user_version, 5);
 }

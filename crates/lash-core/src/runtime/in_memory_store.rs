@@ -21,14 +21,14 @@ struct InMemoryQueuedBatch {
     batch: crate::QueuedWorkBatch,
     claim_id: Option<String>,
     claim_token: Option<String>,
-    claim_owner_id: Option<String>,
+    claim_owner: Option<crate::LeaseOwnerIdentity>,
     claim_fencing_token: u64,
     claim_expires_at_ms: u64,
 }
 
 #[derive(Clone, Default)]
 struct InMemorySessionExecutionLease {
-    owner_id: Option<String>,
+    owner: Option<crate::LeaseOwnerIdentity>,
     lease_token: Option<String>,
     fencing_token: u64,
     claimed_at_epoch_ms: u64,
@@ -100,7 +100,10 @@ impl InMemorySessionStore {
                 session_id: fence.session_id.clone(),
             });
         };
-        if current.owner_id.as_deref() == Some(fence.owner_id.as_str())
+        if current
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.same_incarnation(&fence.owner))
             && current.lease_token.as_deref() == Some(fence.lease_token.as_str())
             && current.fencing_token == fence.fencing_token
             && current.expires_at_epoch_ms > now
@@ -122,15 +125,50 @@ impl InMemorySessionStore {
             .lock()
             .expect("lock session execution leases");
         if let Some(current) = leases.get_mut(&completion.session_id)
-            && current.owner_id.as_deref() == Some(completion.owner_id.as_str())
+            && current
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.same_incarnation(&completion.owner))
             && current.lease_token.as_deref() == Some(completion.lease_token.as_str())
             && current.fencing_token == completion.fencing_token
         {
-            current.owner_id = None;
+            current.owner = None;
             current.lease_token = None;
             current.claimed_at_epoch_ms = 0;
             current.expires_at_epoch_ms = 0;
         }
+    }
+
+    fn in_memory_session_execution_lease(
+        session_id: &str,
+        current: &InMemorySessionExecutionLease,
+    ) -> crate::SessionExecutionLease {
+        crate::SessionExecutionLease {
+            session_id: session_id.to_string(),
+            owner: current.owner.clone().expect("live lease owner set"),
+            lease_token: current.lease_token.clone().expect("live lease token set"),
+            fencing_token: current.fencing_token,
+            claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+            expires_at_epoch_ms: current.expires_at_epoch_ms,
+        }
+    }
+
+    fn acquire_session_execution_lease_in_memory(
+        session_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
+        current: &mut InMemorySessionExecutionLease,
+        now: u64,
+        lease_ttl_ms: u64,
+    ) -> crate::SessionExecutionLease {
+        current.fencing_token = current.fencing_token.saturating_add(1);
+        current.owner = Some(owner.clone());
+        current.lease_token = Some(format!(
+            "{}:{}:{}:{now}:{}",
+            session_id, owner.owner_id, owner.incarnation_id, current.fencing_token
+        ));
+        current.claimed_at_epoch_ms = now;
+        current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+        Self::in_memory_session_execution_lease(session_id, current)
     }
 }
 
@@ -370,9 +408,9 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
-        owner_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<Option<crate::SessionExecutionLease>, crate::store::StoreError> {
+    ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::store::StoreError> {
         let now = self.clock.timestamp_ms();
         let mut leases = self
             .session_execution_leases
@@ -380,35 +418,73 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             .expect("lock session execution leases");
         let current = leases.entry(session_id.to_string()).or_default();
         if current.is_live(now) {
-            if current.owner_id.as_deref() == Some(owner_id) {
+            if current
+                .owner
+                .as_ref()
+                .is_some_and(|current_owner| current_owner.same_incarnation(owner))
+            {
                 current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
-                return Ok(Some(crate::SessionExecutionLease {
-                    session_id: session_id.to_string(),
-                    owner_id: owner_id.to_string(),
-                    lease_token: current.lease_token.clone().expect("live lease token set"),
-                    fencing_token: current.fencing_token,
-                    claimed_at_epoch_ms: current.claimed_at_epoch_ms,
-                    expires_at_epoch_ms: current.expires_at_epoch_ms,
-                }));
+                return Ok(crate::SessionExecutionLeaseClaimOutcome::Acquired(
+                    Self::in_memory_session_execution_lease(session_id, current),
+                ));
             }
-            return Ok(None);
+            return Ok(crate::SessionExecutionLeaseClaimOutcome::Busy {
+                holder: Self::in_memory_session_execution_lease(session_id, current),
+            });
         }
-        current.fencing_token = current.fencing_token.saturating_add(1);
-        current.owner_id = Some(owner_id.to_string());
-        current.lease_token = Some(format!(
-            "{session_id}:{owner_id}:{now}:{}",
-            current.fencing_token
-        ));
-        current.claimed_at_epoch_ms = now;
-        current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
-        Ok(Some(crate::SessionExecutionLease {
-            session_id: session_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: current.lease_token.clone().expect("lease token set"),
-            fencing_token: current.fencing_token,
-            claimed_at_epoch_ms: current.claimed_at_epoch_ms,
-            expires_at_epoch_ms: current.expires_at_epoch_ms,
-        }))
+        Ok(crate::SessionExecutionLeaseClaimOutcome::Acquired(
+            Self::acquire_session_execution_lease_in_memory(
+                session_id,
+                owner,
+                current,
+                now,
+                lease_ttl_ms,
+            ),
+        ))
+    }
+
+    async fn reclaim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
+        observed_holder: &crate::SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::store::StoreError> {
+        let now = self.clock.timestamp_ms();
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock session execution leases");
+        let current = leases.entry(session_id.to_string()).or_default();
+        if !current.is_live(now) {
+            return Ok(crate::SessionExecutionLeaseClaimOutcome::Acquired(
+                Self::acquire_session_execution_lease_in_memory(
+                    session_id,
+                    owner,
+                    current,
+                    now,
+                    lease_ttl_ms,
+                ),
+            ));
+        }
+        let holder = Self::in_memory_session_execution_lease(session_id, current);
+        if observed_holder.session_id == session_id
+            && holder.owner.same_incarnation(&observed_holder.owner)
+            && holder.lease_token == observed_holder.lease_token
+            && holder.fencing_token == observed_holder.fencing_token
+            && holder.owner.is_definitely_dead_for_claimant(owner)
+        {
+            return Ok(crate::SessionExecutionLeaseClaimOutcome::Acquired(
+                Self::acquire_session_execution_lease_in_memory(
+                    session_id,
+                    owner,
+                    current,
+                    now,
+                    lease_ttl_ms,
+                ),
+            ));
+        }
+        Ok(crate::SessionExecutionLeaseClaimOutcome::Busy { holder })
     }
 
     async fn renew_session_execution_lease(
@@ -426,7 +502,10 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 session_id: fence.session_id.clone(),
             });
         };
-        if current.owner_id.as_deref() != Some(fence.owner_id.as_str())
+        if !current
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.same_incarnation(&fence.owner))
             || current.lease_token.as_deref() != Some(fence.lease_token.as_str())
             || current.fencing_token != fence.fencing_token
             || current.expires_at_epoch_ms <= now
@@ -438,7 +517,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
         Ok(crate::SessionExecutionLease {
             session_id: fence.session_id.clone(),
-            owner_id: fence.owner_id.clone(),
+            owner: fence.owner.clone(),
             lease_token: fence.lease_token.clone(),
             fencing_token: fence.fencing_token,
             claimed_at_epoch_ms: current.claimed_at_epoch_ms,
@@ -498,7 +577,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             batch: stored.clone(),
             claim_id: None,
             claim_token: None,
-            claim_owner_id: None,
+            claim_owner: None,
             claim_fencing_token: 0,
             claim_expires_at_ms: 0,
         });
@@ -510,7 +589,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         &self,
         session_id: &str,
         session_execution_lease: &crate::SessionExecutionLeaseFence,
-        owner_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
         boundary: crate::QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
         max_batches: usize,
@@ -522,10 +601,18 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         let now = self.clock.timestamp_ms();
         let mut queued = self.queued_work.lock().expect("lock queued work");
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        let claim_available = |entry: &InMemoryQueuedBatch| {
+            entry.claim_token.is_none()
+                || entry.claim_expires_at_ms <= now
+                || entry
+                    .claim_owner
+                    .as_ref()
+                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+        };
         let first_index = queued.iter().position(|entry| {
             entry.batch.session_id == session_id
                 && entry.batch.available_at_ms <= now
-                && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+                && claim_available(entry)
         });
         let Some(first_index) = first_index else {
             return Ok(None);
@@ -544,7 +631,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 }
                 if entry.batch.session_id != session_id
                     || entry.batch.available_at_ms > now
-                    || (entry.claim_token.is_some() && entry.claim_expires_at_ms > now)
+                    || !claim_available(entry)
                     || entry.batch.slot_policy != crate::SlotPolicy::Join
                     || entry.batch.delivery_policy != first.delivery_policy
                     || entry.batch.merge_key != first.merge_key
@@ -556,14 +643,17 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         }
         let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
         let claim_id = format!("recording-qwc:{}:{fencing_token}", first.enqueue_seq);
-        let lease_token = format!("{session_id}:{owner_id}:{claim_id}:{now}");
+        let lease_token = format!(
+            "{}:{}:{}:{claim_id}:{now}",
+            session_id, owner.owner_id, owner.incarnation_id
+        );
         let expires_at = now.saturating_add(lease_ttl_ms);
         let mut batches = Vec::new();
         for index in indices {
             let entry = &mut queued[index];
             entry.claim_id = Some(claim_id.clone());
             entry.claim_token = Some(lease_token.clone());
-            entry.claim_owner_id = Some(owner_id.to_string());
+            entry.claim_owner = Some(owner.clone());
             entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
             entry.claim_expires_at_ms = expires_at;
             batches.push(entry.batch.clone());
@@ -571,7 +661,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         Ok(Some(crate::QueuedWorkClaim {
             session_id: session_id.to_string(),
             claim_id,
-            owner_id: owner_id.to_string(),
+            owner: owner.clone(),
             lease_token,
             fencing_token,
             claimed_at_epoch_ms: now,
@@ -621,7 +711,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             {
                 entry.claim_id = None;
                 entry.claim_token = None;
-                entry.claim_owner_id = None;
+                entry.claim_owner = None;
                 entry.claim_expires_at_ms = 0;
             }
         }

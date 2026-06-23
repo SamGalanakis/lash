@@ -1,5 +1,7 @@
 //! JSON serialization for `Value`. Bidirectional bridge between the
-//! lashlang value tree and `serde_json::Value`. Image attachments encode
+//! lashlang value tree and `serde_json::Value`. Tuples serialize as arrays in
+//! runtime/public JSON and use a snapshot-only marker when preserving state.
+//! Image attachments encode
 //! as `{"type": "image", "id": ..., "label": ..., "size": ..., "width":
 //! ..., "height": ...}` and round-trip via `image_to_json` /
 //! `image_from_json_map`. Projected values serialize with the canonical
@@ -43,7 +45,7 @@ pub(crate) fn to_json_async<'a>(value: &'a Value) -> ProjectedFuture<'a, serde_j
             Value::String(value) => serde_json::Value::String(value.to_string()),
             Value::Image(image) => image_to_json(image),
             Value::Resource(handle) => resource_to_json(handle),
-            Value::List(values) => {
+            Value::Tuple(values) | Value::List(values) => {
                 let mut out = Vec::with_capacity(values.len());
                 for value in values.iter() {
                     out.push(to_json_async(value).await);
@@ -82,7 +84,7 @@ pub(crate) fn to_json_direct(value: &Value) -> serde_json::Value {
         Value::String(value) => serde_json::Value::String(value.to_string()),
         Value::Image(image) => image_to_json(image),
         Value::Resource(handle) => resource_to_json(handle),
-        Value::List(values) => {
+        Value::Tuple(values) | Value::List(values) => {
             serde_json::Value::Array(values.iter().map(to_json_direct).collect())
         }
         Value::Record(record) => {
@@ -99,6 +101,7 @@ pub(crate) fn to_json_direct(value: &Value) -> serde_json::Value {
 pub(crate) struct RuntimeJson<'a>(pub(crate) &'a Value);
 pub(crate) struct DirectJson<'a>(pub(crate) &'a Value);
 pub(crate) struct SnapshotJson<'a>(pub(crate) &'a Value);
+struct SnapshotTupleItems<'a>(&'a super::ListValue);
 
 impl Serialize for RuntimeJson<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -132,6 +135,19 @@ impl Serialize for SnapshotJson<'_> {
     }
 }
 
+impl Serialize for SnapshotTupleItems<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for value in self.0.iter() {
+            sequence.serialize_element(&SnapshotJson(value))?;
+        }
+        sequence.end()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ProjectedMode {
     Runtime,
@@ -157,7 +173,13 @@ where
         Value::String(value) => serializer.serialize_str(value),
         Value::Image(image) => serialize_image(image, serializer),
         Value::Resource(handle) => serialize_resource(handle, serializer),
-        Value::List(values) => {
+        Value::Tuple(values) if matches!(projected_mode, ProjectedMode::Snapshot) => {
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("__lashlang_snapshot_tuple__", &true)?;
+            map.serialize_entry("items", &SnapshotTupleItems(values))?;
+            map.end()
+        }
+        Value::Tuple(values) | Value::List(values) => {
             let mut sequence = serializer.serialize_seq(Some(values.len()))?;
             for value in values.iter() {
                 match projected_mode {
@@ -242,7 +264,7 @@ pub(crate) fn append_runtime_json_async<'a>(
                 &serde_json::to_string(value).expect("string json serialization should succeed"),
             ),
             Value::Image(_) | Value::Resource(_) => append_direct_json(output, value),
-            Value::List(values) => {
+            Value::Tuple(values) | Value::List(values) => {
                 output.push('[');
                 for (index, value) in values.iter().enumerate() {
                     if index > 0 {

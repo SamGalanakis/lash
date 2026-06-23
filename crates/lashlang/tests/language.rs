@@ -466,6 +466,117 @@ async fn parser_treats_semicolon_like_whitespace_between_idents() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn tuple_comma_expressions_are_first_class_sequence_values() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            pair = 1, "x"
+            singleton = (1,)
+            empty_tuple = ()
+            sliced = slice((1, 2, 3), 1, 3)
+            seen = []
+            for item in pair {
+              seen = push(seen, to_string(item))
+            }
+            print pair
+            submit {
+              first: pair[0],
+              second: pair[1],
+              len_pair: len(pair),
+              len_singleton: len(singleton),
+              empty_empty: empty(empty_tuple),
+              empty_pair: empty(pair),
+              contains_x: contains(pair, "x"),
+              joined: join(("a", "b"), "|"),
+              slice_first: sliced[0],
+              slice_len: len(sliced),
+              truthy_pair: pair ? true : false,
+              truthy_empty: empty_tuple ? true : false,
+              concat_last: ((1,) + (2,))[1],
+              seen: seen,
+              tuple_eq: (1, 2) == (1, 2),
+              tuple_not_list: (1, 2) == [1, 2],
+              text: to_string((1, "x"))
+            }
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("tuple program should run"),
+    );
+
+    let record = value.as_record().expect("record");
+    assert_eq!(record["first"], Value::Number(1.0));
+    assert_eq!(record["second"], Value::String("x".into()));
+    assert_eq!(record["len_pair"], Value::Number(2.0));
+    assert_eq!(record["len_singleton"], Value::Number(1.0));
+    assert_eq!(record["empty_empty"], Value::Bool(true));
+    assert_eq!(record["empty_pair"], Value::Bool(false));
+    assert_eq!(record["contains_x"], Value::Bool(true));
+    assert_eq!(record["joined"], Value::String("a|b".into()));
+    assert_eq!(record["slice_first"], Value::Number(2.0));
+    assert_eq!(record["slice_len"], Value::Number(2.0));
+    assert_eq!(record["truthy_pair"], Value::Bool(true));
+    assert_eq!(record["truthy_empty"], Value::Bool(false));
+    assert_eq!(record["concat_last"], Value::Number(2.0));
+    assert_eq!(
+        record["seen"],
+        Value::List(vec![Value::String("1".into()), Value::String("x".into())].into())
+    );
+    assert_eq!(record["tuple_eq"], Value::Bool(true));
+    assert_eq!(record["tuple_not_list"], Value::Bool(false));
+    assert_eq!(record["text"], Value::String(r#"(1, "x")"#.into()));
+
+    let observations = host.observations.lock().expect("observations");
+    assert!(matches!(&observations[0], Value::Tuple(items) if items.len() == 2));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tuples_are_immutable_and_do_not_mixed_concat_with_lists() {
+    let err = runtime_error(
+        r#"
+        pair = (1, 2)
+        pair[0] = 9
+        submit pair
+        "#,
+    )
+    .await;
+    assert!(err.to_string().contains("tuples are immutable"), "{err:?}");
+
+    let err = runtime_error("submit push((1, 2), 3)").await;
+    assert!(
+        err.to_string()
+            .contains("`push` requires a list as the first argument"),
+        "{err:?}"
+    );
+
+    let err = runtime_error("submit (1,) + [2]").await;
+    assert!(
+        err.to_string().contains("can't concatenate list and tuple"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tuple_snapshot_round_trip_preserves_tuple_identity() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let outcome = execute("pair = 1, 2", &mut state, &host)
+        .await
+        .expect("tuple assignment should run");
+    assert!(matches!(outcome, ExecutionOutcome::Continued));
+
+    let encoded = serde_json::to_string(&state.snapshot()).expect("snapshot encode");
+    assert!(encoded.contains("__lashlang_snapshot_tuple__"), "{encoded}");
+    let snapshot: lashlang::Snapshot = serde_json::from_str(&encoded).expect("snapshot decode");
+    let restored = State::from_snapshot(snapshot);
+    assert!(matches!(restored.globals()["pair"], Value::Tuple(_)));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn multiline_strings_are_expression_values() {
     let host = TestHost::default();
     let mut state = State::new();

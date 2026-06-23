@@ -99,6 +99,36 @@ async fn aggregate_await_nested_resource_calls_reconstructs_shape() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn aggregate_await_tuple_of_resource_calls_batches_and_reconstructs_tuple() {
+    let source = r#"
+        result = await (tools.echo({ value: "left" })?, tools.echo({ value: "right" })?)
+        submit result
+        "#;
+    let compiled = compile_source(source).expect("program should compile");
+    let listing = compiled_instruction_listing(&compiled);
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ResourceOperationBatch(_))),
+        "aggregate tuple await should compile to one batch instruction:\n{listing}"
+    );
+
+    let value = exec(source).await.expect("program should run");
+    let Value::Tuple(items) = value else {
+        panic!("expected tuple result");
+    };
+    assert_eq!(
+        &items[..],
+        [
+            Value::String("left".into()),
+            Value::String("right".into())
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn aggregate_await_mixed_pure_values_batch_resource_leaves_and_reconstructs_shape() {
     struct MixedHost {
         batch_len: std::sync::atomic::AtomicUsize,
@@ -1536,6 +1566,29 @@ async fn helper_functions_are_covered_directly() {
         .expect("stringify"),
         "[1,2]"
     );
+    assert_eq!(
+        stringify_value(&Value::Tuple(
+            vec![Value::Number(1.0), Value::String("x".into())].into()
+        ))
+        .expect("stringify"),
+        r#"(1, "x")"#
+    );
+    assert_eq!(
+        stringify_value(&Value::Tuple(vec![Value::Number(1.0)].into())).expect("stringify"),
+        "(1,)"
+    );
+    assert_eq!(
+        stringify_value(&Value::Tuple(Vec::new().into())).expect("stringify"),
+        "()"
+    );
+    assert_eq!(
+        add_values(
+            Value::Tuple(vec![Value::Number(1.0)].into()),
+            Value::Tuple(vec![Value::Number(2.0)].into())
+        )
+        .expect("tuple concat"),
+        Value::Tuple(vec![Value::Number(1.0), Value::Number(2.0)].into())
+    );
     let mut appended = String::from("prefix:");
     append_stringified_value(&mut appended, &Value::Bool(true)).expect("append stringify");
     assert_eq!(appended, "prefix:true");
@@ -1617,6 +1670,7 @@ async fn helper_functions_are_covered_directly() {
         value_type_name(&Value::Record(Record::default().into())),
         "record"
     );
+    assert_eq!(value_type_name(&Value::Tuple(Vec::new().into())), "tuple");
     assert_eq!(
         RuntimeError::UndefinedVariable {
             name: "x".to_string()
@@ -1645,6 +1699,10 @@ async fn json_helpers_cover_special_paths() {
     );
     assert_eq!(
         to_json(&Value::List(vec![Value::Number(1.0)].into())),
+        serde_json::json!([1])
+    );
+    assert_eq!(
+        to_json(&Value::Tuple(vec![Value::Number(1.0)].into())),
         serde_json::json!([1])
     );
     assert_eq!(

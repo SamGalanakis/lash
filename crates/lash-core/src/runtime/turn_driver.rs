@@ -37,5 +37,6 @@ pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) pending_queue_claims: Vec<crate::QueuedWorkClaim>,
     pub(super) checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer,
     pub(super) session_execution_lease: Option<crate::SessionExecutionLeaseFence>,
+    pub(super) runtime_lease_owner: crate::LeaseOwnerIdentity,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }

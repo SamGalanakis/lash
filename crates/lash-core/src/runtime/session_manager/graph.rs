@@ -75,7 +75,7 @@ impl CurrentSessionCapability {
         let result = commit_runtime_state_with_fresh_session_execution_lease(
             Arc::clone(store),
             commit,
-            "session_manager.append_session_nodes",
+            &self.runtime_lease_owner,
             Arc::clone(&self.host.core.clock),
         )
         .await

@@ -99,7 +99,7 @@ impl RuntimeTurnDriver<'_> {
                 .claim_ready_queued_work(
                     &self.session_id,
                     session_execution_lease,
-                    &self.turn_id,
+                    &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
                     crate::QUEUED_WORK_CLAIM_TTL_MS,
                     64,

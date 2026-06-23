@@ -430,7 +430,7 @@ mod tests {
             ),
             (
                 "x = 1\nsubmit len(true)",
-                "`len` requires a string, list, record, or null",
+                "`len` requires a string, tuple, list, record, or null",
                 "submit len(true)",
             ),
             (
