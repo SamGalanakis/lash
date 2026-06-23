@@ -12,9 +12,7 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, SessionPlugin,
     StaticPluginFactory,
 };
-use lash_core::{
-    ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolScheduling,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolScheduling};
 use lash_tool_support::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
 };

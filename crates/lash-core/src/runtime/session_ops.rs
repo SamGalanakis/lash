@@ -35,7 +35,7 @@ impl LashRuntime {
                         session_id = %state.session_id,
                         orphaned = ?report.orphaned,
                         "persisted state installed with orphaned tools: no registered \
-                         source resolves them; they are Off until their source returns"
+                         source resolves them; they remain non-members until their source returns"
                     );
                 }
             }

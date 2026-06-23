@@ -488,6 +488,7 @@ struct ExactDispatchTools {
     contracts_resolved: Arc<AtomicUsize>,
     executed: Arc<AtomicUsize>,
     contract_available: bool,
+    observed_execution_bindings: Option<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
 }
 
 struct HiddenDispatchTools {
@@ -531,15 +532,48 @@ impl ToolProvider for ExactDispatchTools {
         (name == "host_only").then(|| named_beta_tool("host_only").manifest())
     }
 
+    fn resolve_manifest_by_id(&self, id: &crate::ToolId) -> Option<crate::ToolManifest> {
+        (id == &crate::ToolId::from("tool:host_only"))
+            .then(|| named_beta_tool("host_only").manifest())
+    }
+
     fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
         self.contracts_resolved.fetch_add(1, Ordering::SeqCst);
         (self.contract_available && name == "host_only")
             .then(|| Arc::new(named_beta_tool("host_only").contract()))
     }
 
-    async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         self.executed.fetch_add(1, Ordering::SeqCst);
+        if let Some(bindings) = &self.observed_execution_bindings {
+            bindings
+                .lock()
+                .expect("execution bindings")
+                .push(call.context.tool_execution_binding().clone());
+        }
         ToolResult::ok(json!("host"))
+    }
+
+    async fn prepare_granted_tool_call(
+        &self,
+        _grant: &crate::ToolExecutionGrant,
+        call: crate::ToolPrepareCall<'_>,
+    ) -> Result<crate::PreparedToolCall, ToolResult> {
+        Ok(crate::PreparedToolCall::identity(
+            call.tool_id,
+            call.pending,
+        ))
+    }
+
+    async fn execute_granted(
+        &self,
+        grant: &crate::ToolExecutionGrant,
+        args: &serde_json::Value,
+        context: &crate::ToolContext<'_>,
+        progress: Option<&crate::ProgressSender>,
+    ) -> ToolResult {
+        self.execute_by_id(&grant.manifest.id, args, context, progress)
+            .await
     }
 }
 
@@ -1049,36 +1083,14 @@ async fn before_tool_hook_receives_resolved_argument_projection_policy() {
 }
 
 #[tokio::test]
-async fn dispatch_exact_resolves_missing_environment_tool_and_executes_owner() {
+async fn dispatch_rejects_non_catalog_tool_before_provider_resolution() {
     let contracts_resolved = Arc::new(AtomicUsize::new(0));
     let executed = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
         contracts_resolved: Arc::clone(&contracts_resolved),
         executed: Arc::clone(&executed),
         contract_available: true,
-    });
-    let outcome = dispatch_tool_call(
-        &exact_dispatch_context(provider),
-        "host_only".to_string(),
-        json!({ "value": "ok" }),
-        None,
-    )
-    .await;
-
-    assert!(outcome.record.output.is_success());
-    assert_eq!(outcome.record.output.value_for_projection(), json!("host"));
-    assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
-    assert_eq!(executed.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn dispatch_contract_unavailable_skips_execution() {
-    let contracts_resolved = Arc::new(AtomicUsize::new(0));
-    let executed = Arc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
-        contracts_resolved: Arc::clone(&contracts_resolved),
-        executed: Arc::clone(&executed),
-        contract_available: false,
+        observed_execution_bindings: None,
     });
     let outcome = dispatch_tool_call(
         &exact_dispatch_context(provider),
@@ -1091,10 +1103,99 @@ async fn dispatch_contract_unavailable_skips_execution() {
     assert!(!outcome.record.output.is_success());
     assert_eq!(
         outcome.record.output.value_for_projection()["message"],
-        json!("Tool contract is unavailable in this session")
+        json!("Tool is unavailable in this session")
     );
-    assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
+    assert_eq!(contracts_resolved.load(Ordering::SeqCst), 0);
     assert_eq!(executed.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn non_catalog_tool_is_rejected_before_contract_resolution() {
+    let contracts_resolved = Arc::new(AtomicUsize::new(0));
+    let executed = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
+        contracts_resolved: Arc::clone(&contracts_resolved),
+        executed: Arc::clone(&executed),
+        contract_available: false,
+        observed_execution_bindings: None,
+    });
+    let outcome = dispatch_tool_call(
+        &exact_dispatch_context(provider),
+        "host_only".to_string(),
+        json!({ "value": "ok" }),
+        None,
+    )
+    .await;
+
+    assert!(!outcome.record.output.is_success());
+    assert_eq!(
+        outcome.record.output.value_for_projection()["message"],
+        json!("Tool is unavailable in this session")
+    );
+    assert_eq!(contracts_resolved.load(Ordering::SeqCst), 0);
+    assert_eq!(executed.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn explicit_execution_grant_runs_non_catalog_tool_with_binding() {
+    let contracts_resolved = Arc::new(AtomicUsize::new(0));
+    let executed = Arc::new(AtomicUsize::new(0));
+    let observed_execution_bindings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
+        contracts_resolved: Arc::clone(&contracts_resolved),
+        executed: Arc::clone(&executed),
+        contract_available: false,
+        observed_execution_bindings: Some(Arc::clone(&observed_execution_bindings)),
+    });
+    let context = exact_dispatch_context(provider);
+    let grant = crate::ToolExecutionGrant::from_definition(named_beta_tool("host_only"))
+        .with_source_id(crate::PLUGIN_TOOL_SOURCE_ID)
+        .with_execution_binding(json!({ "kind": "test", "route": "deferred" }));
+    let pending = crate::sansio::PendingToolCall {
+        call_id: "grant-call".to_string(),
+        tool_name: "host_only".to_string(),
+        args: json!({ "value": "ok" }),
+        replay: None,
+    };
+    let prepared = match prepare_granted_tool_call_with_context(
+        &context,
+        &grant,
+        pending,
+        Some("grant-call".to_string()),
+    )
+    .await
+    {
+        ToolPreparationOutcome::Prepared(prepared) => prepared,
+        ToolPreparationOutcome::Completed(outcome) => {
+            panic!("grant should prepare, got {:?}", outcome.record.output)
+        }
+    };
+    let tool_context = ToolContext::from_dispatch(Arc::new(context.clone()))
+        .prepared_call(&prepared)
+        .tool_execution_binding(grant.execution_binding.clone())
+        .build();
+    let launch = dispatch_granted_prepared_tool_call_launch_with_execution_context(
+        &context,
+        &grant,
+        prepared,
+        None,
+        tool_context,
+    )
+    .await;
+    let ToolCallLaunch::Done(outcome) = launch else {
+        panic!("grant call should complete");
+    };
+
+    assert!(outcome.record.output.is_success());
+    assert_eq!(outcome.record.output.value_for_projection(), json!("host"));
+    assert_eq!(contracts_resolved.load(Ordering::SeqCst), 0);
+    assert_eq!(executed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *observed_execution_bindings
+            .lock()
+            .expect("execution bindings"),
+        vec![json!({ "kind": "test", "route": "deferred" })]
+    );
 }
 
 #[tokio::test]

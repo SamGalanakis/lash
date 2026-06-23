@@ -450,13 +450,37 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     assert!(allowed.is_empty());
 
     let tools = vec![
-        test_tool("search_tools", "Discover tools", lash_core::ToolScheduling::Parallel),
-        test_tool("read_file", "Read files", lash_core::ToolScheduling::Parallel),
-        test_tool("search_web", "Search the web", lash_core::ToolScheduling::Parallel),
-        test_tool("apply_patch", "Apply patches", lash_core::ToolScheduling::Serial),
+        test_tool(
+            "search_tools",
+            "Discover tools",
+            lash_core::ToolScheduling::Parallel,
+        ),
+        test_tool(
+            "read_file",
+            "Read files",
+            lash_core::ToolScheduling::Parallel,
+        ),
+        test_tool(
+            "search_web",
+            "Search the web",
+            lash_core::ToolScheduling::Parallel,
+        ),
+        test_tool(
+            "apply_patch",
+            "Apply patches",
+            lash_core::ToolScheduling::Serial,
+        ),
         // Not in the plan-mode allow-list: must be removed from the catalog.
-        test_tool("exec_command", "Run a command", lash_core::ToolScheduling::Serial),
-        test_tool("plan_exit", "Exit plan mode", lash_core::ToolScheduling::Parallel),
+        test_tool(
+            "exec_command",
+            "Run a command",
+            lash_core::ToolScheduling::Serial,
+        ),
+        test_tool(
+            "plan_exit",
+            "Exit plan mode",
+            lash_core::ToolScheduling::Parallel,
+        ),
     ];
     let contracts = tools
         .iter()
@@ -473,9 +497,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             extensions: Default::default(),
         })
         .expect("tool catalog");
-    // In plan mode, membership is the availability fact: allowed tools stay
-    // members (the default allow-list includes search_web/read_file/apply_patch),
-    // and plan_exit stays a member.
+    // In plan mode, membership is the execution gate: allowed tools stay members
+    // (the default allow-list includes search_web/read_file/apply_patch), and
+    // plan_exit stays a member.
     assert!(surface.has_callable_tool("search_web"));
     assert!(surface.has_callable_tool("read_file"));
     assert!(surface.has_callable_tool("plan_exit"));

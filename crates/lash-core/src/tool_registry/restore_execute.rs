@@ -92,6 +92,35 @@ impl ToolRegistry {
                 ToolResult::err_fmt(format_args!("Tool source missing for tool id `{tool_id}`"))
             })
     }
+
+    fn resolve_granted_execution_source(
+        &self,
+        grant: &ToolExecutionGrant,
+    ) -> Result<Arc<dyn ToolSourceExecutor>, ToolResult> {
+        let tool_id = &grant.manifest.id;
+        let Some(source_id) = grant.source_id.as_deref() else {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Granted tool id `{tool_id}` is missing an explicit tool source"
+            )));
+        };
+        let source = self
+            .sources
+            .read()
+            .expect("tool source lock poisoned")
+            .get(source_id)
+            .cloned();
+        let Some(source) = source else {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Tool source `{source_id}` missing for granted tool id `{tool_id}`"
+            )));
+        };
+        if source.resolve_manifest_by_id(tool_id).is_none() {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Tool source `{source_id}` does not resolve granted tool id `{tool_id}`"
+            )));
+        }
+        Ok(source)
+    }
 }
 
 #[async_trait::async_trait]
@@ -252,6 +281,21 @@ impl ToolProvider for ToolRegistry {
         source.prepare_tool_call(call).await
     }
 
+    async fn prepare_granted_tool_call(
+        &self,
+        grant: &ToolExecutionGrant,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        if call.tool_id != grant.manifest.id {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Granted prepare id `{}` does not match call id `{}`",
+                grant.manifest.id, call.tool_id
+            )));
+        }
+        let source = self.resolve_granted_execution_source(grant)?;
+        source.prepare_tool_call(call).await
+    }
+
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let Some(manifest) = self.resolve_manifest(call.name) else {
             return ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name));
@@ -271,8 +315,25 @@ impl ToolProvider for ToolRegistry {
             Ok(resolved) => resolved,
             Err(result) => return result,
         };
+        let _ = manifest;
         source
-            .execute(&manifest.name, args, context, progress)
+            .execute_by_id(tool_id, args, context, progress)
+            .await
+    }
+
+    async fn execute_granted(
+        &self,
+        grant: &ToolExecutionGrant,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let source = match self.resolve_granted_execution_source(grant) {
+            Ok(source) => source,
+            Err(result) => return result,
+        };
+        source
+            .execute_by_id(&grant.manifest.id, args, context, progress)
             .await
     }
 }

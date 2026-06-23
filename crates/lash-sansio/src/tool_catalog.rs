@@ -17,10 +17,10 @@ pub struct ToolCatalogBuildInput {
     pub contributions: Vec<ToolCatalogContribution>,
 }
 
-/// A trusted plugin's contribution to catalog assembly. Membership is the only
-/// availability fact, so the only override a contribution can express is
-/// *removal* of a member (authority hiding, plan-mode gating). Adding members
-/// happens by a [`crate::ToolProvider`] including them in its manifest list.
+/// A trusted plugin's contribution to catalog assembly. Membership is the
+/// execution gate, so the only override a contribution can express is *removal*
+/// of a member (authority hiding, plan-mode gating). Adding members happens by
+/// a [`crate::ToolProvider`] including them in its manifest list.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ToolCatalogContribution {
     /// Names of tools to remove from the catalog (non-membership).
@@ -309,7 +309,7 @@ mod tests {
         let kept = catalog.filter_prompt_contributions(vec![
             PromptContribution::guidance("Plain", "always"),
             PromptContribution::guidance("WithTool", "withtool").requires_tool("read_file"),
-            PromptContribution::guidance("Off", "off").requires_tool("missing_tool"),
+            PromptContribution::guidance("MissingTool", "missing").requires_tool("missing_tool"),
         ]);
 
         assert_eq!(kept.len(), 2);
@@ -346,8 +346,10 @@ mod tests {
 
     #[test]
     fn tool_names_fingerprint_matches_prompt_hash() {
-        let catalog =
-            build_tool_catalog(build_input(vec![tool("read_file"), tool("grep")], Vec::new()));
+        let catalog = build_tool_catalog(build_input(
+            vec![tool("read_file"), tool("grep")],
+            Vec::new(),
+        ));
 
         assert_eq!(
             catalog.tool_names_fingerprint(),

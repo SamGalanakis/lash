@@ -1,7 +1,6 @@
 /// Project every catalog member to a JSON record for host-owned discovery
-/// (e.g. the reference `search_tools` example in `lash-cli`). Membership is the
-/// only availability fact, so the projection ranges over all entries and emits
-/// no availability tier.
+/// (e.g. the reference `search_tools` example in `lash-cli`). The projection
+/// ranges over members and emits no tiered state.
 pub(crate) fn project_tool_catalog<I>(entries: I) -> Vec<serde_json::Value>
 where
     I: IntoIterator<Item = crate::ToolCatalogEntry>,
@@ -42,6 +41,7 @@ mod tests {
         manifest_resolutions: Arc<AtomicUsize>,
         contract_resolutions: Arc<AtomicUsize>,
         executions: Arc<AtomicUsize>,
+        observed_execution_bindings: Option<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
     }
     struct NamedExactSource {
         id: &'static str,
@@ -275,10 +275,16 @@ mod tests {
             &self,
             tool: &str,
             _args: &serde_json::Value,
-            _context: &ToolContext<'_>,
+            context: &ToolContext<'_>,
             _progress: Option<&ProgressSender>,
         ) -> ToolResult {
             self.executions.fetch_add(1, Ordering::SeqCst);
+            if let Some(bindings) = &self.observed_execution_bindings {
+                bindings
+                    .lock()
+                    .expect("execution bindings")
+                    .push(context.tool_execution_binding().clone());
+            }
             ToolResult::ok(json!(tool))
         }
     }
@@ -390,7 +396,7 @@ mod tests {
         let serialized = value.to_string();
 
         assert!(!serialized.contains("source_id"));
-        assert!(!serialized.contains(PLUGIN_SOURCE_ID));
+        assert!(!serialized.contains(PLUGIN_TOOL_SOURCE_ID));
         assert!(!serialized.contains("live:"));
     }
 
@@ -489,6 +495,7 @@ mod tests {
                 manifest_resolutions: Arc::clone(&manifest_resolutions),
                 contract_resolutions: Arc::new(AtomicUsize::new(0)),
                 executions: Arc::new(AtomicUsize::new(0)),
+                observed_execution_bindings: None,
             }))
             .expect("source registered");
 
@@ -550,6 +557,7 @@ mod tests {
                 manifest_resolutions: Arc::clone(&manifest_resolutions),
                 contract_resolutions: Arc::clone(&contract_resolutions),
                 executions: Arc::clone(&executions),
+                observed_execution_bindings: None,
             }))
             .expect("source registered");
 
@@ -579,6 +587,186 @@ mod tests {
         assert!(result.is_success());
         assert_eq!(result.value_for_projection(), json!("host_only"));
         assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn execution_grant_routes_without_adding_tool_to_state_or_catalog() {
+        let manifest_resolutions = Arc::new(AtomicUsize::new(0));
+        let contract_resolutions = Arc::new(AtomicUsize::new(0));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed_execution_bindings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+        registry
+            .upsert_source(Arc::new(ExactResolvingSource {
+                manifest_resolutions: Arc::clone(&manifest_resolutions),
+                contract_resolutions: Arc::clone(&contract_resolutions),
+                executions: Arc::clone(&executions),
+                observed_execution_bindings: Some(Arc::clone(&observed_execution_bindings)),
+            }))
+            .expect("source registered");
+
+        assert!(!registry.export_state().contains(&tool_id("host_only")));
+        assert!(
+            !registry
+                .tool_manifests()
+                .iter()
+                .any(|manifest| manifest.name == "host_only")
+        );
+
+        let grant = crate::ToolExecutionGrant::from_definition(test_tool(
+            "host_only",
+            "host-only",
+        ))
+        .with_source_id("exact")
+        .with_execution_binding(json!({ "kind": "test", "route": "grant" }));
+        let prepare_context = crate::ToolPrepareContext::with_execution_binding(
+            "registry-test".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            crate::TurnContext::default(),
+            Some("grant-call".to_string()),
+            grant.execution_binding.clone(),
+        );
+        let prepared = registry
+            .prepare_granted_tool_call(
+                &grant,
+                crate::ToolPrepareCall {
+                    tool_id: grant.manifest.id.clone(),
+                    pending: crate::sansio::PendingToolCall {
+                        call_id: "grant-call".to_string(),
+                        tool_name: grant.manifest.name.clone(),
+                        args: json!({}),
+                        replay: None,
+                    },
+                    context: &prepare_context,
+                },
+            )
+            .await
+            .expect("grant prepare");
+        assert_eq!(prepared.tool_id, grant.manifest.id);
+
+        let context = test_tool_context().with_tool_execution_binding(grant.execution_binding.clone());
+        let args = json!({});
+        let result = registry.execute_granted(&grant, &args, &context, None).await;
+        assert!(result.is_success());
+        assert_eq!(result.value_for_projection(), json!("host_only"));
+
+        assert!(!registry.export_state().contains(&tool_id("host_only")));
+        assert!(
+            !registry
+                .tool_manifests()
+                .iter()
+                .any(|manifest| manifest.name == "host_only")
+        );
+        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *observed_execution_bindings
+                .lock()
+                .expect("execution bindings"),
+            vec![json!({ "kind": "test", "route": "grant" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_grant_without_source_does_not_infer_registry_route() {
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+        registry
+            .upsert_source(Arc::new(ExactResolvingSource {
+                manifest_resolutions: Arc::new(AtomicUsize::new(0)),
+                contract_resolutions: Arc::new(AtomicUsize::new(0)),
+                executions: Arc::new(AtomicUsize::new(0)),
+                observed_execution_bindings: None,
+            }))
+            .expect("source registered");
+
+        let grant = crate::ToolExecutionGrant::from_definition(test_tool(
+            "host_only",
+            "host-only",
+        ));
+        let context = test_tool_context();
+        let args = json!({});
+        let result = registry.execute_granted(&grant, &args, &context, None).await;
+
+        assert!(!result.is_success());
+        assert_eq!(
+            result.value_for_projection(),
+            json!("Granted tool id `tool:host_only` is missing an explicit tool source")
+        );
+        assert!(!registry.export_state().contains(&tool_id("host_only")));
+    }
+
+    #[tokio::test]
+    async fn execution_grant_routes_grouped_source_by_id_not_name() {
+        struct HiddenSameNameProvider {
+            id: &'static str,
+            result: &'static str,
+        }
+
+        impl HiddenSameNameProvider {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::raw(
+                    self.id,
+                    "shared_hidden_name",
+                    self.result,
+                    ToolDefinition::default_input_schema(),
+                    json!({ "type": "string" }),
+                )
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ToolProvider for HiddenSameNameProvider {
+            fn tool_manifests(&self) -> Vec<ToolManifest> {
+                Vec::new()
+            }
+
+            fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+                (name == "shared_hidden_name").then(|| self.definition().manifest())
+            }
+
+            fn resolve_manifest_by_id(&self, id: &crate::ToolId) -> Option<ToolManifest> {
+                (id.as_str() == self.id).then(|| self.definition().manifest())
+            }
+
+            fn resolve_contract(&self, _name: &str) -> Option<Arc<ToolContract>> {
+                None
+            }
+
+            async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+                ToolResult::ok(json!(self.result))
+            }
+        }
+
+        let registry = ToolRegistry::from_tool_providers(vec![
+            Arc::new(HiddenSameNameProvider {
+                id: "tool:hidden_alpha",
+                result: "wrong-provider",
+            }),
+            Arc::new(HiddenSameNameProvider {
+                id: "tool:hidden_zeta",
+                result: "right-provider",
+            }),
+        ])
+        .expect("registry");
+        let grant = crate::ToolExecutionGrant::from_definition(ToolDefinition::raw(
+            "tool:hidden_zeta",
+            "shared_hidden_name",
+            "grant selects the second hidden provider by id",
+            ToolDefinition::default_input_schema(),
+            json!({ "type": "string" }),
+        ))
+        .with_source_id(crate::PLUGIN_TOOL_SOURCE_ID);
+
+        let context = test_tool_context();
+        let args = json!({});
+        let result = registry.execute_granted(&grant, &args, &context, None).await;
+
+        assert!(result.is_success());
+        assert_eq!(result.value_for_projection(), json!("right-provider"));
+        assert!(
+            registry.export_state().entries().is_empty(),
+            "grant execution must not add hidden providers to registry state"
+        );
     }
 
     #[test]
@@ -960,7 +1148,7 @@ mod tests {
             catalog[0]["contract"]["signature"],
             serde_json::json!("read_file({})")
         );
-        // Membership is the only availability fact; the projection emits no tier.
+        // Membership is the execution gate; the projection emits no tier.
         assert!(catalog[0].get("availability").is_none());
         assert!(catalog[0].get("showcased").is_none());
         assert!(catalog[0].get("callable").is_none());

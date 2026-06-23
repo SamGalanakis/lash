@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash_core::{ToolCall, ToolContract, ToolManifest, ToolProvider, ToolResult};
+use lash_core::{
+    ProgressSender, ToolCall, ToolContext, ToolContract, ToolId, ToolManifest, ToolProvider,
+    ToolResult,
+};
 
 use crate::config::McpServerConfig;
 use crate::error::McpError;
@@ -110,6 +113,47 @@ impl McpToolProvider {
     }
 }
 
+/// Non-resident MCP provider for RLM deferred execution.
+///
+/// It advertises no catalog members, but resolves and executes known MCP tools
+/// by id for explicit deferred grants.
+pub struct McpDeferredToolProvider {
+    pool: Arc<McpConnectionPool>,
+}
+
+impl McpDeferredToolProvider {
+    pub fn new(pool: Arc<McpConnectionPool>) -> Self {
+        Self { pool }
+    }
+
+    fn definition_by_id(&self, id: &ToolId) -> Option<lash_core::ToolDefinition> {
+        self.pool
+            .advertised_tools()
+            .into_iter()
+            .find(|tool| tool.manifest.id == *id)
+    }
+
+    fn validate_execution_binding(
+        tool_id: &ToolId,
+        binding: &serde_json::Value,
+    ) -> Result<(), ToolResult> {
+        let valid = binding
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind == "mcp")
+            && binding
+                .get("tool_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|bound_id| bound_id == tool_id.as_str());
+        if valid {
+            return Ok(());
+        }
+        Err(ToolResult::err_fmt(format_args!(
+            "MCP deferred execution for tool id `{tool_id}` requires an execution binding with kind `mcp` and matching `tool_id`"
+        )))
+    }
+}
+
 #[async_trait]
 impl ToolProvider for McpToolProvider {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
@@ -131,6 +175,57 @@ impl ToolProvider for McpToolProvider {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         self.pool
             .call_tool(call.name, call.args, call.context)
+            .await
+    }
+}
+
+#[async_trait]
+impl ToolProvider for McpDeferredToolProvider {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        Vec::new()
+    }
+
+    fn resolve_manifest(&self, _name: &str) -> Option<ToolManifest> {
+        None
+    }
+
+    fn resolve_manifest_by_id(&self, id: &ToolId) -> Option<ToolManifest> {
+        self.definition_by_id(id).map(|tool| tool.manifest())
+    }
+
+    fn resolve_contract(&self, _name: &str) -> Option<Arc<ToolContract>> {
+        None
+    }
+
+    fn resolve_contract_by_id(&self, id: &ToolId) -> Option<Arc<ToolContract>> {
+        self.definition_by_id(id)
+            .map(|tool| Arc::new(tool.contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        ToolResult::err_fmt(format_args!(
+            "MCP tool `{}` is not a resident catalog member; execute it through a deferred grant",
+            call.name
+        ))
+    }
+
+    async fn execute_by_id(
+        &self,
+        tool_id: &ToolId,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        _progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        if let Err(result) =
+            Self::validate_execution_binding(tool_id, context.tool_execution_binding())
+        {
+            return result;
+        }
+        let Some(definition) = self.definition_by_id(tool_id) else {
+            return ToolResult::err_fmt(format_args!("Unknown MCP tool id: {tool_id}"));
+        };
+        self.pool
+            .call_tool(&definition.manifest.name, args, context)
             .await
     }
 }
@@ -308,17 +403,44 @@ mod tests {
             })
         );
 
-        let result = factory
-            .pool()
-            .call_tool(
-                "mcp__docs__search_docs",
-                &json!({ "query": "lash" }),
+        let deferred = McpDeferredToolProvider::new(Arc::clone(factory.pool()));
+        let tool_id = defs[0].manifest.id.clone();
+        let args = json!({ "query": "lash" });
+        let missing_binding = deferred
+            .execute_by_id(
+                &tool_id,
+                &args,
                 &lash_core::testing::mock_tool_context(),
+                None,
             )
             .await;
-        assert!(result.is_success(), "{result:?}");
+        assert!(!missing_binding.is_success());
+        assert!(
+            missing_binding
+                .value_for_projection()
+                .as_str()
+                .expect("string error")
+                .contains("requires an execution binding"),
+            "{missing_binding:?}"
+        );
+
+        let wrong_binding_context = lash_core::testing::mock_tool_context_with_execution_binding(
+            json!({ "kind": "mcp", "server": "docs", "tool_id": "mcp:docs/other" }),
+        );
+        let wrong_binding = deferred
+            .execute_by_id(&tool_id, &args, &wrong_binding_context, None)
+            .await;
+        assert!(!wrong_binding.is_success());
+
+        let valid_binding_context = lash_core::testing::mock_tool_context_with_execution_binding(
+            json!({ "kind": "mcp", "server": "docs", "tool_id": tool_id.to_string() }),
+        );
+        let deferred_result = deferred
+            .execute_by_id(&tool_id, &args, &valid_binding_context, None)
+            .await;
+        assert!(deferred_result.is_success(), "{deferred_result:?}");
         assert_eq!(
-            result.value_for_projection(),
+            deferred_result.value_for_projection(),
             json!({ "matches": ["matched"] })
         );
 

@@ -4,8 +4,8 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    PreparedToolCall, ProgressSender, ToolCall, ToolContext, ToolContract, ToolId, ToolManifest,
-    ToolPrepareCall, ToolProvider, ToolResult,
+    PreparedToolCall, ProgressSender, ToolCall, ToolContext, ToolContract, ToolExecutionGrant,
+    ToolId, ToolManifest, ToolPrepareCall, ToolProvider, ToolResult,
 };
 
 include!("tool_registry/state.rs");

@@ -29,6 +29,11 @@ use crate::{LashlangHostEnvironment, required_tool_lashlang_executable};
 pub struct ToolGrant {
     /// The callable contract and Lashlang identity for the resolved tool.
     pub definition: lash_core::ToolDefinition,
+    /// Optional registry source route authorized by the host. Registry-backed
+    /// grants require this route at execution time; direct host providers may
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     /// Host-owned routing authority that connects the grant to the backing
     /// account/service/secret/executor. Opaque to the runtime; the host
     /// interprets it when fulfilling the call and when rebuilding for replay.
@@ -40,8 +45,14 @@ impl ToolGrant {
     pub fn new(definition: lash_core::ToolDefinition) -> Self {
         Self {
             definition,
+            source_id: None,
             execution_binding: serde_json::Value::Null,
         }
+    }
+
+    pub fn with_source_id(mut self, source_id: impl Into<String>) -> Self {
+        self.source_id = Some(source_id.into());
+        self
     }
 
     pub fn with_execution_binding(mut self, execution_binding: serde_json::Value) -> Self {
@@ -99,7 +110,10 @@ impl DeferredResolutionRecord {
 
 /// Fold a resolved [`ToolGrant`] into the host environment so the subsequent
 /// link can bind its call-path. The flat catalog is untouched.
-fn fold_grant(host_environment: &mut LashlangHostEnvironment, grant: &ToolGrant) -> Result<(), String> {
+fn fold_grant(
+    host_environment: &mut LashlangHostEnvironment,
+    grant: &ToolGrant,
+) -> Result<(), String> {
     let binding = required_tool_lashlang_executable(&grant.definition.manifest)?;
     host_environment.resources.add_module_operation(
         binding.module_path.iter().map(String::as_str),
@@ -278,7 +292,11 @@ mod tests {
         )
         .await
         .expect("replayed link");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "replay must not re-resolve");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "replay must not re-resolve"
+        );
     }
 
     #[tokio::test]

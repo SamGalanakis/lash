@@ -47,8 +47,7 @@ pub trait SessionStateService: Send + Sync {
 
     /// Toggle Tool Catalog membership for several tools at once. `present` adds
     /// the tools as members; `!present` removes them (non-membership) while
-    /// keeping their state for later re-add. Membership is the only
-    /// availability fact.
+    /// keeping their state for later re-add.
     async fn set_tool_membership(
         &self,
         session_id: &str,

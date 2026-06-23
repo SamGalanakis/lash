@@ -32,6 +32,7 @@ impl CachedIndex {
 #[derive(Clone)]
 pub struct ToolDiscoveryToolsProvider {
     cache: Arc<RwLock<IndexCache>>,
+    extra_catalog: Arc<Vec<Value>>,
 }
 
 impl Default for ToolDiscoveryToolsProvider {
@@ -42,9 +43,24 @@ impl Default for ToolDiscoveryToolsProvider {
 
 impl ToolDiscoveryToolsProvider {
     pub fn new() -> Self {
+        Self::with_catalog(Vec::new())
+    }
+
+    pub fn with_catalog(extra_catalog: Vec<Value>) -> Self {
         Self {
             cache: Arc::default(),
+            extra_catalog: Arc::new(extra_catalog),
         }
+    }
+
+    fn searchable_catalog(&self, resident_catalog: Arc<Vec<Value>>) -> Arc<Vec<Value>> {
+        if self.extra_catalog.is_empty() {
+            return resident_catalog;
+        }
+        let mut combined = Vec::with_capacity(resident_catalog.len() + self.extra_catalog.len());
+        combined.extend(resident_catalog.iter().cloned());
+        combined.extend(self.extra_catalog.iter().cloned());
+        Arc::new(combined)
     }
 
     fn index_for_catalog(&self, catalog: Arc<Vec<Value>>) -> Arc<ToolDiscoveryIndex> {
@@ -89,9 +105,10 @@ impl ToolDiscoveryToolsProvider {
     async fn search_tools(
         &self,
         args: &Value,
-        catalog: Arc<Vec<Value>>,
+        resident_catalog: Arc<Vec<Value>>,
         context: &ToolContext<'_>,
     ) -> ToolResult {
+        let catalog = self.searchable_catalog(resident_catalog);
         let index = self.index_for_catalog(catalog);
         let limit = limit_from_args(args);
         let candidate_args = args_with_limit(args, LLM_CANDIDATE_LIMIT);
@@ -141,11 +158,13 @@ impl ToolDiscoveryToolsProvider {
     }
 }
 
-/// Build the `search_tools` provider backed by a fresh discovery cache.
-pub fn tool_discovery_provider() -> StaticToolProvider<ToolDiscoveryToolsProvider> {
+/// Build the `search_tools` provider with an additional non-resident catalog.
+pub fn tool_discovery_provider_with_catalog(
+    extra_catalog: Vec<Value>,
+) -> StaticToolProvider<ToolDiscoveryToolsProvider> {
     StaticToolProvider::new(
         vec![search_tools_definition()],
-        ToolDiscoveryToolsProvider::new(),
+        ToolDiscoveryToolsProvider::with_catalog(extra_catalog),
     )
 }
 
@@ -289,9 +308,8 @@ mod tests {
         );
         let manifest = tool.manifest();
         // The flat catalog projection (see `project_tool_catalog` in
-        // lash-core) emits id/name/description/bindings/activation/contract and
-        // no availability tier; the example derives the call path from the
-        // `lashlang.tool` binding.
+        // lash-core) emits id/name/description/bindings/activation/contract;
+        // the example derives the call path from the `lashlang.tool` binding.
         json!({
             "id": manifest.id,
             "name": manifest.name,
@@ -317,7 +335,7 @@ mod tests {
 
     #[test]
     fn provider_exposes_search_tools_only() {
-        let manifests = tool_discovery_provider().tool_manifests();
+        let manifests = tool_discovery_provider_with_catalog(Vec::new()).tool_manifests();
         let names = manifests
             .iter()
             .map(|definition| definition.name.as_str())
@@ -378,7 +396,7 @@ mod tests {
             ],
             ..Default::default()
         });
-        let provider = tool_discovery_provider();
+        let provider = tool_discovery_provider_with_catalog(Vec::new());
         let context = discovery_context(host);
 
         #[cfg(feature = "lashlang")]
@@ -438,7 +456,7 @@ mod tests {
             )),
             ..Default::default()
         });
-        let provider = tool_discovery_provider();
+        let provider = tool_discovery_provider_with_catalog(Vec::new());
         let context = discovery_context(host.clone());
 
         let args = json!({

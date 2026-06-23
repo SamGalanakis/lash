@@ -61,6 +61,7 @@ impl DeferredToolResolver for McpDeferredToolResolver {
                 });
                 Resolution::Resolved(
                     ToolGrant::new(tool.definition.clone())
+                        .with_source_id(lash::tools::PLUGIN_TOOL_SOURCE_ID)
                         .with_execution_binding(execution_binding),
                 )
             }
@@ -92,18 +93,18 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_known_call_path_with_execution_binding() {
-        let resolver = McpDeferredToolResolver::new([mcp_tool(
-            "appworld",
-            "venmo_send",
-            "venmo",
-            "send",
-        )]);
+        let resolver =
+            McpDeferredToolResolver::new([mcp_tool("appworld", "venmo_send", "venmo", "send")]);
         let resolution = resolver.resolve("venmo.send").await;
         let Resolution::Resolved(grant) = resolution else {
             panic!("expected resolved grant");
         };
         assert_eq!(grant.execution_binding["kind"], json!("mcp"));
         assert_eq!(grant.execution_binding["server"], json!("appworld"));
+        assert_eq!(
+            grant.source_id.as_deref(),
+            Some(lash::tools::PLUGIN_TOOL_SOURCE_ID)
+        );
         assert_eq!(grant.definition.name(), "venmo_send");
     }
 

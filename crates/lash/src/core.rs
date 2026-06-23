@@ -700,14 +700,13 @@ impl RlmCoreBuilder {
         let process_lifecycle_available = self.inner.process_work_source.has_registry();
         let config = crate::rlm::rlm_protocol_config(self.config, process_lifecycle_available);
         let trace_context = self.inner.resolved_trace_context();
-        let mut protocol_factory =
-            lash_protocol_rlm::RlmProtocolPluginFactory::new(config.clone())
-                .with_projection_resolver(Arc::clone(&self.projection_resolver))
-                .with_lashlang_artifact_store(Arc::clone(&artifact_store))
-                .with_lashlang_execution_trace(
-                    self.lashlang_execution_sink.clone(),
-                    trace_context.clone(),
-                );
+        let mut protocol_factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(config.clone())
+            .with_projection_resolver(Arc::clone(&self.projection_resolver))
+            .with_lashlang_artifact_store(Arc::clone(&artifact_store))
+            .with_lashlang_execution_trace(
+                self.lashlang_execution_sink.clone(),
+                trace_context.clone(),
+            );
         if let Some(resolver) = self.deferred_tool_resolver.clone() {
             protocol_factory = protocol_factory.with_deferred_tool_resolver(resolver);
         }

@@ -42,10 +42,7 @@ impl RlmProtocolPluginFactory {
     /// Wire a host-provided [`DeferredToolResolver`](lash_lashlang_runtime::DeferredToolResolver)
     /// that resolves Lashlang call-paths absent from the link-time host
     /// environment into Tool Grants. Most hosts ship none.
-    pub fn with_deferred_tool_resolver(
-        mut self,
-        resolver: SharedDeferredToolResolver,
-    ) -> Self {
+    pub fn with_deferred_tool_resolver(mut self, resolver: SharedDeferredToolResolver) -> Self {
         self.deferred_tool_resolver = Some(resolver);
         self
     }

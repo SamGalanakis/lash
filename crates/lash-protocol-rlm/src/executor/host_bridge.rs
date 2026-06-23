@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_core::{
     AttachmentRef, ExecImage, RuntimeExecutionContext, TextProjectionMetadata,
-    ToolChildExecutionTraceHook, ToolInvocation, ToolInvocationReply, TraceBranchSelection,
-    TraceContext, TraceEvent, TraceRecord, TraceRuntimeSubject, TraceSink,
+    ToolChildExecutionTraceHook, ToolExecutionGrant, ToolInvocation, ToolInvocationReply,
+    TraceBranchSelection, TraceContext, TraceEvent, TraceRecord, TraceRuntimeSubject, TraceSink,
 };
 use lash_lashlang_runtime::{
     LASHLANG_ENGINE_KIND, LashlangProcessInput, TraceLashlangChildExecution,
@@ -36,6 +36,7 @@ pub(super) struct HostBridge<'run> {
     sleep_sequence: AtomicU64,
     lashlang_execution_trace: Option<LashlangExecutionTrace>,
     host_environment: lashlang::LashlangHostEnvironment,
+    deferred_execution_grants: BTreeMap<lash_core::ToolId, ToolExecutionGrant>,
     artifact_store: std::sync::Arc<dyn lashlang::LashlangArtifactStore>,
 }
 
@@ -46,6 +47,7 @@ impl<'run> HostBridge<'run> {
         tool_result_projectors: Vec<crate::RlmToolResultProjector>,
         lashlang_execution_trace: Option<LashlangExecutionTrace>,
         host_environment: lashlang::LashlangHostEnvironment,
+        deferred_execution_grants: BTreeMap<lash_core::ToolId, ToolExecutionGrant>,
         artifact_store: std::sync::Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> Self {
         Self {
@@ -61,6 +63,7 @@ impl<'run> HostBridge<'run> {
             sleep_sequence: AtomicU64::new(0),
             lashlang_execution_trace,
             host_environment,
+            deferred_execution_grants,
             artifact_store,
         }
     }
@@ -141,6 +144,13 @@ impl<'run> HostBridge<'run> {
             "lashlang:{}:resource:{host_operation}:index:{index}",
             self.ctx.session_id()
         )
+    }
+
+    fn deferred_grant_for_tool_id(
+        &self,
+        tool_id: &lash_core::ToolId,
+    ) -> Option<ToolExecutionGrant> {
+        self.deferred_execution_grants.get(tool_id).cloned()
     }
 }
 
@@ -262,21 +272,42 @@ impl HostBridge<'_> {
             call_site.is_none().then_some(index),
         );
         let tool_id = lash_core::ToolId::from(host_operation.as_str());
+        let execution_grant = self
+            .ctx
+            .callable_tool_manifest_by_id(&tool_id)
+            .is_none()
+            .then(|| self.deferred_grant_for_tool_id(&tool_id))
+            .flatten();
         let call_site = call_site.and_then(|call_site| {
             self.lashlang_execution_trace
                 .as_ref()
                 .map(|trace| trace.tool_child_execution_trace_hook(call_site))
         });
-        let reply = if let Some(call_site) = call_site {
-            self.ctx
-                .call_tool_by_id_with_child_execution_trace_hook(
-                    call_id, tool_id, payload, index, call_site,
-                )
-                .await
-        } else {
-            self.ctx
-                .call_tool_by_id(call_id, tool_id, payload, index)
-                .await
+        let reply = match (execution_grant, call_site) {
+            (Some(grant), Some(call_site)) => {
+                self.ctx
+                    .call_tool_with_execution_grant_and_child_execution_trace_hook(
+                        call_id, grant, payload, index, call_site,
+                    )
+                    .await
+            }
+            (Some(grant), None) => {
+                self.ctx
+                    .call_tool_with_execution_grant(call_id, grant, payload, index)
+                    .await
+            }
+            (None, Some(call_site)) => {
+                self.ctx
+                    .call_tool_by_id_with_child_execution_trace_hook(
+                        call_id, tool_id, payload, index, call_site,
+                    )
+                    .await
+            }
+            (None, None) => {
+                self.ctx
+                    .call_tool_by_id(call_id, tool_id, payload, index)
+                    .await
+            }
         };
         self.consume_reply(&host_operation, reply)
     }
@@ -344,6 +375,14 @@ impl HostBridge<'_> {
                 lash_core::ToolId::from(host_operation.as_str()),
                 payload,
             );
+            if self
+                .ctx
+                .callable_tool_manifest_by_id(&invocation.tool_id)
+                .is_none()
+                && let Some(grant) = self.deferred_grant_for_tool_id(&invocation.tool_id)
+            {
+                invocation = invocation.with_execution_grant(grant);
+            }
             if let Some(call_site) = call_site.and_then(|call_site| {
                 self.lashlang_execution_trace
                     .as_ref()

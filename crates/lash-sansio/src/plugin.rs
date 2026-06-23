@@ -43,8 +43,7 @@ impl PluginMessage {
 }
 
 /// Gate on Tool Catalog membership: a contribution is kept when at least one
-/// of `tools` is a member of the catalog. Membership is the only availability
-/// fact, so there is no minimum-tier dimension.
+/// of `tools` is a member of the catalog. There is no minimum-tier dimension.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptContributionGate {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

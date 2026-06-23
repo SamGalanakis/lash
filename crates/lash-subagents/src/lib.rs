@@ -97,8 +97,7 @@ impl PluginFactory for SubagentsPluginFactory {
                         let note = note.clone();
                         Box::pin(async move {
                             Ok(vec![lash_core::PromptContribution::execution(
-                                "Subagent",
-                                note,
+                                "Subagent", note,
                             )])
                         })
                     }));

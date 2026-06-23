@@ -99,7 +99,7 @@ impl LashRuntime {
                     session_id = %state.session_id,
                     orphaned = ?report.orphaned,
                     "session restored with orphaned tools: no registered source \
-                     resolves them; they are Off until their source returns"
+                     resolves them; they remain non-members until their source returns"
                 );
             }
         }

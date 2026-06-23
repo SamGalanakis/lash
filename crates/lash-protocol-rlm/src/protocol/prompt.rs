@@ -364,9 +364,7 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
         "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Large transient artifacts (files, search results, long pages, raw tool dumps) should stay in variables until you need a focused view; small durable state you consult each turn should stay visible.",
     );
     if has_operations {
-        section.push_str(
-            " Tool-specific lifecycle and output details live under **Tools**.",
-        );
+        section.push_str(" Tool-specific lifecycle and output details live under **Tools**.");
     }
     section.push_str(
         "\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need -> reason inline in lashlang.",

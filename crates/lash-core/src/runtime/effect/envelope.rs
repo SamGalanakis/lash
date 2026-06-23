@@ -289,6 +289,7 @@ fn validate_effect_command(
     }
     if let RuntimeEffectCommand::ToolAttempt {
         call,
+        execution_grant: _,
         attempt,
         max_attempts,
     } = command
@@ -352,6 +353,8 @@ pub enum RuntimeEffectCommand {
     },
     ToolAttempt {
         call: crate::PreparedToolCall,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_grant: Option<Box<crate::ToolExecutionGrant>>,
         attempt: u32,
         max_attempts: u32,
     },

@@ -11,7 +11,7 @@ use lash_core::{
     LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeHostConfig, RuntimeServices,
     SessionPolicy, TestLocalProcessRegistry, TraceRuntimeSubject,
 };
-use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
+use lash_core::{ToolArgumentProjectionPolicy, ToolOutputContract, TurnInput};
 use lash_lashlang_runtime::{
     LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog,
     LashlangLanguageFeatures, LashlangProcessEngine, LashlangSurface, LashlangSurfaceContribution,
@@ -957,16 +957,6 @@ async fn rlm_provider_does_not_require_process_support() {
 
     let plugin = factory.build(&ctx).expect("rlm plugin");
     assert_eq!(plugin.id(), "subagents");
-}
-
-fn dummy_tool(name: &str) -> ToolDefinition {
-    ToolDefinition::raw(
-        format!("tool:{name}"),
-        name,
-        format!("{name} description"),
-        ToolDefinition::default_input_schema(),
-        json!({ "type": "null" }),
-    )
 }
 
 #[test]

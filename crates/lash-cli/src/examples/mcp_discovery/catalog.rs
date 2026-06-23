@@ -26,16 +26,14 @@ impl CatalogTool {
         let id = obj.get("id")?.as_str()?.to_string();
         let name = obj.get("name")?.as_str()?.to_string();
         // Under the flat catalog, the projected record no longer carries
-        // availability or pre-resolved Lashlang call-paths. Derive the call
-        // path from the tool's `lashlang.tool` binding, which is the only
+        // tiered catalog state or pre-resolved Lashlang call-paths. Derive the
+        // call path from the tool's `lashlang.tool` binding, which is the only
         // discovery fact this example needs.
         #[cfg(feature = "lashlang")]
         let (module_path, operation, call, aliases) = {
             let binding: lash_lashlang_runtime::LashlangToolBinding = obj
                 .get("bindings")
-                .and_then(|bindings| {
-                    bindings.get(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
-                })
+                .and_then(|bindings| bindings.get(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY))
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())?;
             let executable = binding.executable_for(&name).ok()?;
@@ -46,7 +44,7 @@ impl CatalogTool {
                 executable.aliases.clone(),
             )
         };
-        // Every catalog member is callable/searchable under the flat model.
+        // Every catalog member is indexable under the flat model.
         let searchable = true;
         let contract: CompactToolContract = obj
             .get("contract")

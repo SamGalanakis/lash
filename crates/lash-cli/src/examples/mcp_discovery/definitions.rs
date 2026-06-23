@@ -38,9 +38,9 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
     }
 
     let description = if cfg!(feature = "lashlang") {
-        "Search catalogued module capabilities, aliases, descriptions, signatures, return fields, and examples. Use this when the capability you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints. For initial exploration, print only result call paths and signatures; inspect descriptions and examples only when you need to choose between close matches or learn call idioms."
+        "Search catalogued module capabilities, aliases, descriptions, signatures, return fields, and examples. Use this when the capability you need is only listed in the catalogued-capabilities preview or is too sparse to call confidently. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints. For initial exploration, print only result call paths and signatures; inspect descriptions and examples only when you need to choose between close matches or learn call idioms."
     } else {
-        "Search catalogued tools by name, id, description, signatures, return fields, and examples. Use this when the capability you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints."
+        "Search catalogued tools by name, id, description, signatures, return fields, and examples. Use this when the capability you need is only listed in the catalogued-capabilities preview or is too sparse to call confidently. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints."
     };
 
     ToolDefinition::raw(

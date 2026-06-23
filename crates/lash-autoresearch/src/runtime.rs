@@ -216,23 +216,24 @@ impl SessionPlugin for AutoresearchPlugin {
             .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
 
         // Autoresearch tools are catalog members only while the mode is active.
-        // Membership is the only availability fact, so an inactive session
-        // removes them from the catalog (the model never sees them).
+        // Inactive sessions remove them from the catalog, so the model never
+        // sees them.
         let catalog_state = Arc::clone(&self.state);
-        reg.tool_catalog().contribute(Arc::new(move |_ctx: ToolCatalogContext| {
-            let active = catalog_state
-                .lock()
-                .map_err(|_| PluginError::Session("autoresearch state poisoned".to_string()))?
-                .mode
-                .active;
-            if active {
-                Ok(ToolCatalogContribution::default())
-            } else {
-                Ok(ToolCatalogContribution::remove_tools(
-                    autoresearch_tool_names(),
-                ))
-            }
-        }));
+        reg.tool_catalog()
+            .contribute(Arc::new(move |_ctx: ToolCatalogContext| {
+                let active = catalog_state
+                    .lock()
+                    .map_err(|_| PluginError::Session("autoresearch state poisoned".to_string()))?
+                    .mode
+                    .active;
+                if active {
+                    Ok(ToolCatalogContribution::default())
+                } else {
+                    Ok(ToolCatalogContribution::remove_tools(
+                        autoresearch_tool_names(),
+                    ))
+                }
+            }));
 
         let prompt_root = self.workdir.clone();
         let prompt_state = Arc::clone(&self.state);
@@ -522,7 +523,7 @@ mod tests {
     fn autoresearch_tools_advertised_as_plain_members() {
         // The provider advertises its tools as plain catalog members; their
         // visibility is gated by the per-turn catalog contribution keyed on
-        // mode state, not by a manifest availability tier.
+        // mode state, not by a manifest tier.
         let dir = tempdir().expect("tempdir");
         let tools = AutoresearchTools {
             workdir: dir.path().to_path_buf(),

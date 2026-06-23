@@ -29,7 +29,9 @@ use lash::ModelSpec;
 use lash::persistence::FileAttachmentStore;
 use lash::tracing::TraceLevel;
 use lash_core::SessionPolicy;
-use lash_plugin_mcp::McpPluginFactory;
+use lash_core::ToolProvider;
+use lash_core::plugin::{PluginSpec, StaticPluginFactory};
+use lash_plugin_mcp::{McpDeferredToolProvider, McpPluginFactory, McpToolProvider};
 use lash_tui::Terminal;
 use serde_json::Value as JsonValue;
 
@@ -460,16 +462,43 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     // Reference MCP deferred-resolution wiring (RLM only): resolve a Lashlang
     // call-path absent from the resident catalog into an MCP Tool Grant on
     // demand. Built from the MCP pool's currently enumerated tools.
+    let mcp_cataloged_tools = {
+        let provider = McpToolProvider::new(Arc::clone(mcp_factory.pool()));
+        crate::examples::mcp_discovery::mcp_cataloged_tools("mcp", &provider)
+    };
+    let mcp_catalog_records =
+        crate::examples::mcp_discovery::mcp_catalog_records(&mcp_cataloged_tools);
     let mcp_deferred_resolver: Option<lash::tools::SharedDeferredToolResolver> =
         if execution_mode.is_rlm() {
-            let provider = lash_plugin_mcp::McpToolProvider::new(Arc::clone(mcp_factory.pool()));
-            Some(Arc::new(crate::examples::mcp_discovery::mcp_deferred_tool_resolver(
-                "mcp", &provider,
-            )))
+            Some(Arc::new(
+                crate::examples::mcp_discovery::McpDeferredToolResolver::new(mcp_cataloged_tools),
+            ))
         } else {
             None
         };
-    plugin_stack.push(mcp_factory);
+    // Reference MCP tool-discovery example: a host-owned `search_tools` tool
+    // over a ranking index. In RLM, MCP tools stay non-resident and are exposed
+    // through this discovery overlay plus deferred grants. In standard mode,
+    // the MCP plugin remains a resident provider and discovery indexes the
+    // current catalog.
+    if execution_mode.is_rlm() {
+        plugin_stack.push(Arc::new(
+            crate::examples::mcp_discovery::ToolDiscoveryPluginFactory::with_catalog(
+                mcp_catalog_records,
+            ),
+        ));
+        plugin_stack.push(Arc::new(StaticPluginFactory::new(
+            "mcp",
+            PluginSpec::new().with_tool_provider(Arc::new(McpDeferredToolProvider::new(Arc::clone(
+                mcp_factory.pool(),
+            ))) as Arc<dyn ToolProvider>),
+        )));
+    } else {
+        plugin_stack.push(mcp_factory);
+        plugin_stack.push(Arc::new(
+            crate::examples::mcp_discovery::ToolDiscoveryPluginFactory::new(),
+        ));
+    }
     if args.info {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())

@@ -67,5 +67,8 @@ pub fn catalogue_preview_contribution(catalog: &[Value]) -> Option<PromptContrib
         }
     }
 
-    Some(PromptContribution::execution("Catalogued Capabilities", rendered).requires_tool("search_tools"))
+    Some(
+        PromptContribution::execution("Catalogued Capabilities", rendered)
+            .requires_tool("search_tools"),
+    )
 }

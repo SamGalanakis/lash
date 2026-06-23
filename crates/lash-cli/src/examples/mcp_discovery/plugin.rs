@@ -7,7 +7,7 @@ use lash_core::plugin::{
 };
 
 use super::catalogue_preview::catalogue_preview_contribution;
-use super::service::tool_discovery_provider;
+use super::service::tool_discovery_provider_with_catalog;
 
 /// Plugin factory for the `search_tools` discovery catalog.
 ///
@@ -23,23 +23,40 @@ pub struct ToolDiscoveryPluginFactory {
 
 impl ToolDiscoveryPluginFactory {
     pub fn new() -> Self {
+        Self::with_catalog(Vec::new())
+    }
+
+    pub fn with_catalog(extra_catalog: Vec<serde_json::Value>) -> Self {
+        let extra_catalog = Arc::new(extra_catalog);
+        let discovery_catalog = Arc::clone(&extra_catalog);
         let spec = PluginSpec::new()
-            .with_tool_provider(Arc::new(tool_discovery_provider()) as Arc<dyn ToolProvider>)
-            .with_prompt_contributor(Arc::new(|ctx: lash_core::plugin::PromptHookContext| {
-                Box::pin(async move {
-                    // The projected catalog ranges over every member; the
-                    // resident core is already documented as full prompt docs,
-                    // so the preview advertises the searchable tail.
-                    let catalog = ctx
-                        .sessions
-                        .shared_tool_catalog(&ctx.session_id)
-                        .await
-                        .unwrap_or_default();
-                    Ok(catalogue_preview_contribution(catalog.as_ref())
-                        .into_iter()
-                        .collect())
-                })
-            }));
+            .with_tool_provider(Arc::new(tool_discovery_provider_with_catalog(
+                extra_catalog.as_ref().clone(),
+            )) as Arc<dyn ToolProvider>)
+            .with_prompt_contributor(Arc::new(
+                move |ctx: lash_core::plugin::PromptHookContext| {
+                    let discovery_catalog = Arc::clone(&discovery_catalog);
+                    Box::pin(async move {
+                        // The projected resident catalog ranges over members. When
+                        // a non-resident discovery catalog is supplied, preview that
+                        // indexed tail; otherwise preserve the default resident
+                        // discovery behavior.
+                        let resident_catalog = ctx
+                            .sessions
+                            .shared_tool_catalog(&ctx.session_id)
+                            .await
+                            .unwrap_or_default();
+                        let preview_catalog = if discovery_catalog.is_empty() {
+                            resident_catalog
+                        } else {
+                            discovery_catalog
+                        };
+                        Ok(catalogue_preview_contribution(preview_catalog.as_ref())
+                            .into_iter()
+                            .collect())
+                    })
+                },
+            ));
         Self {
             inner: StaticPluginFactory::new("tool_discovery", spec),
         }

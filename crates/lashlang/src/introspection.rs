@@ -290,7 +290,9 @@ fn trigger_source(
 /// the "gather" step of deferred tool resolution: the host resolver is asked to
 /// resolve any returned path that the link-time host environment does not
 /// already provide.
-pub fn referenced_module_call_paths(program: &crate::ast::Program) -> std::collections::BTreeSet<String> {
+pub fn referenced_module_call_paths(
+    program: &crate::ast::Program,
+) -> std::collections::BTreeSet<String> {
     let mut paths = std::collections::BTreeSet::new();
     collect_module_call_paths(&program.main, &mut paths);
     for declaration in &program.declarations {
@@ -301,7 +303,10 @@ pub fn referenced_module_call_paths(program: &crate::ast::Program) -> std::colle
     paths
 }
 
-fn collect_module_call_paths(expr: &crate::ast::Expr, paths: &mut std::collections::BTreeSet<String>) {
+fn collect_module_call_paths(
+    expr: &crate::ast::Expr,
+    paths: &mut std::collections::BTreeSet<String>,
+) {
     if let crate::ast::Expr::ReceiverCall {
         receiver,
         operation,

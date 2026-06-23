@@ -32,8 +32,8 @@ impl ToolRegistryEntry {
         self.member && !self.is_orphaned()
     }
 
-    /// The manifest as exposed to surfaces and catalogs. Membership is the only
-    /// availability fact, so the view is just the stored manifest; orphaned and
+    /// The manifest as exposed to surfaces and catalogs. Membership is the
+    /// execution gate, so the view is just the stored manifest; orphaned and
     /// host-removed entries are filtered out by the caller, not flagged here.
     fn view_manifest(&self) -> ToolManifest {
         self.manifest.clone()
@@ -58,7 +58,7 @@ struct ToolRegistryState {
 /// Outcome of [`ToolRegistry::restore_state`]: the adopted generation plus the
 /// ids of persisted tools that no registered source currently resolves.
 /// Hosts should surface a non-empty `orphaned` list to the user — the session
-/// opened, but those tools are `Off` until their source returns.
+/// opened, but those tools are non-members until their source returns.
 #[derive(Clone, Debug, Default)]
 pub struct ToolRestoreReport {
     pub generation: u64,

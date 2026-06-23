@@ -142,7 +142,7 @@ impl LashRuntime {
     /// (a delta-apply onto a fresh base-1 registry would be rejected).
     ///
     /// Persisted tools that no registered source resolves become orphans
-    /// (kept, forced `Off`, rebound when their source returns) and are listed
+    /// (kept as non-members, rebound when their source returns) and are listed
     /// in the returned [`crate::ToolRestoreReport`].
     pub async fn restore_tool_state(
         &mut self,
@@ -162,7 +162,7 @@ impl LashRuntime {
             tracing::warn!(
                 orphaned = ?report.orphaned,
                 "tool state restored with orphaned tools: no registered source \
-                 resolves them; they are Off until their source returns"
+                 resolves them; they remain non-members until their source returns"
             );
         }
         session.refresh_tool_catalog().await?;

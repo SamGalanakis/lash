@@ -2,7 +2,7 @@ impl ToolRegistry {
     pub fn from_tool_provider(provider: Arc<dyn ToolProvider>) -> Result<Self, ReconfigureError> {
         let registry = Self::empty();
         registry.upsert_source(Arc::new(ToolProviderSource::new(
-            PLUGIN_SOURCE_ID,
+            PLUGIN_TOOL_SOURCE_ID,
             provider,
         )))?;
         Ok(registry)
@@ -13,7 +13,7 @@ impl ToolRegistry {
     ) -> Result<Self, ReconfigureError> {
         let registry = Self::empty();
         registry.upsert_source(Arc::new(ToolProviderGroupSource::new(
-            PLUGIN_SOURCE_ID,
+            PLUGIN_TOOL_SOURCE_ID,
             providers,
         )))?;
         Ok(registry)

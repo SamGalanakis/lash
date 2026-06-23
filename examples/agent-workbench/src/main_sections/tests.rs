@@ -957,7 +957,7 @@ submit initial
 
         // Removing the account must not poison the persisted session: the
         // provider stops resolving the account's tools, so restore orphans
-        // them (kept in state, marked orphaned, surfaced as Off) instead of
+        // them as non-members instead of
         // failing the reopen.
         mail_world
             .remove_account("late_account")

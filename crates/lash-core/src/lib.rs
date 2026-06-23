@@ -75,18 +75,18 @@ pub use lash_sansio::{
     TokenUsage, ToolActivation, ToolArgumentProjectionPolicy, ToolCallOutcome, ToolCallOutput,
     ToolCallRecord, ToolCallStatus, ToolCancellation, ToolCatalog, ToolCatalogBuildInput,
     ToolCatalogEntry, ToolContract, ToolControl, ToolDefinition, ToolFailure, ToolFailureClass,
-    ToolFailureSource,
-    ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition, ToolRetryPolicy,
-    ToolScheduling, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
-    append_assistant_text_part, build_prompt, build_tool_catalog, build_turn,
-    default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
+    ToolFailureSource, ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition,
+    ToolRetryPolicy, ToolScheduling, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
+    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_catalog,
+    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
     normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
     prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
     resolve_prompt_layers, shared_parts, validate_tool_input,
 };
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
-    ReconfigureError, ToolRegistry, ToolRestoreReport, ToolSourceHandle, ToolState, ToolStateEntry,
+    PLUGIN_TOOL_SOURCE_ID, ReconfigureError, ToolRegistry, ToolRestoreReport, ToolSourceHandle,
+    ToolState, ToolStateEntry,
 };
 pub use tool_result::{CancelHint, PendingCompletion, TimeoutBehavior, ToolResult};
 pub use triggers::{
@@ -223,10 +223,9 @@ pub use plugin::{
     SessionLifecycleService, SessionParam, SessionPlugin, SessionPluginSource, SessionReadView,
     SessionRelation, SessionSnapshot, SessionStartPoint, SessionStateChangedContext,
     SessionStateService, SessionToolAccess, SessionTurnInput, SessionTurnRequest, SnapshotReader,
-    SnapshotWriter, SubagentSessionContext, ToolCatalogContribution,
-    ToolResultProjectionContext, ToolResultProjector, TriggerEventRegistrations,
-    TurnContextTransform, TurnHookContext, TurnResultHookContext, TurnResultSummary,
-    TurnTransformContext, plugin_operation_def,
+    SnapshotWriter, SubagentSessionContext, ToolCatalogContribution, ToolResultProjectionContext,
+    ToolResultProjector, TriggerEventRegistrations, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_operation_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -338,8 +337,8 @@ pub use store::{
 pub use tool_provider::{
     PreparedToolBatch, PreparedToolBatchCall, PreparedToolCall, ProgressSender, SandboxMessage,
     ToolCall, ToolChildExecutionTraceHook, ToolChildProcessStarted, ToolContext,
-    ToolDurableEffects, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolSessionAdmin,
-    ToolSessionModel, ToolTriggerClient,
+    ToolDurableEffects, ToolExecutionGrant, ToolPrepareCall, ToolPrepareContext, ToolProvider,
+    ToolSessionAdmin, ToolSessionModel, ToolTriggerClient,
 };
 
 #[cfg(test)]

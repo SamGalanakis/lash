@@ -218,7 +218,6 @@ where
     read_plan_report(&path).map_err(PluginError::Session)
 }
 
-
 /// Flip plan-mode enablement. Tool Catalog membership (`plan_exit` visibility,
 /// suppression of non-allowed tools) is derived per turn by the plan-mode
 /// catalog contribution keyed on this state, so there is no registry mutation
@@ -662,9 +661,9 @@ impl SessionPlugin for PlanModePlugin {
             })
         }));
 
-        // Membership is the only availability fact. While plan mode is enabled,
-        // remove every tool that is not allowed (and not `plan_exit`); while it
-        // is disabled, remove `plan_exit` so it is not callable.
+        // Membership is the execution gate. While plan mode is enabled, remove
+        // every tool that is not allowed (and not `plan_exit`); while it is
+        // disabled, remove `plan_exit` so it is not callable.
         let tool_catalog_state = Arc::clone(&self.state);
         let tool_catalog_config = self.config.clone();
         reg.tool_catalog().contribute(Arc::new(move |ctx| {

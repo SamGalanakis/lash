@@ -172,20 +172,18 @@ mod tests {
 
     impl MockToolProvider {
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
-            vec![
-                ToolDefinition::raw(
-                    "tool:mock_tool",
-                    "mock_tool",
-                    "",
-                    json!({
-                        "type": "object",
-                        "properties": { "value": { "type": "string" } },
-                        "required": ["value"],
-                        "additionalProperties": false
-                    }),
-                    json!({ "type": "string" }),
-                ),
-            ]
+            vec![ToolDefinition::raw(
+                "tool:mock_tool",
+                "mock_tool",
+                "",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }),
+                json!({ "type": "string" }),
+            )]
         }
     }
 

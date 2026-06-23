@@ -14,7 +14,7 @@ pub(crate) fn rlm_tool_catalog(
 }
 
 /// Render every catalog member as a full prompt doc under its Lashlang
-/// call-path. Being a member *is* being presented — there is no showcased bit.
+/// call-path. Being a member *is* being presented.
 pub(crate) fn rlm_prompt_tool_docs(tool_catalog: &ToolCatalog) -> String {
     tool_catalog
         .tools
@@ -101,7 +101,7 @@ mod tests {
         let docs = rlm_prompt_tool_docs(&catalog);
         assert!(docs.contains("web.fetch"), "{docs}");
         assert!(docs.contains("files.read"), "{docs}");
-        // No legacy catalogue notes or showcased filtering.
+        // No legacy catalogue notes or tier filtering.
         assert!(!docs.contains("Catalogued capabilities:"), "{docs}");
     }
 

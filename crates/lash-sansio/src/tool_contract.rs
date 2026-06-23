@@ -278,10 +278,10 @@ impl std::fmt::Display for ToolId {
 }
 
 /// Tool metadata exposed to prompts, catalogs, and UI. Catalog membership —
-/// being present in a [`ToolProvider`]'s manifest list — is the only
-/// availability fact; there is no per-manifest availability tier. The optional
-/// compact contract is the catalog-facing projection of the resolved contract;
-/// full schemas stay in [`ToolContract`].
+/// being present in a [`ToolProvider`]'s manifest list — is the execution gate;
+/// there is no per-manifest tier. The optional compact contract is the
+/// catalog-facing projection of the resolved contract; full schemas stay in
+/// [`ToolContract`].
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolManifest {
     pub id: ToolId,

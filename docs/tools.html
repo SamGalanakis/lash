@@ -151,7 +151,7 @@ async fn lookup_weather(args: WeatherArgs) -&gt; WeatherReport {
                 <tr><td><code>context.sessions().snapshot_current().await?</code></td><td>Read the current session snapshot when a tool truly needs more than model selection.</td></tr>
                 <tr><td><code>context.sessions().snapshot(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
                 <tr><td><code>context.sessions().tool_catalog().await?</code></td><td>Read the current session's projected flat tool catalog (every member) for host-owned discovery/ranking tools.</td></tr>
-                <tr><td><code>context.sessions().set_tool_membership(names, present).await?</code></td><td>Add or remove tools from the current session's Tool Catalog. Membership is the only availability fact.</td></tr>
+                <tr><td><code>context.sessions().set_tool_membership(names, present).await?</code></td><td>Add or remove tools from the current session's Tool Catalog. Membership is the execution gate.</td></tr>
                 <tr><td><code>context.sessions()</code></td><td>Cloneable child-session client: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses process handles granted to sessions, not child-turn handles.</td></tr>
                 <tr><td><code>context.processes()</code></td><td>Session-scoped process admin: start a process from a tool, await its output, and list the process handles granted to the session.</td></tr>
                 <tr><td><code>context.process_events().emit(...).await?</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
@@ -197,7 +197,7 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         <div class="section" id="tool-registry-state">
           <div class="section-header">
             <h2>Tool Registry State</h2>
-            <p>The model sees a projected flat <code>ToolCatalog</code> (membership is the only availability fact), but the runtime owns a richer <code>ToolRegistry</code>: live tool sources, per-tool catalog membership, source identity, and a serializable <code>ToolState</code> snapshot.</p>
+            <p>The model sees a projected flat <code>ToolCatalog</code> (membership is the execution gate), but the runtime owns a richer <code>ToolRegistry</code>: live tool sources, per-tool catalog membership, source identity, and a serializable <code>ToolState</code> snapshot.</p>
           </div>
           <div class="listing">
             <div class="listing__row">

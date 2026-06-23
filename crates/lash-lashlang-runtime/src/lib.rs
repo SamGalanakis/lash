@@ -360,7 +360,7 @@ pub fn lashlang_resources_from_tool_catalog(
     catalog: &lash_core::ToolCatalog,
 ) -> Result<LashlangHostCatalog, String> {
     let mut host_catalog = LashlangHostCatalog::new();
-    // Every catalog member is callable; membership is the only availability fact.
+    // Every catalog member is callable; membership is the execution gate.
     for entry in catalog.tools.iter() {
         let lashlang_binding = required_tool_lashlang_executable(&entry.manifest)?;
         host_catalog.add_module_operation(
