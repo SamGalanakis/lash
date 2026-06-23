@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use lash::durability::DurableProcessWorker;
 use lash::observe::SessionResume;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
-use lash_core::{ExecutionScope, ProcessEventAppendRequest};
+use lash_core::{ExecutionScope, LeaseOwnerIdentity, ProcessEventAppendRequest};
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{LashProcessWorkflow, RestateProcessDeployment, RestateRuntimeEffectController};
 use restate_sdk::errors::{HandlerResult, TerminalError};
@@ -116,9 +116,13 @@ impl AppState {
                 .map(Json);
         }
         let session_execution_owner_id = format!("E2eTurnWorkflow/{}/run", request.workflow_id);
+        let session_execution_owner = LeaseOwnerIdentity::opaque(
+            session_execution_owner_id.clone(),
+            format!("{session_execution_owner_id}/incarnation"),
+        );
         let session = core
             .session(DEFAULT_SESSION_ID)
-            .session_execution_owner_id(session_execution_owner_id)
+            .session_execution_owner(session_execution_owner)
             .open()
             .await
             .map_err(terminal_error)?;
