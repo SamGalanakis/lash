@@ -14,15 +14,12 @@ use lash_lashlang_runtime::LashlangSurface;
 use lash_rlm_types::{RlmCreateExtras, RlmFinalAnswerFormat, RlmTermination};
 
 #[cfg(test)]
-use crate::projection::{rlm_history_projection, rlm_protocol_event};
+use crate::projection::rlm_protocol_event;
 use crate::rlm_support::decode_rlm_options;
 
 use history::{RlmHistoryRenderInput, build_rlm_history_messages_from_turn};
 #[cfg(test)]
-use history::{
-    RlmHistoryTestRenderInput, append_entry_image_blocks, build_rlm_history_messages,
-    render_history_prompt,
-};
+use history::render_history_messages;
 
 /// Cell shared between the RLM protocol plugin's turn-prepare hook (writer)
 /// and the projector (reader). The plugin's hook captures `prompt_usage`
@@ -382,21 +379,35 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
 }
 
 impl RlmContextProjector {
+    /// Test helper: the history-only messages (no current-iteration tail)
+    /// flattened to their text for substring assertions on the rendered format.
     #[cfg(test)]
-    fn format_history(&self, projection: &lash_core::ChronologicalProjection) -> String {
-        let history = rlm_history_projection(projection);
-        render_history_prompt(history.history(), self.max_output_chars)
+    fn format_history(&self, events: &[lash_core::SessionEventRecord]) -> String {
+        let mut attachments = Vec::new();
+        let messages = render_history_messages(
+            &RlmHistoryRenderInput {
+                events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
+                max_output_chars: self.max_output_chars,
+                protocol_iteration: 0,
+                finalization: "",
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+            },
+            &mut attachments,
+        );
+        messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .filter_map(|block| match block {
+                LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
-}
-
-#[cfg(test)]
-fn projection_from_events(
-    events: &[lash_core::SessionEventRecord],
-) -> lash_core::ChronologicalProjection {
-    lash_core::ChronologicalProjection::from_turn_view(
-        events,
-        &lash_core::MessageSequence::default(),
-    )
 }
 
 #[cfg(test)]
@@ -446,6 +457,27 @@ mod tests {
         )))
     }
 
+    fn assistant_prose_event(id: &str, text: &str) -> SessionEventRecord {
+        SessionEventRecord::Conversation(ConversationRecord {
+            id: id.to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: text.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]
+            .into(),
+            origin: None,
+        })
+    }
+
     fn projector(max_output_chars: usize) -> RlmContextProjector {
         RlmContextProjector {
             max_output_chars,
@@ -463,42 +495,88 @@ mod tests {
             user_event("u2", "second"),
             step_event(1, "print 2", "2"),
         ];
-        let history = projector.format_history(&projection_from_events(&events));
+        let history = projector.format_history(&events);
 
-        assert!(history.contains("--- history[0] · user message · 5 chars ---\n\nfirst"));
-        assert!(history.contains("--- history[1] · lashlang step · protocol_iteration 0 ---"));
-        assert!(history.contains("Code:\n    print 1"));
+        // History renders in the emission grammar: prior steps are the literal
+        // `<lashlang>` cell the model must emit, outputs as separate blocks.
+        assert!(history.contains("first"));
+        assert!(history.contains("<lashlang>\nprint 1\n</lashlang>"));
         assert!(history.contains("history[1].output[0] (1 chars):\n1"));
-        assert!(history.contains("--- history[2] · user message · 6 chars ---\n\nsecond"));
-        assert!(history.contains("--- history[3] · lashlang step · protocol_iteration 1 ---"));
+        assert!(history.contains("second"));
+        assert!(history.contains("<lashlang>\nprint 2\n</lashlang>"));
         assert!(history.contains("history[3].output[0] (1 chars):\n2"));
-        // Old combined "Output" + "Tool calls" sections were removed;
-        // each `print` is now its own block, and tool calls are visible
-        // inline in the source display above.
-        assert!(!history.contains("\n\nOutput ("));
-        assert!(!history.contains("\n\nTool calls:"));
+        // The `--- history[N] ---` meta-format is gone entirely.
+        assert!(!history.contains("--- history["));
+        assert!(!history.contains("Code:"));
+        assert!(!history.contains("protocol_iteration"));
         assert!(!history.contains("Task"));
         assert!(!history.contains("user_input_"));
+    }
+
+    #[test]
+    fn folded_step_renders_as_emission_cell_not_history_echo() {
+        // Regression for the observed glm-5.2 echo: a step preceded by assistant
+        // prose folds into ONE assistant message that is the literal `<lashlang>`
+        // cell — byte-identical to what the model emits — never a
+        // `--- history[...] ---` meta-format the model could imitate.
+        let events = [
+            user_event("u1", "find it"),
+            assistant_prose_event("a1", "Found it. Running it now."),
+            step_event(0, "loc = run()", "ok"),
+        ];
+        let mut attachments = Vec::new();
+        let messages = build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
+                max_output_chars: 1000,
+                protocol_iteration: 1,
+                finalization: rlm_finalization_prompt(&RlmTermination::default()),
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+            },
+            &mut attachments,
+        );
+
+        let assistant_texts = messages
+            .iter()
+            .filter(|message| matches!(message.role, LlmRole::Assistant))
+            .flat_map(|message| message.blocks.iter())
+            .filter_map(|block| match block {
+                LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        // The prose folded into the cell: exactly one assistant message, no echo.
+        assert_eq!(assistant_texts.len(), 1);
+        assert!(!assistant_texts[0].contains("--- history["));
+        assert!(!assistant_texts[0].contains("Code:\n"));
+        assert_eq!(
+            assistant_texts[0],
+            crate::cell_scan::render_lashlang_cell_text("Found it. Running it now.", "loc = run()")
+        );
     }
 
     #[test]
     fn chronological_history_excludes_hidden_tool_events() {
         let projector = projector(1000);
         let events = [user_event("u1", "first"), step_event(0, "x = 1", "1")];
-        let history = projector.format_history(&projection_from_events(&events));
+        let history = projector.format_history(&events);
 
-        assert!(history.contains("--- history[0] · user message"));
-        assert!(history.contains("--- history[1] · lashlang step · protocol_iteration 0 ---"));
+        assert!(history.contains("first"));
+        assert!(history.contains("<lashlang>\nx = 1\n</lashlang>"));
         assert!(!history.contains("tool_call"));
+        assert!(!history.contains("--- history["));
     }
 
     #[test]
     fn long_user_message_gets_full_history_reference() {
         let projector = projector(10);
-        let history = projector.format_history(&projection_from_events(&[user_event(
-            "u1",
-            "abcdefghijklmnopqrstuvwxyz",
-        )]));
+        let history =
+            projector.format_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")]);
 
         assert!(history.contains("full: history[0].content"));
         assert!(history.contains("... (16 characters omitted) ..."));
@@ -514,11 +592,7 @@ mod tests {
         // in projection::context.
         let projector = projector(10);
         let output = "x".repeat(60 * 1024);
-        let history = projector.format_history(&projection_from_events(&[step_event(
-            0,
-            "print big",
-            &output,
-        )]));
+        let history = projector.format_history(&[step_event(0, "print big", &output)]);
 
         assert!(history.contains("full: history[0].output[0]"));
         assert!(history.contains("...truncated..."));
@@ -535,11 +609,7 @@ mod tests {
             "stderr": "short stderr"
         })
         .to_string();
-        let history = projector.format_history(&projection_from_events(&[step_event(
-            0,
-            "print result",
-            &raw,
-        )]));
+        let history = projector.format_history(&[step_event(0, "print result", &raw)]);
 
         assert!(history.contains("full: history[0].output[0]"), "{history}");
         let status = history.find(r#""status":"failed""#).expect("status field");
@@ -577,11 +647,11 @@ mod tests {
             }),
         });
 
-        let history = projector.format_history(&projection_from_events(&[event]));
-        assert!(history.contains("--- history[0] · user message"));
+        let history = projector.format_history(&[event]);
         assert!(history.contains("synthetic plugin message"));
         assert!(!history.contains("from plugin"));
         assert!(!history.contains("test"));
+        assert!(!history.contains("--- history["));
     }
 
     #[test]
@@ -611,12 +681,14 @@ mod tests {
                 caused_by: None,
             }),
         });
-        let projection = projection_from_events(&[event]);
+        let events = [event];
         let mut attachments = Vec::new();
 
-        let messages = build_rlm_history_messages(
-            RlmHistoryTestRenderInput {
-                projection: &projection,
+        let messages = build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
                 max_output_chars: 1000,
                 protocol_iteration: 1,
                 finalization: rlm_finalization_prompt(&RlmTermination::default()),
@@ -626,12 +698,12 @@ mod tests {
             },
             &mut attachments,
         );
-        let history = projector.format_history(&projection);
+        let history = projector.format_history(&events);
 
-        assert!(history.contains("--- history[0] · event message"));
         assert!(history.contains("Background process wake"));
         assert!(history.contains("blue button pressed"));
         assert!(!history.contains("system message"));
+        assert!(!history.contains("--- history["));
         assert!(matches!(messages[0].role, LlmRole::User));
     }
 
@@ -712,14 +784,22 @@ mod tests {
                 final_output: None,
             }),
         ));
+        let events = [event];
         let mut attachments = Vec::new();
-        let mut blocks = Vec::new();
 
-        let projection = projection_from_events(&[event]);
-        append_entry_image_blocks(
-            projection.entries().first().expect("entry"),
+        let messages = build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
+                max_output_chars: 1000,
+                protocol_iteration: 1,
+                finalization: rlm_finalization_prompt(&RlmTermination::default()),
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+            },
             &mut attachments,
-            &mut blocks,
         );
 
         assert_eq!(attachments.len(), 1);
@@ -732,21 +812,25 @@ mod tests {
                 .map(|reference| reference.id.as_str()),
             Some("img-ref")
         );
-        assert!(matches!(
-            blocks.as_slice(),
-            [LlmContentBlock::Image { attachment_idx: 0 }]
-        ));
+        // The printed image rides the user observation message for the step.
+        assert!(messages.iter().any(|message| {
+            matches!(message.role, LlmRole::User)
+                && message.blocks.iter().any(|block| {
+                    matches!(block, LlmContentBlock::Image { attachment_idx: 0 })
+                })
+        }));
     }
 
     #[test]
     fn rlm_prompt_projects_history_as_chat_messages_with_rolling_cache_breakpoint() {
-        let projection =
-            projection_from_events(&[user_event("u1", "first"), step_event(0, "print 1", "1")]);
+        let events = [user_event("u1", "first"), step_event(0, "print 1", "1")];
         let mut attachments = Vec::new();
 
-        let messages = build_rlm_history_messages(
-            RlmHistoryTestRenderInput {
-                projection: &projection,
+        let messages = build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
                 max_output_chars: 1000,
                 protocol_iteration: 2,
                 finalization: rlm_finalization_prompt(&RlmTermination::default()),
@@ -757,28 +841,39 @@ mod tests {
             &mut attachments,
         );
 
-        assert_eq!(messages.len(), 3);
+        // user turn, assistant cell, user observation, volatile current-iteration tail.
+        assert_eq!(messages.len(), 4);
         assert!(matches!(messages[0].role, LlmRole::User));
         assert!(matches!(messages[1].role, LlmRole::Assistant));
         assert!(matches!(messages[2].role, LlmRole::User));
+        assert!(matches!(messages[3].role, LlmRole::User));
         assert!(matches!(
             messages[0].blocks.first(),
             Some(LlmContentBlock::Text {
                 text,
                 cache_breakpoint: false,
                 ..
-            }) if text.starts_with("--- history[0] · user message")
+            }) if text.as_ref() == "first"
         ));
         assert!(matches!(
             messages[1].blocks.first(),
             Some(LlmContentBlock::Text {
                 text,
-                cache_breakpoint: true,
+                cache_breakpoint: false,
                 ..
-            }) if text.starts_with("--- history[1] · lashlang step")
+            }) if text.starts_with("<lashlang>") && text.contains("print 1")
         ));
+        // The last history message (the observation) carries the rolling fence.
         assert!(matches!(
             messages[2].blocks.first(),
+            Some(LlmContentBlock::Text {
+                text,
+                cache_breakpoint: true,
+                ..
+            }) if text.starts_with("history[1].output[0]")
+        ));
+        assert!(matches!(
+            messages[3].blocks.first(),
             Some(LlmContentBlock::Text {
                 text,
                 cache_breakpoint: false,
@@ -789,7 +884,7 @@ mod tests {
 
     #[test]
     fn rlm_prompt_renders_required_output_block_when_schema_present() {
-        let projection = projection_from_events(&[user_event("u1", "first")]);
+        let events = [user_event("u1", "first")];
         let mut attachments = Vec::new();
         let schema = serde_json::json!({
             "type": "object",
@@ -801,9 +896,11 @@ mod tests {
         });
 
         let schema_contract = render_value_schema_contract(&schema);
-        let messages = build_rlm_history_messages(
-            RlmHistoryTestRenderInput {
-                projection: &projection,
+        let messages = build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
                 max_output_chars: 1000,
                 protocol_iteration: 1,
                 finalization: "Call submit",
@@ -908,21 +1005,22 @@ mod tests {
     #[test]
     fn incremental_render_extends_cached_prefix_on_subsequent_calls() {
         let projector = projector(100);
-        let initial = projector.format_history(&projection_from_events(&[
+        let initial = projector.format_history(&[
             user_event("u1", "first"),
             step_event(0, "print 1", "1"),
-        ]));
-        assert!(initial.contains("--- history[0] · user message"));
-        assert!(initial.contains("--- history[1] · lashlang step · protocol_iteration 0 ---"));
+        ]);
+        assert!(initial.contains("first"));
+        assert!(initial.contains("<lashlang>\nprint 1\n</lashlang>"));
 
-        let extended = projector.format_history(&projection_from_events(&[
+        let extended = projector.format_history(&[
             user_event("u1", "first"),
             step_event(0, "print 1", "1"),
             user_event("u2", "second"),
             step_event(1, "print 2", "2"),
-        ]));
+        ]);
+        // The stable prefix is byte-identical, so the cached prefix extends.
         assert!(extended.starts_with(&initial));
-        assert!(extended.contains("--- history[2] · user message"));
-        assert!(extended.contains("--- history[3] · lashlang step · protocol_iteration 1 ---"));
+        assert!(extended.contains("second"));
+        assert!(extended.contains("<lashlang>\nprint 2\n</lashlang>"));
     }
 }

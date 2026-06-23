@@ -461,3 +461,19 @@ fn markdown_code_blocks_inside_tags_are_lashlang_source() {
         "payload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload"
     );
 }
+
+#[test]
+fn rendered_history_cell_round_trips_through_extractor() {
+    // History == emission: the cell text the history renderer emits for a prior
+    // step (`render_lashlang_cell_text`) extracts back to the exact prose + code
+    // via the same grammar the protocol uses, and carries none of the
+    // `--- history[...] ---` meta-format the model could imitate (the regression
+    // for the observed glm-5.2 history echo).
+    let code = "loc = run()\nprint(loc)";
+    let cell = crate::cell_scan::render_lashlang_cell_text("Found it.", code);
+    assert!(!cell.contains("--- history["));
+    assert!(!cell.contains("\nCode:\n"));
+    let extraction = extract_lashlang_cell(&cell).expect("renders a valid cell");
+    assert_eq!(extraction.prose, "Found it.");
+    assert_eq!(extraction.code, code);
+}
