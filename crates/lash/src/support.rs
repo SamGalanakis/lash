@@ -29,8 +29,8 @@ pub(crate) use lash_core::{
     RuntimeErrorCode, RuntimePersistence, SessionCreateRequest, SessionCursor, SessionError,
     SessionHandle, SessionObservation, SessionObservationSubscription, SessionProcessEventKind,
     SessionReadView, SessionResume, SessionScope, SessionSnapshot, SessionStoreFactory,
-    SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord, ToolManifest,
-    ToolProvider, ToolRestoreReport, ToolSourceHandle, ToolState, TurnActivitySink, TurnOutcome,
+    SessionUsageReport, TerminationPolicy, ToolCallRecord, ToolManifest, ToolProvider,
+    ToolRestoreReport, ToolSourceHandle, ToolState, TurnActivitySink, TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};

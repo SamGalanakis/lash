@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::plugin::{
     PluginError, SessionGraphService, SessionLifecycleService, SessionSnapshot, SessionStateService,
 };
-use crate::{AttachmentStore, ToolContract, ToolId, ToolManifest, ToolResult};
+use crate::{AttachmentStore, ToolContract, ToolDefinition, ToolId, ToolManifest, ToolResult};
 
 mod attachments;
 mod direct_completion;
@@ -119,6 +119,7 @@ pub struct ToolContext<'run> {
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) prepared_payload: serde_json::Value,
+    pub(crate) tool_execution_binding: serde_json::Value,
     /// The id of the in-flight tool call that is invoking this tool.
     pub(crate) tool_call_id: Option<String>,
     pub(crate) attempt_number: u32,
@@ -184,6 +185,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     attachment_store: Arc<dyn AttachmentStore>,
     direct_completions: crate::DirectCompletionClient<'run>,
     prepared_payload: serde_json::Value,
+    tool_execution_binding: serde_json::Value,
     tool_call_id: Option<String>,
     completion: ToolCompletionState,
     durable_effects: ToolDurableEffectState,
@@ -214,6 +216,7 @@ impl<'run> ToolContextBuilder<'run> {
             attachment_store: Arc::clone(&dispatch.attachment_store),
             direct_completions: dispatch.direct_completions.clone(),
             prepared_payload: serde_json::Value::Null,
+            tool_execution_binding: serde_json::Value::Null,
             tool_call_id: None,
             completion: ToolCompletionState::default(),
             durable_effects: ToolDurableEffectState::default(),
@@ -232,6 +235,11 @@ impl<'run> ToolContextBuilder<'run> {
     pub(crate) fn prepared_call(mut self, call: &PreparedToolCall) -> Self {
         self.tool_call_id = Some(call.call_id.clone());
         self.prepared_payload = call.prepared_payload.clone();
+        self
+    }
+
+    pub(crate) fn tool_execution_binding(mut self, binding: serde_json::Value) -> Self {
+        self.tool_execution_binding = binding;
         self
     }
 
@@ -316,6 +324,7 @@ impl<'run> ToolContextBuilder<'run> {
             attachment_store: self.attachment_store,
             direct_completions: self.direct_completions,
             prepared_payload: self.prepared_payload,
+            tool_execution_binding: self.tool_execution_binding,
             tool_call_id: self.tool_call_id,
             attempt_number: 1,
             max_attempts: 1,
@@ -364,6 +373,7 @@ impl<'run> ToolContext<'run> {
             attachment_store,
             direct_completions,
             prepared_payload: serde_json::Value::Null,
+            tool_execution_binding: serde_json::Value::Null,
             tool_call_id: None,
             completion: ToolCompletionState::default(),
             durable_effects: ToolDurableEffectState::default(),
@@ -533,6 +543,10 @@ impl<'run> ToolContext<'run> {
         &self.prepared_payload
     }
 
+    pub fn tool_execution_binding(&self) -> &serde_json::Value {
+        &self.tool_execution_binding
+    }
+
     pub fn decode_prepared_payload<T>(&self) -> Result<T, serde_json::Error>
     where
         T: serde::de::DeserializeOwned,
@@ -635,6 +649,11 @@ impl<'run> ToolContext<'run> {
 
     pub(crate) fn with_prepared_payload(mut self, payload: serde_json::Value) -> Self {
         self.prepared_payload = payload;
+        self
+    }
+
+    pub(crate) fn with_tool_execution_binding(mut self, binding: serde_json::Value) -> Self {
+        self.tool_execution_binding = binding;
         self
     }
 
@@ -979,6 +998,8 @@ impl PreparedToolCall {
 pub struct PreparedToolBatchCall {
     pub call: PreparedToolCall,
     pub replay_suffix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_grant: Option<Box<ToolExecutionGrant>>,
 }
 
 /// Runtime-prepared executable tool batch.
@@ -1001,6 +1022,24 @@ impl PreparedToolBatch {
             .map(|(index, call)| PreparedToolBatchCall {
                 replay_suffix: format!("child:{index}:{}", call.call_id),
                 call,
+                execution_grant: None,
+            })
+            .collect();
+        Self { batch_id, calls }
+    }
+
+    pub fn new_with_grants(
+        batch_id: impl Into<String>,
+        calls: Vec<(PreparedToolCall, Option<ToolExecutionGrant>)>,
+    ) -> Self {
+        let batch_id = batch_id.into();
+        let calls = calls
+            .into_iter()
+            .enumerate()
+            .map(|(index, (call, execution_grant))| PreparedToolBatchCall {
+                replay_suffix: format!("child:{index}:{}", call.call_id),
+                call,
+                execution_grant: execution_grant.map(Box::new),
             })
             .collect();
         Self { batch_id, calls }
@@ -1015,26 +1054,75 @@ impl PreparedToolBatch {
     }
 }
 
+/// Explicit authority to execute a tool outside Tool Catalog membership.
+///
+/// Normal tool calls are authorized by catalog membership. A grant is a
+/// separate, caller-provided capability used by deferred resolution flows: it
+/// carries the manifest/contract to validate the call plus an opaque host
+/// execution binding that providers can inspect from the prepare and execute
+/// contexts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolExecutionGrant {
+    /// Tool identity and model-facing metadata authorized by the grant.
+    pub manifest: ToolManifest,
+    /// Contract used to validate granted call arguments without consulting the
+    /// current Tool Catalog.
+    pub contract: Box<ToolContract>,
+    /// Explicit registry source route for registry-backed execution. Direct
+    /// non-registry providers may ignore this; [`ToolRegistry`] requires it.
+    pub source_id: Option<String>,
+    /// Opaque host routing payload passed to prepare and execute contexts.
+    pub execution_binding: serde_json::Value,
+}
+
+impl ToolExecutionGrant {
+    pub fn new(manifest: ToolManifest, contract: ToolContract) -> Self {
+        Self {
+            manifest,
+            contract: Box::new(contract),
+            source_id: None,
+            execution_binding: serde_json::Value::Null,
+        }
+    }
+
+    pub fn from_definition(definition: ToolDefinition) -> Self {
+        Self::new(definition.manifest(), definition.contract())
+    }
+
+    pub fn with_source_id(mut self, source_id: impl Into<String>) -> Self {
+        self.source_id = Some(source_id.into());
+        self
+    }
+
+    pub fn with_execution_binding(mut self, execution_binding: serde_json::Value) -> Self {
+        self.execution_binding = execution_binding;
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolPrepareContext {
     session_id: String,
     sessions: Arc<dyn SessionStateService>,
     turn_context: crate::TurnContext,
     tool_call_id: Option<String>,
+    tool_execution_binding: serde_json::Value,
 }
 
 impl ToolPrepareContext {
-    pub(crate) fn new(
+    pub(crate) fn with_execution_binding(
         session_id: String,
         sessions: Arc<dyn SessionStateService>,
         turn_context: crate::TurnContext,
         tool_call_id: Option<String>,
+        tool_execution_binding: serde_json::Value,
     ) -> Self {
         Self {
             session_id,
             sessions,
             turn_context,
             tool_call_id,
+            tool_execution_binding,
         }
     }
 
@@ -1044,6 +1132,10 @@ impl ToolPrepareContext {
 
     pub fn tool_call_id(&self) -> Option<&str> {
         self.tool_call_id.as_deref()
+    }
+
+    pub fn tool_execution_binding(&self) -> &serde_json::Value {
+        &self.tool_execution_binding
     }
 
     pub fn turn_context(&self) -> &crate::TurnContext {
@@ -1123,7 +1215,31 @@ pub trait ToolProvider: Send + Sync + 'static {
     ) -> Result<PreparedToolCall, ToolResult> {
         Ok(PreparedToolCall::identity(call.tool_id, call.pending))
     }
+    async fn prepare_granted_tool_call(
+        &self,
+        grant: &ToolExecutionGrant,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        let _ = call;
+        Err(ToolResult::err_fmt(format_args!(
+            "Granted execution is unsupported for tool id `{}`",
+            grant.manifest.id
+        )))
+    }
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult;
+    async fn execute_granted(
+        &self,
+        grant: &ToolExecutionGrant,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let _ = (args, context, progress);
+        ToolResult::err_fmt(format_args!(
+            "Granted execution is unsupported for tool id `{}`",
+            grant.manifest.id
+        ))
+    }
     async fn execute_by_id(
         &self,
         tool_id: &ToolId,

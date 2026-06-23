@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use lash_core::plugin::{CodeExecutorPlugin, ProtocolSessionContext};
 use lash_core::{PromptContribution, SessionError, SessionEventRecord};
-use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface};
+use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface, SharedDeferredToolResolver};
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmProtocolEvent};
 
 use crate::executor::{RlmExecutionState, RlmLashlangExecutionTraceConfig, execute_code};
@@ -16,6 +16,7 @@ pub(super) struct RlmRuntimeState {
     projection_resolver: Arc<dyn ProjectionResolver>,
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     lashlang_surface: LashlangSurface,
+    deferred_tool_resolver: Option<SharedDeferredToolResolver>,
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
     session_projected_bindings: tokio::sync::Mutex<RlmProjectedBindings>,
     execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
@@ -28,6 +29,7 @@ impl RlmRuntimeState {
         projection_resolver: Arc<dyn ProjectionResolver>,
         artifact_store: Arc<dyn LashlangArtifactStore>,
         lashlang_surface: LashlangSurface,
+        deferred_tool_resolver: Option<SharedDeferredToolResolver>,
         lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
     ) -> Result<Self, SessionError> {
         Ok(Self {
@@ -35,6 +37,7 @@ impl RlmRuntimeState {
             projection_resolver,
             artifact_store,
             lashlang_surface,
+            deferred_tool_resolver,
             lashlang_execution_trace_config,
             session_projected_bindings: tokio::sync::Mutex::new(RlmProjectedBindings::new()),
             active_agent_frame_id: tokio::sync::Mutex::new(None),
@@ -195,6 +198,7 @@ impl RlmRuntimeState {
             request,
             Arc::clone(&self.artifact_store),
             self.lashlang_surface.clone(),
+            self.deferred_tool_resolver.clone(),
             session_projected_bindings,
             Arc::clone(&self.projection_resolver),
             self.lashlang_execution_trace_config.clone(),

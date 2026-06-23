@@ -97,6 +97,7 @@ pub(crate) struct CliSessionOpener {
     prompt_layer: lash_core::PromptLayer,
     attachment_store: Arc<dyn AttachmentStore>,
     provider: ProviderHandle,
+    deferred_tool_resolver: Option<lash::tools::SharedDeferredToolResolver>,
     trace_jsonl_path: Option<PathBuf>,
     trace_level: lash::tracing::TraceLevel,
 }
@@ -288,11 +289,13 @@ impl SessionBootstrap {
 }
 
 impl CliSessionOpener {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         plugin_stack: PluginStack,
         prompt_layer: lash_core::PromptLayer,
         attachment_store: Arc<dyn AttachmentStore>,
         provider: ProviderHandle,
+        deferred_tool_resolver: Option<lash::tools::SharedDeferredToolResolver>,
         trace_jsonl_path: Option<PathBuf>,
         trace_level: lash::tracing::TraceLevel,
     ) -> Self {
@@ -301,6 +304,7 @@ impl CliSessionOpener {
             prompt_layer,
             attachment_store,
             provider,
+            deferred_tool_resolver,
             trace_jsonl_path,
             trace_level,
         }
@@ -400,6 +404,9 @@ impl CliSessionOpener {
                     .trigger_store(trigger_store);
                 if let Some(trace_jsonl_path) = self.trace_jsonl_path.clone() {
                     core_builder = core_builder.trace_jsonl_path(trace_jsonl_path);
+                }
+                if let Some(resolver) = self.deferred_tool_resolver.clone() {
+                    core_builder = core_builder.deferred_tool_resolver(resolver);
                 }
                 core_builder
                     .build()?
@@ -516,6 +523,7 @@ mod tests {
                 crate::paths::attachments_dir(),
             )),
             provider,
+            None,
             None,
             lash::tracing::TraceLevel::Standard,
         );

@@ -218,6 +218,14 @@ pub fn mock_tool_context() -> crate::ToolContext<'static> {
     mock_tool_context_with_host(Arc::new(MockSessionManager::default()))
 }
 
+/// Like [`mock_tool_context`], but with the grant execution binding populated.
+/// Use this for provider tests that need to assert grant-only routing behavior.
+pub fn mock_tool_context_with_execution_binding(
+    binding: serde_json::Value,
+) -> crate::ToolContext<'static> {
+    mock_tool_context().with_tool_execution_binding(binding)
+}
+
 /// Like [`mock_tool_context`], but lets the caller supply the host. Useful
 /// when a tool reads from the host (snapshots, tool state, lifecycle hooks)
 /// and the test wants to assert against captured interactions.
@@ -284,10 +292,37 @@ impl crate::ToolProvider for EmptyToolProvider {
 pub fn code_execution_context_with_tool_catalog(
     tool_catalog: crate::ToolCatalog,
 ) -> crate::RuntimeExecutionContext<'static> {
-    code_execution_context_with_tool_catalog_and_trigger_router(tool_catalog, None)
+    code_execution_context_with_tool_provider_catalog_and_trigger_router(
+        Arc::new(EmptyToolProvider),
+        tool_catalog,
+        None,
+    )
+}
+
+pub fn code_execution_context_with_tool_provider_and_catalog(
+    provider: Arc<dyn crate::ToolProvider>,
+    tool_catalog: crate::ToolCatalog,
+) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_tool_provider_catalog_and_trigger_router(
+        provider,
+        tool_catalog,
+        None,
+    )
 }
 
 fn code_execution_context_with_tool_catalog_and_trigger_router(
+    tool_catalog: crate::ToolCatalog,
+    trigger_router: Option<crate::TriggerRouter>,
+) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_tool_provider_catalog_and_trigger_router(
+        Arc::new(EmptyToolProvider),
+        tool_catalog,
+        trigger_router,
+    )
+}
+
+fn code_execution_context_with_tool_provider_catalog_and_trigger_router(
+    provider: Arc<dyn crate::ToolProvider>,
     tool_catalog: crate::ToolCatalog,
     trigger_router: Option<crate::TriggerRouter>,
 ) -> crate::RuntimeExecutionContext<'static> {
@@ -303,7 +338,7 @@ fn code_execution_context_with_tool_catalog_and_trigger_router(
         Arc::new(crate::InMemoryAttachmentStore::new());
     let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
         plugins,
-        tools: Arc::new(EmptyToolProvider),
+        tools: provider,
         tool_catalog: Arc::new(tool_catalog),
         sessions: Arc::new(MockSessionManager::default()),
         session_lifecycle: Arc::new(MockSessionManager::default()),
@@ -1085,7 +1120,6 @@ mod test_protocol_fakes {
                 tool_specs: input.tool_catalog.model_tool_specs(),
                 tool_names,
                 tool_names_fingerprint,
-                omitted_tool_count: 0,
                 execution_prompt: Arc::from(""),
                 prompt_contributions: input.extra_prompt_contributions,
             }

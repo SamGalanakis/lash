@@ -7,7 +7,6 @@ use lash_core::{PluginStack, ToolProvider};
 pub use lash_plugin_observational_memory::ObservationalMemoryConfig;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_process_controls::SessionProcessAdminPluginFactory;
-use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
 use lash_tools::apply_patch::apply_patch_provider;
 use lash_tools::files::{glob_provider, read_file_provider};
@@ -77,7 +76,6 @@ pub fn locked_down_rlm_plugin_stack() -> PluginStack {
 }
 
 fn push_core_runtime_tools(stack: &mut PluginStack) {
-    stack.push(Arc::new(ToolDiscoveryPluginFactory::new()));
     stack.push(Arc::new(ToolOutputBudgetPluginFactory::default()));
 }
 

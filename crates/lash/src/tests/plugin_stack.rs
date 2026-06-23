@@ -60,83 +60,53 @@ async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
 }
 
 #[tokio::test]
-async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
+async fn apply_tool_state_and_membership_update_live_catalog() -> Result<()> {
     let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .build()?;
     let session = core.session("tool-state").open().await?;
+    let app_tool = lash_core::ToolId::from("tool:app_lookup");
 
+    // Members by default.
+    let initial = session.admin().tools().state().await?;
+    assert!(initial.get(&app_tool).expect("app tool").is_member());
+
+    // Remove from the catalog (non-membership).
     let generation = session
         .admin()
         .tools()
-        .set_availability_many(&[(
-            lash_core::ToolId::from("tool:app_lookup"),
-            ToolAvailability::Showcased,
-        )])
+        .set_membership_many(&[(app_tool.clone(), false)])
         .await?;
-    let showcased = session.admin().tools().state().await?;
+    let removed = session.admin().tools().state().await?;
+    assert_eq!(removed.generation(), generation);
+    assert!(!removed.get(&app_tool).expect("app tool").is_member());
 
-    assert_eq!(showcased.generation(), generation);
-    assert_eq!(
-        showcased
-            .get(&lash_core::ToolId::from("tool:app_lookup"))
-            .and_then(|spec| spec.manifest().availability_override),
-        Some(ToolAvailability::Showcased)
-    );
-
+    // Re-add as a member.
     let generation = session
         .admin()
         .tools()
-        .clear_availability_override("tool:app_lookup")
+        .set_membership("tool:app_lookup", true)
         .await?;
-    let cleared = session.admin().tools().state().await?;
+    let restored = session.admin().tools().state().await?;
+    assert_eq!(restored.generation(), generation);
+    assert!(restored.get(&app_tool).expect("app tool").is_member());
 
-    assert_eq!(cleared.generation(), generation);
-    assert_eq!(
-        cleared
-            .get(&lash_core::ToolId::from("tool:app_lookup"))
-            .and_then(|spec| spec.manifest().availability_override),
-        None
-    );
-
-    let generation = session
-        .admin()
-        .tools()
-        .set_availability("tool:app_lookup", ToolAvailability::Off)
-        .await?;
-    let off = session.admin().tools().state().await?;
-
-    assert_eq!(off.generation(), generation);
-    assert_eq!(
-        off.get(&lash_core::ToolId::from("tool:app_lookup"))
-            .and_then(|spec| spec.manifest().availability_override),
-        Some(ToolAvailability::Off)
-    );
-
-    let mut callable = off;
-    callable
-        .set_availability(
-            &lash_core::ToolId::from("tool:app_lookup"),
-            Some(ToolAvailability::Callable),
-        )
+    // Advanced apply_state round-trips membership.
+    let mut removed_again = restored;
+    removed_again
+        .set_membership(&app_tool, false)
         .expect("app tool");
     let generation = session
         .admin()
         .tools()
         .advanced()
-        .apply_state(callable)
+        .apply_state(removed_again)
         .await?;
-    let callable = session.admin().tools().state().await?;
-
-    assert_eq!(callable.generation(), generation);
-    assert_eq!(
-        callable
-            .get(&lash_core::ToolId::from("tool:app_lookup"))
-            .and_then(|spec| spec.manifest().availability_override),
-        Some(ToolAvailability::Callable)
-    );
+    let applied = session.admin().tools().state().await?;
+    assert_eq!(applied.generation(), generation);
+    assert!(!applied.get(&app_tool).expect("app tool").is_member());
     Ok(())
 }
 
@@ -151,7 +121,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     session
         .admin()
         .tools()
-        .set_availability("tool:app_lookup", ToolAvailability::Off)
+        .set_membership("tool:app_lookup", false)
         .await?;
     let persisted_tool_state = session.admin().tools().state().await?.with_generation(9);
     let state = RuntimeSessionState {
@@ -177,11 +147,12 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     let state = reopened.admin().tools().state().await?;
     assert_eq!(state.generation(), 9);
 
-    assert_eq!(
-        state
+    assert!(
+        !state
             .get(&lash_core::ToolId::from("tool:app_lookup"))
-            .and_then(|spec| spec.manifest().availability_override),
-        Some(ToolAvailability::Off)
+            .expect("app tool")
+            .is_member(),
+        "the host-removed tool is restored as a non-member"
     );
     Ok(())
 }

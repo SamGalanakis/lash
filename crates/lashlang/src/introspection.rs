@@ -284,3 +284,52 @@ fn trigger_source(
         event_type: TypeView::new(binding.event_ty().clone()),
     }
 }
+
+/// Collect the module call-paths (`module.operation`, dotted for nested
+/// modules) that a parsed program references through receiver calls. This is
+/// the "gather" step of deferred tool resolution: the host resolver is asked to
+/// resolve any returned path that the link-time host environment does not
+/// already provide.
+pub fn referenced_module_call_paths(
+    program: &crate::ast::Program,
+) -> std::collections::BTreeSet<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    collect_module_call_paths(&program.main, &mut paths);
+    for declaration in &program.declarations {
+        if let crate::ast::Declaration::Process(process) = declaration {
+            collect_module_call_paths(&process.body, &mut paths);
+        }
+    }
+    paths
+}
+
+fn collect_module_call_paths(
+    expr: &crate::ast::Expr,
+    paths: &mut std::collections::BTreeSet<String>,
+) {
+    if let crate::ast::Expr::ReceiverCall {
+        receiver,
+        operation,
+        ..
+    } = expr
+        && let Some(module_path) = module_call_receiver_path(receiver)
+    {
+        paths.insert(format!("{}.{}", module_path.join("."), operation.as_str()));
+    }
+    for child in expr.children() {
+        collect_module_call_paths(child, paths);
+    }
+}
+
+fn module_call_receiver_path(expr: &crate::ast::Expr) -> Option<Vec<String>> {
+    match expr {
+        crate::ast::Expr::LabelAnnotated { expr, .. } => module_call_receiver_path(expr),
+        crate::ast::Expr::Variable(name) => Some(vec![name.as_str().to_string()]),
+        crate::ast::Expr::Field { target, field } => {
+            let mut path = module_call_receiver_path(target)?;
+            path.push(field.as_str().to_string());
+            Some(path)
+        }
+        _ => None,
+    }
+}

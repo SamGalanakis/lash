@@ -18,7 +18,7 @@ The CLI projects that single ingress into separate user-visible surfaces:
 - process dock for durable runtime process handles,
 - diagnostics/status details for background counts and failures.
 
-Slash commands remain CLI host commands and are never queued as model work. Tool availability is configured outside chat slash commands.
+Slash commands remain CLI host commands and are never queued as model work. Tool Catalog membership is configured outside chat slash commands.
 
 ## Consequences
 

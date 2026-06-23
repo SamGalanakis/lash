@@ -1,4 +1,4 @@
-pub const REMOTE_PROTOCOL_VERSION: u32 = 5;
+pub const REMOTE_PROTOCOL_VERSION: u32 = 6;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {

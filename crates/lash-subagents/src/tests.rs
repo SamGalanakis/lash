@@ -11,7 +11,7 @@ use lash_core::{
     LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeHostConfig, RuntimeServices,
     SessionPolicy, TestLocalProcessRegistry, TraceRuntimeSubject,
 };
-use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
+use lash_core::{ToolArgumentProjectionPolicy, ToolOutputContract, TurnInput};
 use lash_lashlang_runtime::{
     LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog,
     LashlangLanguageFeatures, LashlangProcessEngine, LashlangSurface, LashlangSurfaceContribution,
@@ -141,10 +141,6 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
         .iter()
         .find(|tool| tool.name() == "spawn_agent")
         .expect("rlm spawn_agent");
-    assert_eq!(
-        rlm_spawn.effective_availability(),
-        lash_core::ToolAvailability::Showcased
-    );
     assert_eq!(
         rlm_spawn.contract.output_contract,
         ToolOutputContract::from_input_schema("output", None)
@@ -963,59 +959,17 @@ async fn rlm_provider_does_not_require_process_support() {
     assert_eq!(plugin.id(), "subagents");
 }
 
-fn dummy_tool(name: &str) -> ToolDefinition {
-    ToolDefinition::raw(
-        format!("tool:{name}"),
-        name,
-        format!("{name} description"),
-        ToolDefinition::default_input_schema(),
-        json!({ "type": "null" }),
-    )
-}
-
 #[test]
 fn sublashlang_binding_reports_authority_notes() {
-    use lash_core::plugin::ToolCatalogContext;
-
-    let tools = vec![
-        dummy_tool("read_file"),
-        dummy_tool("ask"),
-        dummy_tool("show_snippet_to_user"),
-        dummy_tool("showcase"),
-        dummy_tool("plan_exit"),
-        dummy_tool("apply_patch"),
-        dummy_tool("spawn_agent"),
-    ];
-    let contracts = tools
-        .iter()
-        .map(|tool| {
-            (
-                tool.name().to_string(),
-                std::sync::Arc::new(tool.contract()),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let ctx = ToolCatalogContext {
-        session_id: "child".to_string(),
-        tools: tools.into_iter().map(|tool| tool.manifest()).collect(),
-        resolve_contract: Some(std::sync::Arc::new(move |name| {
-            contracts.get(name).cloned()
-        })),
-        tool_access: lash_core::SessionToolAccess::default(),
-        subagent: Some(lash_core::SubagentSessionContext {
-            parent_session_id: "root".to_string(),
-            capability: "explore".to_string(),
-            depth: 1,
-            max_depth: 5,
-        }),
-        extensions: Default::default(),
+    let authority = lash_core::SubagentSessionContext {
+        parent_session_id: "root".to_string(),
+        capability: "explore".to_string(),
+        depth: 1,
+        max_depth: 5,
     };
 
-    let contribution =
-        rlm_support::sublashlang_binding_contribution(ctx).expect("catalog contribution");
-    assert!(contribution.overrides.is_empty());
     assert_eq!(
-        contribution.tool_list_notes,
-        vec!["Subagent capability: explore. Depth: 1/5."]
+        rlm_support::subagent_capability_note(&authority),
+        "Subagent capability: explore. Depth: 1/5."
     );
 }

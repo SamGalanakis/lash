@@ -84,7 +84,7 @@ flowchart TD
               <thead><tr><th>Host-service area</th><th>Runtime responsibility</th></tr></thead>
               <tbody>
                 <tr><td>Session snapshots and catalogs</td><td>Read current state and tool catalogs through stable projections.</td></tr>
-                <tr><td>Tool state</td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
+                <tr><td>Tool state</td><td>Read and mutate per-session Tool Catalog membership without exposing the inner registry.</td></tr>
                 <tr><td>Session lifecycle and turns</td><td>Create child sessions, fork sessions, append AgentFrames, and stream managed turns.</td></tr>
                 <tr><td>Session graph writes</td><td>Append plugin-authored nodes to a session graph through a guarded contract.</td></tr>
                 <tr><td>Processes</td><td>Register durable processes from typed start requests, grant process handles, deliver wakeups, and route user-facing cancellation through the configured cancel ability.</td></tr>

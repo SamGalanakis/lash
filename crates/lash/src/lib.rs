@@ -100,12 +100,17 @@ pub mod triggers {
 pub mod tools {
     pub use lash_core::{
         CancelHint, PendingCompletion, PreparedToolCall, TimeoutBehavior, ToolActivation,
-        ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCall,
-        ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
-        ToolDurableEffects, ToolManifest, ToolOutputContract, ToolPrepareCall, ToolPrepareContext,
-        ToolProvider, ToolResult, ToolScheduling, ToolSourceHandle, ToolTriggerClient,
+        ToolArgumentProjectionPolicy, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
+        ToolContract, ToolDefinition, ToolDurableEffects, ToolExecutionGrant, ToolManifest,
+        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
+        ToolScheduling, ToolSourceHandle, ToolTriggerClient,
     };
-    pub use lash_core::{ToolRestoreReport, ToolState, ToolStateEntry};
+    pub use lash_core::{PLUGIN_TOOL_SOURCE_ID, ToolRestoreReport, ToolState, ToolStateEntry};
+    #[cfg(feature = "rlm")]
+    pub use lash_lashlang_runtime::{
+        DeferredResolutionRecord, DeferredToolResolver, Resolution as DeferredToolResolution,
+        SharedDeferredToolResolver, ToolGrant as DeferredToolGrant,
+    };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
         LASHLANG_TOOL_BINDING_KEY, LashlangToolBinding, RemoteToolGrantLashlangExt,
@@ -171,8 +176,7 @@ pub mod plugins {
     pub use lash_core::{
         PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
         PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory, PromptHookContext,
-        SessionPlugin, ToolCatalogContribution, ToolCatalogOverride, TurnHookContext,
-        TurnResultHookContext,
+        SessionPlugin, ToolCatalogContribution, TurnHookContext, TurnResultHookContext,
     };
     pub use lash_plugin_tool_output_budget::{
         ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
@@ -219,14 +223,14 @@ pub mod remote {
         RemoteSessionObservationEvent, RemoteSessionObservationEventPayload,
         RemoteSessionProcessEventKind, RemoteSessionQueueEventKind, RemoteSessionScope,
         RemoteTokenLedgerEntry, RemoteToolActivation, RemoteToolArgumentProjectionPolicy,
-        RemoteToolAvailability, RemoteToolCallOutcome, RemoteToolCallSummary,
-        RemoteToolFailureClass, RemoteToolGrant, RemoteToolOutputContract, RemoteToolRegistry,
-        RemoteToolRetryPolicy, RemoteToolScheduling, RemoteTriggerCancelSubscriptionRequest,
-        RemoteTriggerCancelSubscriptionResult, RemoteTriggerEmitReport, RemoteTriggerInputBinding,
-        RemoteTriggerInputTemplate, RemoteTriggerListSubscriptionsResponse,
-        RemoteTriggerOccurrenceRecord, RemoteTriggerOccurrenceRequest,
-        RemoteTriggerRegisterSubscriptionRequest, RemoteTriggerRegisterSubscriptionResult,
-        RemoteTriggerRegistration, RemoteTriggerSubscriptionDraft, RemoteTriggerSubscriptionFilter,
+        RemoteToolCallOutcome, RemoteToolCallSummary, RemoteToolFailureClass, RemoteToolGrant,
+        RemoteToolOutputContract, RemoteToolRegistry, RemoteToolRetryPolicy, RemoteToolScheduling,
+        RemoteTriggerCancelSubscriptionRequest, RemoteTriggerCancelSubscriptionResult,
+        RemoteTriggerEmitReport, RemoteTriggerInputBinding, RemoteTriggerInputTemplate,
+        RemoteTriggerListSubscriptionsResponse, RemoteTriggerOccurrenceRecord,
+        RemoteTriggerOccurrenceRequest, RemoteTriggerRegisterSubscriptionRequest,
+        RemoteTriggerRegisterSubscriptionResult, RemoteTriggerRegistration,
+        RemoteTriggerSubscriptionDraft, RemoteTriggerSubscriptionFilter,
         RemoteTriggerSubscriptionRecord, RemoteTriggerTargetSummary, RemoteTurnActivity,
         RemoteTurnEvent, RemoteTurnFinish, RemoteTurnInput, RemoteTurnIssue, RemoteTurnOutcome,
         RemoteTurnRequest, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,

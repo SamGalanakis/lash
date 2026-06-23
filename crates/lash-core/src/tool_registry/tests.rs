@@ -1,22 +1,19 @@
+/// Project every catalog member to a JSON record for host-owned discovery
+/// (e.g. the reference `search_tools` example in `lash-cli`). The projection
+/// ranges over members and emits no tiered state.
 pub(crate) fn project_tool_catalog<I>(entries: I) -> Vec<serde_json::Value>
 where
     I: IntoIterator<Item = crate::ToolCatalogEntry>,
 {
     entries
         .into_iter()
-        .filter(|entry| entry.availability.is_searchable())
         .map(|entry| {
             let manifest = entry.manifest;
-            let availability = entry.availability;
             let mut projected = serde_json::json!({
                 "id": manifest.id,
                 "name": manifest.name,
                 "description": manifest.description,
                 "bindings": manifest.bindings,
-                "availability": availability,
-                "callable": availability.is_callable(),
-                "showcased": availability.is_showcased(),
-                "searchable": availability.is_searchable(),
                 "activation": manifest.activation,
             });
             if let Some(contract) = manifest.compact_contract {
@@ -44,6 +41,7 @@ mod tests {
         manifest_resolutions: Arc<AtomicUsize>,
         contract_resolutions: Arc<AtomicUsize>,
         executions: Arc<AtomicUsize>,
+        observed_execution_bindings: Option<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
     }
     struct NamedExactSource {
         id: &'static str,
@@ -55,7 +53,6 @@ mod tests {
     fn test_tool(
         name: &str,
         description: &str,
-        availability: crate::ToolAvailabilityConfig,
     ) -> ToolDefinition {
         ToolDefinition::raw(
             format!("tool:{name}"),
@@ -64,7 +61,6 @@ mod tests {
             ToolDefinition::default_input_schema(),
             json!({ "type": "string" }),
         )
-        .with_availability(availability)
     }
 
     fn tool_id(name: &str) -> crate::ToolId {
@@ -86,7 +82,7 @@ mod tests {
     }
 
     fn dynamic_definition(name: &str) -> ToolDefinition {
-        test_tool(name, "dynamic", crate::ToolAvailabilityConfig::callable())
+        test_tool(name, "dynamic")
     }
 
     fn test_tool_context() -> crate::ToolContext<'static> {
@@ -114,7 +110,6 @@ mod tests {
             manifests(vec![test_tool(
                 "mock_tool",
                 "mock",
-                crate::ToolAvailabilityConfig::callable(),
             )])
         }
 
@@ -123,7 +118,6 @@ mod tests {
                 vec![test_tool(
                     "mock_tool",
                     "mock",
-                    crate::ToolAvailabilityConfig::callable(),
                 )],
                 name,
             )
@@ -141,12 +135,10 @@ mod tests {
                 test_tool(
                     "enabled_tool",
                     "enabled",
-                    crate::ToolAvailabilityConfig::callable(),
                 ),
                 test_tool(
                     "disabled_tool",
                     "disabled",
-                    crate::ToolAvailabilityConfig::off(),
                 ),
             ])
         }
@@ -154,16 +146,8 @@ mod tests {
         fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
             contract_from(
                 vec![
-                    test_tool(
-                        "enabled_tool",
-                        "enabled",
-                        crate::ToolAvailabilityConfig::callable(),
-                    ),
-                    test_tool(
-                        "disabled_tool",
-                        "disabled",
-                        crate::ToolAvailabilityConfig::off(),
-                    ),
+                    test_tool("enabled_tool", "enabled"),
+                    test_tool("disabled_tool", "disabled"),
                 ],
                 name,
             )
@@ -247,7 +231,6 @@ mod tests {
                 test_tool(
                     "host_only",
                     "host-only",
-                    crate::ToolAvailabilityConfig::callable(),
                 )
                 .manifest()
             })
@@ -259,7 +242,6 @@ mod tests {
                 test_tool(
                     "host_only",
                     "host-only",
-                    crate::ToolAvailabilityConfig::callable(),
                 )
                 .manifest()
             })
@@ -271,7 +253,6 @@ mod tests {
                 vec![test_tool(
                     "host_only",
                     "host-only",
-                    crate::ToolAvailabilityConfig::callable(),
                 )],
                 name,
             )
@@ -284,8 +265,7 @@ mod tests {
                     test_tool(
                         "host_only",
                         "host-only",
-                        crate::ToolAvailabilityConfig::callable(),
-                    )
+                        )
                     .contract(),
                 )
             })
@@ -295,10 +275,16 @@ mod tests {
             &self,
             tool: &str,
             _args: &serde_json::Value,
-            _context: &ToolContext<'_>,
+            context: &ToolContext<'_>,
             _progress: Option<&ProgressSender>,
         ) -> ToolResult {
             self.executions.fetch_add(1, Ordering::SeqCst);
+            if let Some(bindings) = &self.observed_execution_bindings {
+                bindings
+                    .lock()
+                    .expect("execution bindings")
+                    .push(context.tool_execution_binding().clone());
+            }
             ToolResult::ok(json!(tool))
         }
     }
@@ -318,7 +304,6 @@ mod tests {
                 test_tool(
                     "host_only",
                     "host-only",
-                    crate::ToolAvailabilityConfig::callable(),
                 )
                 .manifest()
             })
@@ -329,7 +314,6 @@ mod tests {
                 test_tool(
                     "host_only",
                     "host-only",
-                    crate::ToolAvailabilityConfig::callable(),
                 )
                 .manifest()
             })
@@ -376,26 +360,29 @@ mod tests {
     }
 
     #[test]
-    fn registry_preserves_initial_availability_state() {
+    fn registry_makes_advertised_tools_members_by_default() {
         let registry =
             ToolRegistry::from_tool_provider(Arc::new(MixedEnabledTool)).expect("registry");
         let snapshot = registry.export_state();
-        assert_eq!(
+        assert!(
             snapshot
                 .get(&tool_id("enabled_tool"))
                 .unwrap()
-                .manifest()
-                .effective_availability(),
-            crate::ToolAvailability::Callable
+                .is_member()
         );
-        assert_eq!(
+        assert!(
             snapshot
                 .get(&tool_id("disabled_tool"))
                 .unwrap()
-                .manifest()
-                .effective_availability(),
-            crate::ToolAvailability::Off
+                .is_member()
         );
+        let members = snapshot
+            .tool_manifests()
+            .into_iter()
+            .map(|manifest| manifest.name)
+            .collect::<BTreeSet<_>>();
+        assert!(members.contains("enabled_tool"));
+        assert!(members.contains("disabled_tool"));
     }
 
     #[test]
@@ -409,7 +396,7 @@ mod tests {
         let serialized = value.to_string();
 
         assert!(!serialized.contains("source_id"));
-        assert!(!serialized.contains(PLUGIN_SOURCE_ID));
+        assert!(!serialized.contains(PLUGIN_TOOL_SOURCE_ID));
         assert!(!serialized.contains("live:"));
     }
 
@@ -441,7 +428,6 @@ mod tests {
                 test_tool(
                     "missing",
                     "missing",
-                    crate::ToolAvailabilityConfig::callable(),
                 )
                 .manifest(),
             ),
@@ -488,7 +474,6 @@ mod tests {
                 test_tool(
                     "host_only",
                     "host-only",
-                    crate::ToolAvailabilityConfig::callable(),
                 )
                 .manifest(),
             ),
@@ -510,6 +495,7 @@ mod tests {
                 manifest_resolutions: Arc::clone(&manifest_resolutions),
                 contract_resolutions: Arc::new(AtomicUsize::new(0)),
                 executions: Arc::new(AtomicUsize::new(0)),
+                observed_execution_bindings: None,
             }))
             .expect("source registered");
 
@@ -571,6 +557,7 @@ mod tests {
                 manifest_resolutions: Arc::clone(&manifest_resolutions),
                 contract_resolutions: Arc::clone(&contract_resolutions),
                 executions: Arc::clone(&executions),
+                observed_execution_bindings: None,
             }))
             .expect("source registered");
 
@@ -600,6 +587,186 @@ mod tests {
         assert!(result.is_success());
         assert_eq!(result.value_for_projection(), json!("host_only"));
         assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn execution_grant_routes_without_adding_tool_to_state_or_catalog() {
+        let manifest_resolutions = Arc::new(AtomicUsize::new(0));
+        let contract_resolutions = Arc::new(AtomicUsize::new(0));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed_execution_bindings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+        registry
+            .upsert_source(Arc::new(ExactResolvingSource {
+                manifest_resolutions: Arc::clone(&manifest_resolutions),
+                contract_resolutions: Arc::clone(&contract_resolutions),
+                executions: Arc::clone(&executions),
+                observed_execution_bindings: Some(Arc::clone(&observed_execution_bindings)),
+            }))
+            .expect("source registered");
+
+        assert!(!registry.export_state().contains(&tool_id("host_only")));
+        assert!(
+            !registry
+                .tool_manifests()
+                .iter()
+                .any(|manifest| manifest.name == "host_only")
+        );
+
+        let grant = crate::ToolExecutionGrant::from_definition(test_tool(
+            "host_only",
+            "host-only",
+        ))
+        .with_source_id("exact")
+        .with_execution_binding(json!({ "kind": "test", "route": "grant" }));
+        let prepare_context = crate::ToolPrepareContext::with_execution_binding(
+            "registry-test".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            crate::TurnContext::default(),
+            Some("grant-call".to_string()),
+            grant.execution_binding.clone(),
+        );
+        let prepared = registry
+            .prepare_granted_tool_call(
+                &grant,
+                crate::ToolPrepareCall {
+                    tool_id: grant.manifest.id.clone(),
+                    pending: crate::sansio::PendingToolCall {
+                        call_id: "grant-call".to_string(),
+                        tool_name: grant.manifest.name.clone(),
+                        args: json!({}),
+                        replay: None,
+                    },
+                    context: &prepare_context,
+                },
+            )
+            .await
+            .expect("grant prepare");
+        assert_eq!(prepared.tool_id, grant.manifest.id);
+
+        let context = test_tool_context().with_tool_execution_binding(grant.execution_binding.clone());
+        let args = json!({});
+        let result = registry.execute_granted(&grant, &args, &context, None).await;
+        assert!(result.is_success());
+        assert_eq!(result.value_for_projection(), json!("host_only"));
+
+        assert!(!registry.export_state().contains(&tool_id("host_only")));
+        assert!(
+            !registry
+                .tool_manifests()
+                .iter()
+                .any(|manifest| manifest.name == "host_only")
+        );
+        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *observed_execution_bindings
+                .lock()
+                .expect("execution bindings"),
+            vec![json!({ "kind": "test", "route": "grant" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_grant_without_source_does_not_infer_registry_route() {
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+        registry
+            .upsert_source(Arc::new(ExactResolvingSource {
+                manifest_resolutions: Arc::new(AtomicUsize::new(0)),
+                contract_resolutions: Arc::new(AtomicUsize::new(0)),
+                executions: Arc::new(AtomicUsize::new(0)),
+                observed_execution_bindings: None,
+            }))
+            .expect("source registered");
+
+        let grant = crate::ToolExecutionGrant::from_definition(test_tool(
+            "host_only",
+            "host-only",
+        ));
+        let context = test_tool_context();
+        let args = json!({});
+        let result = registry.execute_granted(&grant, &args, &context, None).await;
+
+        assert!(!result.is_success());
+        assert_eq!(
+            result.value_for_projection(),
+            json!("Granted tool id `tool:host_only` is missing an explicit tool source")
+        );
+        assert!(!registry.export_state().contains(&tool_id("host_only")));
+    }
+
+    #[tokio::test]
+    async fn execution_grant_routes_grouped_source_by_id_not_name() {
+        struct HiddenSameNameProvider {
+            id: &'static str,
+            result: &'static str,
+        }
+
+        impl HiddenSameNameProvider {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::raw(
+                    self.id,
+                    "shared_hidden_name",
+                    self.result,
+                    ToolDefinition::default_input_schema(),
+                    json!({ "type": "string" }),
+                )
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ToolProvider for HiddenSameNameProvider {
+            fn tool_manifests(&self) -> Vec<ToolManifest> {
+                Vec::new()
+            }
+
+            fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+                (name == "shared_hidden_name").then(|| self.definition().manifest())
+            }
+
+            fn resolve_manifest_by_id(&self, id: &crate::ToolId) -> Option<ToolManifest> {
+                (id.as_str() == self.id).then(|| self.definition().manifest())
+            }
+
+            fn resolve_contract(&self, _name: &str) -> Option<Arc<ToolContract>> {
+                None
+            }
+
+            async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+                ToolResult::ok(json!(self.result))
+            }
+        }
+
+        let registry = ToolRegistry::from_tool_providers(vec![
+            Arc::new(HiddenSameNameProvider {
+                id: "tool:hidden_alpha",
+                result: "wrong-provider",
+            }),
+            Arc::new(HiddenSameNameProvider {
+                id: "tool:hidden_zeta",
+                result: "right-provider",
+            }),
+        ])
+        .expect("registry");
+        let grant = crate::ToolExecutionGrant::from_definition(ToolDefinition::raw(
+            "tool:hidden_zeta",
+            "shared_hidden_name",
+            "grant selects the second hidden provider by id",
+            ToolDefinition::default_input_schema(),
+            json!({ "type": "string" }),
+        ))
+        .with_source_id(crate::PLUGIN_TOOL_SOURCE_ID);
+
+        let context = test_tool_context();
+        let args = json!({});
+        let result = registry.execute_granted(&grant, &args, &context, None).await;
+
+        assert!(result.is_success());
+        assert_eq!(result.value_for_projection(), json!("right-provider"));
+        assert!(
+            registry.export_state().entries().is_empty(),
+            "grant execution must not add hidden providers to registry state"
+        );
     }
 
     #[test]
@@ -642,27 +809,26 @@ mod tests {
     }
 
     #[test]
-    fn upsert_source_preserves_availability_override_on_refresh() {
+    fn upsert_source_preserves_membership_on_refresh() {
         let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
         registry
             .upsert_source(Arc::new(ExternalMockSource))
             .expect("source registered");
         let mut snapshot = registry.export_state();
         snapshot
-            .set_availability(&tool_id("mcp__demo__search"), Some(crate::ToolAvailability::Off))
+            .set_membership(&tool_id("mcp__demo__search"), false)
             .unwrap();
         registry.apply_state(snapshot).unwrap();
         registry
             .upsert_source(Arc::new(ExternalMockSource))
             .expect("source refreshed");
         let snapshot = registry.export_state();
-        assert_eq!(
-            snapshot
+        assert!(
+            !snapshot
                 .get(&tool_id("mcp__demo__search"))
                 .unwrap()
-                .manifest()
-                .effective_availability(),
-            crate::ToolAvailability::Off
+                .is_member(),
+            "a host-removed tool stays a non-member across a source refresh"
         );
     }
 
@@ -728,13 +894,7 @@ mod tests {
 
     #[tokio::test]
     async fn restore_orphans_unresolved_tools_instead_of_failing() {
-        let mut snapshot = snapshot_with_external_tool();
-        snapshot
-            .set_availability(
-                &tool_id("mcp__demo__search"),
-                Some(crate::ToolAvailability::Showcased),
-            )
-            .expect("override set");
+        let snapshot = snapshot_with_external_tool();
 
         let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
         let report = target
@@ -742,40 +902,25 @@ mod tests {
             .expect("restore tolerates the missing source");
         assert_eq!(report.orphaned, vec![tool_id("mcp__demo__search")]);
 
-        // The orphan surfaces as Off without mutating the stored manifest.
-        let view = target
-            .tool_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == "mcp__demo__search")
-            .expect("orphan stays in the surface listing");
-        assert_eq!(
-            view.effective_availability(),
-            crate::ToolAvailability::Off,
-            "orphans are forced Off in the view"
+        // Orphans are non-members: excluded from the catalog listing entirely.
+        assert!(
+            !target
+                .tool_manifests()
+                .into_iter()
+                .any(|manifest| manifest.name == "mcp__demo__search"),
+            "orphans are excluded from the catalog"
         );
         let exported = target.export_state();
-        let exported_view = exported
-            .tool_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == "mcp__demo__search")
-            .expect("orphan is visible in exported tool state");
-        assert_eq!(
-            exported_view.effective_availability(),
-            crate::ToolAvailability::Off,
-            "exported ToolState exposes the same forced-Off orphan view"
+        assert!(
+            !exported
+                .tool_manifests()
+                .into_iter()
+                .any(|manifest| manifest.name == "mcp__demo__search"),
+            "exported ToolState also excludes the orphan from the catalog"
         );
         let entry = exported.get(&tool_id("mcp__demo__search")).expect("orphan exported");
         assert!(entry.is_orphaned());
-        assert_eq!(
-            entry.manifest().effective_availability(),
-            crate::ToolAvailability::Off,
-            "entry manifest is also the public forced-Off view"
-        );
-        assert_eq!(
-            entry.stored_manifest().availability_override,
-            Some(crate::ToolAvailability::Showcased),
-            "the persisted override survives orphaning"
-        );
+        assert!(!entry.is_member(), "orphans are never catalog members");
 
         // Execution fails loudly with a precise error.
         let context = test_tool_context();
@@ -800,13 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn orphan_rebinds_when_source_is_upserted_again() {
-        let mut snapshot = snapshot_with_external_tool();
-        snapshot
-            .set_availability(
-                &tool_id("mcp__demo__search"),
-                Some(crate::ToolAvailability::Showcased),
-            )
-            .expect("override set");
+        let snapshot = snapshot_with_external_tool();
         let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
         target.restore_state(snapshot).expect("restore");
         let orphaned_generation = target.generation();
@@ -825,10 +964,9 @@ mod tests {
             !entry.is_orphaned(),
             "the orphan rebound to the live source"
         );
-        assert_eq!(
-            entry.manifest().availability_override,
-            Some(crate::ToolAvailability::Showcased),
-            "rebinding preserves the persisted override"
+        assert!(
+            entry.is_member(),
+            "the rebound tool is a catalog member again"
         );
 
         let context = test_tool_context();
@@ -865,18 +1003,11 @@ mod tests {
         let manifest = target
             .resolve_manifest("host_only")
             .expect("resolves after the source returned");
-        assert_eq!(
-            manifest.effective_availability(),
-            crate::ToolAvailability::Callable,
-            "lazy rebind drops the forced-Off orphan view"
-        );
-        assert!(
-            !target
-                .export_state()
-                .get(&tool_id("host_only"))
-                .expect("entry kept")
-                .is_orphaned()
-        );
+        assert_eq!(manifest.name, "host_only");
+        let entry = target.export_state();
+        let entry = entry.get(&tool_id("host_only")).expect("entry kept");
+        assert!(!entry.is_orphaned(), "lazy rebind clears the orphan flag");
+        assert!(entry.is_member(), "the rebound tool is a catalog member");
     }
 
     #[test]
@@ -935,20 +1066,16 @@ mod tests {
 
         let mut edited = target.export_state();
         edited
-            .set_availability(&tool_id("mock_tool"), Some(crate::ToolAvailability::Searchable))
+            .set_membership(&tool_id("mock_tool"), false)
             .expect("edit bound tool");
         target
             .apply_state(edited)
             .expect("apply accepts the snapshot it exported");
         let exported = target.export_state();
         assert!(exported.get(&tool_id("mcp__demo__search")).unwrap().is_orphaned());
-        assert_eq!(
-            exported
-                .get(&tool_id("mock_tool"))
-                .unwrap()
-                .manifest()
-                .effective_availability(),
-            crate::ToolAvailability::Searchable
+        assert!(
+            !exported.get(&tool_id("mock_tool")).unwrap().is_member(),
+            "the host-removed bound tool stays a non-member through the round-trip"
         );
 
         // But a snapshot that does NOT mark the tool orphaned still fails —
@@ -997,8 +1124,8 @@ mod tests {
     }
 
     #[test]
-    fn project_tool_catalog_keeps_searchable_tools_with_catalog_metadata() {
-        fn dummy_tool(name: &str) -> crate::ToolDefinition {
+    fn project_tool_catalog_projects_all_members_with_catalog_metadata() {
+        fn member_fixture(name: &str) -> crate::ToolDefinition {
             crate::ToolDefinition::raw(
                 format!("tool:{name}"),
                 name,
@@ -1009,12 +1136,10 @@ mod tests {
         }
         let catalog = project_tool_catalog([
             crate::ToolCatalogEntry {
-                manifest: dummy_tool("read_file").manifest(),
-                availability: crate::ToolAvailability::Showcased,
+                manifest: member_fixture("read_file").manifest(),
             },
             crate::ToolCatalogEntry {
-                manifest: dummy_tool("search_tools").manifest(),
-                availability: crate::ToolAvailability::Callable,
+                manifest: member_fixture("search_tools").manifest(),
             },
         ]);
         assert_eq!(catalog.len(), 2);
@@ -1023,13 +1148,17 @@ mod tests {
             catalog[0]["contract"]["signature"],
             serde_json::json!("read_file({})")
         );
-        assert_eq!(catalog[0]["showcased"], serde_json::json!(true));
-        assert_eq!(catalog[1]["callable"], serde_json::json!(true));
+        // Membership is the execution gate; the projection emits no tier.
+        assert!(catalog[0].get("availability").is_none());
+        assert!(catalog[0].get("showcased").is_none());
+        assert!(catalog[0].get("callable").is_none());
+        assert!(catalog[0].get("searchable").is_none());
+        assert_eq!(catalog[1]["name"], serde_json::json!("search_tools"));
     }
 
     #[test]
     fn project_tool_catalog_preserves_dynamic_output_contracts() {
-        fn dummy_tool(name: &str) -> crate::ToolDefinition {
+        fn member_fixture(name: &str) -> crate::ToolDefinition {
             crate::ToolDefinition::raw(
                 format!("tool:{name}"),
                 name,
@@ -1039,13 +1168,12 @@ mod tests {
             )
         }
         let catalog = project_tool_catalog([crate::ToolCatalogEntry {
-            manifest: dummy_tool("llm_query")
+            manifest: member_fixture("llm_query")
                 .with_output_from_input_schema(
                     "output",
                     Some(serde_json::json!({ "type": "string" })),
                 )
                 .manifest(),
-            availability: crate::ToolAvailability::Searchable,
         }]);
 
         assert_eq!(

@@ -21,7 +21,6 @@ members = [
     "crates/lash-plugin-plan-mode",
     "crates/lash-plugin-process-controls",
     "crates/lash-plugin-tool-output-budget",
-    "crates/lash-plugin-tool-discovery",
     "crates/lash-llm-tools",
     "crates/lash-tool-support",
     "crates/lash-tools",
@@ -73,7 +72,6 @@ default-members = [
     "crates/lash-plugin-plan-mode",
     "crates/lash-plugin-process-controls",
     "crates/lash-plugin-tool-output-budget",
-    "crates/lash-plugin-tool-discovery",
     "crates/lash-subagents",
 ]
 resolver = "3"
@@ -141,7 +139,6 @@ lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.69"
 lash-plugin-observational-memory = { path = "crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.69" }
 lash-plugin-plan-mode = { path = "crates/lash-plugin-plan-mode", version = "=0.1.0-alpha.69" }
 lash-plugin-process-controls = { path = "crates/lash-plugin-process-controls", version = "=0.1.0-alpha.69" }
-lash-plugin-tool-discovery = { path = "crates/lash-plugin-tool-discovery", version = "=0.1.0-alpha.69" }
 lash-plugin-tool-output-budget = { path = "crates/lash-plugin-tool-output-budget", version = "=0.1.0-alpha.69" }
 lash-protocol-rlm = { path = "crates/lash-protocol-rlm", version = "=0.1.0-alpha.69" }
 lash-protocol-standard = { path = "crates/lash-protocol-standard", version = "=0.1.0-alpha.69" }

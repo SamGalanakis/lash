@@ -4,7 +4,7 @@ expression: "rlm_execution_section_for_host_environment(RlmPromptFeatures::defau
 ---
 ### Operating contract
 
-Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them.
+Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Tools**; if a discovery tool is available, use it to find additional module call forms before calling them.
 
 ### `print` vs `submit`
 
@@ -69,7 +69,7 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 
 ### Common mistakes
 
-- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Showcased Tools** or the **Host Surface**.
+- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Tools** or the **Host Surface**.
 - Do not submit final results that depend on operations, files, edits, validation, or generated artifacts before observing the relevant result.
 - Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters.
 
@@ -92,14 +92,14 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 
 ### Working with context
 
-Your turn's REPL trace is your working memory — keep it decision-sized and current. Large transient artifacts (files, search results, long pages, raw tool dumps) should stay in variables until you need a focused view; small durable state you consult each turn should stay visible. Tool-specific lifecycle and output details live under **Showcased Tools**.
+Your turn's REPL trace is your working memory — keep it decision-sized and current. Large transient artifacts (files, search results, long pages, raw tool dumps) should stay in variables until you need a focused view; small durable state you consult each turn should stay visible. Tool-specific lifecycle and output details live under **Tools**.
 
 Choose the lightest mechanism that preserves progress:
 
 - Current variables already hold what you need -> reason inline in lashlang.
 - Several independent slow operations are needed -> use aggregate await over a record/list of direct module calls plus any pure values you want preserved, putting `?` on each operation leaf that should unwrap.
 - The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.
-- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.
+- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools** — don't infer a tool exists from these generic examples.
 
 Example parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):
 

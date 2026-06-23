@@ -10,12 +10,13 @@ use lash_core::plugin::{
     PluginFactory, PluginOperation, PluginOperationFailure, PluginRegistrar,
     PluginRuntimeDirective, PluginSessionContext, PluginSnapshotMeta, PluginTask,
     PluginTaskContext, PluginTaskOutcome, PromptHookContext, SessionParam, SessionPlugin,
-    SnapshotReader, SnapshotWriter, ToolCallHookContext, ToolResultHookContext,
+    SnapshotReader, SnapshotWriter, ToolCallHookContext, ToolCatalogContext, ToolResultHookContext,
     TurnResultHookContext,
 };
 use lash_core::{
-    MessageRole, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolCall, ToolContext,
-    ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    MessageRole, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolCall,
+    ToolCatalogContribution, ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -133,7 +134,10 @@ struct AutoresearchPlugin {
 
 impl AutoresearchPlugin {
     fn new(workdir: PathBuf) -> Self {
-        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        Self::with_state(workdir, Arc::new(Mutex::new(RuntimeState::default())))
+    }
+
+    fn with_state(workdir: PathBuf, state: Arc<Mutex<RuntimeState>>) -> Self {
         Self {
             workdir: workdir.clone(),
             state: Arc::clone(&state),
@@ -210,6 +214,26 @@ impl SessionPlugin for AutoresearchPlugin {
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
+
+        // Autoresearch tools are catalog members only while the mode is active.
+        // Inactive sessions remove them from the catalog, so the model never
+        // sees them.
+        let catalog_state = Arc::clone(&self.state);
+        reg.tool_catalog()
+            .contribute(Arc::new(move |_ctx: ToolCatalogContext| {
+                let active = catalog_state
+                    .lock()
+                    .map_err(|_| PluginError::Session("autoresearch state poisoned".to_string()))?
+                    .mode
+                    .active;
+                if active {
+                    Ok(ToolCatalogContribution::default())
+                } else {
+                    Ok(ToolCatalogContribution::remove_tools(
+                        autoresearch_tool_names(),
+                    ))
+                }
+            }));
 
         let prompt_root = self.workdir.clone();
         let prompt_state = Arc::clone(&self.state);
@@ -422,7 +446,7 @@ use tools::*;
 mod tests {
     use super::*;
     use lash_core::InputItem;
-    use lash_core::plugin::PluginRuntimeDirective;
+    use lash_core::plugin::{PluginHost, PluginRuntimeDirective};
     use lash_core::testing::MockSessionManager;
     use tempfile::tempdir;
 
@@ -496,18 +520,80 @@ mod tests {
     }
 
     #[test]
-    fn autoresearch_tools_start_disabled() {
+    fn autoresearch_tools_advertised_as_plain_members() {
+        // The provider advertises its tools as plain catalog members; their
+        // visibility is gated by the per-turn catalog contribution keyed on
+        // mode state, not by a manifest tier.
         let dir = tempdir().expect("tempdir");
         let tools = AutoresearchTools {
             workdir: dir.path().to_path_buf(),
             state: Arc::new(Mutex::new(RuntimeState::default())),
         };
-        assert!(
-            tools
-                .tool_manifests()
+        let names = tools
+            .tool_manifests()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in autoresearch_tool_names() {
+            assert!(names.contains(&name), "provider advertises `{name}`");
+        }
+    }
+
+    #[test]
+    fn catalog_membership_follows_autoresearch_mode_state() {
+        // Membership is gated by the per-turn catalog contribution: inactive
+        // removes the autoresearch tools; active restores them.
+        struct TestFactory {
+            workdir: PathBuf,
+            state: Arc<Mutex<RuntimeState>>,
+        }
+        impl PluginFactory for TestFactory {
+            fn id(&self) -> &'static str {
+                PLUGIN_ID
+            }
+            fn build(
+                &self,
+                _ctx: &PluginSessionContext,
+            ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+                Ok(Arc::new(AutoresearchPlugin::with_state(
+                    self.workdir.clone(),
+                    Arc::clone(&self.state),
+                )))
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let mut factories: Vec<Arc<dyn PluginFactory>> = vec![Arc::new(TestFactory {
+            workdir: dir.path().to_path_buf(),
+            state: Arc::clone(&state),
+        })];
+        factories.extend(lash_core::testing::test_code_protocol_factories());
+        let host = PluginHost::new(factories);
+        let session = host.build_session("root", None).expect("session");
+
+        let members = |session: &Arc<lash_core::plugin::PluginSession>| {
+            session
+                .resolved_tool_catalog("root")
+                .expect("catalog")
+                .callable_tools()
                 .into_iter()
-                .all(|tool| { tool.effective_availability() == lash_core::ToolAvailability::Off })
-        );
+                .map(|manifest| manifest.name)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        // Inactive: removed from the catalog.
+        let inactive = members(&session);
+        for name in autoresearch_tool_names() {
+            assert!(!inactive.contains(&name), "inactive removes `{name}`");
+        }
+
+        // Active: restored as members.
+        state.lock().expect("state").mode.active = true;
+        let active = members(&session);
+        for name in autoresearch_tool_names() {
+            assert!(active.contains(&name), "active restores `{name}`");
+        }
     }
 
     #[tokio::test]
@@ -552,17 +638,8 @@ mod tests {
             queued_directive_text(&outcome.directives[0])
                 .is_some_and(|text| text.contains("Objective: improve latency"))
         );
-        assert!(
-            manager
-                .tool_registry
-                .as_ref()
-                .expect("registry")
-                .export_state()
-                .tool_manifests()
-                .iter()
-                .all(|tool| tool.effective_availability()
-                    == lash_core::ToolAvailability::Showcased)
-        );
+        // Membership is gated by mode state, which is now active.
+        assert!(state.lock().expect("state").mode.active);
     }
 
     #[tokio::test]
@@ -601,16 +678,8 @@ mod tests {
         assert_eq!(name, "autoresearch.status");
         let status: StatusSummary = serde_json::from_value(payload.clone()).expect("status");
         assert!(!status.active);
-        assert!(
-            manager
-                .tool_registry
-                .as_ref()
-                .expect("registry")
-                .export_state()
-                .tool_manifests()
-                .iter()
-                .all(|tool| tool.effective_availability() == lash_core::ToolAvailability::Off)
-        );
+        // Membership follows mode state, which is now inactive.
+        assert!(!state.lock().expect("state").mode.active);
     }
 
     #[test]

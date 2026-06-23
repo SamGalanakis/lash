@@ -328,6 +328,7 @@ impl LashlangProcessHost<'_> {
             id,
             tool_id,
             args,
+            execution_grant: _,
             child_execution_trace_hook,
         } = invocation;
         let reply = if let Some(call_site) = child_execution_trace_hook {

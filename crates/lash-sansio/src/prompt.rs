@@ -70,7 +70,6 @@ pub struct PromptBuildInput {
     pub execution_prompt_fingerprint: PromptFingerprint,
     pub tool_names: Arc<Vec<String>>,
     pub tool_names_fingerprint: PromptFingerprint,
-    pub omitted_tool_count: usize,
     pub contributions: PromptContributionSet,
 }
 
@@ -79,7 +78,6 @@ pub struct PromptContext {
     #[serde(default)]
     pub execution_prompt: Arc<str>,
     pub tool_names: Arc<Vec<String>>,
-    pub omitted_tool_count: usize,
     pub contributions: Arc<Vec<PromptContribution>>,
 }
 
@@ -132,10 +130,9 @@ pub fn build_prompt_cached(input: PromptBuildInput, cache: Option<&PromptCache>)
     let context = PromptContext {
         execution_prompt: Arc::clone(&input.execution_prompt),
         tool_names: Arc::clone(&input.tool_names),
-        omitted_tool_count: input.omitted_tool_count,
         contributions: input.contributions.as_arc(),
     };
-    let key = cache.map(|_| hash_prompt_inputs(&input, &context));
+    let key = cache.map(|_| hash_prompt_inputs(&input));
     if let (Some(cache), Some(key)) = (cache, key)
         && let Some(cached) = cache.inner.lock().ok().and_then(|guard| {
             guard
@@ -173,12 +170,11 @@ pub fn prompt_tool_names_fingerprint(tool_names: &[String]) -> PromptFingerprint
     PromptFingerprint::from_hashable(tool_names)
 }
 
-fn hash_prompt_inputs(input: &PromptBuildInput, context: &PromptContext) -> u64 {
+fn hash_prompt_inputs(input: &PromptBuildInput) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     input.template_fingerprint.write(&mut hasher);
     input.execution_prompt_fingerprint.write(&mut hasher);
     input.tool_names_fingerprint.write(&mut hasher);
-    context.omitted_tool_count.hash(&mut hasher);
     input.contributions.fingerprint().write(&mut hasher);
     hasher.finish()
 }
@@ -256,7 +252,6 @@ mod tests {
         template: PromptTemplate,
         execution_prompt: &str,
         tool_names: Vec<String>,
-        omitted_tool_count: usize,
         contributions: Vec<PromptContribution>,
     ) -> PromptBuildInput {
         let execution_prompt: Arc<str> = Arc::from(execution_prompt);
@@ -268,7 +263,6 @@ mod tests {
             execution_prompt,
             tool_names_fingerprint: prompt_tool_names_fingerprint(&tool_names),
             tool_names,
-            omitted_tool_count,
             contributions: PromptContributionSet::new(contributions),
         }
     }
@@ -279,7 +273,6 @@ mod tests {
             default_prompt_template(),
             "Use tools.",
             vec!["read_file".to_string()],
-            0,
             vec![
                 PromptContribution::guidance("Repo", "Follow repo rules."),
                 PromptContribution::guidance("Repo", "Follow repo rules."),
@@ -301,7 +294,6 @@ mod tests {
                 default_prompt_template(),
                 "Use tools.",
                 vec!["read_file".to_string()],
-                0,
                 vec![PromptContribution::guidance("Repo", "Follow repo rules.")],
             )
         };
@@ -318,7 +310,6 @@ mod tests {
                 default_prompt_template(),
                 "Use tools.",
                 vec!["read_file".to_string()],
-                0,
                 vec![],
             ),
             Some(&cache),
@@ -328,7 +319,6 @@ mod tests {
                 default_prompt_template(),
                 "Use other tools.",
                 vec!["read_file".to_string()],
-                0,
                 vec![],
             ),
             Some(&cache),

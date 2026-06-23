@@ -816,7 +816,6 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         output_schema_projections: Vec::new(),
         output_contract: RemoteToolOutputContract::Static,
         examples: Vec::new(),
-        availability: None,
         activation: None,
         argument_projection: None,
         scheduling: None,

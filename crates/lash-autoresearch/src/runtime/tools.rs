@@ -27,7 +27,6 @@ pub(crate) fn autoresearch_tool(
         input_schema,
         output_schema,
     )
-    .with_availability(lash_core::ToolAvailabilityConfig::off())
     .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
         ["research"],
         operation,

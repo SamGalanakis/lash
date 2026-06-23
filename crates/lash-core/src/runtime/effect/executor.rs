@@ -1094,6 +1094,7 @@ impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
             }
             RuntimeEffectCommand::ToolAttempt {
                 call,
+                execution_grant,
                 attempt,
                 max_attempts,
             } => {
@@ -1102,6 +1103,7 @@ impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
                     .context
                     .execute_prepared_tool_attempt_effect(
                         call,
+                        execution_grant,
                         attempt,
                         max_attempts,
                         envelope.invocation,

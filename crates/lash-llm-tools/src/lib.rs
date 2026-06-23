@@ -464,10 +464,6 @@ mod tests {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["llm_query"]);
-        assert_eq!(
-            manifests[0].effective_availability(),
-            lash_core::ToolAvailability::Showcased
-        );
         #[cfg(not(feature = "lashlang"))]
         assert!(manifests[0].bindings.is_empty());
         #[cfg(feature = "lashlang")]

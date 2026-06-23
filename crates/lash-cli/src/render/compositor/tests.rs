@@ -53,6 +53,12 @@ mod tests {
     #[test]
     fn status_bar_shows_context_window_usage() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        // Isolate the meter from the test runner's environment: `App::new`
+        // probes the live cwd/git branch, and a long branch name would crowd
+        // the higher-priority repo/cwd slots into the right half and drop the
+        // context meter. This test asserts only the meter renders.
+        app.repo_status = None;
+        app.cwd = String::new();
         app.model_variant = Some("high".into());
         app.usage.context_window = Some(1_100_000);
         app.usage.last_prompt_usage = Some(PromptUsage {

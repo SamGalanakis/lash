@@ -141,7 +141,8 @@ impl ToolSourceExecutor for ToolProviderGroupSource {
                     .get(id)
                     .map(|(_, provider_idx)| (manifest, *provider_idx))
             })?;
-        self.providers[provider_idx].resolve_contract(&manifest.name)
+        let _ = manifest;
+        self.providers[provider_idx].resolve_contract_by_id(id)
     }
 
     async fn prepare_tool_call(
@@ -176,6 +177,21 @@ impl ToolSourceExecutor for ToolProviderGroupSource {
                 context,
                 progress,
             })
+            .await
+    }
+
+    async fn execute_by_id(
+        &self,
+        tool_id: &ToolId,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let Some(provider_idx) = self.provider_index_for_id(tool_id) else {
+            return ToolResult::err_fmt(format_args!("Unknown tool id: {tool_id}"));
+        };
+        self.providers[provider_idx]
+            .execute_by_id(tool_id, args, context, progress)
             .await
     }
 }
@@ -229,6 +245,18 @@ impl ToolSourceExecutor for ToolProviderSource {
             })
             .await
     }
+
+    async fn execute_by_id(
+        &self,
+        tool_id: &ToolId,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.provider
+            .execute_by_id(tool_id, args, context, progress)
+            .await
+    }
 }
 
 /// How a registry entry is connected to its tool source.
@@ -237,8 +265,8 @@ enum ToolBinding {
     /// Resolvable through the registered source with this id.
     Bound(String),
     /// Persisted in a session snapshot but not resolvable from any currently
-    /// registered source. Appears as `Off`; execution fails loudly; rebinds
-    /// when a source re-advertises the same (name, id).
+    /// registered source. Remains a non-member; execution fails loudly;
+    /// rebinds when a source re-advertises the same (name, id).
     Orphaned,
 }
 

@@ -6,10 +6,13 @@ license.workspace = true
 publish = false
 
 [features]
-default = []
+default = ["lashlang"]
 dhat-heap = ["dep:dhat", "lash-perf?/dhat-heap"]
 fff-zlob = ["lash-search-tools/fff-zlob"]
-semantic-tool-search = ["lash-standard-plugins/semantic-tool-search"]
+# The reference MCP tool-discovery example (`examples::mcp_discovery`) is RLM-only.
+lashlang = []
+# Optional semantic ranking for the tool-discovery example.
+semantic-tool-search = ["dep:model2vec-rs"]
 test-provider = ["lash-core/testing"]
 # Hidden UI self-benchmark apparatus (`--ui-perf-benchmark`). Gates the
 # `ui_perf` module plus its CLI flags so none compile into the default
@@ -32,6 +35,9 @@ lash = { workspace = true, features = ["rlm"] }
 lash-plugin-mcp = { workspace = true, features = ["lashlang"] }
 lash-perf = { path = "../lash-perf", optional = true }
 lash-plugin-process-controls = { workspace = true, features = ["lashlang"] }
+lash-lashlang-runtime = { workspace = true }
+lash-tool-support = { workspace = true, features = ["lashlang"] }
+lash-remote-protocol = { workspace = true }
 lash-sqlite-store = { workspace = true }
 lash-llm-tools = { workspace = true, features = ["lashlang"] }
 lash-search-tools = { workspace = true, features = ["lashlang"] }
@@ -72,6 +78,9 @@ dirs = "6"
 sha2 = { workspace = true }
 base64 = { workspace = true }
 dhat = { version = "0.3", optional = true }
+schemars = { workspace = true }
+strsim = "0.11"
+model2vec-rs = { version = "0.1.4", optional = true }
 
 [dev-dependencies]
 lash-debug-cli-harness = { path = "../lash-debug-cli-harness" }

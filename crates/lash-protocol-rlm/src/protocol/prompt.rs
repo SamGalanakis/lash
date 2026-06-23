@@ -158,7 +158,7 @@ fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) 
 fn render_execution_intro(has_operations: bool) -> String {
     let mut section = String::from("### Operating contract\n\n");
     if has_operations {
-        section.push_str("Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them.");
+        section.push_str("Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Tools**; if a discovery tool is available, use it to find additional module call forms before calling them.");
     } else {
         section.push_str("Use plain prose only for direct conversational replies that need no computation. Use Lashlang to compute values, inspect current variables, validate data, or return structured/computed results. No module operations are available in this turn, so do not invent tool calls.");
     }
@@ -341,7 +341,7 @@ fn render_builtins_section(images: bool) -> String {
 
 fn render_common_mistakes_section(has_operations: bool) -> String {
     let tool_scope = if has_operations {
-        "- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Showcased Tools** or the **Host Surface**."
+        "- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Tools** or the **Host Surface**."
     } else {
         "- Do not infer module operations from generic Lashlang syntax. No module operations are available in this turn."
     };
@@ -364,9 +364,7 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
         "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Large transient artifacts (files, search results, long pages, raw tool dumps) should stay in variables until you need a focused view; small durable state you consult each turn should stay visible.",
     );
     if has_operations {
-        section.push_str(
-            " Tool-specific lifecycle and output details live under **Showcased Tools**.",
-        );
+        section.push_str(" Tool-specific lifecycle and output details live under **Tools**.");
     }
     section.push_str(
         "\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need -> reason inline in lashlang.",
@@ -380,9 +378,9 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations && processes {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: web.search({ query: \"one\" })?,\n      two: web.search({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: web.search({ query: \"one\" })?,\n      two: web.search({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
     } else if has_operations {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools** — don't infer a tool exists from these generic examples.");
     } else {
         section.push_str("\n- No module operations are available in this turn — don't infer one exists from generic lashlang syntax.");
     }

@@ -9,6 +9,13 @@ just restate-postgres-workers-e2e
 That starts Postgres, MinIO, Restate, a mock OpenAI-compatible provider, two
 workers, the h2c proxy, and the runner.
 
+The package-level build/unit check is lighter and does not start the distributed
+services:
+
+```sh
+cargo test -p lash-restate-postgres-workers-e2e --all-targets
+```
+
 ## Local Postgres Conformance
 
 The Postgres store conformance tests require `LASH_POSTGRES_DATABASE_URL`.

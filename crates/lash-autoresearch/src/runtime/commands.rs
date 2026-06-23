@@ -1,75 +1,35 @@
 //! Command-mode handlers (start/stop/clear/export) and argument parsing.
+//!
+//! Autoresearch tools are members of the Tool Catalog only while
+//! `state.mode.active`. Membership is driven entirely by the per-turn tool
+//! catalog contribution (see [`super::AutoresearchPlugin::register`]); the
+//! command handlers just flip the mode state.
 
 use super::*;
 
-pub(crate) async fn set_autoresearch_tools_enabled(
-    ctx: &PluginCommandContext,
-    enabled: bool,
-) -> Result<(), ToolResult> {
-    let Some(session_id) = ctx.session_id.as_deref() else {
-        return Err(ToolResult::err_fmt(
-            "autoresearch commands require a session-scoped invocation",
-        ));
-    };
-    let availability = if enabled {
-        Some(lash_core::ToolAvailability::Showcased)
-    } else {
-        Some(lash_core::ToolAvailability::Off)
-    };
-    ctx.sessions
-        .set_tools_availability(session_id, &autoresearch_tool_names(), availability)
-        .await
-        .map_err(|err| {
-            let action = if enabled { "enable" } else { "disable" };
-            ToolResult::err_fmt(format_args!("failed to {action} autoresearch tools: {err}"))
-        })?;
-    Ok(())
-}
-
 pub(crate) async fn start_mode_command(
-    ctx: PluginCommandContext,
+    _ctx: PluginCommandContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
     args: Value,
 ) -> ToolResult {
-    if let Err(result) = set_autoresearch_tools_enabled(&ctx, true).await {
-        return result;
-    }
-    let result = start_mode(root, state, args);
-    if !result.is_success() {
-        let _ = set_autoresearch_tools_enabled(&ctx, false).await;
-    }
-    result
+    start_mode(root, state, args)
 }
 
 pub(crate) async fn stop_mode_command(
-    ctx: PluginCommandContext,
+    _ctx: PluginCommandContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
 ) -> ToolResult {
-    if let Err(result) = set_autoresearch_tools_enabled(&ctx, false).await {
-        return result;
-    }
-    let result = stop_mode(root, state);
-    if !result.is_success() {
-        let _ = set_autoresearch_tools_enabled(&ctx, true).await;
-    }
-    result
+    stop_mode(root, state)
 }
 
 pub(crate) async fn clear_mode_command(
-    ctx: PluginCommandContext,
+    _ctx: PluginCommandContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
 ) -> ToolResult {
-    if let Err(result) = set_autoresearch_tools_enabled(&ctx, false).await {
-        return result;
-    }
-    let result = clear_mode(root, state);
-    if !result.is_success() {
-        let _ = set_autoresearch_tools_enabled(&ctx, true).await;
-    }
-    result
+    clear_mode(root, state)
 }
 
 pub(crate) fn start_mode(root: &Path, state: &Arc<Mutex<RuntimeState>>, args: Value) -> ToolResult {

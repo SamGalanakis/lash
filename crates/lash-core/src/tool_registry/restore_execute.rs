@@ -15,7 +15,7 @@ impl ToolRegistry {
             let Some(manifest) = source.resolve_manifest_by_id(tool_id) else {
                 continue;
             };
-            let mut manifest = manifest_with_compact_contract(source.as_ref(), manifest);
+            let manifest = manifest_with_compact_contract(source.as_ref(), manifest);
             let mut state = self
                 .state
                 .write()
@@ -24,14 +24,11 @@ impl ToolRegistry {
             if !existing.is_orphaned() {
                 return Some(existing.view_manifest());
             }
-            manifest.availability_override = existing
-                .manifest
-                .availability_override
-                .or(manifest.availability_override);
-            state.tools.insert(
-                tool_id.clone(),
-                ToolRegistryEntry::new(manifest.clone(), source_id),
-            );
+            // Preserve host membership state across the rebind.
+            let member = existing.member;
+            let mut rebound = ToolRegistryEntry::new(manifest.clone(), source_id);
+            rebound.member = member;
+            state.tools.insert(tool_id.clone(), rebound);
             state.generation += 1;
             return Some(manifest);
         }
@@ -49,7 +46,18 @@ impl ToolRegistry {
                 "Unknown tool id: {tool_id}"
             )));
         };
-        if manifest.effective_availability() == crate::ToolAvailability::Off {
+        let is_member = {
+            let state = self
+                .state
+                .read()
+                .expect("tool registry state lock poisoned");
+            state
+                .tools
+                .get(tool_id)
+                .map(ToolRegistryEntry::is_member)
+                .unwrap_or(true)
+        };
+        if !is_member {
             return Err(ToolResult::err_fmt(format_args!(
                 "Tool id `{tool_id}` is unavailable"
             )));
@@ -84,6 +92,35 @@ impl ToolRegistry {
                 ToolResult::err_fmt(format_args!("Tool source missing for tool id `{tool_id}`"))
             })
     }
+
+    fn resolve_granted_execution_source(
+        &self,
+        grant: &ToolExecutionGrant,
+    ) -> Result<Arc<dyn ToolSourceExecutor>, ToolResult> {
+        let tool_id = &grant.manifest.id;
+        let Some(source_id) = grant.source_id.as_deref() else {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Granted tool id `{tool_id}` is missing an explicit tool source"
+            )));
+        };
+        let source = self
+            .sources
+            .read()
+            .expect("tool source lock poisoned")
+            .get(source_id)
+            .cloned();
+        let Some(source) = source else {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Tool source `{source_id}` missing for granted tool id `{tool_id}`"
+            )));
+        };
+        if source.resolve_manifest_by_id(tool_id).is_none() {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Tool source `{source_id}` does not resolve granted tool id `{tool_id}`"
+            )));
+        }
+        Ok(source)
+    }
 }
 
 #[async_trait::async_trait]
@@ -96,6 +133,7 @@ impl ToolProvider for ToolRegistry {
         state
             .tools
             .values()
+            .filter(|entry| entry.is_member())
             .map(ToolRegistryEntry::view_manifest)
             .collect()
     }
@@ -131,18 +169,7 @@ impl ToolProvider for ToolRegistry {
             let Some(manifest) = source.resolve_manifest(name) else {
                 continue;
             };
-            let mut manifest = manifest_with_compact_contract(source.as_ref(), manifest);
-            let previous_override = {
-                let state = self
-                    .state
-                    .read()
-                    .expect("tool registry state lock poisoned");
-                state
-                    .tools
-                    .get(&manifest.id)
-                    .and_then(|entry| entry.manifest.availability_override)
-            };
-            manifest.availability_override = previous_override.or(manifest.availability_override);
+            let manifest = manifest_with_compact_contract(source.as_ref(), manifest);
             let mut state = self
                 .state
                 .write()
@@ -254,6 +281,21 @@ impl ToolProvider for ToolRegistry {
         source.prepare_tool_call(call).await
     }
 
+    async fn prepare_granted_tool_call(
+        &self,
+        grant: &ToolExecutionGrant,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        if call.tool_id != grant.manifest.id {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Granted prepare id `{}` does not match call id `{}`",
+                grant.manifest.id, call.tool_id
+            )));
+        }
+        let source = self.resolve_granted_execution_source(grant)?;
+        source.prepare_tool_call(call).await
+    }
+
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let Some(manifest) = self.resolve_manifest(call.name) else {
             return ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name));
@@ -273,8 +315,25 @@ impl ToolProvider for ToolRegistry {
             Ok(resolved) => resolved,
             Err(result) => return result,
         };
+        let _ = manifest;
         source
-            .execute(&manifest.name, args, context, progress)
+            .execute_by_id(tool_id, args, context, progress)
+            .await
+    }
+
+    async fn execute_granted(
+        &self,
+        grant: &ToolExecutionGrant,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let source = match self.resolve_granted_execution_source(grant) {
+            Ok(source) => source,
+            Err(result) => return result,
+        };
+        source
+            .execute_by_id(&grant.manifest.id, args, context, progress)
             .await
     }
 }

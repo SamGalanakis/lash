@@ -4,7 +4,9 @@ use crate::plugin::ToolCallHookContext;
 use crate::validate_tool_input;
 #[cfg(test)]
 use crate::{ProgressSender, ToolContext};
-use crate::{ToolFailureClass, ToolManifest, ToolPrepareCall, ToolPrepareContext};
+use crate::{
+    ToolExecutionGrant, ToolFailureClass, ToolManifest, ToolPrepareCall, ToolPrepareContext,
+};
 
 #[cfg(test)]
 use super::context::ToolDispatchOutcome;
@@ -82,6 +84,56 @@ pub(crate) async fn prepare_tool_call_with_context(
             0,
         ));
     };
+    let Some(contract) = context.tools.resolve_contract(&tool_name) else {
+        return completed_preparation(outcome(
+            tool_name,
+            pending.args,
+            runtime_failure(
+                ToolFailureClass::Unavailable,
+                "tool_contract_unavailable",
+                "Tool contract is unavailable in this session",
+            ),
+            0,
+        ));
+    };
+    prepare_authorized_tool_call_with_context(
+        context,
+        manifest,
+        contract,
+        pending,
+        tool_call_id,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_granted_tool_call_with_context(
+    context: &ToolDispatchContext<'_>,
+    grant: &ToolExecutionGrant,
+    mut pending: crate::sansio::PendingToolCall,
+    tool_call_id: Option<String>,
+) -> ToolPreparationOutcome {
+    pending.tool_name = grant.manifest.name.clone();
+    prepare_authorized_tool_call_with_context(
+        context,
+        grant.manifest.clone(),
+        Arc::new((*grant.contract).clone()),
+        pending,
+        tool_call_id,
+        Some(grant),
+    )
+    .await
+}
+
+async fn prepare_authorized_tool_call_with_context(
+    context: &ToolDispatchContext<'_>,
+    manifest: ToolManifest,
+    contract: Arc<crate::ToolContract>,
+    pending: crate::sansio::PendingToolCall,
+    tool_call_id: Option<String>,
+    grant: Option<&ToolExecutionGrant>,
+) -> ToolPreparationOutcome {
+    let tool_name = manifest.name.clone();
     let mut pending = pending;
     let mut args = pending.args;
 
@@ -117,19 +169,6 @@ pub(crate) async fn prepare_tool_call_with_context(
     if let Some(result) = applied.short_circuit {
         return completed_preparation(outcome(tool_name, args, result, 0));
     }
-    let contract = context.tools.resolve_contract(&tool_name);
-    let Some(contract) = contract else {
-        return completed_preparation(outcome(
-            tool_name,
-            args,
-            runtime_failure(
-                ToolFailureClass::Unavailable,
-                "tool_contract_unavailable",
-                "Tool contract is unavailable in this session",
-            ),
-            0,
-        ));
-    };
     if let Err(err) = validate_tool_input(&contract, &args) {
         return completed_preparation(outcome(
             tool_name,
@@ -140,21 +179,30 @@ pub(crate) async fn prepare_tool_call_with_context(
     }
 
     pending.args = args.clone();
-    let prepare_context = ToolPrepareContext::new(
+    let execution_binding = grant
+        .map(|grant| grant.execution_binding.clone())
+        .unwrap_or(serde_json::Value::Null);
+    let prepare_context = ToolPrepareContext::with_execution_binding(
         context.session_id.clone(),
         Arc::clone(&context.sessions),
         context.turn_context.clone(),
         tool_call_id,
+        execution_binding,
     );
-    match context
-        .tools
-        .prepare_tool_call(ToolPrepareCall {
-            tool_id: manifest.id.clone(),
-            pending,
-            context: &prepare_context,
-        })
-        .await
-    {
+    let prepare_call = ToolPrepareCall {
+        tool_id: manifest.id.clone(),
+        pending,
+        context: &prepare_context,
+    };
+    let prepared = if let Some(grant) = grant {
+        context
+            .tools
+            .prepare_granted_tool_call(grant, prepare_call)
+            .await
+    } else {
+        context.tools.prepare_tool_call(prepare_call).await
+    };
+    match prepared {
         Ok(prepared) if prepared.tool_id == manifest.id => {
             ToolPreparationOutcome::Prepared(prepared)
         }
@@ -179,32 +227,16 @@ pub(crate) fn resolve_callable_manifest(
     context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> Option<ToolManifest> {
+    // Tool Catalog membership is callability: a catalog member is callable.
     if let Some(entry) = context
         .tool_catalog
         .tools
         .iter()
         .find(|tool| tool.manifest.name == tool_name)
     {
-        return entry
-            .availability
-            .is_callable()
-            .then(|| entry.manifest.clone());
+        return Some(entry.manifest.clone());
     }
-
-    let visible_and_callable = |manifest: ToolManifest| {
-        if context.plugins.tool_access().hides(&manifest.name) {
-            return None;
-        }
-        manifest
-            .effective_availability()
-            .is_callable()
-            .then_some(manifest)
-    };
-
-    context
-        .tools
-        .resolve_manifest(tool_name)
-        .and_then(visible_and_callable)
+    None
 }
 
 pub(crate) fn resolve_callable_manifest_by_id(
@@ -217,28 +249,9 @@ pub(crate) fn resolve_callable_manifest_by_id(
         .iter()
         .find(|tool| tool.manifest.id == *tool_id)
     {
-        return entry
-            .availability
-            .is_callable()
-            .then(|| entry.manifest.clone());
+        return Some(entry.manifest.clone());
     }
-
-    let visible_and_callable = |manifest: ToolManifest| {
-        if context.plugins.tool_access().hides(&manifest.name) {
-            return None;
-        }
-        manifest
-            .effective_availability()
-            .is_callable()
-            .then_some(manifest)
-    };
-
-    context
-        .tools
-        .tool_manifests()
-        .into_iter()
-        .find(|manifest| manifest.id == *tool_id)
-        .and_then(visible_and_callable)
+    None
 }
 
 pub(crate) fn resolve_tool_argument_projection_policy(

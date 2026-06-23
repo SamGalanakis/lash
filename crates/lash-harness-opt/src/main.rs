@@ -605,7 +605,7 @@ Required output schema:
 
 Rules:
 - Propose patches only for listed mutable component ids.
-- Preserve generic RLM execution protocol, Lashlang reference, tool contracts, tool availability, and typed response-schema enforcement.
+- Preserve generic RLM execution protocol, Lashlang reference, tool contracts, Tool Catalog membership, and typed response-schema enforcement.
 - Use feedback and traces to target the weakest selected component.
 - Prefer small, testable changes over broad rewrites.
 - Do not claim benchmark improvements that are not present in the evidence.

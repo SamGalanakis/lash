@@ -75,21 +75,6 @@ pub(crate) fn round_score(score: f64) -> f64 {
     (score * 100.0).round() / 100.0
 }
 
-#[cfg(feature = "lashlang")]
-pub(crate) fn string_vec(value: Option<&Value>) -> Vec<String> {
-    match value {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .collect(),
-        Some(Value::String(value)) => vec![value.trim().to_string()],
-        _ => Vec::new(),
-    }
-}
-
 pub(crate) fn catalog_key(catalog: &[Value]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     catalog.len().hash(&mut hasher);

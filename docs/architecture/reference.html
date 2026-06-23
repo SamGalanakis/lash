@@ -57,11 +57,11 @@
     <div class="section">
       <div class="section-header">
         <h2>The Rest Of The Workspace</h2>
-        <p>The workspace contains 43 members. Most are integrations the facade composes for you (providers, plugins, tools, transports, stores, examples, and E2E harnesses) and you don't import them directly; your <code>LashCore</code> wiring picks them up.</p>
+        <p>The workspace contains 44 members. Most are integrations the facade composes for you (providers, plugins, tools, transports, stores, examples, and E2E harnesses) and you don't import them directly; your <code>LashCore</code> wiring picks them up.</p>
       </div>
       <ul class="bullets">
         <li>Provider crates: <code>lash-provider-anthropic</code>, <code>lash-provider-openai</code> (which also ships the <code>codex</code> OAuth provider and OpenAI JSON Schema projection), <code>lash-provider-google</code>, and shared auth/transport support in <code>lash-provider-auth</code> and <code>lash-llm-transport</code>. The CLI wires provider factories for the compiled-in provider kinds directly.</li>
-        <li>Plugin crates: <code>lash-plugin-mcp</code>, <code>lash-plugin-process-controls</code>, <code>lash-plugin-tool-discovery</code>, <code>lash-plugin-observational-memory</code>, <code>lash-plugin-plan-mode</code>, and the <code>lash-standard-plugins</code> aggregator (which also bundles the rolling-history plugin).</li>
+        <li>Plugin crates: <code>lash-plugin-mcp</code>, <code>lash-plugin-process-controls</code>, <code>lash-plugin-observational-memory</code>, <code>lash-plugin-plan-mode</code>, and the <code>lash-standard-plugins</code> aggregator (which also bundles the rolling-history plugin).</li>
         <li>Tool crates: <code>lash-tools</code> (shell, files, web, apply-patch modules), CLI-local grep in <code>lash-search-tools</code>, shared scaffolding in <code>lash-tool-support</code> and <code>lash-llm-tools</code>.</li>
         <li>Mode crates: <code>lash-protocol-standard</code>, <code>lash-protocol-rlm</code>.</li>
         <li>Persistence, tracing, durable execution, profiling, and remote DTOs: <code>lash-sqlite-store</code>, <code>lash-postgres-store</code>, <code>lash-s3-store</code>, <code>lash-restate</code>, <code>lash-trace</code>, <code>lash-trace-viewer</code>, <code>lash-export</code>, <code>lash-perf</code>, <code>lash-remote-protocol</code>.</li>

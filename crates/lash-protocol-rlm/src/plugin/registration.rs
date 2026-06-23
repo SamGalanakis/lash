@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lash_core::plugin::{PluginError, PluginRegistrar};
-use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface};
+use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface, SharedDeferredToolResolver};
 
 use super::RlmProtocolPluginConfig;
 use super::budget_warning::BudgetUsageObserver;
@@ -17,10 +17,12 @@ use crate::projection::{
 };
 use crate::stream_mask;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn register_rlm_protocol_plugin(
     reg: &mut PluginRegistrar,
     config: RlmProtocolPluginConfig,
     projection_resolver: Arc<dyn ProjectionResolver>,
+    deferred_tool_resolver: Option<SharedDeferredToolResolver>,
     artifact_store: Arc<dyn LashlangArtifactStore>,
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
     lashlang_surface: LashlangSurface,
@@ -31,6 +33,7 @@ pub(super) fn register_rlm_protocol_plugin(
             projection_resolver,
             Arc::clone(&artifact_store),
             lashlang_surface.clone(),
+            deferred_tool_resolver,
             lashlang_execution_trace_config,
         )
         .map_err(|err| PluginError::Session(err.to_string()))?,

@@ -366,7 +366,7 @@ impl MockMailProvider {
     /// to route execution; resolution (`tool_manifests`/`resolve_contract`)
     /// covers live accounts exclusively. A persisted session that references
     /// a removed account's tools restores anyway — lash-core orphans them
-    /// (kept, forced Off) and rebinds when the account is re-added.
+    /// as non-members and rebinds when the account is re-added.
     fn route(&self, name: &str) -> Option<(String, &'static str)> {
         let rest = name.strip_prefix("inbox__")?;
         for operation in MAIL_OPERATIONS {

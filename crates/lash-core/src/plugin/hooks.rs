@@ -29,9 +29,6 @@ pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> PluginFuture<Vec<PromptContribution>> + Send + Sync>;
 pub type ToolCatalogContributor =
     Arc<dyn Fn(ToolCatalogContext) -> Result<ToolCatalogContribution, PluginError> + Send + Sync>;
-pub type ToolDiscoveryContributor = Arc<
-    dyn Fn(ToolDiscoveryContext) -> Result<ToolDiscoveryContribution, PluginError> + Send + Sync,
->;
 pub type AssistantStreamHook =
     Arc<dyn Fn(AssistantStreamHookContext) -> PluginFuture<AssistantStreamTransform> + Send + Sync>;
 pub type AssistantResponseHook = Arc<
@@ -140,13 +137,13 @@ impl ToolCallHookContext {
         self.sessions.snapshot_session(&self.session_id).await
     }
 
-    pub async fn set_tools_availability(
+    pub async fn set_tool_membership(
         &self,
         names: &[String],
-        availability: Option<crate::ToolAvailability>,
+        present: bool,
     ) -> Result<u64, PluginError> {
         self.sessions
-            .set_tools_availability(&self.session_id, names, availability)
+            .set_tool_membership(&self.session_id, names, present)
             .await
     }
 }
@@ -187,13 +184,13 @@ impl ToolResultHookContext {
         self.sessions.snapshot_session(&self.session_id).await
     }
 
-    pub async fn set_tools_availability(
+    pub async fn set_tool_membership(
         &self,
         names: &[String],
-        availability: Option<crate::ToolAvailability>,
+        present: bool,
     ) -> Result<u64, PluginError> {
         self.sessions
-            .set_tools_availability(&self.session_id, names, availability)
+            .set_tool_membership(&self.session_id, names, present)
             .await
     }
 }

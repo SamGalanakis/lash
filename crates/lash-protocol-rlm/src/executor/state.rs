@@ -15,6 +15,11 @@ pub struct RlmExecutionState {
     pub(super) scratch: ExecutionScratch,
     pub(super) linked_programs: lashlang::LinkedProgramCache,
     pub(super) stored_lashlang_modules: BTreeSet<lashlang::ModuleRef>,
+    /// Per-turn record of deferred tool resolutions, keyed by Lashlang
+    /// call-path. Snapshotted/restored with the rest of the execution state so
+    /// a re-driven or recovered turn replays the recorded grants and
+    /// `NotAvailable` results without calling the resolver again.
+    pub(super) deferred_resolutions: lash_lashlang_runtime::DeferredResolutionRecord,
     pub(super) scratch_dir: tempfile::TempDir,
     pub(super) dirty: bool,
 }
@@ -26,6 +31,7 @@ impl RlmExecutionState {
             scratch: ExecutionScratch::new(),
             linked_programs: lashlang::LinkedProgramCache::new(),
             stored_lashlang_modules: BTreeSet::new(),
+            deferred_resolutions: lash_lashlang_runtime::DeferredResolutionRecord::default(),
             scratch_dir: tempfile::TempDir::new()?,
             dirty: true,
         })
@@ -43,6 +49,7 @@ impl RlmExecutionState {
             "engine": "lashlang",
             "vars": vars,
             "files": files,
+            "deferred_resolutions": self.deferred_resolutions,
         });
         self.dirty = false;
         Ok(Some(serde_json::to_vec(&combined)?))
@@ -81,6 +88,11 @@ impl RlmExecutionState {
         {
             clear_dir(self.scratch_dir.path());
             let _ = restore_files(self.scratch_dir.path(), &files);
+        }
+        if let Some(record) = parsed.get("deferred_resolutions").cloned()
+            && let Ok(record) = serde_json::from_value(record)
+        {
+            self.deferred_resolutions = record;
         }
         self.dirty = true;
         Ok(())

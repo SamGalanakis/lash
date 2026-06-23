@@ -4,10 +4,10 @@ use lash_core::{ToolCall, ToolContext, ToolResult};
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde_json::{Value, json};
 
-use crate::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
-use crate::definitions::search_tools_definition;
-use crate::ranking::ToolDiscoveryIndex;
-use crate::rerank::{
+use super::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
+use super::definitions::search_tools_definition;
+use super::ranking::ToolDiscoveryIndex;
+use super::rerank::{
     llm_rerank_request, merge_llm_selection, parse_llm_tool_names, rerank_payment_action_intent,
 };
 
@@ -32,6 +32,7 @@ impl CachedIndex {
 #[derive(Clone)]
 pub struct ToolDiscoveryToolsProvider {
     cache: Arc<RwLock<IndexCache>>,
+    extra_catalog: Arc<Vec<Value>>,
 }
 
 impl Default for ToolDiscoveryToolsProvider {
@@ -42,9 +43,24 @@ impl Default for ToolDiscoveryToolsProvider {
 
 impl ToolDiscoveryToolsProvider {
     pub fn new() -> Self {
+        Self::with_catalog(Vec::new())
+    }
+
+    pub fn with_catalog(extra_catalog: Vec<Value>) -> Self {
         Self {
             cache: Arc::default(),
+            extra_catalog: Arc::new(extra_catalog),
         }
+    }
+
+    fn searchable_catalog(&self, resident_catalog: Arc<Vec<Value>>) -> Arc<Vec<Value>> {
+        if self.extra_catalog.is_empty() {
+            return resident_catalog;
+        }
+        let mut combined = Vec::with_capacity(resident_catalog.len() + self.extra_catalog.len());
+        combined.extend(resident_catalog.iter().cloned());
+        combined.extend(self.extra_catalog.iter().cloned());
+        Arc::new(combined)
     }
 
     fn index_for_catalog(&self, catalog: Arc<Vec<Value>>) -> Arc<ToolDiscoveryIndex> {
@@ -89,9 +105,10 @@ impl ToolDiscoveryToolsProvider {
     async fn search_tools(
         &self,
         args: &Value,
-        catalog: Arc<Vec<Value>>,
+        resident_catalog: Arc<Vec<Value>>,
         context: &ToolContext<'_>,
     ) -> ToolResult {
+        let catalog = self.searchable_catalog(resident_catalog);
         let index = self.index_for_catalog(catalog);
         let limit = limit_from_args(args);
         let candidate_args = args_with_limit(args, LLM_CANDIDATE_LIMIT);
@@ -141,11 +158,13 @@ impl ToolDiscoveryToolsProvider {
     }
 }
 
-/// Build the `search_tools` provider backed by a fresh discovery cache.
-pub fn tool_discovery_provider() -> StaticToolProvider<ToolDiscoveryToolsProvider> {
+/// Build the `search_tools` provider with an additional non-resident catalog.
+pub fn tool_discovery_provider_with_catalog(
+    extra_catalog: Vec<Value>,
+) -> StaticToolProvider<ToolDiscoveryToolsProvider> {
     StaticToolProvider::new(
         vec![search_tools_definition()],
-        ToolDiscoveryToolsProvider::new(),
+        ToolDiscoveryToolsProvider::with_catalog(extra_catalog),
     )
 }
 
@@ -201,11 +220,11 @@ mod tests {
             Ok(self.catalog.clone())
         }
 
-        async fn set_tools_availability(
+        async fn set_tool_membership(
             &self,
             _session_id: &str,
             _tool_names: &[String],
-            _availability: Option<lash_core::ToolAvailability>,
+            _present: bool,
         ) -> Result<u64, PluginError> {
             Ok(0)
         }
@@ -288,44 +307,17 @@ mod tests {
             .with_aliases(aliases),
         );
         let manifest = tool.manifest();
-        let projected = json!({
+        // The flat catalog projection (see `project_tool_catalog` in
+        // lash-core) emits id/name/description/bindings/activation/contract;
+        // the example derives the call path from the `lashlang.tool` binding.
+        json!({
             "id": manifest.id,
             "name": manifest.name,
             "description": manifest.description,
-            "availability": "searchable",
-            "callable": false,
-            "showcased": false,
-            "searchable": true,
+            "bindings": manifest.bindings,
             "activation": manifest.activation,
             "contract": manifest.compact_contract.clone().expect("compact contract"),
-        });
-        #[cfg(feature = "lashlang")]
-        {
-            let mut projected = projected;
-            let lashlang_binding =
-                lash_lashlang_runtime::required_tool_lashlang_executable(&manifest)
-                    .expect("catalog test tool has explicit Lashlang binding");
-            let call = lashlang_binding.call_path();
-            let projected_object = projected.as_object_mut().expect("catalog object");
-            projected_object.insert(
-                "module_path".to_string(),
-                json!(lashlang_binding.module_path.clone()),
-            );
-            projected_object.insert(
-                "operation".to_string(),
-                json!(lashlang_binding.operation.clone()),
-            );
-            projected_object.insert("call".to_string(), json!(call));
-            projected_object.insert(
-                "aliases".to_string(),
-                json!(lashlang_binding.aliases.clone()),
-            );
-            projected
-        }
-        #[cfg(not(feature = "lashlang"))]
-        {
-            projected
-        }
+        })
     }
 
     fn ranked_names(results: &[Value]) -> Vec<String> {
@@ -343,7 +335,7 @@ mod tests {
 
     #[test]
     fn provider_exposes_search_tools_only() {
-        let manifests = tool_discovery_provider().tool_manifests();
+        let manifests = tool_discovery_provider_with_catalog(Vec::new()).tool_manifests();
         let names = manifests
             .iter()
             .map(|definition| definition.name.as_str())
@@ -404,7 +396,7 @@ mod tests {
             ],
             ..Default::default()
         });
-        let provider = tool_discovery_provider();
+        let provider = tool_discovery_provider_with_catalog(Vec::new());
         let context = discovery_context(host);
 
         #[cfg(feature = "lashlang")]
@@ -464,7 +456,7 @@ mod tests {
             )),
             ..Default::default()
         });
-        let provider = tool_discovery_provider();
+        let provider = tool_discovery_provider_with_catalog(Vec::new());
         let context = discovery_context(host.clone());
 
         let args = json!({

@@ -9,6 +9,7 @@ mod config;
 mod diff;
 mod editor;
 mod event;
+mod examples;
 mod execution_settings;
 mod fork;
 mod host_docs;

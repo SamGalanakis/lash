@@ -18,7 +18,6 @@ use lash::plugins::{
     AfterToolCallHook, BeforeToolCallHook, CompactionContext, ContextCompaction,
     ContextCompactor, ContextError, PluginDirective, PluginHost, PluginSpec, PluginSpecBuilder,
     PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolCatalogContribution,
-    ToolCatalogOverride,
 };
 use lash::provider::{ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy};
 use lash::runtime::AdvancedLashCoreBuilder;
@@ -221,11 +220,8 @@ fn tool_contract_types_are_nameable(
     let _ = (activation, record, contract);
 }
 
-fn tool_catalog_types_are_nameable(
-    contribution: ToolCatalogContribution,
-    override_: ToolCatalogOverride,
-) {
-    let _ = (contribution, override_);
+fn tool_catalog_types_are_nameable(contribution: ToolCatalogContribution) {
+    let _ = contribution;
 }
 
 fn message_role_type_is_nameable(role: MessageRole) -> &'static str {

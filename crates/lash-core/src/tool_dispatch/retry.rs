@@ -66,6 +66,68 @@ pub(super) async fn execute_tool_call<'run>(
     .await
 }
 
+pub(super) async fn execute_granted_tool_call<'run>(
+    context: &ToolDispatchContext<'run>,
+    grant: &crate::ToolExecutionGrant,
+    prepared: &PreparedToolCall,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolContext<'run>,
+) -> ToolResult {
+    let tool_name = grant.manifest.name.as_str();
+    let retry_policy = grant.manifest.retry_policy;
+    let max_attempts = retry_policy.max_attempts();
+    let replay_key = derive_retry_replay_key(&tool_context, tool_name);
+    if retry_policy.requires_replay_key() && replay_key.is_none() {
+        return execute_granted_once(
+            context,
+            grant,
+            prepared,
+            progress,
+            tool_context.with_retry_context(tool_name, 1, 1),
+        )
+        .await;
+    }
+
+    let max_attempts = max_attempts.max(1);
+    for attempt in 1..=max_attempts {
+        let attempt_context =
+            tool_context
+                .clone()
+                .with_retry_context(tool_name, attempt, max_attempts);
+        let result =
+            execute_granted_once(context, grant, prepared, progress, attempt_context).await;
+        if result.is_pending() {
+            return result;
+        }
+        let retry_after_ms = retry_after_ms(&result, retry_policy, attempt - 1);
+        let Some(retry_after_ms) = retry_after_ms else {
+            return result;
+        };
+        if attempt >= max_attempts {
+            return mark_retry_exhausted(result, attempt);
+        }
+        if retry_after_ms > 0
+            && let Err(err) =
+                sleep_before_retry(context, &tool_context, tool_name, attempt, retry_after_ms).await
+        {
+            return ToolResult::failure(ToolFailure::runtime(
+                ToolFailureClass::Internal,
+                "tool_retry_sleep_failed",
+                format!("retry sleep for tool `{tool_name}` failed after attempt {attempt}: {err}"),
+            ));
+        }
+    }
+
+    execute_granted_once(
+        context,
+        grant,
+        prepared,
+        progress,
+        tool_context.with_retry_context(tool_name, 1, 1),
+    )
+    .await
+}
+
 pub(super) async fn execute_tool_attempt<'run>(
     context: &ToolDispatchContext<'run>,
     manifest: &ToolManifest,
@@ -85,6 +147,26 @@ pub(super) async fn execute_tool_attempt<'run>(
     .await
 }
 
+pub(super) async fn execute_granted_tool_attempt<'run>(
+    context: &ToolDispatchContext<'run>,
+    grant: &crate::ToolExecutionGrant,
+    prepared: &PreparedToolCall,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolContext<'run>,
+    attempt: u32,
+    max_attempts: u32,
+) -> ToolResult {
+    let tool_name = grant.manifest.name.as_str();
+    execute_granted_once(
+        context,
+        grant,
+        prepared,
+        progress,
+        tool_context.with_retry_context(tool_name, attempt, max_attempts),
+    )
+    .await
+}
+
 async fn execute_once<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: &PreparedToolCall,
@@ -95,6 +177,19 @@ async fn execute_once<'run>(
     context
         .tools
         .execute_by_id(&prepared.tool_id, args, &tool_context, progress)
+        .await
+}
+
+async fn execute_granted_once<'run>(
+    context: &ToolDispatchContext<'run>,
+    grant: &crate::ToolExecutionGrant,
+    prepared: &PreparedToolCall,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolContext<'run>,
+) -> ToolResult {
+    context
+        .tools
+        .execute_granted(grant, &prepared.args, &tool_context, progress)
         .await
 }
 

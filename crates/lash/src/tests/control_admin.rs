@@ -683,17 +683,18 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
     session
         .admin()
         .tools()
-        .set_availability("tool:app_lookup", ToolAvailability::Off)
+        .set_membership("tool:app_lookup", false)
         .await?;
     let tool_state = session
         .observe()
         .tool_state()
         .expect("tool state should be observable");
-    assert_eq!(
-        tool_state
+    assert!(
+        !tool_state
             .get(&lash_core::ToolId::from("tool:app_lookup"))
-            .and_then(|spec| spec.manifest().availability_override),
-        Some(ToolAvailability::Off)
+            .expect("app tool")
+            .is_member(),
+        "the host-removed tool is a non-member"
     );
     Ok(())
 }

@@ -543,6 +543,7 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
         (
             RuntimeEffectCommand::ToolAttempt {
                 call: prepared_tool_call(),
+                execution_grant: None,
                 attempt: 1,
                 max_attempts: 1,
             },
@@ -1097,6 +1098,7 @@ async fn restate_positional_replay_records_tool_attempt_as_one_command() {
         runtime_invocation(RuntimeEffectKind::ToolAttempt, "tool-attempt"),
         RuntimeEffectCommand::ToolAttempt {
             call,
+            execution_grant: None,
             attempt: 1,
             max_attempts: 1,
         },

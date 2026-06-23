@@ -300,7 +300,7 @@ fn execution_section_hides_module_examples_without_module_operations() {
         rlm_execution_section_for_host_environment(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("await tools."));
-    assert!(!section.contains("Showcased Tools"));
+    assert!(!section.contains("**Tools**"));
     assert!(!section.contains("Module operations"));
     assert!(section.contains("No module operations are available"));
 }

@@ -3,8 +3,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::llm::types::LlmToolSpec;
 use crate::{
-    PromptContribution, PromptFingerprint, ToolAvailability, ToolContract, ToolDefinition,
-    ToolManifest, prompt_tool_names_fingerprint,
+    PromptContribution, PromptFingerprint, ToolContract, ToolDefinition, ToolManifest,
+    prompt_tool_names_fingerprint,
 };
 
 pub type ToolContractResolver =
@@ -17,38 +17,38 @@ pub struct ToolCatalogBuildInput {
     pub contributions: Vec<ToolCatalogContribution>,
 }
 
+/// A trusted plugin's contribution to catalog assembly. Membership is the
+/// execution gate, so the only override a contribution can express is *removal*
+/// of a member (authority hiding, plan-mode gating). Adding members happens by
+/// a [`crate::ToolProvider`] including them in its manifest list.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ToolCatalogContribution {
-    pub overrides: Vec<ToolCatalogOverride>,
-    pub tool_list_notes: Vec<String>,
+    /// Names of tools to remove from the catalog (non-membership).
+    pub remove: Vec<String>,
 }
 
 impl ToolCatalogContribution {
     pub fn is_empty(&self) -> bool {
-        self.overrides.is_empty() && self.tool_list_notes.is_empty()
+        self.remove.is_empty()
     }
-}
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct ToolCatalogOverride {
-    pub tool_name: String,
-    pub availability: Option<ToolAvailability>,
+    pub fn remove_tools(tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            remove: tools.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolCatalogEntry {
     pub manifest: ToolManifest,
-    pub availability: ToolAvailability,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ToolCatalog {
     pub tools: Vec<ToolCatalogEntry>,
-    pub tool_list_notes: Vec<String>,
     #[serde(skip)]
     resolve_contract: Option<ToolContractResolver>,
-    #[serde(skip)]
-    prompt_tool_docs: OnceLock<Arc<str>>,
     #[serde(skip)]
     model_tool_specs: OnceLock<Arc<Vec<LlmToolSpec>>>,
     #[serde(skip)]
@@ -61,16 +61,11 @@ impl Clone for ToolCatalog {
     fn clone(&self) -> Self {
         let clone = Self {
             tools: self.tools.clone(),
-            tool_list_notes: self.tool_list_notes.clone(),
             resolve_contract: self.resolve_contract.clone(),
-            prompt_tool_docs: OnceLock::new(),
             model_tool_specs: OnceLock::new(),
             tool_names: OnceLock::new(),
             tool_names_fingerprint: OnceLock::new(),
         };
-        if let Some(value) = self.prompt_tool_docs.get() {
-            let _ = clone.prompt_tool_docs.set(Arc::clone(value));
-        }
         if let Some(value) = self.model_tool_specs.get() {
             let _ = clone.model_tool_specs.set(Arc::clone(value));
         }
@@ -88,7 +83,6 @@ impl std::fmt::Debug for ToolCatalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolCatalog")
             .field("tools", &self.tools)
-            .field("tool_list_notes", &self.tool_list_notes)
             .finish_non_exhaustive()
     }
 }
@@ -97,9 +91,7 @@ impl Default for ToolCatalog {
     fn default() -> Self {
         Self {
             tools: Vec::new(),
-            tool_list_notes: Vec::new(),
             resolve_contract: None,
-            prompt_tool_docs: OnceLock::new(),
             model_tool_specs: OnceLock::new(),
             tool_names: OnceLock::new(),
             tool_names_fingerprint: OnceLock::new(),
@@ -137,64 +129,30 @@ impl ToolCatalog {
         Self {
             tools: tools
                 .into_iter()
-                .map(|manifest| ToolCatalogEntry {
-                    availability: manifest.effective_availability(),
-                    manifest,
-                })
+                .map(|manifest| ToolCatalogEntry { manifest })
                 .collect(),
-            tool_list_notes: Vec::new(),
             resolve_contract,
-            prompt_tool_docs: OnceLock::new(),
             model_tool_specs: OnceLock::new(),
             tool_names: OnceLock::new(),
             tool_names_fingerprint: OnceLock::new(),
         }
     }
 
+    /// All catalog members. Membership is callability; there is no filtering.
     pub fn callable_tools_iter(&self) -> impl Iterator<Item = &ToolManifest> {
-        self.tools
-            .iter()
-            .filter(|tool| tool.availability.is_callable())
-            .map(|tool| &tool.manifest)
+        self.tools.iter().map(|tool| &tool.manifest)
     }
 
     pub fn callable_tools(&self) -> Vec<ToolManifest> {
         self.callable_tools_iter().cloned().collect()
     }
 
-    pub fn showcased_tools_iter(&self) -> impl Iterator<Item = &ToolManifest> {
-        self.tools
-            .iter()
-            .filter(|tool| tool.availability.is_showcased())
-            .map(|tool| &tool.manifest)
-    }
-
-    pub fn showcased_tools(&self) -> Vec<ToolManifest> {
-        self.showcased_tools_iter().cloned().collect()
-    }
-
-    pub fn searchable_tools_iter(&self) -> impl Iterator<Item = &ToolCatalogEntry> {
-        self.tools
-            .iter()
-            .filter(|tool| tool.availability.is_searchable())
-    }
-
-    pub fn omitted_tools_iter(&self) -> impl Iterator<Item = &ToolCatalogEntry> {
-        self.searchable_tools_iter()
-            .filter(|tool| !tool.availability.is_showcased())
-    }
-
+    /// Membership test: a tool is in the catalog (callable) or it does not
+    /// exist to the model.
     pub fn has_callable_tool(&self, tool_name: &str) -> bool {
         self.tools
             .iter()
-            .any(|tool| tool.availability.is_callable() && tool.manifest.name == tool_name)
-    }
-
-    pub fn tool_availability(&self, tool_name: &str) -> Option<ToolAvailability> {
-        self.tools
-            .iter()
-            .find(|tool| tool.manifest.name == tool_name)
-            .map(|tool| tool.availability)
+            .any(|tool| tool.manifest.name == tool_name)
     }
 
     pub fn tool_names(&self) -> Arc<Vec<String>> {
@@ -202,7 +160,6 @@ impl ToolCatalog {
             Arc::new(
                 self.tools
                     .iter()
-                    .filter(|tool| tool.availability.is_callable())
                     .map(|tool| tool.manifest.name.clone())
                     .collect(),
             )
@@ -215,16 +172,11 @@ impl ToolCatalog {
             .get_or_init(|| prompt_tool_names_fingerprint(&self.tool_names()))
     }
 
-    pub fn omitted_tool_count(&self) -> usize {
-        self.omitted_tools_iter().count()
-    }
-
     pub fn model_tool_specs(&self) -> Arc<Vec<LlmToolSpec>> {
         Arc::clone(self.model_tool_specs.get_or_init(|| {
             Arc::new(
                 self.tools
                     .iter()
-                    .filter(|tool| tool.availability.is_callable())
                     .filter_map(|tool| {
                         self.resolve_contract(&tool.manifest.name)
                             .map(|contract| contract.model_tool(&tool.manifest))
@@ -242,40 +194,10 @@ impl ToolCatalog {
         }))
     }
 
-    pub fn prompt_tool_docs(&self) -> &str {
-        self.prompt_tool_docs
-            .get_or_init(|| Arc::from(self.rendered_prompt_tool_docs()))
-            .as_ref()
-    }
-
     pub fn resolve_contract(&self, tool_name: &str) -> Option<Arc<ToolContract>> {
         self.resolve_contract
             .as_ref()
             .and_then(|resolve| resolve(tool_name))
-    }
-
-    fn rendered_prompt_tool_docs(&self) -> String {
-        let mut docs = self
-            .tools
-            .iter()
-            .filter(|tool| tool.availability.is_showcased())
-            .filter_map(|tool| {
-                self.resolve_contract(&tool.manifest.name)
-                    .map(|contract| contract.compact_contract(&tool.manifest).render_markdown())
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        for note in &self.tool_list_notes {
-            let note = note.trim();
-            if note.is_empty() {
-                continue;
-            }
-            if !docs.is_empty() {
-                docs.push_str("\n\n");
-            }
-            docs.push_str(note);
-        }
-        docs
     }
 
     pub fn filter_prompt_contributions(
@@ -292,49 +214,38 @@ impl ToolCatalog {
         if contribution.gate.is_empty() {
             return true;
         }
-        contribution.gate.tools.iter().any(|tool_name| {
-            self.tool_availability(tool_name)
-                .is_some_and(|availability| availability >= contribution.gate.minimum_availability)
-        })
+        contribution
+            .gate
+            .tools
+            .iter()
+            .any(|tool_name| self.has_callable_tool(tool_name))
     }
 }
 
 pub fn build_tool_catalog(input: ToolCatalogBuildInput) -> ToolCatalog {
-    let mut surface = ToolCatalog::from_tool_manifests(input.tools, input.resolve_contract);
+    let mut catalog = ToolCatalog::from_tool_manifests(input.tools, input.resolve_contract);
     for contribution in input.contributions {
-        apply_contribution(&mut surface, contribution);
+        apply_contribution(&mut catalog, contribution);
     }
-    surface
+    catalog
 }
 
-fn apply_contribution(surface: &mut ToolCatalog, contribution: ToolCatalogContribution) {
-    for override_ in contribution.overrides {
-        if let Some(tool) = surface
-            .tools
-            .iter_mut()
-            .find(|tool| tool.manifest.name == override_.tool_name)
-            && let Some(availability) = override_.availability
-        {
-            tool.availability = availability;
-        }
+fn apply_contribution(catalog: &mut ToolCatalog, contribution: ToolCatalogContribution) {
+    if contribution.remove.is_empty() {
+        return;
     }
-
-    surface.tool_list_notes.extend(
-        contribution
-            .tool_list_notes
-            .into_iter()
-            .map(|note| note.trim().to_string())
-            .filter(|note| !note.is_empty()),
-    );
+    catalog
+        .tools
+        .retain(|tool| !contribution.remove.contains(&tool.manifest.name));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ToolActivation, ToolAvailabilityConfig, ToolScheduling};
+    use crate::{ToolActivation, ToolScheduling};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn tool(name: &str, availability: ToolAvailability) -> ToolDefinition {
+    fn tool(name: &str) -> ToolDefinition {
         let mut definition = ToolDefinition::raw(
             format!("tool:{name}"),
             name,
@@ -346,7 +257,6 @@ mod tests {
             }),
             serde_json::json!({ "type": "string" }),
         );
-        definition.manifest.availability = ToolAvailabilityConfig::same(availability);
         definition.manifest.activation = ToolActivation::Always;
         definition.manifest.scheduling = ToolScheduling::Parallel;
         definition
@@ -368,66 +278,38 @@ mod tests {
     }
 
     #[test]
-    fn catalog_splits_callable_and_showcased_tools() {
-        let surface = build_tool_catalog(build_input(
-            vec![
-                tool("search_tools", ToolAvailability::Showcased),
-                tool("read_file", ToolAvailability::Showcased),
-                tool("grep", ToolAvailability::Callable),
-                tool("privileged_tool", ToolAvailability::Searchable),
-            ],
+    fn catalog_membership_is_flat_and_callable() {
+        let catalog = build_tool_catalog(build_input(
+            vec![tool("read_file"), tool("grep"), tool("write_file")],
             Vec::new(),
         ));
 
-        assert_eq!(surface.callable_tools().len(), 3);
-        assert_eq!(surface.showcased_tools().len(), 2);
-        assert_eq!(surface.omitted_tool_count(), 2);
-        assert!(!surface.prompt_tool_docs().contains("Catalogued tools"));
+        assert_eq!(catalog.callable_tools().len(), 3);
+        assert!(catalog.has_callable_tool("read_file"));
+        assert!(catalog.has_callable_tool("grep"));
+        assert!(!catalog.has_callable_tool("absent"));
     }
 
     #[test]
-    fn explicit_contributions_override_availability() {
-        let surface = build_tool_catalog(build_input(
-            vec![tool("read_file", ToolAvailability::Showcased)],
-            vec![ToolCatalogContribution {
-                overrides: vec![ToolCatalogOverride {
-                    tool_name: "read_file".to_string(),
-                    availability: Some(ToolAvailability::Off),
-                }],
-                tool_list_notes: vec!["custom note".to_string()],
-            }],
+    fn contributions_remove_members() {
+        let catalog = build_tool_catalog(build_input(
+            vec![tool("read_file"), tool("write_file")],
+            vec![ToolCatalogContribution::remove_tools(["write_file"])],
         ));
 
-        assert_eq!(
-            surface
-                .tools
-                .iter()
-                .find(|tool| tool.manifest.name == "read_file")
-                .expect("read_file present")
-                .availability,
-            ToolAvailability::Off
-        );
-        assert!(
-            surface
-                .tool_list_notes
-                .iter()
-                .any(|note| note == "custom note")
-        );
+        assert!(catalog.has_callable_tool("read_file"));
+        assert!(!catalog.has_callable_tool("write_file"));
+        assert_eq!(catalog.callable_tools().len(), 1);
     }
 
     #[test]
-    fn prompt_gate_requires_matching_tool_availability() {
-        let surface = build_tool_catalog(build_input(
-            vec![tool("search_tools", ToolAvailability::Showcased)],
-            Vec::new(),
-        ));
+    fn prompt_gate_requires_member_tool() {
+        let catalog = build_tool_catalog(build_input(vec![tool("read_file")], Vec::new()));
 
-        let kept = surface.filter_prompt_contributions(vec![
+        let kept = catalog.filter_prompt_contributions(vec![
             PromptContribution::guidance("Plain", "always"),
-            PromptContribution::guidance("Discovery", "discover")
-                .requires_tool("search_tools", ToolAvailability::Showcased),
-            PromptContribution::guidance("Off", "off")
-                .requires_tool("missing_tool", ToolAvailability::Callable),
+            PromptContribution::guidance("WithTool", "withtool").requires_tool("read_file"),
+            PromptContribution::guidance("MissingTool", "missing").requires_tool("missing_tool"),
         ]);
 
         assert_eq!(kept.len(), 2);
@@ -437,67 +319,16 @@ mod tests {
         );
         assert!(
             kept.iter()
-                .any(|contribution| contribution.title.as_deref() == Some("Discovery"))
+                .any(|contribution| contribution.title.as_deref() == Some("WithTool"))
         );
     }
 
     #[test]
-    fn rlm_catalog_does_not_resolve_searchable_only_contracts() {
+    fn model_specs_resolve_lazily() {
         let contract_resolutions = Arc::new(AtomicUsize::new(0));
-        let searchable = tool("large_schema", ToolAvailability::Searchable);
-        let showcased = tool("search_tools", ToolAvailability::Showcased);
+        let callable = tool("read_file");
         let resolver_count = Arc::clone(&contract_resolutions);
-        let surface = build_tool_catalog(ToolCatalogBuildInput {
-            tools: vec![searchable.manifest(), showcased.manifest()],
-            resolve_contract: Some(Arc::new(move |name| {
-                resolver_count.fetch_add(1, Ordering::SeqCst);
-                match name {
-                    "large_schema" => Some(Arc::new(searchable.contract())),
-                    "search_tools" => Some(Arc::new(showcased.contract())),
-                    _ => None,
-                }
-            })),
-            contributions: Vec::new(),
-        });
-
-        assert_eq!(
-            surface.tool_availability("large_schema"),
-            Some(ToolAvailability::Searchable)
-        );
-        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
-        assert!(!surface.prompt_tool_docs().contains("large_schema"));
-        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn callable_only_catalog_resolves_model_specs_lazily() {
-        let contract_resolutions = Arc::new(AtomicUsize::new(0));
-        let callable = tool("large_callable", ToolAvailability::Callable);
-        let resolver_count = Arc::clone(&contract_resolutions);
-        let surface = build_tool_catalog(ToolCatalogBuildInput {
-            tools: vec![callable.manifest()],
-            resolve_contract: Some(Arc::new(move |name| {
-                resolver_count.fetch_add(1, Ordering::SeqCst);
-                (name == "large_callable").then(|| Arc::new(callable.contract()))
-            })),
-            contributions: Vec::new(),
-        });
-
-        assert_eq!(
-            surface.tool_names().as_ref(),
-            &vec!["large_callable".to_string()]
-        );
-        assert_eq!(surface.model_tool_specs().len(), 1);
-        assert_eq!(surface.prompt_tool_docs(), "");
-        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn standard_catalog_resolves_model_specs_lazily() {
-        let contract_resolutions = Arc::new(AtomicUsize::new(0));
-        let callable = tool("read_file", ToolAvailability::Callable);
-        let resolver_count = Arc::clone(&contract_resolutions);
-        let surface = build_tool_catalog(ToolCatalogBuildInput {
+        let catalog = build_tool_catalog(ToolCatalogBuildInput {
             tools: vec![callable.manifest()],
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
@@ -507,25 +338,22 @@ mod tests {
         });
 
         assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
-        assert_eq!(surface.model_tool_specs().len(), 1);
+        assert_eq!(catalog.model_tool_specs().len(), 1);
         assert_eq!(contract_resolutions.load(Ordering::SeqCst), 1);
-        assert_eq!(surface.model_tool_specs().len(), 1);
+        assert_eq!(catalog.model_tool_specs().len(), 1);
         assert_eq!(contract_resolutions.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn tool_names_fingerprint_matches_prompt_hash() {
-        let surface = build_tool_catalog(build_input(
-            vec![
-                tool("read_file", ToolAvailability::Callable),
-                tool("search_tools", ToolAvailability::Showcased),
-            ],
+        let catalog = build_tool_catalog(build_input(
+            vec![tool("read_file"), tool("grep")],
             Vec::new(),
         ));
 
         assert_eq!(
-            surface.tool_names_fingerprint(),
-            prompt_tool_names_fingerprint(&surface.tool_names())
+            catalog.tool_names_fingerprint(),
+            prompt_tool_names_fingerprint(&catalog.tool_names())
         );
     }
 }

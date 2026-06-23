@@ -83,8 +83,6 @@ pub struct RemotePromptContribution {
 pub struct RemotePromptContributionGate {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    #[serde(default)]
-    pub minimum_availability: RemoteToolAvailability,
 }
 
 impl RemotePromptContributionGate {

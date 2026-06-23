@@ -3,13 +3,12 @@ use std::sync::Arc;
 
 use crate::runtime::AssembledTurn;
 use crate::{
-    MessageRole, ProtocolTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
-    ToolManifest, ToolProvider, ToolResult, TurnInput,
+    MessageRole, ProtocolTurnOptions, SessionPolicy, ToolDefinition, ToolManifest, ToolProvider,
+    ToolResult, TurnInput,
 };
 
 pub use lash_sansio::{
     CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolCatalogContribution,
-    ToolCatalogOverride,
 };
 
 mod actions;
@@ -52,7 +51,7 @@ pub use hooks::{
     CheckpointHookContext, PluginFuture, PluginLifecycleEvent, PluginLifecycleEventHook,
     PluginLifecycleFuture, PluginSessionTask, PromptContributor, PromptHookContext,
     SessionConfigChangedContext, SessionConfigMutator, SessionStateChangedContext,
-    ToolCallHookContext, ToolCatalogContributor, ToolDiscoveryContributor, ToolResultHookContext,
+    ToolCallHookContext, ToolCatalogContributor, ToolResultHookContext,
     ToolResultProjectionContext, ToolResultProjector, TurnHookContext, TurnResultHookContext,
     TurnResultSummary,
 };
@@ -95,7 +94,6 @@ pub use snapshot::{
 };
 pub use tool_catalog::{
     CheckpointApplication, PluginAbort, PluginDirective, PrepareTurnRequest, ToolCatalogContext,
-    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryToolContribution,
     TurnFinalization, TurnPreparation,
 };
 pub(crate) use tool_catalog::{emit_plugin_runtime_events, plugin_runtime_session_events};
@@ -174,21 +172,18 @@ mod tests {
 
     impl MockToolProvider {
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
-            vec![
-                ToolDefinition::raw(
-                    "tool:mock_tool",
-                    "mock_tool",
-                    "",
-                    json!({
-                        "type": "object",
-                        "properties": { "value": { "type": "string" } },
-                        "required": ["value"],
-                        "additionalProperties": false
-                    }),
-                    json!({ "type": "string" }),
-                )
-                .with_availability(crate::ToolAvailabilityConfig::callable()),
-            ]
+            vec![ToolDefinition::raw(
+                "tool:mock_tool",
+                "mock_tool",
+                "",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }),
+                json!({ "type": "string" }),
+            )]
         }
     }
 

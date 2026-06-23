@@ -156,6 +156,7 @@ impl RuntimeEffectController for RecordingEffectController {
             }
             RuntimeEffectCommand::ToolAttempt {
                 call,
+                execution_grant,
                 attempt,
                 max_attempts,
             } => {
@@ -164,6 +165,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         envelope.invocation,
                         RuntimeEffectCommand::ToolAttempt {
                             call,
+                            execution_grant,
                             attempt,
                             max_attempts,
                         },
@@ -1013,6 +1015,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
             match envelope.command {
                 RuntimeEffectCommand::ToolAttempt {
                     call,
+                    execution_grant,
                     attempt,
                     max_attempts,
                 } => {
@@ -1021,6 +1024,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
                             envelope.invocation,
                             RuntimeEffectCommand::ToolAttempt {
                                 call,
+                                execution_grant,
                                 attempt,
                                 max_attempts,
                             },
@@ -2054,7 +2058,6 @@ impl ProtocolDriverPlugin for EffectControllerTestProtocolDriver {
             tool_specs: input.tool_catalog.model_tool_specs(),
             tool_names: input.tool_catalog.tool_names(),
             tool_names_fingerprint: input.tool_catalog.tool_names_fingerprint(),
-            omitted_tool_count: 0,
             execution_prompt: Arc::from(""),
             prompt_contributions: input.extra_prompt_contributions,
         }

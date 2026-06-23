@@ -57,14 +57,13 @@ pub fn build_rlm_preamble(
     config: RlmProjectorConfig,
 ) -> TurnDriverPreamble {
     let tool_catalog = input.tool_catalog.as_ref();
-    let omitted_tool_count = tool_catalog.omitted_tool_count();
     let tool_names = tool_catalog.tool_names();
     let tool_names_fingerprint = tool_catalog.tool_names_fingerprint();
     let mut prompt_contributions = Vec::new();
 
     let tool_docs = crate::tool_catalog::rlm_prompt_tool_docs(tool_catalog);
     if !tool_docs.trim().is_empty() {
-        prompt_contributions.push(PromptContribution::execution("Showcased Tools", tool_docs));
+        prompt_contributions.push(PromptContribution::execution("Tools", tool_docs));
     }
     prompt_contributions.extend(input.extra_prompt_contributions);
     let lashlang_host_environment = config
@@ -86,7 +85,6 @@ pub fn build_rlm_preamble(
         tool_specs: Arc::new(Vec::new()),
         tool_names,
         tool_names_fingerprint,
-        omitted_tool_count,
         execution_prompt: Arc::from(crate::protocol::rlm_execution_section_for_host_environment(
             config.prompt_features,
             &lashlang_host_environment,
@@ -98,7 +96,7 @@ pub fn build_rlm_preamble(
 #[cfg(test)]
 mod catalogue_tests {
     use super::*;
-    use lash_core::{ToolActivation, ToolAvailabilityConfig, ToolScheduling};
+    use lash_core::{ToolActivation, ToolScheduling};
     use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 
     fn tool(
@@ -117,7 +115,6 @@ mod catalogue_tests {
             }),
             serde_json::json!({ "type": "string" }),
         )
-        .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
         .with_scheduling(ToolScheduling::Parallel)
         .with_lashlang_binding(LashlangToolBinding::new([module], operation))
@@ -158,7 +155,6 @@ mod catalogue_tests {
             },
         );
 
-        assert_eq!(preamble.omitted_tool_count, 0);
         assert_eq!(preamble.tool_names.as_ref(), &vec!["search_tools", "grep"]);
         let prompt = preamble
             .prompt_contributions

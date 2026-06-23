@@ -825,6 +825,7 @@ fn replay_conformance_tool_attempt_envelope(
                 None,
                 serde_json::json!({ "prepared": effect_id }),
             ),
+            execution_grant: None,
             attempt: 1,
             max_attempts: 1,
         },

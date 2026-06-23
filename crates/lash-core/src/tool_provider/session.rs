@@ -73,13 +73,13 @@ impl<'run> ToolSessionAdmin<'run> {
         self.sessions.shared_tool_catalog(&self.session_id).await
     }
 
-    pub async fn set_tools_availability(
+    pub async fn set_tool_membership(
         &self,
         names: &[String],
-        availability: Option<crate::ToolAvailability>,
+        present: bool,
     ) -> Result<u64, PluginError> {
         self.sessions
-            .set_tools_availability(&self.session_id, names, availability)
+            .set_tool_membership(&self.session_id, names, present)
             .await
     }
 }

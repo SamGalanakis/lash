@@ -103,7 +103,7 @@ where
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_exact_claim_uses_selected_batch_ids(make()).await;
     queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
-    queued_work_respects_availability_limits_exclusivity_reclaim_and_sessions(make()).await;
+    queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions(make()).await;
     queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
     queued_work_completion_is_lease_guarded(make()).await;
     queued_wake_delivery_is_source_key_idempotent_and_claimed_once(make()).await;
@@ -1048,7 +1048,7 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
     assert!(renewed.expires_at_epoch_ms >= reclaimed.expires_at_epoch_ms);
 }
 
-async fn queued_work_respects_availability_limits_exclusivity_reclaim_and_sessions(
+async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions(
     store: Arc<dyn RuntimePersistence>,
 ) {
     store

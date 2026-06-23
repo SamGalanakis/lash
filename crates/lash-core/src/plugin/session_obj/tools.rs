@@ -3,60 +3,6 @@ use std::sync::Arc;
 
 use super::*;
 
-fn merge_string_array(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    values: Vec<String>,
-) {
-    let mut existing = obj
-        .remove(key)
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|value| value.as_str().map(str::to_string))
-        .collect::<BTreeSet<_>>();
-    existing.extend(
-        values
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-    );
-    if !existing.is_empty() {
-        obj.insert(key.to_string(), serde_json::json!(existing));
-    }
-}
-
-fn apply_tool_discovery_contributions(
-    catalog: &mut [serde_json::Value],
-    contributions: impl IntoIterator<Item = ToolDiscoveryContribution>,
-) {
-    let mut by_name = BTreeMap::new();
-    for (idx, tool) in catalog.iter().enumerate() {
-        if let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) {
-            by_name.insert(name.to_string(), idx);
-        }
-    }
-
-    for contribution in contributions {
-        for patch in contribution.tools {
-            let Some(idx) = by_name.get(&patch.tool_name).copied() else {
-                continue;
-            };
-            let Some(obj) = catalog[idx].as_object_mut() else {
-                continue;
-            };
-            if let Some(namespace) = patch
-                .namespace
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-            {
-                obj.insert("namespace".to_string(), serde_json::json!(namespace));
-            }
-            merge_string_array(obj, "aliases", patch.aliases);
-        }
-    }
-}
-
 impl PluginSession {
     pub fn resolved_tool_catalog(
         &self,
@@ -76,27 +22,13 @@ impl PluginSession {
         })?))
     }
 
+    /// Project every Tool Catalog member to a JSON record for host-owned
+    /// discovery (e.g. the reference `search_tools` example in `lash-cli`).
     pub fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
         let catalog = self.resolved_tool_catalog(session_id)?;
-        let mut catalog =
-            crate::tool_registry::project_tool_catalog(catalog.searchable_tools_iter().cloned());
-        let contributions = collect_owned_sync(
-            &self.contributions.tool_discovery_contributors,
-            ToolDiscoveryContext {
-                session_id: session_id.to_string(),
-                catalog: catalog.clone(),
-            },
-            |hook, ctx| hook(ctx),
-        )
-        .unwrap_or_else(|err| {
-            tracing::warn!("failed to resolve tool discovery metadata: {err}");
-            Vec::new()
-        });
-        apply_tool_discovery_contributions(
-            &mut catalog,
-            contributions.into_iter().map(|owned| owned.value),
-        );
-        Ok(catalog)
+        Ok(crate::tool_registry::project_tool_catalog(
+            catalog.tools.iter().cloned(),
+        ))
     }
 
     pub fn resolve_tool_catalog(
@@ -145,14 +77,7 @@ impl PluginSession {
             .collect::<BTreeSet<_>>();
         if !authority_hidden_tools.is_empty() {
             contributions.push(ToolCatalogContribution {
-                overrides: authority_hidden_tools
-                    .into_iter()
-                    .map(|tool_name| ToolCatalogOverride {
-                        tool_name,
-                        availability: Some(crate::ToolAvailability::Off),
-                    })
-                    .collect(),
-                ..Default::default()
+                remove: authority_hidden_tools.into_iter().collect(),
             });
         }
         Ok(crate::build_tool_catalog(crate::ToolCatalogBuildInput {

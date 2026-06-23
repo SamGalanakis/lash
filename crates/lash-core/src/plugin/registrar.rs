@@ -88,7 +88,6 @@ pub(crate) struct PluginContributions {
     pub(crate) triggers: Vec<crate::TriggerEvent>,
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(crate) tool_catalog_contributors: Vec<RegisteredHook<ToolCatalogContributor>>,
-    pub(crate) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
     pub(crate) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     pub(crate) before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
     pub(crate) after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
@@ -154,16 +153,6 @@ pub struct ToolCatalogRegistrations<'a> {
 impl ToolCatalogRegistrations<'_> {
     pub fn contribute(self, contributor: ToolCatalogContributor) {
         self.reg.add_tool_catalog_contributor(contributor);
-    }
-}
-
-pub struct DiscoveryRegistrations<'a> {
-    reg: &'a mut PluginRegistrar,
-}
-
-impl DiscoveryRegistrations<'_> {
-    pub fn contribute(self, contributor: ToolDiscoveryContributor) {
-        self.reg.add_tool_discovery_contributor(contributor);
     }
 }
 
@@ -499,10 +488,6 @@ impl PluginRegistrar {
         ToolCatalogRegistrations { reg: self }
     }
 
-    pub fn discovery(&mut self) -> DiscoveryRegistrations<'_> {
-        DiscoveryRegistrations { reg: self }
-    }
-
     pub fn turn(&mut self) -> TurnRegistrations<'_> {
         TurnRegistrations { reg: self }
     }
@@ -579,14 +564,6 @@ impl PluginRegistrar {
     fn add_tool_catalog_contributor(&mut self, contributor: ToolCatalogContributor) {
         push_registered_hook(
             &mut self.contributions.tool_catalog_contributors,
-            &self.registering_plugin_id,
-            contributor,
-        );
-    }
-
-    fn add_tool_discovery_contributor(&mut self, contributor: ToolDiscoveryContributor) {
-        push_registered_hook(
-            &mut self.contributions.tool_discovery_contributors,
             &self.registering_plugin_id,
             contributor,
         );

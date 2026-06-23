@@ -1128,7 +1128,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     opened
         .admin()
         .tools()
-        .set_availability("tool:app_lookup", ToolAvailability::Off)
+        .set_membership("tool:app_lookup", false)
         .await?;
     let mut persisted = opened.admin().state().persist_current().await?;
     let expected_generation = opened
@@ -1156,11 +1156,12 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         .await?;
     let state = reopened.admin().tools().state().await?;
     assert_eq!(state.generation(), expected_generation);
-    assert_eq!(
-        state
+    assert!(
+        !state
             .get(&lash_core::ToolId::from("tool:app_lookup"))
-            .and_then(|spec| spec.manifest().availability_override),
-        Some(ToolAvailability::Off)
+            .expect("app tool")
+            .is_member(),
+        "the host-removed tool is restored as a non-member"
     );
     Ok(())
 }
