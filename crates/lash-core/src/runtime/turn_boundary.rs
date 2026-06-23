@@ -729,6 +729,10 @@ mod tests {
     use crate::session_model::{ConversationRecord, MessageRole, Part, PartKind, PruneState};
     use crate::{Message, SessionGraph, TokenUsage, shared_parts};
 
+    fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
+        crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
+    }
+
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
         Message {
             id: id.to_string(),
@@ -853,10 +857,12 @@ mod tests {
         store: &RecordingStore,
         state: RuntimeSessionState,
     ) -> (TurnBoundary, crate::SessionExecutionLease) {
+        let owner = lease_owner("turn-boundary-test");
         let lease = store
-            .try_claim_session_execution_lease(&state.session_id, "turn-boundary-test", 60_000)
+            .try_claim_session_execution_lease(&state.session_id, &owner, 60_000)
             .await
             .expect("claim test session execution lease")
+            .acquired()
             .expect("test session execution lease");
         (
             TurnBoundary::from_state(state).with_session_execution_lease(Some(lease.fence())),
@@ -1179,10 +1185,12 @@ mod tests {
             )
             .await
             .expect("checkpoint without store");
+        let owner = lease_owner("turn-boundary-test");
         let lease = store
-            .try_claim_session_execution_lease("session-1", "turn-boundary-test", 60_000)
+            .try_claim_session_execution_lease("session-1", &owner, 60_000)
             .await
             .expect("claim test session execution lease")
+            .acquired()
             .expect("test session execution lease");
         pipeline = pipeline.with_session_execution_lease(Some(lease.fence()));
 

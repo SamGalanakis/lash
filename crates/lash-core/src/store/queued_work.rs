@@ -11,6 +11,7 @@
 
 use sha2::{Digest, Sha256};
 
+use super::LeaseOwnerIdentity;
 use super::StoreError;
 use crate::{
     DeliveryPolicy, MergeKey, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkCompletion,
@@ -101,7 +102,7 @@ impl QueuedWorkClaimLease {
     pub fn derive(
         head: &ClaimCandidate,
         session_id: &str,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         now_epoch_ms: u64,
         lease_ttl_ms: u64,
     ) -> Self {
@@ -109,7 +110,13 @@ impl QueuedWorkClaimLease {
         let claim_id = format!("qwc:{}:{fencing_token}", head.enqueue_seq);
         let lease_token = format!(
             "{:x}",
-            Sha256::digest(format!("{session_id}:{owner_id}:{claim_id}:{now_epoch_ms}").as_bytes())
+            Sha256::digest(
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    session_id, owner.owner_id, owner.incarnation_id, claim_id, now_epoch_ms
+                )
+                .as_bytes(),
+            )
         );
         Self {
             claim_id,
@@ -280,12 +287,13 @@ mod tests {
             slot_policy: SlotPolicy::Exclusive,
             merge_key: MergeKey::Never,
         };
-        let lease = QueuedWorkClaimLease::derive(&head, "session", "owner", 1_000, 250);
+        let owner = LeaseOwnerIdentity::opaque("owner", "owner:incarnation");
+        let lease = QueuedWorkClaimLease::derive(&head, "session", &owner, 1_000, 250);
         assert_eq!(lease.fencing_token, 3);
         assert_eq!(lease.claim_id, "qwc:7:3");
         assert_eq!(lease.claimed_at_epoch_ms, 1_000);
         assert_eq!(lease.expires_at_epoch_ms, 1_250);
-        let again = QueuedWorkClaimLease::derive(&head, "session", "owner", 1_000, 250);
+        let again = QueuedWorkClaimLease::derive(&head, "session", &owner, 1_000, 250);
         assert_eq!(lease.lease_token, again.lease_token);
     }
 

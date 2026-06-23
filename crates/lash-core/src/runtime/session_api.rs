@@ -479,7 +479,7 @@ impl LashRuntime {
             .claim_ready_queued_work(
                 &self.state.session_id,
                 session_execution_lease,
-                &self.runtime_scope_id,
+                &self.runtime_lease_owner,
                 crate::QueuedWorkClaimBoundary::Idle,
                 crate::QUEUED_WORK_CLAIM_TTL_MS,
                 1,

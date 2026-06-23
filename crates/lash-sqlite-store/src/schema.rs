@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS runtime_turn_commits (
 CREATE TABLE IF NOT EXISTS session_execution_leases (
     session_id               TEXT PRIMARY KEY,
     lease_owner_id           TEXT,
+    lease_owner_incarnation_id TEXT,
+    lease_owner_liveness_json TEXT,
     lease_token              TEXT,
     lease_fencing_token      INTEGER NOT NULL DEFAULT 0,
     lease_claimed_at_ms      INTEGER NOT NULL DEFAULT 0,
@@ -95,6 +97,8 @@ CREATE TABLE IF NOT EXISTS queued_work_batches (
     enqueued_at_ms    INTEGER NOT NULL,
     claim_id          TEXT,
     claim_owner_id    TEXT,
+    claim_owner_incarnation_id TEXT,
+    claim_owner_liveness_json TEXT,
     claim_token       TEXT,
     claim_fencing_token INTEGER NOT NULL DEFAULT 0,
     claim_claimed_at_ms INTEGER NOT NULL DEFAULT 0,
@@ -141,7 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 4;
+pub(crate) const SCHEMA_VERSION: i32 = 5;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

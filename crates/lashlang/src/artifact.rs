@@ -693,6 +693,13 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
             writer.atom("variable");
             writer.atom(&normalizer.name_token(name.as_str()));
         }
+        Expr::Tuple(items) => {
+            writer.atom("tuple");
+            writer.usize(items.len());
+            for item in items {
+                write_expr(writer, item, normalizer);
+            }
+        }
         Expr::List(items) => {
             writer.atom("list");
             writer.usize(items.len());
@@ -1227,6 +1234,12 @@ impl<'program> RequirementsCollector<'program> {
                 self.collect_expr(expr, scope)
             }
             Expr::Variable(name) => scope.get(name.as_str()).cloned(),
+            Expr::Tuple(items) => {
+                for item in items {
+                    self.collect_expr(item, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
             Expr::List(items) => {
                 for item in items {
                     self.collect_expr(item, scope);

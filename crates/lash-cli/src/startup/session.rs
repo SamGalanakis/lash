@@ -15,7 +15,8 @@ use lash_core::provider::ProviderHandle;
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::store::SessionHead;
 use lash_core::{
-    AttachmentStore, PersistedSessionConfig, RuntimePersistence, SessionGraph, SessionPolicy,
+    AttachmentStore, LeaseOwnerIdentity, PersistedSessionConfig, RuntimePersistence, SessionGraph,
+    SessionPolicy,
 };
 use lash_sqlite_store::Store;
 use lash_standard_plugins::StandardContextApproach;
@@ -136,6 +137,14 @@ fn save_host_config(
         serde_json::to_vec_pretty(config)?,
     )?;
     Ok(())
+}
+
+fn cli_runtime_lease_owner() -> Result<LeaseOwnerIdentity> {
+    Ok(LeaseOwnerIdentity::local_process(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+        crate::paths::host_id()?,
+    ))
 }
 
 impl SessionBootstrap {
@@ -348,6 +357,7 @@ impl CliSessionOpener {
                 })?;
         }
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
+        let runtime_lease_owner = cli_runtime_lease_owner()?;
         let effect_host = Arc::new(
             lash_sqlite_store::SqliteEffectHost::open(&bootstrap.effects_db_file()).await?,
         );
@@ -382,6 +392,7 @@ impl CliSessionOpener {
                 core_builder
                     .build()?
                     .session(session_id)
+                    .session_execution_owner(runtime_lease_owner.clone())
                     .store(store)
                     .open_with_state(state)
                     .await?
@@ -411,6 +422,7 @@ impl CliSessionOpener {
                 core_builder
                     .build()?
                     .session(session_id)
+                    .session_execution_owner(runtime_lease_owner)
                     .store(store)
                     .open_with_state(state)
                     .await?

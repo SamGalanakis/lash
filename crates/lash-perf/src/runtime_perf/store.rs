@@ -11,10 +11,11 @@ use lash_core::store::{
     GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    BlobRef, DeliveryPolicy, GcReport, RuntimeCommit, RuntimePersistence, SessionExecutionLease,
-    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionGraph, SessionNodeRecord,
-    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError,
-    VacuumReport, current_epoch_ms,
+    BlobRef, DeliveryPolicy, GcReport, LeaseOwnerIdentity, RuntimeCommit, RuntimePersistence,
+    SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
+    SessionExecutionLeaseFence, SessionGraph, SessionNodeRecord, SessionReadScope,
+    SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
+    current_epoch_ms,
 };
 
 #[derive(Clone)]
@@ -22,18 +23,28 @@ struct RuntimePerfQueuedBatch {
     batch: QueuedWorkBatch,
     claim_id: Option<String>,
     claim_token: Option<String>,
-    claim_owner_id: Option<String>,
+    claim_owner: Option<LeaseOwnerIdentity>,
     claim_fencing_token: u64,
     claim_expires_at_ms: u64,
 }
 
 #[derive(Clone, Default)]
 struct RuntimePerfSessionExecutionLease {
-    owner_id: Option<String>,
+    owner: Option<LeaseOwnerIdentity>,
     lease_token: Option<String>,
     fencing_token: u64,
     claimed_at_epoch_ms: u64,
     expires_at_epoch_ms: u64,
+}
+
+fn session_fence_equivalent(
+    left: &SessionExecutionLeaseFence,
+    right: &SessionExecutionLeaseFence,
+) -> bool {
+    left.session_id == right.session_id
+        && left.owner == right.owner
+        && left.lease_token == right.lease_token
+        && left.fencing_token == right.fencing_token
 }
 
 #[derive(Default)]
@@ -78,7 +89,7 @@ impl RuntimePerfStore {
                 session_id: fence.session_id.clone(),
             });
         };
-        if current.owner_id.as_deref() == Some(fence.owner_id.as_str())
+        if current.owner.as_ref() == Some(&fence.owner)
             && current.lease_token.as_deref() == Some(fence.lease_token.as_str())
             && current.fencing_token == fence.fencing_token
             && current.expires_at_epoch_ms > now
@@ -100,11 +111,11 @@ impl RuntimePerfStore {
             .lock()
             .expect("lock perf session execution leases");
         if let Some(current) = leases.get_mut(&completion.session_id)
-            && current.owner_id.as_deref() == Some(completion.owner_id.as_str())
+            && current.owner.as_ref() == Some(&completion.owner)
             && current.lease_token.as_deref() == Some(completion.lease_token.as_str())
             && current.fencing_token == completion.fencing_token
         {
-            current.owner_id = None;
+            current.owner = None;
             current.lease_token = None;
             current.claimed_at_epoch_ms = 0;
             current.expires_at_epoch_ms = 0;
@@ -388,9 +399,9 @@ impl RuntimePersistence for RuntimePerfStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<Option<SessionExecutionLease>, StoreError> {
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let now = current_epoch_ms();
         let mut leases = self
             .session_execution_leases
@@ -398,35 +409,100 @@ impl RuntimePersistence for RuntimePerfStore {
             .expect("lock perf session execution leases");
         let current = leases.entry(session_id.to_string()).or_default();
         if current.lease_token.is_some() && current.expires_at_epoch_ms > now {
-            if current.owner_id.as_deref() == Some(owner_id) {
+            if current
+                .owner
+                .as_ref()
+                .is_some_and(|current_owner| current_owner.same_incarnation(owner))
+            {
                 current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
-                return Ok(Some(SessionExecutionLease {
+                return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                    SessionExecutionLease {
+                        session_id: session_id.to_string(),
+                        owner: owner.clone(),
+                        lease_token: current.lease_token.clone().expect("live lease token set"),
+                        fencing_token: current.fencing_token,
+                        claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+                        expires_at_epoch_ms: current.expires_at_epoch_ms,
+                    },
+                ));
+            }
+            return Ok(SessionExecutionLeaseClaimOutcome::Busy {
+                holder: SessionExecutionLease {
                     session_id: session_id.to_string(),
-                    owner_id: owner_id.to_string(),
+                    owner: current.owner.clone().expect("live lease owner set"),
                     lease_token: current.lease_token.clone().expect("live lease token set"),
                     fencing_token: current.fencing_token,
                     claimed_at_epoch_ms: current.claimed_at_epoch_ms,
                     expires_at_epoch_ms: current.expires_at_epoch_ms,
-                }));
-            }
-            return Ok(None);
+                },
+            });
         }
         current.fencing_token = current.fencing_token.saturating_add(1);
-        current.owner_id = Some(owner_id.to_string());
+        current.owner = Some(owner.clone());
         current.lease_token = Some(format!(
-            "{session_id}:{owner_id}:{now}:{}",
-            current.fencing_token
+            "{session_id}:{}:{}:{now}:{}",
+            owner.owner_id, owner.incarnation_id, current.fencing_token
         ));
         current.claimed_at_epoch_ms = now;
         current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
-        Ok(Some(SessionExecutionLease {
-            session_id: session_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: current.lease_token.clone().expect("lease token set"),
-            fencing_token: current.fencing_token,
-            claimed_at_epoch_ms: current.claimed_at_epoch_ms,
-            expires_at_epoch_ms: current.expires_at_epoch_ms,
-        }))
+        Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+            SessionExecutionLease {
+                session_id: session_id.to_string(),
+                owner: owner.clone(),
+                lease_token: current.lease_token.clone().expect("lease token set"),
+                fencing_token: current.fencing_token,
+                claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+                expires_at_epoch_ms: current.expires_at_epoch_ms,
+            },
+        ))
+    }
+
+    async fn reclaim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner: &LeaseOwnerIdentity,
+        observed_holder: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
+        let now = current_epoch_ms();
+        let mut leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock perf session execution leases");
+        let current = leases.entry(session_id.to_string()).or_default();
+        if current.lease_token.is_some() && current.expires_at_epoch_ms > now {
+            let holder = SessionExecutionLease {
+                session_id: session_id.to_string(),
+                owner: current.owner.clone().expect("live lease owner set"),
+                lease_token: current.lease_token.clone().expect("live lease token set"),
+                fencing_token: current.fencing_token,
+                claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+                expires_at_epoch_ms: current.expires_at_epoch_ms,
+            };
+            if !session_fence_equivalent(&holder.fence(), observed_holder)
+                || !holder.owner.is_definitely_dead_for_claimant(owner)
+            {
+                return Ok(SessionExecutionLeaseClaimOutcome::Busy { holder });
+            }
+        }
+        current.fencing_token = current.fencing_token.saturating_add(1);
+        current.owner = Some(owner.clone());
+        current.lease_token = Some(format!(
+            "{session_id}:{}:{}:{now}:{}",
+            owner.owner_id, owner.incarnation_id, current.fencing_token
+        ));
+        current.claimed_at_epoch_ms = now;
+        current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+        Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+            SessionExecutionLease {
+                session_id: session_id.to_string(),
+                owner: owner.clone(),
+                lease_token: current.lease_token.clone().expect("lease token set"),
+                fencing_token: current.fencing_token,
+                claimed_at_epoch_ms: current.claimed_at_epoch_ms,
+                expires_at_epoch_ms: current.expires_at_epoch_ms,
+            },
+        ))
     }
 
     async fn renew_session_execution_lease(
@@ -444,7 +520,7 @@ impl RuntimePersistence for RuntimePerfStore {
                 session_id: fence.session_id.clone(),
             });
         };
-        if current.owner_id.as_deref() != Some(fence.owner_id.as_str())
+        if current.owner.as_ref() != Some(&fence.owner)
             || current.lease_token.as_deref() != Some(fence.lease_token.as_str())
             || current.fencing_token != fence.fencing_token
             || current.expires_at_epoch_ms <= now
@@ -456,7 +532,7 @@ impl RuntimePersistence for RuntimePerfStore {
         current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
         Ok(SessionExecutionLease {
             session_id: fence.session_id.clone(),
-            owner_id: fence.owner_id.clone(),
+            owner: fence.owner.clone(),
             lease_token: fence.lease_token.clone(),
             fencing_token: fence.fencing_token,
             claimed_at_epoch_ms: current.claimed_at_epoch_ms,
@@ -512,7 +588,7 @@ impl RuntimePersistence for RuntimePerfStore {
             batch: stored.clone(),
             claim_id: None,
             claim_token: None,
-            claim_owner_id: None,
+            claim_owner: None,
             claim_fencing_token: 0,
             claim_expires_at_ms: 0,
         });
@@ -524,7 +600,7 @@ impl RuntimePersistence for RuntimePerfStore {
         &self,
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         boundary: QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
         max_batches: usize,
@@ -570,14 +646,17 @@ impl RuntimePersistence for RuntimePerfStore {
         }
         let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
         let claim_id = format!("perf-qwc:{}:{fencing_token}", first.enqueue_seq);
-        let lease_token = format!("{session_id}:{owner_id}:{claim_id}:{now}");
+        let lease_token = format!(
+            "{session_id}:{}:{}:{claim_id}:{now}",
+            owner.owner_id, owner.incarnation_id
+        );
         let expires_at = now.saturating_add(lease_ttl_ms);
         let mut batches = Vec::new();
         for index in indices {
             let entry = &mut queued[index];
             entry.claim_id = Some(claim_id.clone());
             entry.claim_token = Some(lease_token.clone());
-            entry.claim_owner_id = Some(owner_id.to_string());
+            entry.claim_owner = Some(owner.clone());
             entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
             entry.claim_expires_at_ms = expires_at;
             batches.push(entry.batch.clone());
@@ -585,7 +664,7 @@ impl RuntimePersistence for RuntimePerfStore {
         Ok(Some(QueuedWorkClaim {
             session_id: session_id.to_string(),
             claim_id,
-            owner_id: owner_id.to_string(),
+            owner: owner.clone(),
             lease_token,
             fencing_token,
             claimed_at_epoch_ms: now,
@@ -632,7 +711,7 @@ impl RuntimePersistence for RuntimePerfStore {
             {
                 entry.claim_id = None;
                 entry.claim_token = None;
-                entry.claim_owner_id = None;
+                entry.claim_owner = None;
                 entry.claim_expires_at_ms = 0;
             }
         }

@@ -33,11 +33,11 @@
           </div>
           <dl class="def-list">
             <dt>Values</dt>
-            <dd><code>null</code>, booleans, numbers, strings, lists, records, projected host descriptors, result wrappers, and immutable <code>Image</code> handles. Resource handles and process handles appear only when the linked host surface exposes those abilities. Lists and records are value-shaped and copy-on-write at mutation roots.</dd>
+            <dd><code>null</code>, booleans, numbers, strings, lists, tuples, records, projected host descriptors, result wrappers, and immutable <code>Image</code> handles. Resource handles and process handles appear only when the linked host surface exposes those abilities. Lists and records are value-shaped and copy-on-write at mutation roots. Tuples are immutable sequence values and serialize to JSON arrays at host boundaries.</dd>
             <dt>Program form</dt>
             <dd>A program is a module with optional <code>type</code> and <code>process</code> declarations plus a foreground main block. Removed declarative <code>trigger</code> syntax is rejected by the parser with a diagnostic that points agents at the trigger registry. Disabled abilities remain syntax-valid where applicable but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>while</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are expression nodes; assignment and loops evaluate to <code>null</code>.</dd>
             <dt>Expressions</dt>
-            <dd>Literals, variables, builtin calls, receiver operations, named process starts, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
+            <dd>Literals, variables, tuple comma expressions, builtin calls, receiver operations, named process starts, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
             <dt>Effects</dt>
             <dd>All external work crosses <code>ExecutionHost</code>. Receiver operations return wrapper records when resource operations are enabled, background process starts return handles when process support is enabled, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations. Linked modules are content-addressed <code>ModuleArtifact</code> records in the host/profile artifact store; durable Lashlang process input stores only <code>module_ref</code>, <code>process_ref</code>, <code>host_requirements_ref</code>, <code>process_name</code>, and JSON args. Nested process starts reload the artifact by ref and verify the required host surface before execution.</dd>
           </dl>
@@ -126,18 +126,23 @@ await control.continue_as({
         <div class="section" id="syntax-and-values">
           <div class="section-header">
             <h2>Syntax And Values</h2>
-            <p>The language accepts newline-separated expressions. Commas are accepted in lists, records, type fields, and handle-fanout records/lists where they make generated code easier to read.</p>
+            <p>The language accepts newline-separated expressions. Outside comma-delimited syntactic lists, commas construct immutable tuples. Inside calls, lists, records, type fields, and process argument lists, commas keep their separator role.</p>
           </div>
           <dl class="def-list">
             <dt>Literals</dt>
-            <dd>Use <code>null</code>, <code>true</code>, <code>false</code>, numbers, strings, lists like <code>[a, b]</code>, and records like <code>{ name: "lash", "with space": 1 }</code>. Record insertion order is preserved for display and serialization.</dd>
+            <dd>Use <code>null</code>, <code>true</code>, <code>false</code>, numbers, strings, lists like <code>[a, b]</code>, tuples like <code>(a, b)</code>, <code>(a,)</code>, and <code>()</code>, and records like <code>{ name: "lash", "with space": 1 }</code>. Record insertion order is preserved for display and serialization.</dd>
             <dt>Strings</dt>
             <dd><code>"..."</code> and <code>'...'</code> support <code>\n</code>, <code>\r</code>, <code>\t</code>, escaped matching quotes, and <code>\\</code>. <code>"""..."""</code> and <code>'''...'''</code> are multiline with the same escapes. Raw strings such as <code>r"..."</code>, <code>r'...'</code>, <code>r"""..."""</code>, and <code>r'''...'''</code> preserve content exactly for patches, JSON, scripts, Markdown, and heredocs.</dd>
             <dt>Fields and indexes</dt>
-            <dd><code>value.field</code> reads record and image fields. <code>value[index]</code> reads lists and records; record indexes are string-coerced and missing keys read as <code>null</code>. List indexes support negative offsets for reads and slices.</dd>
+            <dd><code>value.field</code> reads record and image fields. <code>value[index]</code> reads lists, tuples, and records; record indexes are string-coerced and missing keys read as <code>null</code>. List and tuple indexes support negative offsets for reads and slices. Tuple index assignment is rejected because tuples are immutable.</dd>
             <dt>Images</dt>
             <dd><code>Image</code> values expose <code>.id</code>, <code>.label</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>. Image fields are immutable. <code>len(image)</code> is invalid; use <code>image.size</code>.</dd>
           </dl>
+          <pre><code>count = grep_results.count
+files = grep_results.files_with_matches
+print count, files
+pair = count, files
+submit { pair: pair, first: pair[0] }</code></pre>
         </div>
 
         <div class="section" id="expressions">
@@ -149,7 +154,8 @@ await control.continue_as({
             <table>
               <thead><tr><th>Form</th><th>Meaning</th></tr></thead>
               <tbody>
-                <tr><td><code>a + b</code>, <code>a - b</code>, <code>a * b</code>, <code>a / b</code>, <code>a % b</code></td><td>Numeric arithmetic. <code>+</code> also concatenates strings and lists where supported by runtime value semantics.</td></tr>
+                <tr><td><code>a, b</code>, <code>(a,)</code>, <code>()</code></td><td>Tuple construction. <code>(a)</code> remains grouping; <code>foo(a, b)</code> remains two arguments; <code>foo((a, b))</code> passes one tuple argument.</td></tr>
+                <tr><td><code>a + b</code>, <code>a - b</code>, <code>a * b</code>, <code>a / b</code>, <code>a % b</code></td><td>Numeric arithmetic. <code>+</code> also concatenates strings, lists, and tuples where supported by runtime value semantics. Mixed list/tuple concatenation is rejected.</td></tr>
                 <tr><td><code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code></td><td>Comparison operators used in conditionals and filters.</td></tr>
                 <tr><td><code>a and b</code>, <code>a or b</code>, <code>!a</code>, <code>not a</code></td><td>Boolean composition and negation.</td></tr>
                 <tr><td><code>cond ? yes : no</code></td><td>Expression ternary. Lashlang has no expression-form <code>if</code>.</td></tr>
@@ -158,6 +164,11 @@ await control.continue_as({
               </tbody>
             </table>
           </div>
+          <pre><code>results = await (
+  workspace.default.read_file({ path: "left.txt" })?,
+  workspace.default.read_file({ path: "right.txt" })?
+)
+submit { left: results[0], both: results }</code></pre>
         </div>
 
         <div class="section" id="assignment-and-mutation">
@@ -169,7 +180,7 @@ await control.continue_as({
             <dt>Supported targets</dt>
             <dd><code>name = expr</code>, <code>record.field = value</code>, <code>record[key] = value</code>, <code>list[i] = value</code>, and nested forms like <code>state.groups[g].count = count + 1</code>.</dd>
             <dt>Rules</dt>
-            <dd>Record field/index assignment inserts or replaces fields. List assignment replaces an existing integer index only. Assigning through a missing nested record key or image field is an error.</dd>
+            <dd>Record field/index assignment inserts or replaces fields. List assignment replaces an existing integer index only. Tuple indexes are read-only. Assigning through a missing nested record key or image field is an error.</dd>
           </dl>
           <pre><code>counts = {}
 for group in groups {
@@ -188,7 +199,7 @@ submit counts</code></pre>
             <dt><code>if</code> / <code>else</code></dt>
             <dd>Conditionals use blocks. <code>else if</code> parses as an <code>else</code> block containing another <code>if</code>.</dd>
             <dt><code>for</code></dt>
-            <dd><code>for item in iterable { ... }</code> iterates lists. Non-list iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</dd>
+            <dd><code>for item in iterable { ... }</code> iterates lists and tuples. Non-sequence iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</dd>
             <dt><code>while</code></dt>
             <dd><code>while condition { ... }</code> repeats while the condition is truthy. Prefer bounded loops where possible; <code>break</code>, <code>continue</code>, and <code>submit</code> keep their normal meanings inside the loop body.</dd>
             <dt><code>break</code> / <code>continue</code></dt>

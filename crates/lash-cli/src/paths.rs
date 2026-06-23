@@ -54,6 +54,22 @@ pub fn attachments_dir() -> PathBuf {
     lash_home().join("attachments")
 }
 
+/// Stable id for this CLI installation on this host, stored under `$LASH_HOME`.
+pub fn host_id() -> std::io::Result<String> {
+    let home = lash_home();
+    std::fs::create_dir_all(&home)?;
+    let path = home.join("host-id");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if !existing.is_empty() {
+            return Ok(existing.to_string());
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(&path, format!("{id}\n"))?;
+    Ok(id)
+}
+
 /// Path to the CLI's model catalog cache.
 pub fn model_catalog_cache_file() -> PathBuf {
     lash_cache_dir().join("models.json")

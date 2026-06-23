@@ -150,7 +150,7 @@ pub(crate) fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             FlowValue::Resource(resource) => serde_json::to_value(resource)
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-            FlowValue::List(values) => {
+            FlowValue::Tuple(values) | FlowValue::List(values) => {
                 let mut out = Vec::with_capacity(values.len());
                 for value in values.iter() {
                     out.push(flow_to_json_value(value).await);
@@ -263,6 +263,18 @@ fn rehydrate_projected_value<'a>(
                     name, resolved, ref_json,
                 ));
                 Ok(true)
+            }
+            FlowValue::Tuple(values) => {
+                let mut changed = false;
+                let mut restored = values.iter().cloned().collect::<Vec<_>>();
+                for value in restored.iter_mut() {
+                    changed |=
+                        rehydrate_projected_value(value, Arc::clone(&projection_resolver)).await?;
+                }
+                if changed {
+                    *value = FlowValue::Tuple(restored.into());
+                }
+                Ok(changed)
             }
             FlowValue::List(values) => {
                 let mut changed = false;

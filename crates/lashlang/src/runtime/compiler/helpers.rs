@@ -116,6 +116,7 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::Number(_)
         | Expr::String(_)
         | Expr::Variable(_)
+        | Expr::Tuple(_)
         | Expr::List(_)
         | Expr::ListComprehension { .. }
         | Expr::Record(_)
@@ -166,6 +167,7 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         | Expr::Variable(_)
         | Expr::ProcessRef { .. }
         | Expr::ResourceRef(_) => true,
+        Expr::Tuple(items) => items.iter().all(is_pure_expr),
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
         Expr::ResultUnwrap(expr) => is_pure_expr(expr),

@@ -275,6 +275,16 @@ impl Compiler {
                     stack_value_count,
                 )
             }
+            Expr::Tuple(items) => {
+                let values = items
+                    .iter()
+                    .map(|item| {
+                        self.compile_aggregate_await_shape(item, leaves, stack_value_count)
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                CompiledAggregateAwaitShape::Tuple(values)
+            }
             Expr::List(items) => {
                 let values = items
                     .iter()
@@ -703,6 +713,9 @@ impl Compiler {
 
 fn aggregate_await_shape_leaf_count(expr: &Expr) -> Option<usize> {
     match expr {
+        Expr::Tuple(items) => items.iter().try_fold(0usize, |count, item| {
+            Some(count + aggregate_await_leaf_count(item)?)
+        }),
         Expr::List(items) => items.iter().try_fold(0usize, |count, item| {
             Some(count + aggregate_await_leaf_count(item)?)
         }),
@@ -717,6 +730,9 @@ fn aggregate_await_leaf_count(expr: &Expr) -> Option<usize> {
     match expr {
         Expr::ReceiverCall { .. } => Some(1),
         Expr::ResultUnwrap(inner) if matches!(inner.as_ref(), Expr::ReceiverCall { .. }) => Some(1),
+        Expr::Tuple(items) => items.iter().try_fold(0usize, |count, item| {
+            Some(count + aggregate_await_leaf_count(item)?)
+        }),
         Expr::List(items) => items.iter().try_fold(0usize, |count, item| {
             Some(count + aggregate_await_leaf_count(item)?)
         }),

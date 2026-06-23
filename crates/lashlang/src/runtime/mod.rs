@@ -85,7 +85,7 @@ use vm::IterState;
 pub enum RuntimeError {
     #[error("unknown name `{name}`")]
     UndefinedVariable { name: String },
-    #[error("`for` expects a list")]
+    #[error("`for` expects a list or tuple")]
     NonListIteration,
     #[error("`{keyword}` can only be used inside a process body")]
     SessionProcessAdminOutsideProcess { keyword: &'static str },

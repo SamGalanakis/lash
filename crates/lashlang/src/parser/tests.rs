@@ -110,6 +110,114 @@ mod tests {
     }
 
     #[test]
+    fn comma_expressions_parse_as_tuples_outside_delimited_lists() {
+        let program = parse("pair = 1, 2\nsubmit pair").expect("program should parse");
+        let Expr::Assign { expr, .. } = &block(&program)[0] else {
+            panic!("expected assignment");
+        };
+        let Expr::Tuple(items) = expr.as_ref() else {
+            panic!("assignment value should be a tuple");
+        };
+        assert_eq!(items.len(), 2);
+
+        let program = parse("submit 1, 2").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        let Expr::Tuple(items) = expr.as_ref() else {
+            panic!("submit value should be a tuple");
+        };
+        assert_eq!(items.len(), 2);
+
+        let program = parse("print grep_results.count, grep_results.files_with_matches")
+            .expect("program should parse");
+        let Expr::Print(expr) = &block(&program)[0] else {
+            panic!("expected print");
+        };
+        let Expr::Tuple(items) = expr.as_ref() else {
+            panic!("print value should be a tuple");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| matches!(item, Expr::Field { .. })));
+    }
+
+    #[test]
+    fn parenthesized_tuple_rules_match_python_shape() {
+        let program = parse("submit (1,)").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        let Expr::Tuple(items) = expr.as_ref() else {
+            panic!("singleton should be a tuple");
+        };
+        assert_eq!(items.len(), 1);
+
+        let program = parse("submit ()").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        let Expr::Tuple(items) = expr.as_ref() else {
+            panic!("empty parens should be an empty tuple");
+        };
+        assert!(items.is_empty());
+
+        let program = parse("submit (1)").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        assert!(matches!(expr.as_ref(), Expr::Number(_)));
+    }
+
+    #[test]
+    fn delimited_commas_remain_argument_list_and_record_separators() {
+        let program = parse("foo(1, 2,)").expect("program should parse");
+        let Expr::BuiltinCall { args, .. } = &block(&program)[0] else {
+            panic!("expected builtin call");
+        };
+        assert_eq!(args.len(), 2);
+        assert!(args.iter().all(|arg| matches!(arg, Expr::Number(_))));
+
+        let program = parse("foo((1, 2))").expect("program should parse");
+        let Expr::BuiltinCall { args, .. } = &block(&program)[0] else {
+            panic!("expected builtin call");
+        };
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0], Expr::Tuple(items) if items.len() == 2));
+
+        let program = parse("submit [1, 2,]").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        assert!(matches!(expr.as_ref(), Expr::List(items) if items.len() == 2));
+
+        let program = parse("submit [(1, 2)]").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        let Expr::List(items) = expr.as_ref() else {
+            panic!("expected list");
+        };
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], Expr::Tuple(tuple_items) if tuple_items.len() == 2));
+
+        let program = parse("submit { a: 1, b: 2, }").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        assert!(matches!(expr.as_ref(), Expr::Record(entries) if entries.len() == 2));
+
+        let program = parse("submit { a: (1, 2) }").expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        let Expr::Record(entries) = expr.as_ref() else {
+            panic!("expected record");
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].1, Expr::Tuple(tuple_items) if tuple_items.len() == 2));
+    }
+
+    #[test]
     fn list_comprehension_parses_ordered_for_and_if_clauses() {
         let program = parse(
             "result = [format(\"{}:{}\", a, b) for a in xs if a > 0 for b in ys if b != a]",

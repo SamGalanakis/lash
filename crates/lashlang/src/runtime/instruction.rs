@@ -95,6 +95,7 @@ pub(crate) struct CompiledResourceOperationBatchLeaf {
 pub(crate) enum CompiledAggregateAwaitShape {
     BatchLeaf(usize),
     Value(usize),
+    Tuple(Box<[CompiledAggregateAwaitShape]>),
     List(Box<[CompiledAggregateAwaitShape]>),
     Record {
         keys: usize,
@@ -137,6 +138,7 @@ pub(crate) enum Instruction {
         slot: usize,
         constant: usize,
     },
+    BuildTuple(usize),
     BuildList(usize),
     ListAppend,
     BuildRecord(usize),
@@ -328,6 +330,7 @@ impl Instruction {
             Instruction::StoreName(_)
             | Instruction::StoreConst { .. }
             | Instruction::PathAssign { .. } => InstructionProfileTag::StoreName,
+            Instruction::BuildTuple(_) => InstructionProfileTag::BuildTuple,
             Instruction::BuildList(_) => InstructionProfileTag::BuildList,
             Instruction::ListAppend => InstructionProfileTag::AppendAssign,
             Instruction::BuildRecord(_) => InstructionProfileTag::BuildRecord,
@@ -466,6 +469,7 @@ pub(crate) enum InstructionProfileTag {
     PushConst,
     LoadName,
     StoreName,
+    BuildTuple,
     BuildList,
     BuildRecord,
     Field,
@@ -570,6 +574,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "push_const",
     "load_name",
     "store_name",
+    "build_tuple",
     "build_list",
     "build_record",
     "field",

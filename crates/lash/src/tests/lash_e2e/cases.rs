@@ -328,6 +328,46 @@ submit { joined: [left_value, right_value] }"#,
     })
 }
 
+#[test]
+fn lash_e2e_tuple_values_submit_as_json_arrays() -> Result<()> {
+    run_async_test_on_stack_budget("lash-e2e-tuple-values", || async {
+        run_turn_case(LashE2eCase {
+            name: "tuple values submit as json arrays",
+            session_id: "lash-e2e-tuple-values",
+            scripted_provider_responses: vec![lashlang_block(
+                r#"
+pair = "left", "right"
+tail = slice(pair, 1, null)
+seen = []
+for item in pair {
+  seen = push(seen, item)
+}
+submit {
+  first: pair[0],
+  tail: tail,
+  seen: seen,
+  tuple: pair,
+  nested: { pair: pair }
+}"#,
+            )],
+            root_prompt: "Use tuple values and submit the derived result.",
+            expected_submitted_value: Some(serde_json::json!({
+                "first": "left",
+                "tail": ["right"],
+                "seen": ["left", "right"],
+                "tuple": ["left", "right"],
+                "nested": { "pair": ["left", "right"] }
+            })),
+            tool_provider: None,
+            install_subagents: false,
+            max_turns: None,
+            expected_contracts: ExpectedContracts::default(),
+        })
+        .await?;
+        Ok(())
+    })
+}
+
 fn assert_lashlang_process_ids_unique_for_labels<const N: usize>(
     processes: &[lash_core::ProcessHandleSummary],
     expected_labels: [&str; N],

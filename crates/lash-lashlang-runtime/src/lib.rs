@@ -824,12 +824,22 @@ impl lash_core::ProcessEngine for LashlangProcessEngine {
 }
 
 mod bridge;
+mod catalogue_preview;
 mod deferred;
 mod process;
 
 pub use bridge::{
     lashlang_value_to_json, process_event_payload, protocol_tool_output_to_lashlang_value,
     protocol_tool_reply_to_lashlang_value, sleep_duration_ms,
+};
+pub use catalogue_preview::{
+    CataloguePreviewEntry, CataloguePreviewOptions, DEFAULT_CATALOGUE_PREVIEW_CALL_NAME_LIMIT,
+    DEFAULT_CATALOGUE_PREVIEW_MODULE_LIMIT, catalogue_preview_contribution,
+    catalogue_preview_contribution_for_entries,
+    catalogue_preview_contribution_for_entries_with_options,
+    catalogue_preview_contribution_for_manifests, catalogue_preview_contribution_with_options,
+    catalogue_preview_entries_from_catalog_records, catalogue_preview_entries_from_manifests,
+    catalogue_preview_entry_from_catalog_record, catalogue_preview_entry_from_manifest,
 };
 pub use deferred::{
     DeferredResolutionRecord, DeferredToolResolver, Resolution, SharedDeferredToolResolver,

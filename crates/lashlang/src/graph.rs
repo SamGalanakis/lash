@@ -740,6 +740,7 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::Number(_)
         | Expr::String(_)
         | Expr::Variable(_)
+        | Expr::Tuple(_)
         | Expr::List(_)
         | Expr::ListComprehension { .. }
         | Expr::Record(_)

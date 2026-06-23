@@ -8,16 +8,17 @@ use lash::direct::{
 use lash::durability::RuntimeHostConfig;
 use lash::messages::MessageRole;
 use lash::persistence::{
-    GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeCommit, RuntimeCommitResult,
-    RuntimePersistence, RuntimeSessionState, RuntimeTurnCommitStamp, SessionCheckpoint, SessionMeta,
-    SessionExecutionLease, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
-    SessionNodeRecord, SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport,
-    load_persisted_session_state, load_persisted_session_state_active_path,
+    GcReport, GraphCommitDelta, LeaseOwnerIdentity, PersistedSessionRead, RuntimeCommit,
+    RuntimeCommitResult, RuntimePersistence, RuntimeSessionState, RuntimeTurnCommitStamp,
+    SessionCheckpoint, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
+    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionMeta, SessionNodeRecord,
+    SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport, load_persisted_session_state,
+    load_persisted_session_state_active_path,
 };
 use lash::plugins::{
-    AfterToolCallHook, BeforeToolCallHook, CompactionContext, ContextCompaction,
-    ContextCompactor, ContextError, PluginDirective, PluginHost, PluginSpec, PluginSpecBuilder,
-    PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolCatalogContribution,
+    AfterToolCallHook, BeforeToolCallHook, CompactionContext, ContextCompaction, ContextCompactor,
+    ContextError, PluginDirective, PluginHost, PluginSpec, PluginSpecBuilder, PluginSpecFactory,
+    ToolCallHookContext, ToolCatalogContribution, ToolResultHookContext,
 };
 use lash::provider::{ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy};
 use lash::runtime::AdvancedLashCoreBuilder;
@@ -38,10 +39,7 @@ impl RuntimePersistence for FacadeStore {
         Ok(None)
     }
 
-    async fn load_node(
-        &self,
-        _node_id: &str,
-    ) -> Result<Option<SessionNodeRecord>, StoreError> {
+    async fn load_node(&self, _node_id: &str) -> Result<Option<SessionNodeRecord>, StoreError> {
         Ok(None)
     }
 
@@ -66,17 +64,38 @@ impl RuntimePersistence for FacadeStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<Option<SessionExecutionLease>, StoreError> {
-        Ok(Some(SessionExecutionLease {
-            session_id: session_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: "facade-token".to_string(),
-            fencing_token: 1,
-            claimed_at_epoch_ms: 0,
-            expires_at_epoch_ms: lease_ttl_ms,
-        }))
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
+        Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+            SessionExecutionLease {
+                session_id: session_id.to_string(),
+                owner: owner.clone(),
+                lease_token: "facade-token".to_string(),
+                fencing_token: 1,
+                claimed_at_epoch_ms: 0,
+                expires_at_epoch_ms: lease_ttl_ms,
+            },
+        ))
+    }
+
+    async fn reclaim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner: &LeaseOwnerIdentity,
+        _observed_holder: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
+        Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+            SessionExecutionLease {
+                session_id: session_id.to_string(),
+                owner: owner.clone(),
+                lease_token: "facade-token".to_string(),
+                fencing_token: 1,
+                claimed_at_epoch_ms: 0,
+                expires_at_epoch_ms: lease_ttl_ms,
+            },
+        ))
     }
 
     async fn renew_session_execution_lease(
@@ -86,7 +105,7 @@ impl RuntimePersistence for FacadeStore {
     ) -> Result<SessionExecutionLease, StoreError> {
         Ok(SessionExecutionLease {
             session_id: fence.session_id.clone(),
-            owner_id: fence.owner_id.clone(),
+            owner: fence.owner.clone(),
             lease_token: fence.lease_token.clone(),
             fencing_token: fence.fencing_token,
             claimed_at_epoch_ms: 0,
@@ -149,16 +168,10 @@ fn persistence_types_are_nameable(
 
 fn plugin_types_are_nameable() -> PluginHost {
     let before: BeforeToolCallHook = Arc::new(|ctx: ToolCallHookContext| {
-        Box::pin(async move {
-            Ok(vec![PluginDirective::ReplaceToolArgs {
-                args: ctx.args,
-            }])
-        })
+        Box::pin(async move { Ok(vec![PluginDirective::ReplaceToolArgs { args: ctx.args }]) })
     });
     let after: AfterToolCallHook = Arc::new(|ctx: ToolResultHookContext| {
-        Box::pin(async move {
-            Ok(vec![PluginDirective::short_circuit(ctx.result)])
-        })
+        Box::pin(async move { Ok(vec![PluginDirective::short_circuit(ctx.result)]) })
     });
     let builder: PluginSpecBuilder = Arc::new(move |_ctx| {
         Ok(PluginSpec::new()
@@ -233,10 +246,7 @@ fn message_role_type_is_nameable(role: MessageRole) -> &'static str {
     }
 }
 
-fn turn_result_detail_types_are_nameable(
-    output: AssistantOutput,
-    issue: TurnIssue,
-) {
+fn turn_result_detail_types_are_nameable(output: AssistantOutput, issue: TurnIssue) {
     let _ = (output, issue);
 }
 

@@ -91,6 +91,9 @@ struct QueuedBatchRow {
     available_at_ms: u64,
     enqueued_at_ms: u64,
     claim_fencing_token: u64,
+    claim_owner: Option<LeaseOwnerIdentity>,
+    claim_token: Option<String>,
+    claim_expires_at_ms: u64,
 }
 
 fn queued_batch_row(row: PgRow) -> Result<QueuedBatchRow, StoreError> {
@@ -113,6 +116,13 @@ fn queued_batch_row(row: PgRow) -> Result<QueuedBatchRow, StoreError> {
         available_at_ms: row.get::<i64, _>("available_at_ms") as u64,
         enqueued_at_ms: row.get::<i64, _>("enqueued_at_ms") as u64,
         claim_fencing_token: row.get::<i64, _>("claim_fencing_token") as u64,
+        claim_owner: lease_owner_from_columns(
+            row.get("claim_owner_id"),
+            row.get("claim_owner_incarnation_id"),
+            row.get("claim_owner_liveness_json"),
+        ),
+        claim_token: row.get("claim_token"),
+        claim_expires_at_ms: row.get::<i64, _>("claim_expires_at_ms") as u64,
     })
 }
 
@@ -123,7 +133,8 @@ async fn load_queued_batch(
     let row = sqlx::query(
         "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                 slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                claim_fencing_token
+                claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                claim_owner_liveness_json, claim_token, claim_expires_at_ms
          FROM lash_queued_work_batches
          WHERE batch_id = $1",
     )

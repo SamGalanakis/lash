@@ -436,6 +436,10 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
+            Instruction::BuildTuple(len) => {
+                let values = self.pop_n(len)?;
+                self.stack.push(Value::Tuple(values.into()));
+            }
             Instruction::BuildList(len) => {
                 let values = self.pop_n(len)?;
                 self.stack.push(Value::List(values.into()));
@@ -1288,6 +1292,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             | Instruction::LoadName(_)
             | Instruction::StoreName(_)
             | Instruction::StoreConst { .. }
+            | Instruction::BuildTuple(_)
             | Instruction::BuildList(_)
             | Instruction::BuildRecord(_)
             | Instruction::ResultUnwrap

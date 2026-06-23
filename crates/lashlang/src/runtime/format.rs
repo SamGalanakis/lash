@@ -1,5 +1,5 @@
 //! String formatting and stringification: `apply_format` (the `f"..."`
-//! template engine), `stringify_value*` (record/list/projected pretty-print),
+//! template engine), `stringify_value*` (record/list/tuple/projected pretty-print),
 //! `execute_compiled_format`, plus the slice-bound helpers used by the
 //! `slice` builtin (which also fold strings).
 //!
@@ -50,6 +50,7 @@ pub(crate) fn append_stringified_value_direct(
             write_number(output, *value).expect("string writes should not fail")
         }
         Value::Projected(_) => unreachable!("projected values require async stringification"),
+        Value::Tuple(values) => append_tuple_literal_direct(output, values)?,
         Value::Image(_) | Value::Resource(_) | Value::List(_) | Value::Record(_) => {
             append_direct_json(output, value)
         }
@@ -70,6 +71,7 @@ pub(crate) fn append_stringified_value_async<'a>(
                 write_number(output, *value).expect("string writes should not fail")
             }
             Value::Projected(value) => output.push_str(&value.render().await),
+            Value::Tuple(values) => append_tuple_literal_async(output, values).await?,
             Value::Image(_) | Value::Resource(_) | Value::List(_) | Value::Record(_) => {
                 append_runtime_json_async(output, value).await;
             }
@@ -84,6 +86,74 @@ pub(crate) fn append_stringified_value(
     value: &Value,
 ) -> Result<(), RuntimeError> {
     futures_executor::block_on(append_stringified_value_async(output, value))
+}
+
+pub(crate) fn append_tuple_literal_direct(
+    output: &mut String,
+    values: &ListValue,
+) -> Result<(), RuntimeError> {
+    output.push('(');
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        append_tuple_item_literal_direct(output, value)?;
+    }
+    if values.len() == 1 {
+        output.push(',');
+    }
+    output.push(')');
+    Ok(())
+}
+
+fn append_tuple_item_literal_direct(
+    output: &mut String,
+    value: &Value,
+) -> Result<(), RuntimeError> {
+    match value {
+        Value::String(value) => output.push_str(
+            &serde_json::to_string(value).expect("string json serialization should succeed"),
+        ),
+        Value::Tuple(values) => append_tuple_literal_direct(output, values)?,
+        other => append_stringified_value_direct(output, other)?,
+    }
+    Ok(())
+}
+
+pub(crate) fn append_tuple_literal_async<'a>(
+    output: &'a mut String,
+    values: &'a ListValue,
+) -> ProjectedFuture<'a, Result<(), RuntimeError>> {
+    Box::pin(async move {
+        output.push('(');
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                output.push_str(", ");
+            }
+            append_tuple_item_literal_async(output, value).await?;
+        }
+        if values.len() == 1 {
+            output.push(',');
+        }
+        output.push(')');
+        Ok(())
+    })
+}
+
+fn append_tuple_item_literal_async<'a>(
+    output: &'a mut String,
+    value: &'a Value,
+) -> ProjectedFuture<'a, Result<(), RuntimeError>> {
+    Box::pin(async move {
+        match value {
+            Value::String(value) => output.push_str(
+                &serde_json::to_string(value).expect("string json serialization should succeed"),
+            ),
+            Value::Tuple(values) => append_tuple_literal_async(output, values).await?,
+            other => append_stringified_value_async(output, other).await?,
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn write_number(output: &mut impl fmt::Write, value: f64) -> fmt::Result {

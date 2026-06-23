@@ -22,6 +22,21 @@ pub(crate) fn decode_queued_payload(value: String) -> Result<QueuedWorkPayload, 
         .map_err(|err| StoreError::Backend(format!("failed to decode queued-work payload: {err}")))
 }
 
+fn lease_owner_from_columns(
+    owner_id: Option<String>,
+    incarnation_id: Option<String>,
+    liveness_json: Option<String>,
+) -> Option<LeaseOwnerIdentity> {
+    owner_id.map(|owner_id| LeaseOwnerIdentity {
+        incarnation_id: incarnation_id.unwrap_or_else(|| owner_id.clone()),
+        owner_id,
+        liveness: liveness_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or(LeaseOwnerLiveness::Opaque),
+    })
+}
+
 pub(crate) fn queued_work_batch_from_conn(
     conn: &Connection,
     row: QueuedBatchRow,
@@ -72,6 +87,9 @@ pub(crate) struct QueuedBatchRow {
     pub(crate) available_at_ms: u64,
     pub(crate) enqueued_at_ms: u64,
     pub(crate) claim_fencing_token: u64,
+    pub(crate) claim_owner: Option<LeaseOwnerIdentity>,
+    pub(crate) claim_token: Option<String>,
+    pub(crate) claim_expires_at_ms: u64,
 }
 
 pub(crate) fn queued_batch_row_from_sql(
@@ -88,6 +106,9 @@ pub(crate) fn queued_batch_row_from_sql(
         available_at_ms: row.get::<_, i64>(7)? as u64,
         enqueued_at_ms: row.get::<_, i64>(8)? as u64,
         claim_fencing_token: row.get::<_, i64>(9)? as u64,
+        claim_owner: lease_owner_from_columns(row.get(10)?, row.get(11)?, row.get(12)?),
+        claim_token: row.get(13)?,
+        claim_expires_at_ms: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -99,7 +120,8 @@ pub(crate) fn load_queued_batch_by_id_conn(
         .query_row(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token
+                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM queued_work_batches
              WHERE batch_id = ?1",
             params![batch_id],

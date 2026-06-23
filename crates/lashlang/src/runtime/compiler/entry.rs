@@ -722,6 +722,13 @@ impl Compiler {
             ))),
             Expr::ProcessRef { .. } | Expr::HostDescriptorConstructor { .. } => None,
             Expr::Variable(name) => self.const_for_name(name),
+            Expr::Tuple(items) => Some(Value::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.fold_compile_time_expr(item))
+                    .collect::<Option<Vec<_>>>()?
+                    .into(),
+            )),
             Expr::List(items) => Some(Value::List(
                 items
                     .iter()

@@ -136,6 +136,10 @@ fn execution_section_documents_static_label_annotations_when_enabled() {
     assert!(section.contains("@label(title: \"Label\")"));
     assert!(section.contains("@label(title: \"Label\", description: \"Details\")"));
     assert!(section.contains("Execution labels"));
+    assert!(section.contains("prefix annotation, not a standalone statement"));
+    assert!(section.contains("must appear immediately before the one statement"));
+    assert!(section.contains("Do not emit `@label(...)` by itself"));
+    assert!(section.contains("paths = await files.glob"));
     assert!(section.contains("important Lashlang phases"));
     assert!(section.contains("At top level, label meaningful setup"));
     assert!(section.contains("string literals"));

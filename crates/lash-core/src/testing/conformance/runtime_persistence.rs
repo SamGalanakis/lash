@@ -91,6 +91,7 @@ where
     load_hydrates_checkpoint_and_usage(make()).await;
     active_path_read_scope_selects_only_requested_ancestry(make()).await;
     session_execution_lease_contract(make()).await;
+    session_execution_lease_reclaim_contract(make()).await;
     match options.attachment_manifest {
         AttachmentManifestConformance::Persistent => {
             attachment_manifest_records_intent_and_commit_stamps(make()).await;
@@ -148,15 +149,41 @@ fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
     }
 }
 
+fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
+    crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
+}
+
+fn local_lease_owner(
+    owner_id: &str,
+    incarnation_id: &str,
+    host_id: &str,
+    boot_id: &str,
+    pid: u32,
+    process_start: &str,
+) -> crate::LeaseOwnerIdentity {
+    crate::LeaseOwnerIdentity {
+        owner_id: owner_id.to_string(),
+        incarnation_id: incarnation_id.to_string(),
+        liveness: crate::LeaseOwnerLiveness::local_process_for_test(
+            host_id,
+            boot_id,
+            pid,
+            process_start,
+        ),
+    }
+}
+
 async fn claim_session_execution_lease_for_test(
     store: &Arc<dyn RuntimePersistence>,
     session_id: &str,
     owner_id: &str,
 ) -> crate::SessionExecutionLease {
+    let owner = lease_owner(owner_id);
     store
-        .try_claim_session_execution_lease(session_id, owner_id, 60_000)
+        .try_claim_session_execution_lease(session_id, &owner, 60_000)
         .await
         .expect("claim session execution lease")
+        .acquired()
         .expect("session execution lease is free")
 }
 
@@ -362,20 +389,38 @@ async fn runtime_persistence_reports_declared_durability(
 
 async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
     let first = claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
+    let owner_a = lease_owner("owner-a");
+    let owner_a_next = crate::LeaseOwnerIdentity::opaque("owner-a", "owner-a:next-incarnation");
+    let owner_b = lease_owner("owner-b");
+    let owner_c = lease_owner("owner-c");
+    let owner_expired = lease_owner("owner-expired");
     let reentered = store
-        .try_claim_session_execution_lease("root", "owner-a", 120_000)
+        .try_claim_session_execution_lease("root", &owner_a, 120_000)
         .await
-        .expect("same owner may re-enter live session lease")
-        .expect("same owner receives existing session lease");
+        .expect("same incarnation may re-enter live session lease")
+        .acquired()
+        .expect("same incarnation receives existing session lease");
     assert_eq!(reentered.lease_token, first.lease_token);
     assert_eq!(reentered.fencing_token, first.fencing_token);
     assert!(reentered.expires_at_epoch_ms >= first.expires_at_epoch_ms);
     assert!(
-        store
-            .try_claim_session_execution_lease("root", "owner-b", 60_000)
-            .await
-            .expect("try concurrent session lease")
-            .is_none(),
+        matches!(
+            store
+                .try_claim_session_execution_lease("root", &owner_a_next, 60_000)
+                .await
+                .expect("try same owner next incarnation"),
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
+        "a live session execution lease must exclude the same owner in a different incarnation"
+    );
+    assert!(
+        matches!(
+            store
+                .try_claim_session_execution_lease("root", &owner_b, 60_000)
+                .await
+                .expect("try concurrent session lease"),
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
         "a live session execution lease must exclude concurrent owners"
     );
     let renewed = store
@@ -398,18 +443,20 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
     store
         .release_session_execution_lease(&crate::SessionExecutionLeaseCompletion {
             session_id: first.session_id.clone(),
-            owner_id: first.owner_id.clone(),
+            owner: first.owner.clone(),
             lease_token: format!("{}:stale", first.lease_token),
             fencing_token: first.fencing_token,
         })
         .await
         .expect("stale release is fenced and idempotent");
     assert!(
-        store
-            .try_claim_session_execution_lease("root", "owner-b", 60_000)
-            .await
-            .expect("try after stale release")
-            .is_none(),
+        matches!(
+            store
+                .try_claim_session_execution_lease("root", &owner_b, 60_000)
+                .await
+                .expect("try after stale release"),
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
         "stale release must not clear the live lease"
     );
     release_session_execution_lease_for_test(&store, &renewed).await;
@@ -423,19 +470,22 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
         .await
         .expect("old release is idempotent");
     assert!(
-        store
-            .try_claim_session_execution_lease("root", "owner-c", 60_000)
-            .await
-            .expect("try after old release")
-            .is_none(),
+        matches!(
+            store
+                .try_claim_session_execution_lease("root", &owner_c, 60_000)
+                .await
+                .expect("try after old release"),
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
         "old release must not clear a newer lease"
     );
     release_session_execution_lease_for_test(&store, &second).await;
 
     let expired = store
-        .try_claim_session_execution_lease("root", "owner-expired", 0)
+        .try_claim_session_execution_lease("root", &owner_expired, 0)
         .await
         .expect("claim expiring lease")
+        .acquired()
         .expect("expiring lease");
     let reclaimed = claim_session_execution_lease_for_test(&store, "root", "owner-reclaim").await;
     assert!(reclaimed.fencing_token > expired.fencing_token);
@@ -507,7 +557,7 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
         .claim_ready_queued_work(
             "root",
             &commit_lease.fence(),
-            "queue-owner",
+            &lease_owner("queue-owner"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             1,
@@ -523,7 +573,7 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
         .claim_ready_queued_work(
             "root",
             &queue_lease.fence(),
-            "queue-owner",
+            &lease_owner("queue-owner"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             1,
@@ -533,6 +583,273 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
         .expect("queue work claim");
     assert_eq!(claim.batches[0].batch_id, batch.batch_id);
     release_session_execution_lease_for_test(&store, &queue_lease).await;
+}
+
+async fn session_execution_lease_reclaim_contract(store: Arc<dyn RuntimePersistence>) {
+    let pid = std::process::id();
+    let dead_holder = local_lease_owner(
+        "dead-holder",
+        "dead-holder:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "not-the-current-process-start",
+    );
+    let claimant = local_lease_owner(
+        "claimant",
+        "claimant:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "claimant-start",
+    );
+    let holder = store
+        .try_claim_session_execution_lease("reclaim-dead", &dead_holder, 60_000)
+        .await
+        .expect("claim dead-holder lease")
+        .acquired()
+        .expect("dead-holder lease acquired");
+    assert!(
+        matches!(
+            store
+                .try_claim_session_execution_lease("reclaim-dead", &claimant, 60_000)
+                .await
+                .expect("try claimant against dead holder"),
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
+        "plain claim must report busy before the caller performs fenced reclaim"
+    );
+    let reclaimed = store
+        .reclaim_session_execution_lease("reclaim-dead", &claimant, &holder.fence(), 60_000)
+        .await
+        .expect("reclaim dead holder")
+        .acquired()
+        .expect("dead holder is reclaimable before ttl");
+    assert!(
+        reclaimed.fencing_token > holder.fencing_token,
+        "fenced reclaim must advance the fencing token"
+    );
+    let stale_reclaim = store
+        .reclaim_session_execution_lease(
+            "reclaim-dead",
+            &local_lease_owner(
+                "late-claimant",
+                "late-claimant:incarnation",
+                "host-a",
+                "boot-a",
+                pid,
+                "late-claimant-start",
+            ),
+            &holder.fence(),
+            60_000,
+        )
+        .await
+        .expect("stale observed-holder reclaim");
+    assert!(
+        matches!(
+            stale_reclaim,
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
+        "a stale observed holder must not clear the newer lease"
+    );
+    release_session_execution_lease_for_test(&store, &reclaimed).await;
+
+    let race_holder = store
+        .try_claim_session_execution_lease("reclaim-race", &dead_holder, 60_000)
+        .await
+        .expect("claim race holder")
+        .acquired()
+        .expect("race holder acquired");
+    let race_fence = race_holder.fence();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_store = Arc::clone(&store);
+    let right_store = Arc::clone(&store);
+    let left_barrier = Arc::clone(&barrier);
+    let right_barrier = Arc::clone(&barrier);
+    let left_fence = race_fence.clone();
+    let right_fence = race_fence.clone();
+    let left_claimant = local_lease_owner(
+        "race-left",
+        "race-left:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "race-left-start",
+    );
+    let right_claimant = local_lease_owner(
+        "race-right",
+        "race-right:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "race-right-start",
+    );
+    let left = tokio::spawn(async move {
+        left_barrier.wait().await;
+        left_store
+            .reclaim_session_execution_lease("reclaim-race", &left_claimant, &left_fence, 60_000)
+            .await
+    });
+    let right = tokio::spawn(async move {
+        right_barrier.wait().await;
+        right_store
+            .reclaim_session_execution_lease("reclaim-race", &right_claimant, &right_fence, 60_000)
+            .await
+    });
+    barrier.wait().await;
+    let left = left
+        .await
+        .expect("join left reclaim race")
+        .expect("left reclaim race");
+    let right = right
+        .await
+        .expect("join right reclaim race")
+        .expect("right reclaim race");
+    let mut race_winners = [left, right]
+        .into_iter()
+        .filter_map(crate::SessionExecutionLeaseClaimOutcome::acquired)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        race_winners.len(),
+        1,
+        "exactly one claimant may win a fenced reclaim race"
+    );
+    let race_winner = race_winners.pop().expect("race winner");
+    assert!(race_winner.fencing_token > race_holder.fencing_token);
+    release_session_execution_lease_for_test(&store, &race_winner).await;
+
+    let cross_host_holder = store
+        .try_claim_session_execution_lease("reclaim-cross-host", &dead_holder, 60_000)
+        .await
+        .expect("claim cross-host holder")
+        .acquired()
+        .expect("cross-host holder acquired");
+    let cross_host_result = store
+        .reclaim_session_execution_lease(
+            "reclaim-cross-host",
+            &local_lease_owner(
+                "cross-host-claimant",
+                "cross-host-claimant:incarnation",
+                "host-b",
+                "boot-a",
+                pid,
+                "claimant-start",
+            ),
+            &cross_host_holder.fence(),
+            60_000,
+        )
+        .await
+        .expect("cross-host reclaim");
+    assert!(
+        matches!(
+            cross_host_result,
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
+        "dead-looking local-process holders are reclaimable only on the same host"
+    );
+    release_session_execution_lease_for_test(&store, &cross_host_holder).await;
+
+    let different_boot_holder = store
+        .try_claim_session_execution_lease("reclaim-different-boot", &dead_holder, 60_000)
+        .await
+        .expect("claim different-boot holder")
+        .acquired()
+        .expect("different-boot holder acquired");
+    let different_boot_result = store
+        .reclaim_session_execution_lease(
+            "reclaim-different-boot",
+            &local_lease_owner(
+                "different-boot-claimant",
+                "different-boot-claimant:incarnation",
+                "host-a",
+                "boot-b",
+                pid,
+                "claimant-start",
+            ),
+            &different_boot_holder.fence(),
+            60_000,
+        )
+        .await
+        .expect("different-boot reclaim");
+    assert!(
+        matches!(
+            different_boot_result,
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
+        "same-host process metadata from a different boot is not proof of death"
+    );
+    release_session_execution_lease_for_test(&store, &different_boot_holder).await;
+
+    let opaque_holder = store
+        .try_claim_session_execution_lease("reclaim-opaque", &lease_owner("opaque-holder"), 60_000)
+        .await
+        .expect("claim opaque holder")
+        .acquired()
+        .expect("opaque holder acquired");
+    let opaque_result = store
+        .reclaim_session_execution_lease(
+            "reclaim-opaque",
+            &claimant,
+            &opaque_holder.fence(),
+            60_000,
+        )
+        .await
+        .expect("opaque reclaim");
+    assert!(
+        matches!(
+            opaque_result,
+            crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+        ),
+        "opaque holders fall back to ttl rather than fast reclaim"
+    );
+    release_session_execution_lease_for_test(&store, &opaque_holder).await;
+
+    if let Some(liveness) = crate::LeaseOwnerLiveness::current_local_process("live-host") {
+        let crate::LeaseOwnerLiveness::LocalProcess {
+            host_id, boot_id, ..
+        } = &liveness
+        else {
+            unreachable!("current local-process liveness is either local or absent");
+        };
+        let host_id = host_id.clone();
+        let boot_id = boot_id.clone();
+        let live_holder_owner = crate::LeaseOwnerIdentity {
+            owner_id: "live-holder".to_string(),
+            incarnation_id: "live-holder:incarnation".to_string(),
+            liveness,
+        };
+        let live_claimant = local_lease_owner(
+            "live-claimant",
+            "live-claimant:incarnation",
+            &host_id,
+            &boot_id,
+            pid,
+            "live-claimant-start",
+        );
+        let live_holder = store
+            .try_claim_session_execution_lease("reclaim-live", &live_holder_owner, 60_000)
+            .await
+            .expect("claim live holder")
+            .acquired()
+            .expect("live holder acquired");
+        let live_result = store
+            .reclaim_session_execution_lease(
+                "reclaim-live",
+                &live_claimant,
+                &live_holder.fence(),
+                60_000,
+            )
+            .await
+            .expect("live reclaim");
+        assert!(
+            matches!(
+                live_result,
+                crate::SessionExecutionLeaseClaimOutcome::Busy { .. }
+            ),
+            "a live local process holder remains busy before ttl"
+        );
+        release_session_execution_lease_for_test(&store, &live_holder).await;
+    }
 }
 
 async fn active_path_read_scope_selects_only_requested_ancestry(
@@ -795,7 +1112,7 @@ async fn queued_work_cancel_removes_only_unclaimed_batches(store: Arc<dyn Runtim
         .claim_ready_queued_work(
             "root",
             &session_lease.fence(),
-            "owner",
+            &lease_owner("owner"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             1,
@@ -880,7 +1197,7 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
             .claim_ready_queued_work_by_batch_ids(
                 "root",
                 &rejected_session_lease.fence(),
-                "owner",
+                &lease_owner("owner"),
                 QueuedWorkClaimBoundary::Idle,
                 60_000,
                 std::slice::from_ref(&second.batch_id),
@@ -908,7 +1225,7 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
         .claim_ready_queued_work_by_batch_ids(
             "root",
             &accepted_session_lease.fence(),
-            "owner",
+            &lease_owner("owner"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             std::slice::from_ref(&first.batch_id),
@@ -966,7 +1283,7 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
             .claim_ready_queued_work(
                 "root",
                 &checkpoint_empty_lease.fence(),
-                "owner-a",
+                &lease_owner("owner-a"),
                 QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
                 60_000,
                 10,
@@ -984,7 +1301,7 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
         .claim_ready_queued_work(
             "root",
             &idle_session_lease.fence(),
-            "owner-a",
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1002,7 +1319,7 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
         .claim_ready_queued_work(
             "root",
             &checkpoint_session_lease.fence(),
-            "owner-b",
+            &lease_owner("owner-b"),
             QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
             60_000,
             10,
@@ -1023,7 +1340,7 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
         .claim_ready_queued_work(
             "root",
             &reclaim_session_lease.fence(),
-            "owner-c",
+            &lease_owner("owner-c"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1100,7 +1417,7 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .claim_ready_queued_work(
             "root",
             &root_session_lease.fence(),
-            "owner-a",
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1124,7 +1441,7 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .claim_ready_queued_work(
             "root",
             &next_root_session_lease.fence(),
-            "owner-b",
+            &lease_owner("owner-b"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1140,7 +1457,7 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .claim_ready_queued_work(
             "other",
             &other_session_lease.fence(),
-            "owner-c",
+            &lease_owner("owner-c"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1169,7 +1486,7 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .claim_ready_queued_work(
             "reclaim",
             &expired_session_lease.fence(),
-            "owner-a",
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
             0,
             1,
@@ -1184,7 +1501,7 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .claim_ready_queued_work(
             "reclaim",
             &reclaim_session_lease.fence(),
-            "owner-b",
+            &lease_owner("owner-b"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             1,
@@ -1241,7 +1558,7 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .claim_ready_queued_work(
             "limited",
             &limited_session_lease.fence(),
-            "owner",
+            &lease_owner("owner"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             2,
@@ -1268,7 +1585,7 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .claim_ready_queued_work(
             "limited",
             &remaining_session_lease.fence(),
-            "owner-next",
+            &lease_owner("owner-next"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1338,7 +1655,7 @@ async fn queued_work_join_groups_by_delivery_policy_and_merge_key(
         .claim_ready_queued_work(
             "root",
             &first_session_lease.fence(),
-            "owner-a",
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1362,7 +1679,7 @@ async fn queued_work_join_groups_by_delivery_policy_and_merge_key(
         .claim_ready_queued_work(
             "root",
             &second_session_lease.fence(),
-            "owner-b",
+            &lease_owner("owner-b"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1378,7 +1695,7 @@ async fn queued_work_join_groups_by_delivery_policy_and_merge_key(
         .claim_ready_queued_work(
             "root",
             &third_session_lease.fence(),
-            "owner-c",
+            &lease_owner("owner-c"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1421,7 +1738,7 @@ async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersisten
         .claim_ready_queued_work(
             "root",
             &claim_session_lease.fence(),
-            "owner-a",
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,
@@ -1495,7 +1812,7 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
         .claim_ready_queued_work(
             "root",
             &session_lease.fence(),
-            "queue-owner",
+            &lease_owner("queue-owner"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             1,
@@ -1781,16 +2098,18 @@ async fn session_execution_lease_first_claim_excludes_concurrent_reopen_handles(
     let reopen = Arc::clone(&factory.reopen);
     let open_barrier = Arc::clone(&barrier);
     let reopen_barrier = Arc::clone(&barrier);
+    let open_owner = lease_owner("owner-a");
+    let reopen_owner = lease_owner("owner-b");
 
     let open_claim = tokio::spawn(async move {
         open_barrier.wait().await;
-        open.try_claim_session_execution_lease("first-claim-race", "owner-a", 60_000)
+        open.try_claim_session_execution_lease("first-claim-race", &open_owner, 60_000)
             .await
     });
     let reopen_claim = tokio::spawn(async move {
         reopen_barrier.wait().await;
         reopen
-            .try_claim_session_execution_lease("first-claim-race", "owner-b", 60_000)
+            .try_claim_session_execution_lease("first-claim-race", &reopen_owner, 60_000)
             .await
     });
 
@@ -1803,12 +2122,14 @@ async fn session_execution_lease_first_claim_excludes_concurrent_reopen_handles(
         .await
         .expect("join reopen first-claim race")
         .expect("reopen first-claim race");
-    let claim_count = usize::from(open_claim.is_some()) + usize::from(reopen_claim.is_some());
+    let open_lease = open_claim.acquired();
+    let reopen_lease = reopen_claim.acquired();
+    let claim_count = usize::from(open_lease.is_some()) + usize::from(reopen_lease.is_some());
     assert_eq!(
         claim_count, 1,
         "exactly one concurrent first claim may acquire a session execution lease"
     );
-    if let Some(lease) = open_claim.as_ref().or(reopen_claim.as_ref()) {
+    if let Some(lease) = open_lease.as_ref().or(reopen_lease.as_ref()) {
         factory
             .open
             .release_session_execution_lease(&lease.completion())
@@ -1869,7 +2190,7 @@ async fn queued_wake_delivery_is_source_key_idempotent_and_claimed_once(
         .claim_ready_queued_work(
             "root",
             &session_lease.fence(),
-            "wake-owner",
+            &lease_owner("wake-owner"),
             QueuedWorkClaimBoundary::Idle,
             60_000,
             10,

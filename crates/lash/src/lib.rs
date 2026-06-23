@@ -108,13 +108,19 @@ pub mod tools {
     pub use lash_core::{PLUGIN_TOOL_SOURCE_ID, ToolRestoreReport, ToolState, ToolStateEntry};
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
-        DeferredResolutionRecord, DeferredToolResolver, Resolution as DeferredToolResolution,
-        SharedDeferredToolResolver, ToolGrant as DeferredToolGrant,
+        CataloguePreviewEntry, CataloguePreviewOptions, DEFAULT_CATALOGUE_PREVIEW_CALL_NAME_LIMIT,
+        DEFAULT_CATALOGUE_PREVIEW_MODULE_LIMIT, LASHLANG_TOOL_BINDING_KEY, LashlangToolBinding,
+        RemoteToolGrantLashlangExt, ToolDefinitionLashlangExt, ToolManifestLashlangExt,
+        catalogue_preview_contribution, catalogue_preview_contribution_for_entries,
+        catalogue_preview_contribution_for_entries_with_options,
+        catalogue_preview_contribution_for_manifests, catalogue_preview_contribution_with_options,
+        catalogue_preview_entries_from_catalog_records, catalogue_preview_entries_from_manifests,
+        catalogue_preview_entry_from_catalog_record, catalogue_preview_entry_from_manifest,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
-        LASHLANG_TOOL_BINDING_KEY, LashlangToolBinding, RemoteToolGrantLashlangExt,
-        ToolDefinitionLashlangExt, ToolManifestLashlangExt,
+        DeferredResolutionRecord, DeferredToolResolver, Resolution as DeferredToolResolution,
+        SharedDeferredToolResolver, ToolGrant as DeferredToolGrant,
     };
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
     /// `resolve_contract`: supply the [`ToolDefinition`]s once and an
@@ -152,11 +158,11 @@ pub mod persistence {
         ProcessExecutionEnvStore,
     };
     pub use lash_core::{
-        BlobRef, GcReport, PersistedSessionConfig, PersistedTurnState, ProtocolEvent,
-        RuntimePersistence, SessionEventRecord, SessionExecutionLease,
-        SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionGraph, SessionMeta,
-        SessionNodeRecord, SessionReadScope, SessionReadView, SessionRelation, StoreError,
-        TokenLedgerEntry, VacuumReport,
+        BlobRef, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, PersistedSessionConfig,
+        PersistedTurnState, ProtocolEvent, RuntimePersistence, SessionEventRecord,
+        SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
+        SessionExecutionLeaseFence, SessionGraph, SessionMeta, SessionNodeRecord, SessionReadScope,
+        SessionReadView, SessionRelation, StoreError, TokenLedgerEntry, VacuumReport,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{InMemoryLashlangArtifactStore, LashlangArtifactStore};

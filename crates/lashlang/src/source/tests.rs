@@ -207,11 +207,18 @@ fn canonical_program_source_handles_unlinked_programs_without_requirements() {
         }
 
         answer = (1 + 2) * 3
-        submit answer
+        pair = 1, 2
+        singleton = (answer,)
+        empty = ()
+        submit { pair: pair, singleton: singleton, empty: empty, scalar: (answer) }
         "#,
     )
     .expect("parse");
     let rendered = canonical_program_source(&program).expect("render source");
+    assert!(rendered.contains("pair = (1, 2)"), "{rendered}");
+    assert!(rendered.contains("singleton = (answer,)"), "{rendered}");
+    assert!(rendered.contains("empty = ()"), "{rendered}");
+    assert!(rendered.contains("scalar: answer"), "{rendered}");
     let reparsed = parse(&rendered).expect("parse rendered");
     assert_eq!(
         canonical_program_ir(reparsed),

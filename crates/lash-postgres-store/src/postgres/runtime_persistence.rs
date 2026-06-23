@@ -150,12 +150,8 @@ impl RuntimePersistence for PostgresSessionStore {
                 session_id: commit.session_id.clone(),
             });
         };
-        ensure_session_execution_lease_tx(
-            &mut tx,
-            &commit.session_id,
-            session_execution_lease,
-        )
-        .await?;
+        ensure_session_execution_lease_tx(&mut tx, &commit.session_id, session_execution_lease)
+            .await?;
         let actual_revision = existing.as_ref().map_or(0, |meta| meta.head_revision);
         if commit.expected_head_revision.is_some()
             && commit.expected_head_revision != Some(actual_revision)
@@ -350,71 +346,181 @@ impl RuntimePersistence for PostgresSessionStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<Option<SessionExecutionLease>, StoreError> {
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         let now = current_epoch_ms();
-        let expires_at = now.saturating_add(lease_ttl_ms);
-        let row = sqlx::query(
-            "INSERT INTO lash_session_execution_leases (
-                session_id, lease_owner_id, lease_token, lease_fencing_token,
-                lease_claimed_at_ms, lease_expires_at_ms
-             )
-             VALUES ($1, $2, $1 || ':' || $2 || ':' || $3::TEXT || ':1', 1, $3, $4)
-             ON CONFLICT (session_id) DO UPDATE SET
-                lease_owner_id = EXCLUDED.lease_owner_id,
-                lease_token = CASE
-                    WHEN lash_session_execution_leases.lease_owner_id = $2
-                     AND lash_session_execution_leases.lease_token IS NOT NULL
-                     AND lash_session_execution_leases.lease_expires_at_ms > $3
-                    THEN lash_session_execution_leases.lease_token
-                    ELSE $1 || ':' || $2 || ':' || $3::TEXT || ':' ||
-                        (lash_session_execution_leases.lease_fencing_token + 1)::TEXT
-                END,
-                lease_fencing_token = CASE
-                    WHEN lash_session_execution_leases.lease_owner_id = $2
-                     AND lash_session_execution_leases.lease_token IS NOT NULL
-                     AND lash_session_execution_leases.lease_expires_at_ms > $3
-                    THEN lash_session_execution_leases.lease_fencing_token
-                    ELSE lash_session_execution_leases.lease_fencing_token + 1
-                END,
-                lease_claimed_at_ms = CASE
-                    WHEN lash_session_execution_leases.lease_owner_id = $2
-                     AND lash_session_execution_leases.lease_token IS NOT NULL
-                     AND lash_session_execution_leases.lease_expires_at_ms > $3
-                    THEN lash_session_execution_leases.lease_claimed_at_ms
-                    ELSE EXCLUDED.lease_claimed_at_ms
-                END,
-                lease_expires_at_ms = EXCLUDED.lease_expires_at_ms
-             WHERE lash_session_execution_leases.lease_token IS NULL
-                OR lash_session_execution_leases.lease_expires_at_ms <= $3
-                OR lash_session_execution_leases.lease_owner_id = $2
-             RETURNING lease_owner_id, lease_token, lease_fencing_token,
-                       lease_claimed_at_ms, lease_expires_at_ms",
-        )
-        .bind(session_id)
-        .bind(owner_id)
-        .bind(now as i64)
-        .bind(expires_at as i64)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(store_sqlx_error)?;
-        let Some(row) = row else {
+        let current = load_session_execution_lease_tx(&mut tx, session_id).await?;
+        if current
+            .as_ref()
+            .is_some_and(|lease| lease.lease_token.is_some() && lease.expires_at_ms > now)
+        {
+            let current = current.expect("checked current lease is present");
+            if current
+                .owner
+                .as_ref()
+                .is_some_and(|current_owner| current_owner.same_incarnation(owner))
+            {
+                let expires_at = now.saturating_add(lease_ttl_ms);
+                sqlx::query(
+                    "UPDATE lash_session_execution_leases
+                     SET lease_expires_at_ms = $2
+                     WHERE session_id = $1",
+                )
+                .bind(session_id)
+                .bind(expires_at as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(store_sqlx_error)?;
+                tx.commit().await.map_err(store_sqlx_error)?;
+                return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                    SessionExecutionLease {
+                        session_id: session_id.to_string(),
+                        owner: owner.clone(),
+                        lease_token: current.lease_token.expect("live lease token set"),
+                        fencing_token: current.fencing_token,
+                        claimed_at_epoch_ms: current.claimed_at_ms,
+                        expires_at_epoch_ms: expires_at,
+                    },
+                ));
+            }
+            let holder = row_to_session_execution_lease(session_id, current)?;
             tx.commit().await.map_err(store_sqlx_error)?;
-            return Ok(None);
-        };
-        let lease_token: String = row.get(1);
-        let fencing_token = row.get::<i64, _>(2) as u64;
+            return Ok(SessionExecutionLeaseClaimOutcome::Busy { holder });
+        }
+        let previous_fencing_token = current.as_ref().map_or(0, |lease| lease.fencing_token);
+        let lease = acquire_session_execution_lease_tx(
+            &mut tx,
+            session_id,
+            owner,
+            previous_fencing_token,
+            now,
+            lease_ttl_ms,
+        )
+        .await?;
         tx.commit().await.map_err(store_sqlx_error)?;
-        Ok(Some(SessionExecutionLease {
-            session_id: session_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token,
-            fencing_token,
-            claimed_at_epoch_ms: row.get::<i64, _>(3) as u64,
-            expires_at_epoch_ms: row.get::<i64, _>(4) as u64,
-        }))
+        Ok(SessionExecutionLeaseClaimOutcome::Acquired(lease))
+    }
+
+    async fn reclaim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner: &LeaseOwnerIdentity,
+        observed_holder: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        let now = current_epoch_ms();
+        let current = load_session_execution_lease_tx(&mut tx, session_id).await?;
+        let Some(current) = current else {
+            let lease = acquire_session_execution_lease_tx(
+                &mut tx,
+                session_id,
+                owner,
+                0,
+                now,
+                lease_ttl_ms,
+            )
+            .await?;
+            tx.commit().await.map_err(store_sqlx_error)?;
+            return Ok(SessionExecutionLeaseClaimOutcome::Acquired(lease));
+        };
+        if current.lease_token.is_none() || current.expires_at_ms <= now {
+            let lease = acquire_session_execution_lease_tx(
+                &mut tx,
+                session_id,
+                owner,
+                current.fencing_token,
+                now,
+                lease_ttl_ms,
+            )
+            .await?;
+            tx.commit().await.map_err(store_sqlx_error)?;
+            return Ok(SessionExecutionLeaseClaimOutcome::Acquired(lease));
+        }
+        let holder = row_to_session_execution_lease(session_id, current)?;
+        if observed_holder.session_id == session_id
+            && holder.owner.same_incarnation(&observed_holder.owner)
+            && holder.lease_token == observed_holder.lease_token
+            && holder.fencing_token == observed_holder.fencing_token
+            && holder.owner.is_definitely_dead_for_claimant(owner)
+        {
+            let fencing_token = holder.fencing_token.saturating_add(1);
+            let lease_token = format!(
+                "{}:{}:{}:{now}:{fencing_token}",
+                session_id, owner.owner_id, owner.incarnation_id
+            );
+            let expires_at = now.saturating_add(lease_ttl_ms);
+            let liveness_json = encode_liveness(&owner.liveness)?;
+            let changed = sqlx::query(
+                "UPDATE lash_session_execution_leases
+                 SET lease_owner_id = $1,
+                     lease_owner_incarnation_id = $2,
+                     lease_owner_liveness_json = $3,
+                     lease_token = $4,
+                     lease_fencing_token = $5,
+                     lease_claimed_at_ms = $6,
+                     lease_expires_at_ms = $7
+                 WHERE session_id = $8
+                   AND lease_owner_id = $9
+                   AND lease_owner_incarnation_id = $10
+                   AND lease_token = $11
+                   AND lease_fencing_token = $12",
+            )
+            .bind(&owner.owner_id)
+            .bind(&owner.incarnation_id)
+            .bind(&liveness_json)
+            .bind(&lease_token)
+            .bind(fencing_token as i64)
+            .bind(now as i64)
+            .bind(expires_at as i64)
+            .bind(session_id)
+            .bind(&observed_holder.owner.owner_id)
+            .bind(&observed_holder.owner.incarnation_id)
+            .bind(&observed_holder.lease_token)
+            .bind(observed_holder.fencing_token as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?
+            .rows_affected();
+            if changed == 1 {
+                let lease = SessionExecutionLease {
+                    session_id: session_id.to_string(),
+                    owner: owner.clone(),
+                    lease_token,
+                    fencing_token,
+                    claimed_at_epoch_ms: now,
+                    expires_at_epoch_ms: expires_at,
+                };
+                tx.commit().await.map_err(store_sqlx_error)?;
+                return Ok(SessionExecutionLeaseClaimOutcome::Acquired(lease));
+            }
+            let current = load_session_execution_lease_tx(&mut tx, session_id).await?;
+            if current
+                .as_ref()
+                .is_some_and(|lease| lease.lease_token.is_some() && lease.expires_at_ms > now)
+            {
+                let current = current.expect("checked current lease is present");
+                let holder = row_to_session_execution_lease(session_id, current)?;
+                tx.commit().await.map_err(store_sqlx_error)?;
+                return Ok(SessionExecutionLeaseClaimOutcome::Busy { holder });
+            }
+            let previous_fencing_token = current.as_ref().map_or(0, |lease| lease.fencing_token);
+            let lease = acquire_session_execution_lease_tx(
+                &mut tx,
+                session_id,
+                owner,
+                previous_fencing_token,
+                now,
+                lease_ttl_ms,
+            )
+            .await?;
+            tx.commit().await.map_err(store_sqlx_error)?;
+            return Ok(SessionExecutionLeaseClaimOutcome::Acquired(lease));
+        }
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(SessionExecutionLeaseClaimOutcome::Busy { holder })
     }
 
     async fn renew_session_execution_lease(
@@ -430,7 +536,10 @@ impl RuntimePersistence for PostgresSessionStore {
                 session_id: fence.session_id.clone(),
             });
         };
-        if current.owner_id.as_deref() != Some(fence.owner_id.as_str())
+        if !current
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.same_incarnation(&fence.owner))
             || current.lease_token.as_deref() != Some(fence.lease_token.as_str())
             || current.fencing_token != fence.fencing_token
             || current.expires_at_ms <= now
@@ -445,21 +554,23 @@ impl RuntimePersistence for PostgresSessionStore {
              SET lease_expires_at_ms = $5
              WHERE session_id = $1
                AND lease_owner_id = $2
-               AND lease_token = $3
-               AND lease_fencing_token = $4",
+               AND lease_owner_incarnation_id = $3
+               AND lease_token = $4
+               AND lease_fencing_token = $6",
         )
         .bind(&fence.session_id)
-        .bind(&fence.owner_id)
+        .bind(&fence.owner.owner_id)
+        .bind(&fence.owner.incarnation_id)
         .bind(&fence.lease_token)
-        .bind(fence.fencing_token as i64)
         .bind(expires_at as i64)
+        .bind(fence.fencing_token as i64)
         .execute(&mut *tx)
         .await
         .map_err(store_sqlx_error)?;
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(SessionExecutionLease {
             session_id: fence.session_id.clone(),
-            owner_id: fence.owner_id.clone(),
+            owner: fence.owner.clone(),
             lease_token: fence.lease_token.clone(),
             fencing_token: fence.fencing_token,
             claimed_at_epoch_ms: current.claimed_at_ms,
@@ -549,7 +660,7 @@ impl RuntimePersistence for PostgresSessionStore {
         &self,
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         boundary: QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
         max_batches: usize,
@@ -563,11 +674,11 @@ impl RuntimePersistence for PostgresSessionStore {
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token
+                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND available_at_ms <= $2
-               AND (claim_token IS NULL OR claim_expires_at_ms <= $2)
              ORDER BY enqueue_seq ASC
              LIMIT $3
              FOR UPDATE SKIP LOCKED",
@@ -580,7 +691,16 @@ impl RuntimePersistence for PostgresSessionStore {
         .map_err(store_sqlx_error)?;
         let mut selected = Vec::new();
         for row in rows {
-            selected.push(queued_batch_row(row)?);
+            let row = queued_batch_row(row)?;
+            if row.claim_token.is_none()
+                || row.claim_expires_at_ms <= now
+                || row
+                    .claim_owner
+                    .as_ref()
+                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+            {
+                selected.push(row);
+            }
         }
         let candidates = selected
             .iter()
@@ -599,27 +719,51 @@ impl RuntimePersistence for PostgresSessionStore {
         }
         selected.truncate(selected_len);
         let lease =
-            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner_id, now, lease_ttl_ms);
+            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, lease_ttl_ms);
+        let liveness_json = encode_liveness(&owner.liveness)?;
         for row in &selected {
             let changed = sqlx::query(
                 "UPDATE lash_queued_work_batches
                  SET claim_id = $3,
                      claim_owner_id = $4,
-                     claim_token = $5,
+                     claim_owner_incarnation_id = $5,
+                     claim_owner_liveness_json = $6,
+                     claim_token = $7,
                      claim_fencing_token = claim_fencing_token + 1,
-                     claim_claimed_at_ms = $6,
-                     claim_expires_at_ms = $7
+                     claim_claimed_at_ms = $8,
+                     claim_expires_at_ms = $9
                  WHERE session_id = $1
                    AND batch_id = $2
-                   AND (claim_token IS NULL OR claim_expires_at_ms <= $6)",
+                   AND (
+                        claim_token IS NULL
+                        OR claim_expires_at_ms <= $8
+                        OR (
+                            claim_token = $10
+                            AND claim_owner_id = $11
+                            AND claim_owner_incarnation_id = $12
+                        )
+                   )",
             )
             .bind(session_id)
             .bind(&row.batch_id)
             .bind(&lease.claim_id)
-            .bind(owner_id)
+            .bind(&owner.owner_id)
+            .bind(&owner.incarnation_id)
+            .bind(&liveness_json)
             .bind(&lease.lease_token)
             .bind(now as i64)
             .bind(lease.expires_at_epoch_ms as i64)
+            .bind(&row.claim_token)
+            .bind(
+                row.claim_owner
+                    .as_ref()
+                    .map(|owner| owner.owner_id.as_str()),
+            )
+            .bind(
+                row.claim_owner
+                    .as_ref()
+                    .map(|owner| owner.incarnation_id.as_str()),
+            )
             .execute(&mut *tx)
             .await
             .map_err(store_sqlx_error)?
@@ -637,7 +781,7 @@ impl RuntimePersistence for PostgresSessionStore {
         Ok(Some(QueuedWorkClaim {
             session_id: session_id.to_string(),
             claim_id: lease.claim_id,
-            owner_id: owner_id.to_string(),
+            owner: owner.clone(),
             lease_token: lease.lease_token,
             fencing_token: lease.fencing_token,
             claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
@@ -673,6 +817,8 @@ impl RuntimePersistence for PostgresSessionStore {
             "UPDATE lash_queued_work_batches
              SET claim_id = NULL,
                  claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
                  claim_token = NULL,
                  claim_claimed_at_ms = 0,
                  claim_expires_at_ms = 0
@@ -697,7 +843,8 @@ impl RuntimePersistence for PostgresSessionStore {
         let row = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token
+                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND batch_id = $2
@@ -729,7 +876,8 @@ impl RuntimePersistence for PostgresSessionStore {
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token
+                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM lash_queued_work_batches
              WHERE session_id = $1
              ORDER BY enqueue_seq ASC",
@@ -755,7 +903,8 @@ impl RuntimePersistence for PostgresSessionStore {
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token
+                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND (claim_token IS NULL OR claim_expires_at_ms <= $2)
@@ -861,7 +1010,7 @@ impl RuntimePersistence for PostgresSessionStore {
 }
 
 struct SessionExecutionLeaseRow {
-    owner_id: Option<String>,
+    owner: Option<LeaseOwnerIdentity>,
     lease_token: Option<String>,
     fencing_token: u64,
     claimed_at_ms: u64,
@@ -874,7 +1023,8 @@ async fn load_session_execution_lease_tx(
 ) -> Result<Option<SessionExecutionLeaseRow>, StoreError> {
     let row = sqlx::query(
         "SELECT lease_owner_id, lease_token, lease_fencing_token,
-                lease_claimed_at_ms, lease_expires_at_ms
+                lease_claimed_at_ms, lease_expires_at_ms,
+                lease_owner_incarnation_id, lease_owner_liveness_json
          FROM lash_session_execution_leases
          WHERE session_id = $1
          FOR UPDATE",
@@ -884,12 +1034,101 @@ async fn load_session_execution_lease_tx(
     .await
     .map_err(store_sqlx_error)?;
     Ok(row.map(|row| SessionExecutionLeaseRow {
-        owner_id: row.get(0),
+        owner: lease_owner_from_columns(row.get(0), row.get(5), row.get(6)),
         lease_token: row.get(1),
         fencing_token: row.get::<i64, _>(2) as u64,
         claimed_at_ms: row.get::<i64, _>(3) as u64,
         expires_at_ms: row.get::<i64, _>(4) as u64,
     }))
+}
+
+fn lease_owner_from_columns(
+    owner_id: Option<String>,
+    incarnation_id: Option<String>,
+    liveness_json: Option<String>,
+) -> Option<LeaseOwnerIdentity> {
+    owner_id.map(|owner_id| LeaseOwnerIdentity {
+        incarnation_id: incarnation_id.unwrap_or_else(|| owner_id.clone()),
+        owner_id,
+        liveness: liveness_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or(LeaseOwnerLiveness::Opaque),
+    })
+}
+
+fn encode_liveness(liveness: &LeaseOwnerLiveness) -> Result<String, StoreError> {
+    serde_json::to_string(liveness)
+        .map_err(|err| StoreError::Backend(format!("failed to encode lease liveness: {err}")))
+}
+
+fn row_to_session_execution_lease(
+    session_id: &str,
+    row: SessionExecutionLeaseRow,
+) -> Result<SessionExecutionLease, StoreError> {
+    Ok(SessionExecutionLease {
+        session_id: session_id.to_string(),
+        owner: row
+            .owner
+            .ok_or_else(|| StoreError::Backend("live session lease missing owner".to_string()))?,
+        lease_token: row.lease_token.ok_or_else(|| {
+            StoreError::Backend("live session lease missing lease token".to_string())
+        })?,
+        fencing_token: row.fencing_token,
+        claimed_at_epoch_ms: row.claimed_at_ms,
+        expires_at_epoch_ms: row.expires_at_ms,
+    })
+}
+
+async fn acquire_session_execution_lease_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+    owner: &LeaseOwnerIdentity,
+    previous_fencing_token: u64,
+    now: u64,
+    lease_ttl_ms: u64,
+) -> Result<SessionExecutionLease, StoreError> {
+    let fencing_token = previous_fencing_token.saturating_add(1);
+    let lease_token = format!(
+        "{}:{}:{}:{now}:{fencing_token}",
+        session_id, owner.owner_id, owner.incarnation_id
+    );
+    let expires_at = now.saturating_add(lease_ttl_ms);
+    let liveness_json = encode_liveness(&owner.liveness)?;
+    sqlx::query(
+        "INSERT INTO lash_session_execution_leases (
+            session_id, lease_owner_id, lease_owner_incarnation_id, lease_owner_liveness_json,
+            lease_token, lease_fencing_token, lease_claimed_at_ms, lease_expires_at_ms
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (session_id) DO UPDATE SET
+            lease_owner_id = EXCLUDED.lease_owner_id,
+            lease_owner_incarnation_id = EXCLUDED.lease_owner_incarnation_id,
+            lease_owner_liveness_json = EXCLUDED.lease_owner_liveness_json,
+            lease_token = EXCLUDED.lease_token,
+            lease_fencing_token = EXCLUDED.lease_fencing_token,
+            lease_claimed_at_ms = EXCLUDED.lease_claimed_at_ms,
+            lease_expires_at_ms = EXCLUDED.lease_expires_at_ms",
+    )
+    .bind(session_id)
+    .bind(&owner.owner_id)
+    .bind(&owner.incarnation_id)
+    .bind(&liveness_json)
+    .bind(&lease_token)
+    .bind(fencing_token as i64)
+    .bind(now as i64)
+    .bind(expires_at as i64)
+    .execute(&mut **tx)
+    .await
+    .map_err(store_sqlx_error)?;
+    Ok(SessionExecutionLease {
+        session_id: session_id.to_string(),
+        owner: owner.clone(),
+        lease_token,
+        fencing_token,
+        claimed_at_epoch_ms: now,
+        expires_at_epoch_ms: expires_at,
+    })
 }
 
 async fn ensure_session_execution_lease_tx(
@@ -909,7 +1148,10 @@ async fn ensure_session_execution_lease_tx(
             session_id: session_id.to_string(),
         });
     };
-    if current.owner_id.as_deref() == Some(fence.owner_id.as_str())
+    if current
+        .owner
+        .as_ref()
+        .is_some_and(|owner| owner.same_incarnation(&fence.owner))
         && current.lease_token.as_deref() == Some(fence.lease_token.as_str())
         && current.fencing_token == fence.fencing_token
         && current.expires_at_ms > now
@@ -929,16 +1171,20 @@ async fn release_session_execution_lease_tx(
     sqlx::query(
         "UPDATE lash_session_execution_leases
          SET lease_owner_id = NULL,
+             lease_owner_incarnation_id = NULL,
+             lease_owner_liveness_json = NULL,
              lease_token = NULL,
              lease_claimed_at_ms = 0,
              lease_expires_at_ms = 0
          WHERE session_id = $1
            AND lease_owner_id = $2
-           AND lease_token = $3
-           AND lease_fencing_token = $4",
+           AND lease_owner_incarnation_id = $3
+           AND lease_token = $4
+           AND lease_fencing_token = $5",
     )
     .bind(&completion.session_id)
-    .bind(&completion.owner_id)
+    .bind(&completion.owner.owner_id)
+    .bind(&completion.owner.incarnation_id)
     .bind(&completion.lease_token)
     .bind(completion.fencing_token as i64)
     .execute(&mut **tx)

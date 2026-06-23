@@ -67,7 +67,8 @@ use turn_boundary::*;
 use turn_commit_draft::*;
 use turn_driver::*;
 
-pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
+pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 30 * 1000;
+pub(crate) const RUNTIME_TURN_LEASE_RENEW_MS: u64 = 10 * 1000;
 
 pub(super) fn runtime_error_from_store_commit(err: crate::store::StoreError) -> RuntimeError {
     match err {
@@ -962,6 +963,7 @@ pub struct LashRuntime {
     pub(in crate::runtime) services: RuntimeServices,
     pub(in crate::runtime) state: RuntimeSessionState,
     pub(in crate::runtime) runtime_scope_id: Arc<str>,
+    pub(in crate::runtime) runtime_lease_owner: crate::LeaseOwnerIdentity,
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Protocol-owned turn options for this session.

@@ -349,21 +349,25 @@ impl RuntimePersistence for Store {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<Option<SessionExecutionLease>, StoreError> {
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let session_id = session_id.to_string();
-        let owner_id = owner_id.to_string();
+        let owner = owner.clone();
         self.conn
             .write_flow(move |tx| {
-                let outcome: Result<Option<SessionExecutionLease>, StoreError> = (|| {
+                let outcome: Result<SessionExecutionLeaseClaimOutcome, StoreError> = (|| {
                     let now = current_epoch_ms();
                     let current = load_session_execution_lease_row_conn(tx, &session_id)?;
                     if current.as_ref().is_some_and(|lease| {
                         lease.lease_token.is_some() && lease.expires_at_ms > now
                     }) {
                         let current = current.expect("checked current lease is present");
-                        if current.owner_id.as_deref() == Some(owner_id.as_str()) {
+                        if current
+                            .owner
+                            .as_ref()
+                            .is_some_and(|current_owner| current_owner.same_incarnation(&owner))
+                        {
                             let expires_at = now.saturating_add(lease_ttl_ms);
                             tx.execute(
                                 "UPDATE session_execution_leases
@@ -372,53 +376,161 @@ impl RuntimePersistence for Store {
                                 params![session_id, expires_at as i64],
                             )
                             .map_err(sqlite_error)?;
-                            return Ok(Some(SessionExecutionLease {
-                                session_id,
-                                owner_id,
-                                lease_token: current.lease_token.expect("live lease token set"),
-                                fencing_token: current.fencing_token,
-                                claimed_at_epoch_ms: current.claimed_at_ms,
-                                expires_at_epoch_ms: expires_at,
-                            }));
+                            return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                                SessionExecutionLease {
+                                    session_id,
+                                    owner,
+                                    lease_token: current.lease_token.expect("live lease token set"),
+                                    fencing_token: current.fencing_token,
+                                    claimed_at_epoch_ms: current.claimed_at_ms,
+                                    expires_at_epoch_ms: expires_at,
+                                },
+                            ));
                         }
-                        return Ok(None);
+                        return Ok(SessionExecutionLeaseClaimOutcome::Busy {
+                            holder: row_to_session_execution_lease(&session_id, current)?,
+                        });
                     }
-                    let fencing_token = current
-                        .as_ref()
-                        .map_or(0, |lease| lease.fencing_token)
-                        .saturating_add(1);
-                    let lease_token = format!("{session_id}:{owner_id}:{now}:{fencing_token}");
-                    let expires_at = now.saturating_add(lease_ttl_ms);
-                    tx.execute(
-                        "INSERT INTO session_execution_leases (
-                            session_id, lease_owner_id, lease_token, lease_fencing_token,
-                            lease_claimed_at_ms, lease_expires_at_ms
-                         )
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                         ON CONFLICT(session_id) DO UPDATE SET
-                            lease_owner_id = excluded.lease_owner_id,
-                            lease_token = excluded.lease_token,
-                            lease_fencing_token = excluded.lease_fencing_token,
-                            lease_claimed_at_ms = excluded.lease_claimed_at_ms,
-                            lease_expires_at_ms = excluded.lease_expires_at_ms",
-                        params![
-                            session_id,
-                            owner_id,
-                            lease_token,
-                            fencing_token as i64,
-                            now as i64,
-                            expires_at as i64
-                        ],
-                    )
-                    .map_err(sqlite_error)?;
-                    Ok(Some(SessionExecutionLease {
-                        session_id,
-                        owner_id,
-                        lease_token,
-                        fencing_token,
-                        claimed_at_epoch_ms: now,
-                        expires_at_epoch_ms: expires_at,
-                    }))
+                    Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                        acquire_session_execution_lease_conn(
+                            tx,
+                            &session_id,
+                            &owner,
+                            current.as_ref().map_or(0, |lease| lease.fencing_token),
+                            now,
+                            lease_ttl_ms,
+                        )?,
+                    ))
+                })(
+                );
+                match outcome {
+                    Ok(value) => Ok(TxOutcome::Commit(Ok(value))),
+                    Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+                }
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
+    async fn reclaim_session_execution_lease(
+        &self,
+        session_id: &str,
+        owner: &LeaseOwnerIdentity,
+        observed_holder: &SessionExecutionLeaseFence,
+        lease_ttl_ms: u64,
+    ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
+        let session_id = session_id.to_string();
+        let owner = owner.clone();
+        let observed_holder = observed_holder.clone();
+        self.conn
+            .write_flow(move |tx| {
+                let outcome: Result<SessionExecutionLeaseClaimOutcome, StoreError> = (|| {
+                    let now = current_epoch_ms();
+                    let current = load_session_execution_lease_row_conn(tx, &session_id)?;
+                    let Some(current) = current else {
+                        return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                            acquire_session_execution_lease_conn(
+                                tx,
+                                &session_id,
+                                &owner,
+                                0,
+                                now,
+                                lease_ttl_ms,
+                            )?,
+                        ));
+                    };
+                    if current.lease_token.is_none() || current.expires_at_ms <= now {
+                        return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                            acquire_session_execution_lease_conn(
+                                tx,
+                                &session_id,
+                                &owner,
+                                current.fencing_token,
+                                now,
+                                lease_ttl_ms,
+                            )?,
+                        ));
+                    }
+                    let holder = row_to_session_execution_lease(&session_id, current)?;
+                    if observed_holder.session_id == session_id
+                        && holder.owner.same_incarnation(&observed_holder.owner)
+                        && holder.lease_token == observed_holder.lease_token
+                        && holder.fencing_token == observed_holder.fencing_token
+                        && holder.owner.is_definitely_dead_for_claimant(&owner)
+                    {
+                        let fencing_token = holder.fencing_token.saturating_add(1);
+                        let lease_token = format!(
+                            "{}:{}:{}:{now}:{fencing_token}",
+                            session_id, owner.owner_id, owner.incarnation_id
+                        );
+                        let expires_at = now.saturating_add(lease_ttl_ms);
+                        let liveness_json = encode_liveness(&owner.liveness)?;
+                        let changed = tx
+                            .execute(
+                                "UPDATE session_execution_leases
+                                 SET lease_owner_id = ?1,
+                                     lease_owner_incarnation_id = ?2,
+                                     lease_owner_liveness_json = ?3,
+                                     lease_token = ?4,
+                                     lease_fencing_token = ?5,
+                                     lease_claimed_at_ms = ?6,
+                                     lease_expires_at_ms = ?7
+                                 WHERE session_id = ?8
+                                   AND lease_owner_id = ?9
+                                   AND lease_owner_incarnation_id = ?10
+                                   AND lease_token = ?11
+                                   AND lease_fencing_token = ?12",
+                                params![
+                                    owner.owner_id,
+                                    owner.incarnation_id,
+                                    liveness_json,
+                                    lease_token,
+                                    fencing_token as i64,
+                                    now as i64,
+                                    expires_at as i64,
+                                    session_id,
+                                    observed_holder.owner.owner_id,
+                                    observed_holder.owner.incarnation_id,
+                                    observed_holder.lease_token,
+                                    observed_holder.fencing_token as i64,
+                                ],
+                            )
+                            .map_err(sqlite_error)?;
+                        if changed == 1 {
+                            return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                                SessionExecutionLease {
+                                    session_id,
+                                    owner,
+                                    lease_token,
+                                    fencing_token,
+                                    claimed_at_epoch_ms: now,
+                                    expires_at_epoch_ms: expires_at,
+                                },
+                            ));
+                        }
+                        let current = load_session_execution_lease_row_conn(tx, &session_id)?;
+                        if current.as_ref().is_some_and(|lease| {
+                            lease.lease_token.is_some() && lease.expires_at_ms > now
+                        }) {
+                            let current = current.expect("checked current lease is present");
+                            return Ok(SessionExecutionLeaseClaimOutcome::Busy {
+                                holder: row_to_session_execution_lease(&session_id, current)?,
+                            });
+                        }
+                        let previous_fencing_token =
+                            current.as_ref().map_or(0, |lease| lease.fencing_token);
+                        return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
+                            acquire_session_execution_lease_conn(
+                                tx,
+                                &session_id,
+                                &owner,
+                                previous_fencing_token,
+                                now,
+                                lease_ttl_ms,
+                            )?,
+                        ));
+                    }
+                    Ok(SessionExecutionLeaseClaimOutcome::Busy { holder })
                 })(
                 );
                 match outcome {
@@ -446,7 +558,10 @@ impl RuntimePersistence for Store {
                             session_id: fence.session_id.clone(),
                         });
                     };
-                    if current.owner_id.as_deref() != Some(fence.owner_id.as_str())
+                    if !current
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.same_incarnation(&fence.owner))
                         || current.lease_token.as_deref() != Some(fence.lease_token.as_str())
                         || current.fencing_token != fence.fencing_token
                         || current.expires_at_ms <= now
@@ -461,20 +576,22 @@ impl RuntimePersistence for Store {
                          SET lease_expires_at_ms = ?5
                          WHERE session_id = ?1
                            AND lease_owner_id = ?2
-                           AND lease_token = ?3
-                           AND lease_fencing_token = ?4",
+                           AND lease_owner_incarnation_id = ?3
+                           AND lease_token = ?4
+                           AND lease_fencing_token = ?6",
                         params![
                             fence.session_id,
-                            fence.owner_id,
+                            fence.owner.owner_id,
+                            fence.owner.incarnation_id,
                             fence.lease_token,
-                            fence.fencing_token as i64,
-                            expires_at as i64
+                            expires_at as i64,
+                            fence.fencing_token as i64
                         ],
                     )
                     .map_err(sqlite_error)?;
                     Ok(SessionExecutionLease {
                         session_id: fence.session_id,
-                        owner_id: fence.owner_id,
+                        owner: fence.owner,
                         lease_token: fence.lease_token,
                         fencing_token: fence.fencing_token,
                         claimed_at_epoch_ms: current.claimed_at_ms,
@@ -585,7 +702,7 @@ impl RuntimePersistence for Store {
         &self,
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         boundary: QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
         max_batches: usize,
@@ -595,7 +712,7 @@ impl RuntimePersistence for Store {
         }
         let session_id = session_id.to_string();
         let session_execution_lease = session_execution_lease.clone();
-        let owner_id = owner_id.to_string();
+        let owner = owner.clone();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<TxOutcome<Option<QueuedWorkClaim>>, StoreError> = (|| {
@@ -610,11 +727,11 @@ impl RuntimePersistence for Store {
                             .prepare(
                                 "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                                         slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                        claim_fencing_token
+                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
                                  FROM queued_work_batches
                                  WHERE session_id = ?1
                                    AND available_at_ms <= ?2
-                                   AND (claim_token IS NULL OR claim_expires_at_ms <= ?2)
                                  ORDER BY enqueue_seq ASC
                                  LIMIT ?3",
                             )
@@ -627,6 +744,17 @@ impl RuntimePersistence for Store {
                             .map_err(sqlite_error)?;
                         rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
                     };
+                    let candidate_rows = candidate_rows
+                        .into_iter()
+                        .filter(|row| {
+                            row.claim_token.is_none()
+                                || row.claim_expires_at_ms <= now
+                                || row
+                                    .claim_owner
+                                    .as_ref()
+                                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(&owner))
+                        })
+                        .collect::<Vec<_>>();
                     let candidates = candidate_rows
                         .iter()
                         .map(|row| {
@@ -650,10 +778,11 @@ impl RuntimePersistence for Store {
                     let lease = QueuedWorkClaimLease::derive(
                         &candidates[0],
                         &session_id,
-                        &owner_id,
+                        &owner,
                         now,
                         lease_ttl_ms,
                     );
+                    let liveness_json = encode_liveness(&owner.liveness)?;
                     for row in &selected {
                         // Under `BEGIN IMMEDIATE` this connection already holds
                         // the write lock, but the row could still have been
@@ -668,21 +797,38 @@ impl RuntimePersistence for Store {
                                 "UPDATE queued_work_batches
                                  SET claim_id = ?3,
                                      claim_owner_id = ?4,
-                                     claim_token = ?5,
+                                     claim_owner_incarnation_id = ?5,
+                                     claim_owner_liveness_json = ?6,
+                                     claim_token = ?7,
                                      claim_fencing_token = claim_fencing_token + 1,
-                                     claim_claimed_at_ms = ?6,
-                                     claim_expires_at_ms = ?7
+                                     claim_claimed_at_ms = ?8,
+                                     claim_expires_at_ms = ?9
                                  WHERE session_id = ?1
                                    AND batch_id = ?2
-                                   AND (claim_token IS NULL OR claim_expires_at_ms <= ?6)",
+                                   AND (
+                                        claim_token IS NULL
+                                        OR claim_expires_at_ms <= ?8
+                                        OR (
+                                            claim_token = ?10
+                                            AND claim_owner_id = ?11
+                                            AND claim_owner_incarnation_id = ?12
+                                        )
+                                   )",
                                 params![
                                     session_id,
                                     row.batch_id,
                                     lease.claim_id,
-                                    owner_id,
+                                    owner.owner_id.as_str(),
+                                    owner.incarnation_id.as_str(),
+                                    liveness_json.as_str(),
                                     lease.lease_token,
                                     now as i64,
-                                    lease.expires_at_epoch_ms as i64
+                                    lease.expires_at_epoch_ms as i64,
+                                    row.claim_token,
+                                    row.claim_owner.as_ref().map(|owner| owner.owner_id.as_str()),
+                                    row.claim_owner
+                                        .as_ref()
+                                        .map(|owner| owner.incarnation_id.as_str())
                                 ],
                             )
                             .map_err(sqlite_error)?;
@@ -700,7 +846,7 @@ impl RuntimePersistence for Store {
                     Ok(TxOutcome::Commit(Some(QueuedWorkClaim {
                         session_id: session_id.clone(),
                         claim_id: lease.claim_id,
-                        owner_id: owner_id.clone(),
+                        owner: owner.clone(),
                         lease_token: lease.lease_token,
                         fencing_token: lease.fencing_token,
                         claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
@@ -756,6 +902,8 @@ impl RuntimePersistence for Store {
                     "UPDATE queued_work_batches
                      SET claim_id = NULL,
                          claim_owner_id = NULL,
+                         claim_owner_incarnation_id = NULL,
+                         claim_owner_liveness_json = NULL,
                          claim_token = NULL,
                          claim_claimed_at_ms = 0,
                          claim_expires_at_ms = 0
@@ -783,7 +931,8 @@ impl RuntimePersistence for Store {
                         .query_row(
                             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                    claim_fencing_token
+                                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
                              FROM queued_work_batches
                              WHERE session_id = ?1
                                AND batch_id = ?2
@@ -826,7 +975,8 @@ impl RuntimePersistence for Store {
                             .prepare(
                                 "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                                         slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                        claim_fencing_token
+                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
                                  FROM queued_work_batches
                                  WHERE session_id = ?1
                                  ORDER BY enqueue_seq ASC",
@@ -861,7 +1011,8 @@ impl RuntimePersistence for Store {
                             .prepare(
                                 "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                                         slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                        claim_fencing_token
+                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
                                  FROM queued_work_batches
                                  WHERE session_id = ?1
                                    AND (claim_token IS NULL OR claim_expires_at_ms <= ?2)
@@ -930,7 +1081,7 @@ impl RuntimePersistence for Store {
 }
 
 struct SessionExecutionLeaseRow {
-    owner_id: Option<String>,
+    owner: Option<LeaseOwnerIdentity>,
     lease_token: Option<String>,
     fencing_token: u64,
     claimed_at_ms: u64,
@@ -944,13 +1095,17 @@ fn load_session_execution_lease_row_conn(
     let row = conn
         .query_row(
             "SELECT lease_owner_id, lease_token, lease_fencing_token,
-                    lease_claimed_at_ms, lease_expires_at_ms
+                    lease_claimed_at_ms, lease_expires_at_ms,
+                    lease_owner_incarnation_id, lease_owner_liveness_json
              FROM session_execution_leases
              WHERE session_id = ?1",
             params![session_id],
             |row| {
+                let owner_id: Option<String> = row.get(0)?;
+                let incarnation_id: Option<String> = row.get(5)?;
+                let liveness_json: Option<String> = row.get(6)?;
                 Ok(SessionExecutionLeaseRow {
-                    owner_id: row.get(0)?,
+                    owner: lease_owner_from_columns(owner_id, incarnation_id, liveness_json),
                     lease_token: row.get(1)?,
                     fencing_token: row.get::<_, i64>(2)? as u64,
                     claimed_at_ms: row.get::<_, i64>(3)? as u64,
@@ -961,6 +1116,95 @@ fn load_session_execution_lease_row_conn(
         .optional()
         .map_err(sqlite_error)?;
     Ok(row)
+}
+
+fn lease_owner_from_columns(
+    owner_id: Option<String>,
+    incarnation_id: Option<String>,
+    liveness_json: Option<String>,
+) -> Option<LeaseOwnerIdentity> {
+    owner_id.map(|owner_id| LeaseOwnerIdentity {
+        incarnation_id: incarnation_id.unwrap_or_else(|| owner_id.clone()),
+        owner_id,
+        liveness: liveness_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or(LeaseOwnerLiveness::Opaque),
+    })
+}
+
+fn encode_liveness(liveness: &LeaseOwnerLiveness) -> Result<String, StoreError> {
+    serde_json::to_string(liveness)
+        .map_err(|err| StoreError::Backend(format!("failed to encode lease liveness: {err}")))
+}
+
+fn row_to_session_execution_lease(
+    session_id: &str,
+    row: SessionExecutionLeaseRow,
+) -> Result<SessionExecutionLease, StoreError> {
+    Ok(SessionExecutionLease {
+        session_id: session_id.to_string(),
+        owner: row
+            .owner
+            .ok_or_else(|| StoreError::Backend("live session lease missing owner".to_string()))?,
+        lease_token: row.lease_token.ok_or_else(|| {
+            StoreError::Backend("live session lease missing lease token".to_string())
+        })?,
+        fencing_token: row.fencing_token,
+        claimed_at_epoch_ms: row.claimed_at_ms,
+        expires_at_epoch_ms: row.expires_at_ms,
+    })
+}
+
+fn acquire_session_execution_lease_conn(
+    conn: &Connection,
+    session_id: &str,
+    owner: &LeaseOwnerIdentity,
+    previous_fencing_token: u64,
+    now: u64,
+    lease_ttl_ms: u64,
+) -> Result<SessionExecutionLease, StoreError> {
+    let fencing_token = previous_fencing_token.saturating_add(1);
+    let lease_token = format!(
+        "{}:{}:{}:{now}:{fencing_token}",
+        session_id, owner.owner_id, owner.incarnation_id
+    );
+    let expires_at = now.saturating_add(lease_ttl_ms);
+    let liveness_json = encode_liveness(&owner.liveness)?;
+    conn.execute(
+        "INSERT INTO session_execution_leases (
+            session_id, lease_owner_id, lease_owner_incarnation_id, lease_owner_liveness_json,
+            lease_token, lease_fencing_token, lease_claimed_at_ms, lease_expires_at_ms
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(session_id) DO UPDATE SET
+            lease_owner_id = excluded.lease_owner_id,
+            lease_owner_incarnation_id = excluded.lease_owner_incarnation_id,
+            lease_owner_liveness_json = excluded.lease_owner_liveness_json,
+            lease_token = excluded.lease_token,
+            lease_fencing_token = excluded.lease_fencing_token,
+            lease_claimed_at_ms = excluded.lease_claimed_at_ms,
+            lease_expires_at_ms = excluded.lease_expires_at_ms",
+        params![
+            session_id,
+            owner.owner_id,
+            owner.incarnation_id,
+            liveness_json,
+            lease_token,
+            fencing_token as i64,
+            now as i64,
+            expires_at as i64
+        ],
+    )
+    .map_err(sqlite_error)?;
+    Ok(SessionExecutionLease {
+        session_id: session_id.to_string(),
+        owner: owner.clone(),
+        lease_token,
+        fencing_token,
+        claimed_at_epoch_ms: now,
+        expires_at_epoch_ms: expires_at,
+    })
 }
 
 fn ensure_session_execution_lease_conn(
@@ -980,7 +1224,10 @@ fn ensure_session_execution_lease_conn(
             session_id: session_id.to_string(),
         });
     };
-    if current.owner_id.as_deref() == Some(fence.owner_id.as_str())
+    if current
+        .owner
+        .as_ref()
+        .is_some_and(|owner| owner.same_incarnation(&fence.owner))
         && current.lease_token.as_deref() == Some(fence.lease_token.as_str())
         && current.fencing_token == fence.fencing_token
         && current.expires_at_ms > now
@@ -1000,16 +1247,20 @@ fn release_session_execution_lease_conn(
     conn.execute(
         "UPDATE session_execution_leases
          SET lease_owner_id = NULL,
+             lease_owner_incarnation_id = NULL,
+             lease_owner_liveness_json = NULL,
              lease_token = NULL,
              lease_claimed_at_ms = 0,
              lease_expires_at_ms = 0
          WHERE session_id = ?1
            AND lease_owner_id = ?2
-           AND lease_token = ?3
-           AND lease_fencing_token = ?4",
+           AND lease_owner_incarnation_id = ?3
+           AND lease_token = ?4
+           AND lease_fencing_token = ?5",
         params![
             completion.session_id,
-            completion.owner_id,
+            completion.owner.owner_id,
+            completion.owner.incarnation_id,
             completion.lease_token,
             completion.fencing_token as i64
         ],

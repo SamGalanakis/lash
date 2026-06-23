@@ -21,8 +21,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::record::{Symbol, intern_symbol, symbol_name};
 use super::{
-    Name, Record, RuntimeError, RuntimeJson, execute_contains_direct, from_json,
-    is_truthy as value_truthy, materialize_projected_async, read_field_ref_direct,
+    Name, Record, RuntimeError, RuntimeJson, append_tuple_literal_direct, execute_contains_direct,
+    from_json, is_truthy as value_truthy, materialize_projected_async, read_field_ref_direct,
     read_index_ref_direct, stringify_value_async, value_contains_projected, value_len,
     value_type_name, write_number,
 };
@@ -177,6 +177,7 @@ pub enum Value {
     String(CompactString),
     Image(ImageValue),
     Resource(ResourceHandle),
+    Tuple(ListValue),
     List(ListValue),
     Record(Arc<Record>),
     Projected(ProjectedValue),
@@ -204,6 +205,7 @@ impl PartialEq for Value {
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Image(left), Self::Image(right)) => left == right,
             (Self::Resource(left), Self::Resource(right)) => left == right,
+            (Self::Tuple(left), Self::Tuple(right)) => left == right,
             (Self::List(left), Self::List(right)) => left == right,
             (Self::Record(left), Self::Record(right)) => left == right,
             (Self::Projected(left), Self::Projected(right)) => left == right,
@@ -793,6 +795,11 @@ impl fmt::Display for Value {
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write_number(f, *value),
             Self::String(value) => write!(f, "{value}"),
+            Self::Tuple(values) => {
+                let mut output = String::new();
+                append_tuple_literal_direct(&mut output, values).map_err(|_| fmt::Error)?;
+                write!(f, "{output}")
+            }
             Self::Image(_)
             | Self::Resource(_)
             | Self::List(_)

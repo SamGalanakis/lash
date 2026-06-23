@@ -150,6 +150,7 @@ pub enum Expr {
     Number(f64),
     String(AstString),
     Variable(AstString),
+    Tuple(Vec<Expr>),
     List(Vec<Expr>),
     ListComprehension {
         element: Box<Expr>,
@@ -267,7 +268,7 @@ impl Expr {
             | Expr::ProcessRef { .. }
             | Expr::ResourceRef(_)
             | Expr::TypeLiteral(_) => {}
-            Expr::Block(expressions) | Expr::List(expressions) => {
+            Expr::Block(expressions) | Expr::Tuple(expressions) | Expr::List(expressions) => {
                 buffer.extend(expressions.iter());
             }
             Expr::ListComprehension { element, clauses } => {
@@ -412,6 +413,12 @@ where
             label,
             expr: Box::new(folder.fold_expr(*expr)),
         },
+        Expr::Tuple(items) => Expr::Tuple(
+            items
+                .into_iter()
+                .map(|expr| folder.fold_expr(expr))
+                .collect(),
+        ),
         Expr::List(items) => Expr::List(
             items
                 .into_iter()

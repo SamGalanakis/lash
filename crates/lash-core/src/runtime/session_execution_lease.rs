@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::{Clock, RUNTIME_TURN_LEASE_TTL_MS};
+use super::{Clock, RUNTIME_TURN_LEASE_RENEW_MS, RUNTIME_TURN_LEASE_TTL_MS};
 use crate::store::{
     RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionExecutionLease,
-    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, StoreError,
+    SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
+    StoreError,
 };
 
 pub(super) struct SessionExecutionLeaseGuard {
@@ -23,25 +24,43 @@ impl SessionExecutionLeaseGuard {
     pub(super) async fn try_acquire(
         store: Arc<dyn RuntimePersistence>,
         session_id: &str,
-        owner_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
         clock: Arc<dyn Clock>,
         cancel: CancellationToken,
     ) -> Result<Option<Self>, StoreError> {
-        let Some(lease) = store
-            .try_claim_session_execution_lease(session_id, owner_id, RUNTIME_TURN_LEASE_TTL_MS)
+        let lease = match store
+            .try_claim_session_execution_lease(session_id, owner, RUNTIME_TURN_LEASE_TTL_MS)
             .await?
-        else {
-            tracing::debug!(
-                session_id,
-                owner_id,
-                event = "session_execution_lease.busy",
-                "session execution lease is busy"
-            );
-            return Ok(None);
+        {
+            SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
+            SessionExecutionLeaseClaimOutcome::Busy { holder }
+                if holder.owner.is_definitely_dead_for_claimant(owner) =>
+            {
+                match store
+                    .reclaim_session_execution_lease(
+                        session_id,
+                        owner,
+                        &holder.fence(),
+                        RUNTIME_TURN_LEASE_TTL_MS,
+                    )
+                    .await?
+                {
+                    SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
+                    SessionExecutionLeaseClaimOutcome::Busy { holder } => {
+                        trace_busy(session_id, owner, &holder);
+                        return Ok(None);
+                    }
+                }
+            }
+            SessionExecutionLeaseClaimOutcome::Busy { holder } => {
+                trace_busy(session_id, owner, &holder);
+                return Ok(None);
+            }
         };
         tracing::debug!(
             session_id = %lease.session_id,
-            owner_id = %lease.owner_id,
+            owner_id = %lease.owner.owner_id,
+            incarnation_id = %lease.owner.incarnation_id,
             fencing_token = lease.fencing_token,
             event = "session_execution_lease.acquired",
             "acquired session execution lease"
@@ -82,7 +101,8 @@ impl SessionExecutionLeaseGuard {
         let completion = self.completion();
         tracing::debug!(
             session_id = %completion.session_id,
-            owner_id = %completion.owner_id,
+            owner_id = %completion.owner.owner_id,
+            incarnation_id = %completion.owner.incarnation_id,
             fencing_token = completion.fencing_token,
             event = "session_execution_lease.released",
             "released session execution lease"
@@ -109,7 +129,8 @@ impl SessionExecutionLeaseGuard {
             Ok(renewed) => {
                 tracing::debug!(
                     session_id = %renewed.session_id,
-                    owner_id = %renewed.owner_id,
+                    owner_id = %renewed.owner.owner_id,
+                    incarnation_id = %renewed.owner.incarnation_id,
                     fencing_token = renewed.fencing_token,
                     event = "session_execution_lease.renewed",
                     "renewed session execution lease"
@@ -123,7 +144,8 @@ impl SessionExecutionLeaseGuard {
                 tracing::warn!(
                     error = %err,
                     session_id = %fence.session_id,
-                    owner_id = %fence.owner_id,
+                    owner_id = %fence.owner.owner_id,
+                    incarnation_id = %fence.owner.incarnation_id,
                     fencing_token = fence.fencing_token,
                     event = "session_execution_lease.lost",
                     "lost session execution lease"
@@ -147,7 +169,8 @@ impl SessionExecutionLeaseGuard {
             .await?;
         tracing::debug!(
             session_id = %completion.session_id,
-            owner_id = %completion.owner_id,
+            owner_id = %completion.owner.owner_id,
+            incarnation_id = %completion.owner.incarnation_id,
             fencing_token = completion.fencing_token,
             event = "session_execution_lease.released",
             "released session execution lease"
@@ -159,14 +182,14 @@ impl SessionExecutionLeaseGuard {
 pub(super) async fn commit_runtime_state_with_fresh_session_execution_lease(
     store: Arc<dyn RuntimePersistence>,
     commit: RuntimeCommit,
-    owner_id: &str,
+    owner: &crate::LeaseOwnerIdentity,
     clock: Arc<dyn Clock>,
 ) -> Result<RuntimeCommitResult, StoreError> {
     let session_id = commit.session_id.clone();
     let Some(lease) = SessionExecutionLeaseGuard::try_acquire(
         Arc::clone(&store),
         &session_id,
-        owner_id,
+        owner,
         clock,
         CancellationToken::new(),
     )
@@ -198,7 +221,7 @@ fn spawn_renewal_task(
     clock: Arc<dyn Clock>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let renew_every = Duration::from_millis((RUNTIME_TURN_LEASE_TTL_MS / 3).max(1));
+    let renew_every = Duration::from_millis(RUNTIME_TURN_LEASE_RENEW_MS.max(1));
     tokio::spawn(async move {
         loop {
             clock.sleep(renew_every).await;
@@ -213,7 +236,8 @@ fn spawn_renewal_task(
                 Ok(renewed) => {
                     tracing::debug!(
                         session_id = %renewed.session_id,
-                        owner_id = %renewed.owner_id,
+                        owner_id = %renewed.owner.owner_id,
+                        incarnation_id = %renewed.owner.incarnation_id,
                         fencing_token = renewed.fencing_token,
                         event = "session_execution_lease.renewed",
                         "renewed session execution lease"
@@ -225,7 +249,8 @@ fn spawn_renewal_task(
                     tracing::warn!(
                         error = %err,
                         session_id = %fence.session_id,
-                        owner_id = %fence.owner_id,
+                        owner_id = %fence.owner.owner_id,
+                        incarnation_id = %fence.owner.incarnation_id,
                         fencing_token = fence.fencing_token,
                         event = "session_execution_lease.lost",
                         "lost session execution lease"
@@ -236,4 +261,22 @@ fn spawn_renewal_task(
             }
         }
     })
+}
+
+fn trace_busy(
+    session_id: &str,
+    claimant: &crate::LeaseOwnerIdentity,
+    holder: &SessionExecutionLease,
+) {
+    tracing::debug!(
+        session_id,
+        claimant_owner_id = %claimant.owner_id,
+        claimant_incarnation_id = %claimant.incarnation_id,
+        holder_owner_id = %holder.owner.owner_id,
+        holder_incarnation_id = %holder.owner.incarnation_id,
+        holder_fencing_token = holder.fencing_token,
+        holder_expires_at_epoch_ms = holder.expires_at_epoch_ms,
+        event = "session_execution_lease.busy",
+        "session execution lease is busy"
+    );
 }

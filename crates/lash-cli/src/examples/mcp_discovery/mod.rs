@@ -6,18 +6,18 @@
 //!
 //! 1. Enumerate MCP tools and build a ranking index ([`ranking`]).
 //! 2. Advertise them through a catalogue-preview prompt contribution
-//!    ([`catalogue_preview`]).
+//!    ([`lash_lashlang_runtime::catalogue_preview_contribution`]).
 //! 3. Expose a `search_tools` host tool over the index ([`definitions`],
 //!    [`service`]).
 //! 4. Register a [`DeferredToolResolver`](lash_lashlang_runtime::DeferredToolResolver)
 //!    that resolves chosen MCP call-paths into a Tool Grant + Tool Execution
 //!    Binding ([`resolver`]).
 //!
-//! The index ranking (BM25 / optional semantic / RRF) and the catalogue-preview
-//! formatter live here as a reference example hosts can copy or adapt.
+//! The index ranking (BM25 / optional semantic / RRF) lives here as a reference
+//! example hosts can copy or adapt. The catalogue-preview formatter is a public
+//! helper in `lash-lashlang-runtime`.
 
 mod catalog;
-mod catalogue_preview;
 mod common;
 mod definitions;
 mod plugin;

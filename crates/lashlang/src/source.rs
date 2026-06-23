@@ -327,6 +327,7 @@ impl<'a> SourceFormatter<'a> {
             Expr::Number(value) => format_number(*value),
             Expr::String(value) => Ok(format_string(value.as_str())),
             Expr::Variable(name) => format_identifier("variable", name.as_str()),
+            Expr::Tuple(items) => Ok(self.tuple_source(items)?),
             Expr::List(items) => {
                 let items = items
                     .iter()
@@ -508,6 +509,7 @@ impl<'a> SourceFormatter<'a> {
             | Expr::Number(_)
             | Expr::String(_)
             | Expr::Variable(_)
+            | Expr::Tuple(_)
             | Expr::List(_)
             | Expr::ListComprehension { .. }
             | Expr::Record(_)
@@ -532,6 +534,7 @@ impl<'a> SourceFormatter<'a> {
             | Expr::Number(_)
             | Expr::String(_)
             | Expr::Variable(_)
+            | Expr::Tuple(_)
             | Expr::List(_)
             | Expr::ListComprehension { .. }
             | Expr::Record(_)
@@ -566,6 +569,18 @@ impl<'a> SourceFormatter<'a> {
             }
         }
         Ok(out)
+    }
+
+    fn tuple_source(&self, items: &[Expr]) -> Result<String, CanonicalSourceError> {
+        let items = items
+            .iter()
+            .map(|item| self.expr_source(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(match items.as_slice() {
+            [] => "()".to_string(),
+            [item] => format!("({item},)"),
+            items => format!("({})", items.join(", ")),
+        })
     }
 
     fn type_source(&self, ty: &TypeExpr) -> Result<String, CanonicalSourceError> {
