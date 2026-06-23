@@ -4,7 +4,7 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash_core::{TraceContext, TraceSink};
-use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface};
+use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface, SharedDeferredToolResolver};
 
 use super::registration::register_rlm_protocol_plugin;
 use super::{RLM_PROTOCOL_PLUGIN_ID, RlmProtocolPluginConfig};
@@ -15,6 +15,7 @@ use crate::projection::{ProjectionRegistry, ProjectionResolver};
 pub struct RlmProtocolPluginFactory {
     config: RlmProtocolPluginConfig,
     projection_resolver: Arc<dyn ProjectionResolver>,
+    deferred_tool_resolver: Option<SharedDeferredToolResolver>,
     artifact_store: Arc<dyn LashlangArtifactStore>,
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
 }
@@ -24,6 +25,7 @@ impl RlmProtocolPluginFactory {
         Self {
             config,
             projection_resolver: Arc::new(ProjectionRegistry::default()),
+            deferred_tool_resolver: None,
             artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
             lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig::default(),
         }
@@ -34,6 +36,17 @@ impl RlmProtocolPluginFactory {
         projection_resolver: Arc<dyn ProjectionResolver>,
     ) -> Self {
         self.projection_resolver = projection_resolver;
+        self
+    }
+
+    /// Wire a host-provided [`DeferredToolResolver`](lash_lashlang_runtime::DeferredToolResolver)
+    /// that resolves Lashlang call-paths absent from the link-time host
+    /// environment into Tool Grants. Most hosts ship none.
+    pub fn with_deferred_tool_resolver(
+        mut self,
+        resolver: SharedDeferredToolResolver,
+    ) -> Self {
+        self.deferred_tool_resolver = Some(resolver);
         self
     }
 
@@ -80,6 +93,7 @@ impl PluginFactory for RlmProtocolPluginFactory {
         Ok(Arc::new(RlmProtocolPlugin {
             config: self.config.clone(),
             projection_resolver: Arc::clone(&self.projection_resolver),
+            deferred_tool_resolver: self.deferred_tool_resolver.clone(),
             artifact_store: Arc::clone(&self.artifact_store),
             lashlang_execution_trace_config: self.lashlang_execution_trace_config.clone(),
             lashlang_surface,
@@ -91,6 +105,7 @@ impl PluginFactory for RlmProtocolPluginFactory {
 struct RlmProtocolPlugin {
     config: RlmProtocolPluginConfig,
     projection_resolver: Arc<dyn ProjectionResolver>,
+    deferred_tool_resolver: Option<SharedDeferredToolResolver>,
     artifact_store: Arc<dyn LashlangArtifactStore>,
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
     lashlang_surface: LashlangSurface,
@@ -107,6 +122,7 @@ impl SessionPlugin for RlmProtocolPlugin {
             reg,
             self.config.clone(),
             Arc::clone(&self.projection_resolver),
+            self.deferred_tool_resolver.clone(),
             Arc::clone(&self.artifact_store),
             self.lashlang_execution_trace_config.clone(),
             self.lashlang_surface.clone(),

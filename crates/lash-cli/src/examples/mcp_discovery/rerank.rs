@@ -5,7 +5,7 @@ use lash_core::{
 };
 use serde_json::{Value, json};
 
-use crate::common::tokenize;
+use super::common::tokenize;
 
 /// Domain-specific intent reranking applied to candidate tools *after* the
 /// generic lexical/semantic ranker produces them. The BM25 scorer is kept

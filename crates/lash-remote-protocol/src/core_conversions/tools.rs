@@ -12,28 +12,6 @@ impl From<RemoteSchemaProjectionOverride> for lash_core::SchemaProjectionOverrid
     }
 }
 
-impl From<RemoteToolAvailability> for lash_core::ToolAvailability {
-    fn from(value: RemoteToolAvailability) -> Self {
-        match value {
-            RemoteToolAvailability::Off => Self::Off,
-            RemoteToolAvailability::Searchable => Self::Searchable,
-            RemoteToolAvailability::Callable => Self::Callable,
-            RemoteToolAvailability::Showcased => Self::Showcased,
-        }
-    }
-}
-
-impl From<lash_core::ToolAvailability> for RemoteToolAvailability {
-    fn from(value: lash_core::ToolAvailability) -> Self {
-        match value {
-            lash_core::ToolAvailability::Off => Self::Off,
-            lash_core::ToolAvailability::Searchable => Self::Searchable,
-            lash_core::ToolAvailability::Callable => Self::Callable,
-            lash_core::ToolAvailability::Showcased => Self::Showcased,
-        }
-    }
-}
-
 impl From<RemoteToolActivation> for lash_core::ToolActivation {
     fn from(value: RemoteToolActivation) -> Self {
         match value {
@@ -137,7 +115,6 @@ impl TryFrom<&RemoteToolGrant> for ToolDefinition {
             output_schema_projections,
             output_contract,
             examples,
-            availability,
             activation,
             argument_projection,
             scheduling,
@@ -154,10 +131,6 @@ impl TryFrom<&RemoteToolGrant> for ToolDefinition {
         .with_examples(examples.clone())
         .with_output_contract(output_contract.clone().into());
         definition.manifest.bindings = bindings.clone();
-        if let Some(availability) = *availability {
-            definition = definition
-                .with_availability(lash_core::ToolAvailabilityConfig::same(availability.into()));
-        }
         if let Some(activation) = *activation {
             definition = definition.with_activation(activation.into());
         }

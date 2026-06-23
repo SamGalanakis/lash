@@ -1,10 +1,9 @@
 //! Private helpers for the RLM subagent tool catalog.
 
-use lash_core::plugin::PluginError;
 use lash_core::{
     AssembledTurn, CausalRef, InputItem, SessionCreateRequest, SessionSnapshot, SessionSpec,
-    SessionToolAccess, SubagentSessionContext, ToolCatalogContribution, ToolDefinition, ToolResult,
-    ToolScheduling, TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    SessionToolAccess, SubagentSessionContext, ToolDefinition, ToolResult, ToolScheduling,
+    TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 use serde_json::{Value, json};
@@ -257,20 +256,14 @@ pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {
     })
 }
 
-/// Apply the spawned subagent's tool authority as a tool catalog override.
-pub(crate) fn sublashlang_binding_contribution(
-    ctx: lash_core::plugin::ToolCatalogContext,
-) -> Result<ToolCatalogContribution, PluginError> {
-    let Some(authority) = ctx.subagent else {
-        return Ok(ToolCatalogContribution::default());
-    };
-    Ok(ToolCatalogContribution {
-        tool_list_notes: vec![format!(
-            "Subagent capability: {}. Depth: {}/{}.",
-            authority.capability, authority.depth, authority.max_depth
-        )],
-        ..Default::default()
-    })
+/// Render the spawned subagent's tool authority as a prompt note. Under the
+/// flat catalog, tool-list notes are ordinary prompt contributions authored by
+/// the host, not a catalog property.
+pub(crate) fn subagent_capability_note(authority: &SubagentSessionContext) -> String {
+    format!(
+        "Subagent capability: {}. Depth: {}/{}.",
+        authority.capability, authority.depth, authority.max_depth
+    )
 }
 
 pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {

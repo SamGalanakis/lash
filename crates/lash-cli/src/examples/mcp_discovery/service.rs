@@ -4,10 +4,10 @@ use lash_core::{ToolCall, ToolContext, ToolResult};
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde_json::{Value, json};
 
-use crate::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
-use crate::definitions::search_tools_definition;
-use crate::ranking::ToolDiscoveryIndex;
-use crate::rerank::{
+use super::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
+use super::definitions::search_tools_definition;
+use super::ranking::ToolDiscoveryIndex;
+use super::rerank::{
     llm_rerank_request, merge_llm_selection, parse_llm_tool_names, rerank_payment_action_intent,
 };
 
@@ -201,11 +201,11 @@ mod tests {
             Ok(self.catalog.clone())
         }
 
-        async fn set_tools_availability(
+        async fn set_tool_membership(
             &self,
             _session_id: &str,
             _tool_names: &[String],
-            _availability: Option<lash_core::ToolAvailability>,
+            _present: bool,
         ) -> Result<u64, PluginError> {
             Ok(0)
         }
@@ -288,44 +288,18 @@ mod tests {
             .with_aliases(aliases),
         );
         let manifest = tool.manifest();
-        let projected = json!({
+        // The flat catalog projection (see `project_tool_catalog` in
+        // lash-core) emits id/name/description/bindings/activation/contract and
+        // no availability tier; the example derives the call path from the
+        // `lashlang.tool` binding.
+        json!({
             "id": manifest.id,
             "name": manifest.name,
             "description": manifest.description,
-            "availability": "searchable",
-            "callable": false,
-            "showcased": false,
-            "searchable": true,
+            "bindings": manifest.bindings,
             "activation": manifest.activation,
             "contract": manifest.compact_contract.clone().expect("compact contract"),
-        });
-        #[cfg(feature = "lashlang")]
-        {
-            let mut projected = projected;
-            let lashlang_binding =
-                lash_lashlang_runtime::required_tool_lashlang_executable(&manifest)
-                    .expect("catalog test tool has explicit Lashlang binding");
-            let call = lashlang_binding.call_path();
-            let projected_object = projected.as_object_mut().expect("catalog object");
-            projected_object.insert(
-                "module_path".to_string(),
-                json!(lashlang_binding.module_path.clone()),
-            );
-            projected_object.insert(
-                "operation".to_string(),
-                json!(lashlang_binding.operation.clone()),
-            );
-            projected_object.insert("call".to_string(), json!(call));
-            projected_object.insert(
-                "aliases".to_string(),
-                json!(lashlang_binding.aliases.clone()),
-            );
-            projected
-        }
-        #[cfg(not(feature = "lashlang"))]
-        {
-            projected
-        }
+        })
     }
 
     fn ranked_names(results: &[Value]) -> Vec<String> {

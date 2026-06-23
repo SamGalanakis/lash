@@ -13,7 +13,7 @@ use lash_core::plugin::{
     StaticPluginFactory,
 };
 use lash_core::{
-    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolScheduling,
+    ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolScheduling,
 };
 use lash_tool_support::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
@@ -113,7 +113,6 @@ pub fn process_list_tool_definition() -> ToolDefinition {
         "await processes.list({ definition: on_button })?".into(),
     ])
     .with_lashlang_binding(LashlangToolBinding::new(["processes"], "list"))
-    .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }
 
@@ -159,7 +158,6 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
         r#"await processes.cancel({ process_id: "subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C" })?"#.into(),
     ])
     .with_lashlang_binding(LashlangToolBinding::new(["processes"], "cancel"))
-    .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }
 
@@ -320,12 +318,8 @@ mod tests {
     }
 
     #[test]
-    fn cancel_process_definition_is_callable_when_registered() {
+    fn cancel_process_definition_renders_contract() {
         let definition = process_cancel_tool_definition();
-        assert_eq!(
-            definition.effective_availability(),
-            lash_core::ToolAvailability::Callable
-        );
         let rendered = definition.compact_contract().render_signature();
         assert!(rendered.contains("status: enum["), "{rendered}");
         assert!(!rendered.contains("terminal:"), "{rendered}");

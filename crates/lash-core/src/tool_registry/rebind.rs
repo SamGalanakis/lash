@@ -30,14 +30,6 @@ fn validate_unique_manifests<'a>(
     Ok(())
 }
 
-fn manifest_with_restored_override(
-    mut live: ToolManifest,
-    stored: &ToolManifest,
-) -> ToolManifest {
-    live.availability_override = stored.availability_override.or(live.availability_override);
-    live
-}
-
 fn manifest_with_compact_contract(
     source: &dyn ToolSourceExecutor,
     mut manifest: ToolManifest,
@@ -110,10 +102,9 @@ fn rebind_tool_state_entries(
                 )));
             }
             orphaned.push(id.clone());
-            rebound.insert(
-                id.clone(),
-                ToolRegistryEntry::orphaned(entry.manifest.clone()),
-            );
+            let mut orphan = ToolRegistryEntry::orphaned(entry.manifest.clone());
+            orphan.member = entry.member;
+            rebound.insert(id.clone(), orphan);
             continue;
         }
 
@@ -122,13 +113,9 @@ fn rebind_tool_state_entries(
                 .into_iter()
                 .next()
                 .expect("len checked above");
-            rebound.insert(
-                id.clone(),
-                ToolRegistryEntry::new(
-                    manifest_with_restored_override(manifest, &entry.manifest),
-                    source_id,
-                ),
-            );
+            let mut rebound_entry = ToolRegistryEntry::new(manifest, source_id);
+            rebound_entry.member = entry.member;
+            rebound.insert(id.clone(), rebound_entry);
         } else {
             return Err(ReconfigureError::Validation(format!(
                 "tool id `{id}` is resolved by multiple registered sources"

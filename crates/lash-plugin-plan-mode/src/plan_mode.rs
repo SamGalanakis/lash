@@ -9,7 +9,7 @@ use lash_core::plugin::{
     PluginCommand, PluginCommandOutcome, PluginDirective, PluginError, PluginFactory,
     PluginOperation, PluginOperationFailure, PluginRegistrar, PluginSessionContext,
     PluginSnapshotMeta, SessionParam, SessionPlugin, SnapshotReader, SnapshotWriter,
-    ToolCatalogContribution, ToolCatalogOverride,
+    ToolCatalogContribution,
 };
 use lash_core::{
     JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
@@ -218,98 +218,20 @@ where
     read_plan_report(&path).map_err(PluginError::Session)
 }
 
-fn tool_state_unavailable(err: &PluginError) -> bool {
-    matches!(err, PluginError::Session(message) if message.contains("tool state"))
-}
 
-async fn sync_plan_exit_tool_state<H>(
-    host: &Arc<H>,
-    session_id: &str,
-    enabled: bool,
-) -> Result<(), PluginError>
-where
-    H: lash_core::plugin::runtime_host::SessionStateService + ?Sized,
-{
-    let availability = if enabled {
-        Some(lash_core::ToolAvailability::Showcased)
-    } else {
-        Some(lash_core::ToolAvailability::Off)
-    };
-    match host
-        .set_tool_availability(session_id, "plan_exit", availability)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(err) if tool_state_unavailable(&err) => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-async fn set_plan_mode_enabled_state<H>(
+/// Flip plan-mode enablement. Tool Catalog membership (`plan_exit` visibility,
+/// suppression of non-allowed tools) is derived per turn by the plan-mode
+/// catalog contribution keyed on this state, so there is no registry mutation
+/// here.
+fn set_plan_mode_enabled_state(
     state: &Arc<Mutex<PlanModeState>>,
-    session_id: &str,
-    host: &Arc<H>,
-    enabled: bool,
-) -> Result<bool, PluginError>
-where
-    H: lash_core::plugin::runtime_host::SessionStateService + ?Sized,
-{
-    let previous = {
-        let mut guard = state
-            .lock()
-            .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
-        let previous = guard.enabled;
-        if previous != enabled {
-            guard.set_enabled(enabled);
-        }
-        previous
-    };
-    if let Err(err) = sync_plan_exit_tool_state(host, session_id, enabled).await {
-        if previous != enabled {
-            let mut guard = state
-                .lock()
-                .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
-            guard.set_enabled(previous);
-        }
-        return Err(err);
-    }
-    Ok(enabled)
-}
-
-async fn set_plan_mode_enabled_state_for_tool_context(
-    state: &Arc<Mutex<PlanModeState>>,
-    context: &ToolContext<'_>,
     enabled: bool,
 ) -> Result<bool, PluginError> {
-    let previous = {
-        let mut guard = state
-            .lock()
-            .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
-        let previous = guard.enabled;
-        if previous != enabled {
-            guard.set_enabled(enabled);
-        }
-        previous
-    };
-    let availability = if enabled {
-        Some(lash_core::ToolAvailability::Showcased)
-    } else {
-        Some(lash_core::ToolAvailability::Off)
-    };
-    let names = vec!["plan_exit".to_string()];
-    if let Err(err) = context
-        .sessions()
-        .set_tools_availability(&names, availability)
-        .await
-        && !tool_state_unavailable(&err)
-    {
-        if previous != enabled {
-            let mut guard = state
-                .lock()
-                .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
-            guard.set_enabled(previous);
-        }
-        return Err(err);
+    let mut guard = state
+        .lock()
+        .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
+    if guard.enabled != enabled {
+        guard.set_enabled(enabled);
     }
     Ok(enabled)
 }
@@ -420,9 +342,7 @@ impl PlanModeTools {
             PlanModePromptResponse::Single { note, .. } => note.clone(),
         };
 
-        if let Err(err) =
-            set_plan_mode_enabled_state_for_tool_context(&self.state, context, false).await
-        {
+        if let Err(err) = set_plan_mode_enabled_state(&self.state, false) {
             return ToolResult::err(json!(err.to_string()));
         }
 
@@ -474,7 +394,6 @@ fn plan_exit_tool_definition() -> ToolDefinition {
         plan_exit_output_schema(),
     )
     .with_examples(vec!["await plan.exit({})?".into()])
-    .with_availability(lash_core::ToolAvailabilityConfig::off())
     .with_lashlang_binding(LashlangToolBinding::new(["plan"], "exit"))
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -743,39 +662,49 @@ impl SessionPlugin for PlanModePlugin {
             })
         }));
 
+        // Membership is the only availability fact. While plan mode is enabled,
+        // remove every tool that is not allowed (and not `plan_exit`); while it
+        // is disabled, remove `plan_exit` so it is not callable.
         let tool_catalog_state = Arc::clone(&self.state);
         let tool_catalog_config = self.config.clone();
         reg.tool_catalog().contribute(Arc::new(move |ctx| {
-            let state = tool_catalog_state
+            let enabled = tool_catalog_state
                 .lock()
-                .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
-            if !state.enabled {
-                return Ok(ToolCatalogContribution::default());
+                .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
+                .enabled;
+            if !enabled {
+                return Ok(ToolCatalogContribution::remove_tools(["plan_exit"]));
             }
 
-            let mut overrides = ctx
+            let remove = ctx
                 .tools
                 .iter()
-                .filter(|tool| !tool_catalog_config.allowed_tools.contains(&tool.name))
-                .map(|tool| ToolCatalogOverride {
-                    tool_name: tool.name.clone(),
-                    availability: Some(lash_core::ToolAvailability::Off),
+                .filter(|tool| {
+                    tool.name != "plan_exit"
+                        && !tool_catalog_config.allowed_tools.contains(&tool.name)
                 })
+                .map(|tool| tool.name.clone())
                 .collect::<Vec<_>>();
-            overrides.push(ToolCatalogOverride {
-                tool_name: "plan_exit".to_string(),
-                availability: Some(lash_core::ToolAvailability::Showcased),
-            });
-            if tool_catalog_config.allowed_tools.contains("apply_patch") {
-                overrides.push(ToolCatalogOverride {
-                    tool_name: "apply_patch".to_string(),
-                    availability: Some(lash_core::ToolAvailability::Showcased),
-                });
-            }
+            Ok(ToolCatalogContribution { remove })
+        }));
 
-            Ok(ToolCatalogContribution {
-                overrides,
-                tool_list_notes: vec![plan_mode_tool_note(state.plan_path().as_deref())],
+        // The plan-mode tool note is an ordinary prompt contribution, gated on
+        // `plan_exit` being a catalog member (i.e. plan mode enabled).
+        let prompt_state = Arc::clone(&self.state);
+        reg.prompt().contribute(Arc::new(move |_ctx| {
+            let state = Arc::clone(&prompt_state);
+            Box::pin(async move {
+                let guard = state
+                    .lock()
+                    .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
+                if !guard.enabled {
+                    return Ok(Vec::new());
+                }
+                let note = plan_mode_tool_note(guard.plan_path().as_deref());
+                Ok(vec![
+                    lash_core::PromptContribution::execution("Plan Mode", note)
+                        .requires_tool("plan_exit"),
+                ])
             })
         }));
 
@@ -860,9 +789,7 @@ where
                     },
                     Err(_) => return Err(PluginOperationFailure::new("plan mode state poisoned")),
                 };
-                let enabled =
-                    set_plan_mode_enabled_state(&state, &session_id, &ctx.sessions, target_enabled)
-                        .await?;
+                let enabled = set_plan_mode_enabled_state(&state, target_enabled)?;
                 let report =
                     ensure_plan_report(&state, &session_id, &ctx.sessions, enabled).await?;
                 let status = plan_mode_payload(&session_id, enabled, Some(&report));

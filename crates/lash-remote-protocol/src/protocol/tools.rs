@@ -18,8 +18,6 @@ pub struct RemoteToolGrant {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub availability: Option<RemoteToolAvailability>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<RemoteToolActivation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_projection: Option<RemoteToolArgumentProjectionPolicy>,
@@ -191,16 +189,6 @@ fn default_input_schema() -> serde_json::Value {
 pub struct RemoteSchemaProjectionOverride {
     pub profile: String,
     pub schema: serde_json::Value,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteToolAvailability {
-    Off,
-    Searchable,
-    Callable,
-    #[default]
-    Showcased,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

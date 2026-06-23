@@ -9,9 +9,9 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    Resolution, RuntimeEffectController, ToolAvailabilityConfig, ToolContract, ToolDefinition,
-    ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
-    TriggerOccurrenceRequest, empty_trigger_source_key,
+    Resolution, RuntimeEffectController, ToolContract, ToolDefinition, ToolManifest,
+    ToolOutputContract, ToolProvider, ToolResult, ToolScheduling, TriggerOccurrenceRequest,
+    empty_trigger_source_key,
 };
 #[cfg(test)]
 use lash_lashlang_runtime::tool_lashlang_binding;
@@ -529,7 +529,6 @@ fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
         gmail_like_input_schema(name),
         gmail_like_output_schema(name),
     )
-    .with_availability(ToolAvailabilityConfig::callable())
     .with_examples(vec![
         format!(
             r#"call {name} {{ user_id: "me", message_id: "msg_123", payload: {{ label_ids: ["INBOX", "IMPORTANT"] }} }}"#
@@ -1382,7 +1381,7 @@ fn empty_request() -> LlmRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{ToolAvailability, ToolCatalogBuildInput, build_tool_catalog};
+    use lash_core::{ToolCatalogBuildInput, build_tool_catalog};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1394,8 +1393,7 @@ mod tests {
             let binding = tool_lashlang_binding(&def.manifest)
                 .expect("valid lashlang binding")
                 .expect("benchmark tool has lashlang binding");
-            def.manifest.availability.base == ToolAvailability::Callable
-                && binding.module_path == vec!["gmail".to_string()]
+            binding.module_path == vec!["gmail".to_string()]
                 && !def.contract.input_schema["properties"]
                     .as_object()
                     .expect("object schema")
@@ -1450,9 +1448,10 @@ mod tests {
             contributions: Vec::new(),
         });
 
+        // Every member is callable under the flat catalog; building the
+        // catalog resolves no contracts (rendering is lazy and protocol-owned).
         assert_eq!(surface.callable_tools().len(), GMAIL_LIKE_TOOL_NAMES.len());
         assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
-        assert_eq!(surface.prompt_tool_docs(), "");
     }
 
     #[test]

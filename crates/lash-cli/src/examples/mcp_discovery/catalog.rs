@@ -1,9 +1,7 @@
 use lash_core::CompactToolContract;
 use serde_json::{Value, json};
 
-use crate::common::round_score;
-#[cfg(feature = "lashlang")]
-use crate::common::string_vec;
+use super::common::round_score;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CatalogTool {
@@ -27,34 +25,29 @@ impl CatalogTool {
         let obj = raw.as_object()?;
         let id = obj.get("id")?.as_str()?.to_string();
         let name = obj.get("name")?.as_str()?.to_string();
+        // Under the flat catalog, the projected record no longer carries
+        // availability or pre-resolved Lashlang call-paths. Derive the call
+        // path from the tool's `lashlang.tool` binding, which is the only
+        // discovery fact this example needs.
         #[cfg(feature = "lashlang")]
-        let module_path = {
-            let module_path = string_vec(obj.get("module_path"));
-            if module_path.is_empty() {
-                return None;
-            }
-            module_path
+        let (module_path, operation, call, aliases) = {
+            let binding: lash_lashlang_runtime::LashlangToolBinding = obj
+                .get("bindings")
+                .and_then(|bindings| {
+                    bindings.get(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
+                })
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())?;
+            let executable = binding.executable_for(&name).ok()?;
+            (
+                executable.module_path.clone(),
+                executable.operation.clone(),
+                executable.call_path(),
+                executable.aliases.clone(),
+            )
         };
-        #[cfg(feature = "lashlang")]
-        let operation = obj
-            .get("operation")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)?;
-        #[cfg(feature = "lashlang")]
-        let call = obj
-            .get("call")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)?;
-        #[cfg(feature = "lashlang")]
-        let aliases = string_vec(obj.get("aliases"));
-        let searchable = obj
-            .get("searchable")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        // Every catalog member is callable/searchable under the flat model.
+        let searchable = true;
         let contract: CompactToolContract = obj
             .get("contract")
             .cloned()

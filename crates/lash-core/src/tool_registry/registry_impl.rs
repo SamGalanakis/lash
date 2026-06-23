@@ -91,12 +91,12 @@ impl ToolRegistry {
     ///
     /// Restore is tolerant of missing sources: a persisted tool that no current
     /// source resolves becomes an orphaned entry (kept with its last-known
-    /// manifest, surfaced as `Off`, rebound when its source returns) instead of
-    /// failing the whole restore. Tool id is the registry identity; the live
-    /// manifest wins on rebind, with the persisted availability override
-    /// preserved. Multiple sources resolving the same id or advertised name
-    /// still fail because execution authority and model-facing names must both
-    /// be unambiguous.
+    /// manifest, excluded from the catalog as a non-member, rebound when its
+    /// source returns) instead of failing the whole restore. Tool id is the
+    /// registry identity; the live manifest wins on rebind, with the persisted
+    /// Tool Catalog membership preserved. Multiple sources resolving the same id
+    /// or advertised name still fail because execution authority and
+    /// model-facing names must both be unambiguous.
     pub fn restore_state(
         &self,
         snapshot: ToolState,
@@ -185,10 +185,10 @@ impl ToolRegistry {
             .state
             .write()
             .expect("tool registry state lock poisoned");
-        let previous_overrides = state
+        let previous_membership = state
             .tools
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.manifest.availability_override))
+            .map(|(id, entry)| (id.clone(), entry.member))
             .collect::<BTreeMap<_, _>>();
         {
             let advertised_names = advertised_tools
@@ -203,8 +203,8 @@ impl ToolRegistry {
                 SourceReconcilePolicy::RejectExternalConflicts => {
                     // Orphans never conflict: a live advertisement supersedes a
                     // tool that is currently unresolvable. Matching id means the
-                    // source came back, with its availability override preserved
-                    // via `previous_overrides`.
+                    // source came back, with its catalog membership preserved
+                    // via `previous_membership`.
                     for manifest in &advertised_tools {
                         if let Some(existing) = state.tools.get(&manifest.id)
                             && let Some(existing_source) = existing.binding.source_id()
@@ -249,16 +249,12 @@ impl ToolRegistry {
                 }
             }
         }
-        for mut manifest in advertised_tools {
+        for manifest in advertised_tools {
             let id = manifest.id.clone();
-            manifest.availability_override = previous_overrides
-                .get(&id)
-                .copied()
-                .flatten()
-                .or(manifest.availability_override);
-            state
-                .tools
-                .insert(id, ToolRegistryEntry::new(manifest, source_id.clone()));
+            let member = previous_membership.get(&id).copied().unwrap_or(true);
+            let mut entry = ToolRegistryEntry::new(manifest, source_id.clone());
+            entry.member = member;
+            state.tools.insert(id, entry);
         }
         self.sources
             .write()

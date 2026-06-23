@@ -179,32 +179,21 @@ pub(crate) fn resolve_callable_manifest(
     context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> Option<ToolManifest> {
+    // Tool Catalog membership is callability: a catalog member is callable.
     if let Some(entry) = context
         .tool_catalog
         .tools
         .iter()
         .find(|tool| tool.manifest.name == tool_name)
     {
-        return entry
-            .availability
-            .is_callable()
-            .then(|| entry.manifest.clone());
+        return Some(entry.manifest.clone());
     }
 
-    let visible_and_callable = |manifest: ToolManifest| {
-        if context.plugins.tool_access().hides(&manifest.name) {
-            return None;
-        }
-        manifest
-            .effective_availability()
-            .is_callable()
-            .then_some(manifest)
+    let visible = |manifest: ToolManifest| {
+        (!context.plugins.tool_access().hides(&manifest.name)).then_some(manifest)
     };
 
-    context
-        .tools
-        .resolve_manifest(tool_name)
-        .and_then(visible_and_callable)
+    context.tools.resolve_manifest(tool_name).and_then(visible)
 }
 
 pub(crate) fn resolve_callable_manifest_by_id(
@@ -217,20 +206,11 @@ pub(crate) fn resolve_callable_manifest_by_id(
         .iter()
         .find(|tool| tool.manifest.id == *tool_id)
     {
-        return entry
-            .availability
-            .is_callable()
-            .then(|| entry.manifest.clone());
+        return Some(entry.manifest.clone());
     }
 
-    let visible_and_callable = |manifest: ToolManifest| {
-        if context.plugins.tool_access().hides(&manifest.name) {
-            return None;
-        }
-        manifest
-            .effective_availability()
-            .is_callable()
-            .then_some(manifest)
+    let visible = |manifest: ToolManifest| {
+        (!context.plugins.tool_access().hides(&manifest.name)).then_some(manifest)
     };
 
     context
@@ -238,7 +218,7 @@ pub(crate) fn resolve_callable_manifest_by_id(
         .tool_manifests()
         .into_iter()
         .find(|manifest| manifest.id == *tool_id)
-        .and_then(visible_and_callable)
+        .and_then(visible)
 }
 
 pub(crate) fn resolve_tool_argument_projection_policy(

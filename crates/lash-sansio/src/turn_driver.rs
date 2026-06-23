@@ -50,7 +50,6 @@ pub struct TurnDriverPreamble<M: TurnProtocol = UnitTurnProtocol> {
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
     pub tool_names: Arc<Vec<String>>,
     pub tool_names_fingerprint: PromptFingerprint,
-    pub omitted_tool_count: usize,
     pub execution_prompt: Arc<str>,
     pub prompt_contributions: Vec<PromptContribution>,
 }

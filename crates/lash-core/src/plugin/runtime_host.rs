@@ -45,43 +45,27 @@ pub trait SessionStateService: Send + Sync {
         ))
     }
 
-    async fn set_tools_availability(
+    /// Toggle Tool Catalog membership for several tools at once. `present` adds
+    /// the tools as members; `!present` removes them (non-membership) while
+    /// keeping their state for later re-add. Membership is the only
+    /// availability fact.
+    async fn set_tool_membership(
         &self,
         session_id: &str,
         tool_names: &[String],
-        availability: Option<crate::ToolAvailability>,
+        present: bool,
     ) -> Result<u64, PluginError> {
         let mut snapshot = self.tool_state(session_id).await?;
         for name in tool_names {
             let id = snapshot
-                .tool_manifests()
-                .into_iter()
-                .find(|manifest| manifest.name == *name)
-                .map(|manifest| manifest.id)
+                .iter()
+                .find(|(_, entry)| entry.manifest().name == *name)
+                .map(|(id, _)| id.clone())
                 .ok_or_else(|| PluginError::Session(format!("unknown tool `{name}`")))?;
             snapshot
-                .set_availability(&id, availability)
+                .set_membership(&id, present)
                 .map_err(|err| PluginError::Session(err.to_string()))?;
         }
-        self.apply_tool_state(session_id, snapshot).await
-    }
-
-    async fn set_tool_availability(
-        &self,
-        session_id: &str,
-        tool_name: &str,
-        availability: Option<ToolAvailability>,
-    ) -> Result<u64, PluginError> {
-        let mut snapshot = self.tool_state(session_id).await?;
-        let id = snapshot
-            .tool_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == tool_name)
-            .map(|manifest| manifest.id)
-            .ok_or_else(|| PluginError::Session(format!("unknown tool `{tool_name}`")))?;
-        snapshot
-            .set_availability(&id, availability)
-            .map_err(|err| PluginError::Session(err.to_string()))?;
         self.apply_tool_state(session_id, snapshot).await
     }
 }

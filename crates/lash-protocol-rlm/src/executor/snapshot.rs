@@ -1,6 +1,6 @@
 use lashlang::State as FlowState;
 
-pub(super) const RLM_SNAPSHOT_VERSION: u32 = 3;
+pub(super) const RLM_SNAPSHOT_VERSION: u32 = 4;
 
 pub(super) fn snapshot_runtime(rlm: &FlowState) -> Result<String, String> {
     serde_json::to_string(&rlm.snapshot()).map_err(|err| format!("failed to snapshot RLM: {err}"))

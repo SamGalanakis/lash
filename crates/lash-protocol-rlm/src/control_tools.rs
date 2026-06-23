@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use lash_core::{
-    ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContract, ToolControl,
-    ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    ToolArgumentProjectionPolicy, ToolCall, ToolContract, ToolControl, ToolDefinition,
+    ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use serde_json::{Value, json};
@@ -45,7 +45,6 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     .with_argument_projection(ToolArgumentProjectionPolicy::preserve_projected_refs_in_field(
         "seed",
     ))
-    .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }
 

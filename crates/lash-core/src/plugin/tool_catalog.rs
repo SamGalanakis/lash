@@ -15,26 +15,6 @@ pub struct ToolCatalogContext {
 }
 
 #[derive(Clone, Debug)]
-pub struct ToolDiscoveryContext {
-    pub session_id: String,
-    pub catalog: Vec<serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ToolDiscoveryContribution {
-    pub tools: Vec<ToolDiscoveryToolContribution>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ToolDiscoveryToolContribution {
-    pub tool_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
 pub struct PluginAbort {
     pub code: String,
     pub message: String,

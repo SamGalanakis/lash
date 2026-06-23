@@ -1085,7 +1085,6 @@ mod test_protocol_fakes {
                 tool_specs: input.tool_catalog.model_tool_specs(),
                 tool_names,
                 tool_names_fingerprint,
-                omitted_tool_count: 0,
                 execution_prompt: Arc::from(""),
                 prompt_contributions: input.extra_prompt_contributions,
             }

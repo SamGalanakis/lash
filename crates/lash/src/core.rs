@@ -533,6 +533,7 @@ impl RlmCore {
             inner: LashCore::builder().plugins(default_runtime_stack()),
             config: lash_protocol_rlm::RlmProtocolPluginConfig::default(),
             projection_resolver: Arc::new(lash_protocol_rlm::ProjectionRegistry::default()),
+            deferred_tool_resolver: None,
             lashlang_artifact_store: None,
             lashlang_execution_sink: None,
         }
@@ -629,6 +630,7 @@ pub struct RlmCoreBuilder {
     inner: LashCoreBuilder,
     config: lash_protocol_rlm::RlmProtocolPluginConfig,
     projection_resolver: Arc<dyn lash_protocol_rlm::ProjectionResolver>,
+    deferred_tool_resolver: Option<lash_lashlang_runtime::SharedDeferredToolResolver>,
     lashlang_artifact_store: Option<Arc<dyn lash_lashlang_runtime::LashlangArtifactStore>>,
     lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
 }
@@ -648,6 +650,16 @@ impl RlmCoreBuilder {
         projection_resolver: Arc<dyn lash_protocol_rlm::ProjectionResolver>,
     ) -> Self {
         self.projection_resolver = projection_resolver;
+        self
+    }
+
+    /// Wire a host-provided RLM Deferred Tool Resolver. Most hosts ship none;
+    /// the CLI's MCP-discovery example wires one.
+    pub fn deferred_tool_resolver(
+        mut self,
+        resolver: lash_lashlang_runtime::SharedDeferredToolResolver,
+    ) -> Self {
+        self.deferred_tool_resolver = Some(resolver);
         self
     }
 
@@ -688,15 +700,18 @@ impl RlmCoreBuilder {
         let process_lifecycle_available = self.inner.process_work_source.has_registry();
         let config = crate::rlm::rlm_protocol_config(self.config, process_lifecycle_available);
         let trace_context = self.inner.resolved_trace_context();
-        let protocol_factory = Arc::new(
+        let mut protocol_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(config.clone())
                 .with_projection_resolver(Arc::clone(&self.projection_resolver))
                 .with_lashlang_artifact_store(Arc::clone(&artifact_store))
                 .with_lashlang_execution_trace(
                     self.lashlang_execution_sink.clone(),
                     trace_context.clone(),
-                ),
-        );
+                );
+        if let Some(resolver) = self.deferred_tool_resolver.clone() {
+            protocol_factory = protocol_factory.with_deferred_tool_resolver(resolver);
+        }
+        let protocol_factory = Arc::new(protocol_factory);
         let engine_artifact_store = Arc::clone(&artifact_store);
         let engine_config = config.clone();
         let engine_sink = self.lashlang_execution_sink.clone();

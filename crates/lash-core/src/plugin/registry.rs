@@ -17,8 +17,7 @@ use super::{
     PluginQuery, PluginQueryHandler, PluginQueryInvokeFuture, PluginRegistrar, PluginSnapshotMeta,
     PluginTask, PluginTaskHandler, PluginTaskInvokeFuture, PluginTaskOutcome, PromptContributor,
     SessionConfigMutator, SessionToolAccess, SnapshotReader, SnapshotWriter,
-    SubagentSessionContext, ToolCatalogContributor, ToolDiscoveryContributor, ToolResultProjector,
-    TurnContextTransform,
+    SubagentSessionContext, ToolCatalogContributor, ToolResultProjector, TurnContextTransform,
 };
 use crate::{PluginOptions, ToolProvider};
 
@@ -89,7 +88,6 @@ pub struct PluginSpec {
     pub triggers: Vec<crate::TriggerEvent>,
     pub prompt_contributors: Vec<PromptContributor>,
     pub tool_catalog_contributors: Vec<ToolCatalogContributor>,
-    pub tool_discovery_contributors: Vec<ToolDiscoveryContributor>,
     pub before_turn_hooks: Vec<BeforeTurnHook>,
     pub before_tool_call_hooks: Vec<BeforeToolCallHook>,
     pub after_tool_call_hooks: Vec<AfterToolCallHook>,
@@ -129,14 +127,6 @@ impl PluginSpec {
 
     pub fn with_tool_catalog_contributor(mut self, contributor: ToolCatalogContributor) -> Self {
         self.tool_catalog_contributors.push(contributor);
-        self
-    }
-
-    pub fn with_tool_discovery_contributor(
-        mut self,
-        contributor: ToolDiscoveryContributor,
-    ) -> Self {
-        self.tool_discovery_contributors.push(contributor);
         self
     }
 
@@ -584,9 +574,6 @@ impl SessionPlugin for SpecPlugin {
         }
         for contributor in &self.spec.tool_catalog_contributors {
             reg.tool_catalog().contribute(Arc::clone(contributor));
-        }
-        for contributor in &self.spec.tool_discovery_contributors {
-            reg.discovery().contribute(Arc::clone(contributor));
         }
         for hook in &self.spec.before_turn_hooks {
             reg.turn().before(Arc::clone(hook));

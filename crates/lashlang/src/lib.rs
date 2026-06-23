@@ -40,6 +40,7 @@ pub use introspection::{
     ModuleOperationIntrospection, NamedDataTypeIntrospection, ProcessInputIntrospection,
     ProcessIntrospection, ProcessSignalIntrospection, ResourceOperationIntrospection,
     ResourceTypeIntrospection, TriggerSourceIntrospection, TypeView, ValueConstructorIntrospection,
+    referenced_module_call_paths,
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{

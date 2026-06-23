@@ -65,6 +65,11 @@ pub(super) fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>)
     };
     let mut plugin_stack = standard_tool_stack(runtime_options);
     push_cli_search_tool(&mut plugin_stack);
+    // Reference MCP tool-discovery example: a host-owned `search_tools` tool
+    // over a ranking index. Discovery is host policy, not a lash primitive.
+    plugin_stack.push(Arc::new(
+        crate::examples::mcp_discovery::ToolDiscoveryPluginFactory::new(),
+    ) as Arc<dyn PluginFactory>);
     plugin_stack.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
@@ -151,7 +156,7 @@ fn retain_autonomous_tools(snapshot: &mut ToolState) {
     snapshot.retain(|_, entry| autonomous_tool_allowed(&entry.manifest().name));
 }
 
-pub(super) fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
+pub(crate) fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
     let mut intro_entries = vec![PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro)];
     intro_entries.push(PromptTemplateEntry::slot(PromptSlot::Intro));
 
@@ -209,8 +214,8 @@ mod tests {
     use super::*;
     use crate::instructions::FsInstructionSource;
     use lash::tools::{
-        ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
-        ToolResult, ToolScheduling,
+        ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+        ToolScheduling,
     };
     use lash_core::ToolRegistry;
 
@@ -224,7 +229,6 @@ mod tests {
             ToolDefinition::default_input_schema(),
             serde_json::json!({ "type": "null" }),
         )
-        .with_availability(ToolAvailabilityConfig::callable())
         .with_scheduling(ToolScheduling::Parallel)
     }
 

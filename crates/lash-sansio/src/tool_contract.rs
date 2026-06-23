@@ -118,95 +118,12 @@ fn is_default_tool_retry_policy(policy: &ToolRetryPolicy) -> bool {
     *policy == ToolRetryPolicy::default()
 }
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolAvailability {
-    /// Keep the tool out of the current surface entirely.
-    ///
-    /// The definition can remain in registry state so host or authority
-    /// overrides survive refreshes, but the model cannot search, see, or call
-    /// the tool.
-    #[default]
-    Off,
-    /// Include the tool in the searchable catalog, but not in the model's
-    /// callable tool list.
-    Searchable,
-    /// Include the tool in the model's callable tool list, without featuring
-    /// it in prompt-side tool documentation.
-    Callable,
-    /// Include the tool in the callable list and feature it in prompt-side
-    /// tool documentation.
-    Showcased,
-}
-
-impl ToolAvailability {
-    pub fn is_searchable(self) -> bool {
-        self >= Self::Searchable
-    }
-
-    pub fn is_callable(self) -> bool {
-        self >= Self::Callable
-    }
-
-    pub fn is_showcased(self) -> bool {
-        self >= Self::Showcased
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ToolAvailabilityConfig {
-    pub base: ToolAvailability,
-}
-
-impl ToolAvailabilityConfig {
-    pub fn same(availability: ToolAvailability) -> Self {
-        Self { base: availability }
-    }
-
-    pub fn showcased() -> Self {
-        Self::same(ToolAvailability::Showcased)
-    }
-
-    pub fn callable() -> Self {
-        Self::same(ToolAvailability::Callable)
-    }
-
-    pub fn off() -> Self {
-        Self::same(ToolAvailability::Off)
-    }
-
-    pub fn base(&self) -> ToolAvailability {
-        self.base
-    }
-}
-
-impl Default for ToolAvailabilityConfig {
-    fn default() -> Self {
-        Self::showcased()
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolActivation {
     #[default]
     Always,
     Internal,
-}
-
-fn is_default_tool_availability_config(config: &ToolAvailabilityConfig) -> bool {
-    *config == ToolAvailabilityConfig::default()
 }
 
 fn is_default_tool_activation(activation: &ToolActivation) -> bool {
@@ -360,9 +277,11 @@ impl std::fmt::Display for ToolId {
     }
 }
 
-/// Tool metadata exposed to prompts, catalogs, UI, and availability checks.
-/// The optional compact contract is the catalog-facing projection of the
-/// resolved contract; full schemas stay in [`ToolContract`].
+/// Tool metadata exposed to prompts, catalogs, and UI. Catalog membership —
+/// being present in a [`ToolProvider`]'s manifest list — is the only
+/// availability fact; there is no per-manifest availability tier. The optional
+/// compact contract is the catalog-facing projection of the resolved contract;
+/// full schemas stay in [`ToolContract`].
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolManifest {
     pub id: ToolId,
@@ -371,12 +290,8 @@ pub struct ToolManifest {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_contract: Option<CompactToolContract>,
-    #[serde(default, skip_serializing_if = "is_default_tool_availability_config")]
-    pub availability: ToolAvailabilityConfig,
     #[serde(default, skip_serializing_if = "is_default_tool_activation")]
     pub activation: ToolActivation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub availability_override: Option<ToolAvailability>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub bindings: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(
@@ -394,13 +309,6 @@ pub struct ToolManifest {
         skip_serializing_if = "is_default_tool_retry_policy"
     )]
     pub retry_policy: ToolRetryPolicy,
-}
-
-impl ToolManifest {
-    pub fn effective_availability(&self) -> ToolAvailability {
-        self.availability_override
-            .unwrap_or_else(|| self.availability.base())
-    }
 }
 
 /// Heavy tool contract resolved only when a prompt or call needs schemas/docs.
@@ -678,9 +586,7 @@ impl ToolDefinition {
                 name: name.into(),
                 description: description.into(),
                 compact_contract: None,
-                availability: ToolAvailabilityConfig::default(),
                 activation: ToolActivation::default(),
-                availability_override: None,
                 bindings: std::collections::BTreeMap::new(),
                 argument_projection: ToolArgumentProjectionPolicy::default(),
                 scheduling: default_tool_scheduling(),
@@ -714,11 +620,6 @@ impl ToolDefinition {
 
     pub fn with_examples(mut self, examples: Vec<String>) -> Self {
         self.contract.examples = examples;
-        self
-    }
-
-    pub fn with_availability(mut self, availability: ToolAvailabilityConfig) -> Self {
-        self.manifest.availability = availability;
         self
     }
 
@@ -830,10 +731,6 @@ impl ToolDefinition {
     pub fn compact_contract_with_example_limit(&self, example_limit: usize) -> CompactToolContract {
         self.contract
             .compact_contract_with_example_limit(&self.manifest, example_limit)
-    }
-
-    pub fn effective_availability(&self) -> ToolAvailability {
-        self.manifest.effective_availability()
     }
 
     pub fn model_tool(&self) -> ModelTool {

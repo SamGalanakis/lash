@@ -16,15 +16,29 @@ impl ToolSourceHandle {
     }
 }
 
+fn is_member_default() -> bool {
+    true
+}
+
+fn is_default_member(member: &bool) -> bool {
+    *member
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolStateEntry {
     manifest: ToolManifest,
     /// True when this tool was not resolvable from any registered source at
     /// export time (e.g. a detached MCP server). Orphaned entries keep their
-    /// last-known manifest, surface as [`crate::ToolAvailability::Off`], and
-    /// rebind automatically when a source re-advertises the same tool id.
+    /// last-known manifest, are excluded from the Tool Catalog (non-members
+    /// until their source returns), and rebind automatically when a source
+    /// re-advertises the same tool id.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     orphaned: bool,
+    /// Catalog membership. Membership is the only availability fact: a member
+    /// is callable; a non-member does not exist to the model. Hosts toggle this
+    /// via `set_tool_membership`.
+    #[serde(default = "is_member_default", skip_serializing_if = "is_default_member")]
+    member: bool,
 }
 
 impl ToolStateEntry {
@@ -33,26 +47,28 @@ impl ToolStateEntry {
         Self {
             manifest,
             orphaned: false,
+            member: true,
         }
     }
 
-    /// The manifest as exposed to callers. Orphaned entries are known to the
-    /// session but unavailable until their source returns, so their public
-    /// availability is always forced to `Off`.
+    /// The stored manifest as exposed to callers.
     pub fn manifest(&self) -> ToolManifest {
-        let mut manifest = self.manifest.clone();
-        if self.orphaned {
-            manifest.availability_override = Some(crate::ToolAvailability::Off);
-        }
-        manifest
+        self.manifest.clone()
     }
 
+    #[allow(dead_code)]
     fn stored_manifest(&self) -> &ToolManifest {
         &self.manifest
     }
 
     pub fn is_orphaned(&self) -> bool {
         self.orphaned
+    }
+
+    /// Whether this entry is currently a Tool Catalog member. Orphaned entries
+    /// are never members.
+    pub fn is_member(&self) -> bool {
+        self.member && !self.orphaned
     }
 }
 
@@ -79,8 +95,14 @@ impl ToolState {
         self
     }
 
+    /// Manifests for current Tool Catalog members. Orphaned and host-removed
+    /// entries are excluded (non-membership) but kept in state for rebind.
     pub fn tool_manifests(&self) -> Vec<ToolManifest> {
-        self.tools.values().map(ToolStateEntry::manifest).collect()
+        self.tools
+            .values()
+            .filter(|entry| entry.is_member())
+            .map(ToolStateEntry::manifest)
+            .collect()
     }
 
     pub fn get(&self, id: &ToolId) -> Option<&ToolStateEntry> {
@@ -109,17 +131,16 @@ impl ToolState {
         self.tools.iter()
     }
 
-    pub fn set_availability(
-        &mut self,
-        id: &ToolId,
-        availability: Option<crate::ToolAvailability>,
-    ) -> Result<(), ReconfigureError> {
+    /// Toggle Tool Catalog membership for a tool. `present == false` removes
+    /// the tool from the catalog (non-membership) while keeping its state entry;
+    /// `present == true` restores membership.
+    pub fn set_membership(&mut self, id: &ToolId, present: bool) -> Result<(), ReconfigureError> {
         let Some(entry) = Arc::make_mut(&mut self.tools).get_mut(id) else {
             return Err(ReconfigureError::Validation(format!(
                 "unknown tool id `{id}`"
             )));
         };
-        entry.manifest.availability_override = availability;
+        entry.member = present;
         Ok(())
     }
 

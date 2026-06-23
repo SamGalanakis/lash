@@ -42,12 +42,13 @@ impl PluginMessage {
     }
 }
 
+/// Gate on Tool Catalog membership: a contribution is kept when at least one
+/// of `tools` is a member of the catalog. Membership is the only availability
+/// fact, so there is no minimum-tier dimension.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptContributionGate {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    #[serde(default)]
-    pub minimum_availability: crate::ToolAvailability,
 }
 
 impl PromptContributionGate {
@@ -80,10 +81,7 @@ impl PromptContribution {
             slot,
             title,
             priority: 0,
-            gate: PromptContributionGate {
-                tools: Vec::new(),
-                minimum_availability: crate::ToolAvailability::default(),
-            },
+            gate: PromptContributionGate { tools: Vec::new() },
             content: content.into(),
         }
     }
@@ -93,14 +91,9 @@ impl PromptContribution {
         self
     }
 
-    pub fn requires_tool(
-        mut self,
-        tool_name: impl Into<String>,
-        minimum_availability: crate::ToolAvailability,
-    ) -> Self {
+    pub fn requires_tool(mut self, tool_name: impl Into<String>) -> Self {
         self.gate = PromptContributionGate {
             tools: vec![tool_name.into()],
-            minimum_availability,
         };
         self
     }
@@ -108,11 +101,9 @@ impl PromptContribution {
     pub fn requires_any_tool(
         mut self,
         tool_names: impl IntoIterator<Item = impl Into<String>>,
-        minimum_availability: crate::ToolAvailability,
     ) -> Self {
         self.gate = PromptContributionGate {
             tools: tool_names.into_iter().map(Into::into).collect(),
-            minimum_availability,
         };
         self
     }

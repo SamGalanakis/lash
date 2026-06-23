@@ -187,10 +187,6 @@ mod tests {
             definition.manifest.activation,
             lash_core::ToolActivation::Always
         );
-        assert_eq!(
-            definition.manifest.availability.base,
-            lash_core::ToolAvailability::Showcased
-        );
     }
 
     #[test]

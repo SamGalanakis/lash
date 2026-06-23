@@ -389,6 +389,16 @@ impl LashlangHostCatalog {
         module.operations.get(operation)
     }
 
+    /// Whether this catalog already provides `operation` on the module at the
+    /// dotted `module_path` (e.g. `"web"`, `"web.fetch"`), regardless of the
+    /// backing resource type. Used by deferred resolution to skip call-paths
+    /// the link-time host environment already binds.
+    pub fn provides_module_operation(&self, module_path: &str, operation: &str) -> bool {
+        self.module_instances
+            .get(module_path)
+            .is_some_and(|module| module.operations.contains_key(operation))
+    }
+
     pub fn resolve_value_constructor(
         &self,
         path: &[impl AsRef<str>],

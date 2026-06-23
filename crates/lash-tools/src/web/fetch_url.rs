@@ -126,7 +126,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fetch_url_returns_minimal_typed_record_and_is_showcased() {
+    fn fetch_url_returns_minimal_typed_record() {
         let definition = fetch_url_tool_definition();
 
         assert_eq!(
@@ -144,10 +144,6 @@ mod tests {
         assert_eq!(
             definition.manifest.activation,
             lash_core::ToolActivation::Always
-        );
-        assert_eq!(
-            definition.manifest.availability.base,
-            lash_core::ToolAvailability::Showcased
         );
     }
 }

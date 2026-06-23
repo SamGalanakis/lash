@@ -198,26 +198,14 @@ impl From<RemotePromptContribution> for lash_core::PromptContribution {
 
 impl From<lash_core::PromptContributionGate> for RemotePromptContributionGate {
     fn from(value: lash_core::PromptContributionGate) -> Self {
-        let lash_core::PromptContributionGate {
-            tools,
-            minimum_availability,
-        } = value;
-        Self {
-            tools,
-            minimum_availability: minimum_availability.into(),
-        }
+        let lash_core::PromptContributionGate { tools } = value;
+        Self { tools }
     }
 }
 
 impl From<RemotePromptContributionGate> for lash_core::PromptContributionGate {
     fn from(value: RemotePromptContributionGate) -> Self {
-        let RemotePromptContributionGate {
-            tools,
-            minimum_availability,
-        } = value;
-        Self {
-            tools,
-            minimum_availability: minimum_availability.into(),
-        }
+        let RemotePromptContributionGate { tools } = value;
+        Self { tools }
     }
 }

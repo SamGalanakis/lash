@@ -49,7 +49,6 @@ impl PreparedExecutionEnvironment {
                 execution_prompt: Arc::clone(&self.turn_driver_preamble.execution_prompt),
                 tool_names_fingerprint: self.turn_driver_preamble.tool_names_fingerprint,
                 tool_names: Arc::clone(&self.turn_driver_preamble.tool_names),
-                omitted_tool_count: self.turn_driver_preamble.omitted_tool_count,
                 contributions,
             },
             prompt_cache.as_deref(),

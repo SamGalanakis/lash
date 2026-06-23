@@ -194,6 +194,7 @@ mod tests {
                 Arc::new(ProjectionRegistry::default()),
                 lashlang::global_in_memory_lashlang_artifact_store(),
                 lash_lashlang_runtime::LashlangSurface::default(),
+                None,
                 crate::executor::RlmLashlangExecutionTraceConfig::default(),
             )
             .expect("runtime state"),

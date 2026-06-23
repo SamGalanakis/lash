@@ -15,7 +15,7 @@ impl ToolRegistry {
             let Some(manifest) = source.resolve_manifest_by_id(tool_id) else {
                 continue;
             };
-            let mut manifest = manifest_with_compact_contract(source.as_ref(), manifest);
+            let manifest = manifest_with_compact_contract(source.as_ref(), manifest);
             let mut state = self
                 .state
                 .write()
@@ -24,14 +24,11 @@ impl ToolRegistry {
             if !existing.is_orphaned() {
                 return Some(existing.view_manifest());
             }
-            manifest.availability_override = existing
-                .manifest
-                .availability_override
-                .or(manifest.availability_override);
-            state.tools.insert(
-                tool_id.clone(),
-                ToolRegistryEntry::new(manifest.clone(), source_id),
-            );
+            // Preserve host membership state across the rebind.
+            let member = existing.member;
+            let mut rebound = ToolRegistryEntry::new(manifest.clone(), source_id);
+            rebound.member = member;
+            state.tools.insert(tool_id.clone(), rebound);
             state.generation += 1;
             return Some(manifest);
         }
@@ -49,7 +46,18 @@ impl ToolRegistry {
                 "Unknown tool id: {tool_id}"
             )));
         };
-        if manifest.effective_availability() == crate::ToolAvailability::Off {
+        let is_member = {
+            let state = self
+                .state
+                .read()
+                .expect("tool registry state lock poisoned");
+            state
+                .tools
+                .get(tool_id)
+                .map(ToolRegistryEntry::is_member)
+                .unwrap_or(true)
+        };
+        if !is_member {
             return Err(ToolResult::err_fmt(format_args!(
                 "Tool id `{tool_id}` is unavailable"
             )));
@@ -96,6 +104,7 @@ impl ToolProvider for ToolRegistry {
         state
             .tools
             .values()
+            .filter(|entry| entry.is_member())
             .map(ToolRegistryEntry::view_manifest)
             .collect()
     }
@@ -131,18 +140,7 @@ impl ToolProvider for ToolRegistry {
             let Some(manifest) = source.resolve_manifest(name) else {
                 continue;
             };
-            let mut manifest = manifest_with_compact_contract(source.as_ref(), manifest);
-            let previous_override = {
-                let state = self
-                    .state
-                    .read()
-                    .expect("tool registry state lock poisoned");
-                state
-                    .tools
-                    .get(&manifest.id)
-                    .and_then(|entry| entry.manifest.availability_override)
-            };
-            manifest.availability_override = previous_override.or(manifest.availability_override);
+            let manifest = manifest_with_compact_contract(source.as_ref(), manifest);
             let mut state = self
                 .state
                 .write()

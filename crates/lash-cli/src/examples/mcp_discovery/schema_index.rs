@@ -1,5 +1,5 @@
 #[cfg(feature = "semantic-tool-search")]
-use crate::catalog::CatalogTool;
+use super::catalog::CatalogTool;
 
 #[cfg(feature = "semantic-tool-search")]
 pub(crate) fn semantic_index_text(tool: &CatalogTool) -> String {

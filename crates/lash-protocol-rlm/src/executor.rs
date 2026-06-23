@@ -40,6 +40,7 @@ pub async fn execute_code(
     request: ExecRequest,
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     lashlang_surface: LashlangSurface,
+    deferred_tool_resolver: Option<lash_lashlang_runtime::SharedDeferredToolResolver>,
     session_projected_bindings: RlmProjectedBindings,
     projection_resolver: Arc<dyn ProjectionResolver>,
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
@@ -53,6 +54,7 @@ pub async fn execute_code(
         start,
         artifact_store,
         lashlang_surface,
+        deferred_tool_resolver,
         session_projected_bindings,
         projection_resolver,
         lashlang_execution_trace_config,
@@ -83,12 +85,14 @@ async fn execute_code_inner(
     start: std::time::Instant,
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     lashlang_surface: LashlangSurface,
+    deferred_tool_resolver: Option<lash_lashlang_runtime::SharedDeferredToolResolver>,
     session_projected_bindings: RlmProjectedBindings,
     projection_resolver: Arc<dyn ProjectionResolver>,
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
 ) -> ExecResponse {
     state.dirty = true;
-    let host_environment = match lashlang_surface.host_environment(ctx.tool_catalog().as_ref()) {
+    let mut host_environment = match lashlang_surface.host_environment(ctx.tool_catalog().as_ref())
+    {
         Ok(host_environment) => host_environment,
         Err(err) => {
             return ExecResponse {
@@ -103,6 +107,27 @@ async fn execute_code_inner(
             };
         }
     };
+
+    // gather → resolve → link: fold any deferred call-paths the program
+    // references into the host environment before compiling. The resolution
+    // record lives in the (snapshotted) execution state, so a re-driven or
+    // recovered turn replays it without re-calling the resolver. The flat Tool
+    // Catalog is never mutated — resolution is link-scoped only. A resolver is
+    // present only under hosts that configure RLM deferral; most hosts ship
+    // none and this is a no-op.
+    if deferred_tool_resolver.is_some() || !state.deferred_resolutions.is_empty() {
+        let _phase = ctx.named_phase("rlm_lashlang.deferred_resolve");
+        if let Ok(program) = lashlang::parse(code) {
+            host_environment = lash_lashlang_runtime::resolve_and_fold_deferred(
+                &program,
+                host_environment,
+                deferred_tool_resolver.as_ref(),
+                &mut state.deferred_resolutions,
+            )
+            .await;
+        }
+    }
+
     let compile_result = {
         let _phase = ctx.named_phase("rlm_lashlang.compile_link");
         state
@@ -464,6 +489,7 @@ mod tests {
         ProjectionRef, ProjectionRegistry, flow_record_to_json_value, flow_record_to_tool_args,
         flow_to_json_value, projected_index,
     };
+    use lash_lashlang_runtime::ToolDefinitionLashlangExt;
     use lash_rlm_types::PROJECTED_JSON_TAG;
     use lashlang::{
         AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
@@ -624,6 +650,7 @@ mod tests {
             },
             lashlang::global_in_memory_lashlang_artifact_store(),
             surface,
+            None,
             RlmProjectedBindings::default(),
             Arc::new(ProjectionRegistry::new()),
             RlmLashlangExecutionTraceConfig::default(),
@@ -657,6 +684,7 @@ mod tests {
                 request(),
                 lashlang::global_in_memory_lashlang_artifact_store(),
                 surface(),
+                None,
                 RlmProjectedBindings::default(),
                 resolver(),
                 RlmLashlangExecutionTraceConfig::default(),
@@ -675,6 +703,7 @@ mod tests {
                 request(),
                 lashlang::global_in_memory_lashlang_artifact_store(),
                 surface(),
+                None,
                 RlmProjectedBindings::default(),
                 resolver(),
                 RlmLashlangExecutionTraceConfig::default(),
@@ -688,6 +717,111 @@ mod tests {
             assert_eq!(second_stats.misses, 1);
             assert_eq!(second_stats.entries, 1);
             assert!(state.stored_lashlang_modules.is_empty());
+        });
+    }
+
+    struct CountingDeferredResolver {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl lash_lashlang_runtime::DeferredToolResolver for CountingDeferredResolver {
+        async fn resolve(&self, path: &str) -> lash_lashlang_runtime::Resolution {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if path == "web.fetch" {
+                let definition = lash_core::ToolDefinition::raw(
+                    "tool:web_fetch",
+                    "web_fetch",
+                    "Fetch a URL",
+                    lash_core::ToolDefinition::default_input_schema(),
+                    serde_json::json!({ "type": "string" }),
+                )
+                .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+                    ["web"],
+                    "fetch",
+                ));
+                lash_lashlang_runtime::Resolution::Resolved(lash_lashlang_runtime::ToolGrant::new(
+                    definition,
+                ))
+            } else {
+                lash_lashlang_runtime::Resolution::NotAvailable
+            }
+        }
+    }
+
+    fn empty_rlm_host_environment() -> lashlang::LashlangHostEnvironment {
+        LashlangSurface::default()
+            .host_environment(&lash_core::ToolCatalog::default())
+            .expect("host environment")
+    }
+
+    #[test]
+    fn deferred_resolution_record_replays_across_snapshot_without_re_resolving() {
+        block_on(async {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let resolver: lash_lashlang_runtime::SharedDeferredToolResolver =
+                Arc::new(CountingDeferredResolver {
+                    calls: Arc::clone(&calls),
+                });
+
+            // First drive: resolve `web.fetch` (1 resolver call) and `mystery.x`
+            // (NotAvailable, 1 call). The record captures both.
+            let mut state = RlmExecutionState::new().expect("state");
+            let program =
+                lashlang::parse(r#"await web.fetch({})?"#).expect("parse");
+            let env = lash_lashlang_runtime::resolve_and_fold_deferred(
+                &program,
+                empty_rlm_host_environment(),
+                Some(&resolver),
+                &mut state.deferred_resolutions,
+            )
+            .await;
+            assert!(env.resources.provides_module_operation("web", "fetch"));
+            let mystery = lashlang::parse(r#"await mystery.x({})?"#).expect("parse");
+            let _ = lash_lashlang_runtime::resolve_and_fold_deferred(
+                &mystery,
+                empty_rlm_host_environment(),
+                Some(&resolver),
+                &mut state.deferred_resolutions,
+            )
+            .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "resolved each path once");
+
+            // Snapshot and restore into a fresh state, modeling a re-driven /
+            // recovered turn.
+            let snapshot = state
+                .snapshot_execution_state()
+                .expect("snapshot")
+                .expect("snapshot bytes");
+            let mut restored = RlmExecutionState::new().expect("state");
+            restored
+                .restore_execution_state(&snapshot)
+                .expect("restore");
+
+            // Re-drive both links: the resolver is never called again; the
+            // recorded Resolved grant still folds in, and the recorded
+            // NotAvailable still leaves its symbol unresolved.
+            let env = lash_lashlang_runtime::resolve_and_fold_deferred(
+                &program,
+                empty_rlm_host_environment(),
+                Some(&resolver),
+                &mut restored.deferred_resolutions,
+            )
+            .await;
+            assert!(env.resources.provides_module_operation("web", "fetch"));
+            let env = lash_lashlang_runtime::resolve_and_fold_deferred(
+                &mystery,
+                empty_rlm_host_environment(),
+                Some(&resolver),
+                &mut restored.deferred_resolutions,
+            )
+            .await;
+            assert!(!env.resources.provides_module_operation("mystery", "x"));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "replay must not re-resolve either path"
+            );
         });
     }
 
@@ -716,6 +850,7 @@ mod tests {
                 request(),
                 lashlang::global_in_memory_lashlang_artifact_store(),
                 surface(),
+                None,
                 RlmProjectedBindings::default(),
                 resolver(),
                 RlmLashlangExecutionTraceConfig::default(),
@@ -731,6 +866,7 @@ mod tests {
                 request(),
                 lashlang::global_in_memory_lashlang_artifact_store(),
                 surface(),
+                None,
                 RlmProjectedBindings::default(),
                 resolver(),
                 RlmLashlangExecutionTraceConfig::default(),
@@ -1305,6 +1441,7 @@ mod tests {
                     lashlang::LashlangLanguageFeatures::default(),
                     lashlang::LashlangHostCatalog::new(),
                 ),
+                None,
                 RlmProjectedBindings::default(),
                 Arc::new(ProjectionRegistry::new()),
                 RlmLashlangExecutionTraceConfig::default(),
@@ -1360,6 +1497,7 @@ mod tests {
                     lashlang::LashlangLanguageFeatures::default(),
                     lashlang::LashlangHostCatalog::new(),
                 ),
+                None,
                 RlmProjectedBindings::default(),
                 Arc::new(ProjectionRegistry::new()),
                 RlmLashlangExecutionTraceConfig::default(),
@@ -1449,6 +1587,7 @@ mod tests {
                     lashlang::LashlangLanguageFeatures::default(),
                     lashlang::LashlangHostCatalog::new(),
                 ),
+                None,
                 RlmProjectedBindings::default(),
                 Arc::new(ProjectionRegistry::new()),
                 RlmLashlangExecutionTraceConfig::default(),

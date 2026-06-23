@@ -546,9 +546,7 @@ impl ToolProvider for ExactDispatchTools {
 #[async_trait::async_trait]
 impl ToolProvider for HiddenDispatchTools {
     fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-        manifests(vec![
-            named_beta_tool("hidden").with_availability(crate::ToolAvailabilityConfig::off()),
-        ])
+        manifests(vec![named_beta_tool("hidden")])
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
@@ -610,6 +608,63 @@ fn lazy_contract_dispatch_context(
     ));
     ToolDispatchContext {
         plugins: test_plugins(provider),
+        tools,
+        tool_catalog,
+        sessions: Arc::new(MockSessionManager::default()),
+        session_lifecycle: Arc::new(MockSessionManager::default()),
+        session_graph: Arc::new(MockSessionManager::default()),
+        processes: Arc::new(crate::UnavailableProcessService),
+        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        trigger_router: None,
+        effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+            crate::InlineRuntimeEffectController,
+        )),
+        direct_completions: crate::DirectCompletionClient::unavailable(
+            "direct completions are unavailable in this test context",
+        ),
+        parent_invocation: None,
+        execution_env_spec: crate::ProcessExecutionEnvSpec::new(
+            crate::PluginOptions::default(),
+            crate::SessionPolicy::default(),
+        ),
+        session_id: "session".to_string(),
+        agent_frame_id: String::new(),
+        event_tx,
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
+        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        turn_context: crate::TurnContext::default(),
+        clock: std::sync::Arc::new(crate::SystemClock),
+    }
+}
+
+/// Build a dispatch context where the provider's tool is authority-hidden,
+/// so it is removed from the Tool Catalog (non-membership) and rejected before
+/// contract resolution.
+fn hidden_member_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContext<'static> {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut tool_access = crate::SessionToolAccess::default();
+    tool_access.hidden_tools.insert("hidden".to_string());
+    let plugins = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
+        "test_tools",
+        crate::PluginSpec::new().with_tool_provider(Arc::clone(&provider)),
+    ))])
+    .build_session_with_parent(
+        "root",
+        None,
+        None,
+        crate::plugin::SessionAuthorityContext {
+            tool_access,
+            ..Default::default()
+        },
+    )
+    .expect("plugin session");
+    let tools = plugins.tools();
+    let tool_catalog = plugins
+        .resolved_tool_catalog("session")
+        .expect("tool catalog");
+    ToolDispatchContext {
+        plugins,
         tools,
         tool_catalog,
         sessions: Arc::new(MockSessionManager::default()),
@@ -1051,7 +1106,7 @@ async fn dispatch_rejects_hidden_tool_before_contract_resolution() {
         executed: Arc::clone(&executed),
     });
     let outcome = dispatch_tool_call(
-        &exact_dispatch_context(provider),
+        &hidden_member_dispatch_context(provider),
         "hidden".to_string(),
         json!({ "value": "ok" }),
         None,

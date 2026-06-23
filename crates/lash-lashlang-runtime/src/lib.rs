@@ -360,18 +360,17 @@ pub fn lashlang_resources_from_tool_catalog(
     catalog: &lash_core::ToolCatalog,
 ) -> Result<LashlangHostCatalog, String> {
     let mut host_catalog = LashlangHostCatalog::new();
+    // Every catalog member is callable; membership is the only availability fact.
     for entry in catalog.tools.iter() {
-        if entry.availability.is_callable() {
-            let lashlang_binding = required_tool_lashlang_executable(&entry.manifest)?;
-            host_catalog.add_module_operation(
-                lashlang_binding.module_path.iter().map(String::as_str),
-                lashlang_binding.authority_type.clone(),
-                lashlang_binding.operation.clone(),
-                entry.manifest.id.to_string(),
-                lashlang::TypeExpr::Any,
-                lashlang::TypeExpr::Any,
-            );
-        }
+        let lashlang_binding = required_tool_lashlang_executable(&entry.manifest)?;
+        host_catalog.add_module_operation(
+            lashlang_binding.module_path.iter().map(String::as_str),
+            lashlang_binding.authority_type.clone(),
+            lashlang_binding.operation.clone(),
+            entry.manifest.id.to_string(),
+            lashlang::TypeExpr::Any,
+            lashlang::TypeExpr::Any,
+        );
     }
     Ok(host_catalog)
 }
@@ -825,11 +824,16 @@ impl lash_core::ProcessEngine for LashlangProcessEngine {
 }
 
 mod bridge;
+mod deferred;
 mod process;
 
 pub use bridge::{
     lashlang_value_to_json, process_event_payload, protocol_tool_output_to_lashlang_value,
     protocol_tool_reply_to_lashlang_value, sleep_duration_ms,
+};
+pub use deferred::{
+    DeferredResolutionRecord, DeferredToolResolver, Resolution, SharedDeferredToolResolver,
+    ToolGrant, link_with_deferred_resolution, resolve_and_fold_deferred,
 };
 pub use process::{
     lashlang_process_event_types, lashlang_process_signal_event_types, lashlang_type_expr_schema,
@@ -1161,7 +1165,6 @@ mod tests {
             output_schema_projections: Vec::new(),
             output_contract: lash_remote_protocol::RemoteToolOutputContract::Static,
             examples: Vec::new(),
-            availability: None,
             activation: None,
             argument_projection: None,
             scheduling: None,

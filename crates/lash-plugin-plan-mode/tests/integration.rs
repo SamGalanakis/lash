@@ -10,7 +10,8 @@ use lash_core::plugin::runtime_host::{
     SessionGraphService, SessionLifecycleService, SessionStateService,
 };
 use lash_core::plugin::{
-    PluginDirective, PluginError, ToolCallHookContext, ToolCatalogContext, ToolResultHookContext,
+    PluginDirective, PluginError, PromptHookContext, ToolCallHookContext, ToolCatalogContext,
+    ToolResultHookContext,
 };
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
@@ -162,7 +163,6 @@ fn mock_read_view(run_session_id: &str) -> SessionReadView {
 fn test_tool(
     name: &str,
     description: &str,
-    availability: lash_core::ToolAvailabilityConfig,
     execution_mode: lash_core::ToolScheduling,
 ) -> ToolDefinition {
     ToolDefinition::raw(
@@ -172,7 +172,6 @@ fn test_tool(
         ToolDefinition::default_input_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_availability(availability)
     .with_scheduling(execution_mode)
 }
 
@@ -193,7 +192,6 @@ fn plan_mode_test_tool_definition() -> ToolDefinition {
     test_tool(
         "plan_exit",
         "Ask whether to exit plan mode.",
-        lash_core::ToolAvailabilityConfig::off(),
         lash_core::ToolScheduling::Parallel,
     )
     .with_examples(vec!["await plan.exit({})?".to_string()])
@@ -211,15 +209,9 @@ fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
 }
 
 fn showcase_plan_exit_for_direct_execute(session: &lash_core::plugin::PluginSession) {
-    let registry = session.tool_registry();
-    let mut state = registry.export_state();
-    state
-        .set_availability(
-            &lash_core::ToolId::from("tool:plan_exit"),
-            Some(lash_core::ToolAvailability::Showcased),
-        )
-        .expect("plan_exit exists");
-    registry.apply_state(state).expect("apply plan_exit state");
+    // `plan_exit` is a catalog member by default; this is a no-op kept for
+    // call-site clarity in the direct-execute tests.
+    let _ = session;
 }
 
 fn plan_mode_env_lock() -> &'static Mutex<()> {
@@ -358,7 +350,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
 }
 
 #[tokio::test]
-async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
+async fn plan_mode_toggles_plan_exit_catalog_membership() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
@@ -367,34 +359,21 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     let manager = Arc::new(mock_session_manager("run-session"));
     let manager_host = manager.clone();
 
-    let initial = manager
-        .tool_state("root")
-        .await
-        .expect("initial tool state");
-    let plan_exit_tool_id = lash_core::ToolId::from("tool:plan_exit");
-    assert!(initial.get(&plan_exit_tool_id).is_some_and(|tool| {
-        tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
-    }));
+    let plan_exit_is_member = |session: &Arc<lash_core::plugin::PluginSession>| {
+        session
+            .resolved_tool_catalog("root")
+            .expect("catalog")
+            .has_callable_tool("plan_exit")
+    };
+
+    // Disabled by default: the catalog contribution removes plan_exit.
+    assert!(!plan_exit_is_member(&session));
 
     run_plan_command(&session, "plan_mode.enable", json!({}), &manager_host).await;
-
-    let enabled = manager
-        .tool_state("root")
-        .await
-        .expect("enabled tool state");
-    assert!(enabled.get(&plan_exit_tool_id).is_some_and(|tool| {
-        tool.manifest().effective_availability() == lash_core::ToolAvailability::Showcased
-    }));
+    assert!(plan_exit_is_member(&session));
 
     run_plan_command(&session, "plan_mode.disable", json!({}), &manager_host).await;
-
-    let disabled = manager
-        .tool_state("root")
-        .await
-        .expect("disabled tool state");
-    assert!(disabled.get(&plan_exit_tool_id).is_some_and(|tool| {
-        tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
-    }));
+    assert!(!plan_exit_is_member(&session));
 }
 
 #[tokio::test]
@@ -471,36 +450,13 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     assert!(allowed.is_empty());
 
     let tools = vec![
-        test_tool(
-            "search_tools",
-            "Discover tools",
-            lash_core::ToolAvailabilityConfig::callable(),
-            lash_core::ToolScheduling::Parallel,
-        ),
-        test_tool(
-            "read_file",
-            "Read files",
-            lash_core::ToolAvailabilityConfig::showcased(),
-            lash_core::ToolScheduling::Parallel,
-        ),
-        test_tool(
-            "search_web",
-            "Search the web",
-            lash_core::ToolAvailabilityConfig::showcased(),
-            lash_core::ToolScheduling::Parallel,
-        ),
-        test_tool(
-            "apply_patch",
-            "Apply patches",
-            lash_core::ToolAvailabilityConfig::showcased(),
-            lash_core::ToolScheduling::Serial,
-        ),
-        test_tool(
-            "plan_exit",
-            "Exit plan mode",
-            lash_core::ToolAvailabilityConfig::off(),
-            lash_core::ToolScheduling::Parallel,
-        ),
+        test_tool("search_tools", "Discover tools", lash_core::ToolScheduling::Parallel),
+        test_tool("read_file", "Read files", lash_core::ToolScheduling::Parallel),
+        test_tool("search_web", "Search the web", lash_core::ToolScheduling::Parallel),
+        test_tool("apply_patch", "Apply patches", lash_core::ToolScheduling::Serial),
+        // Not in the plan-mode allow-list: must be removed from the catalog.
+        test_tool("exec_command", "Run a command", lash_core::ToolScheduling::Serial),
+        test_tool("plan_exit", "Exit plan mode", lash_core::ToolScheduling::Parallel),
     ];
     let contracts = tools
         .iter()
@@ -517,25 +473,29 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             extensions: Default::default(),
         })
         .expect("tool catalog");
+    // In plan mode, membership is the availability fact: allowed tools stay
+    // members (the default allow-list includes search_web/read_file/apply_patch),
+    // and plan_exit stays a member.
+    assert!(surface.has_callable_tool("search_web"));
+    assert!(surface.has_callable_tool("read_file"));
+    assert!(surface.has_callable_tool("plan_exit"));
+    assert!(surface.has_callable_tool("apply_patch"));
+    assert!(!surface.has_callable_tool("exec_command"));
+    // The plan-mode note is now an ordinary prompt contribution.
+    let prompt = session
+        .collect_prompt_contributions(PromptHookContext {
+            session_id: "root".to_string(),
+            sessions: sessions(&manager),
+            state: mock_read_view("run-session"),
+            protocol_turn_options: Default::default(),
+            turn_context: lash_core::TurnContext::default(),
+        })
+        .await
+        .expect("prompt contributions");
     assert!(
-        surface
-            .tools
+        prompt
             .iter()
-            .find(|tool| tool.manifest.name == "search_web")
-            .is_some_and(|tool| tool.availability == lash_core::ToolAvailability::Showcased)
-    );
-    assert!(
-        surface
-            .tools
-            .iter()
-            .find(|tool| tool.manifest.name == "plan_exit")
-            .is_some_and(|tool| tool.availability == lash_core::ToolAvailability::Showcased)
-    );
-    assert!(
-        surface
-            .tool_list_notes
-            .iter()
-            .any(|note| note.contains(".lash/plans/run-session.md"))
+            .any(|c| c.content.contains(".lash/plans/run-session.md"))
     );
 
     let read_allowed = session
@@ -846,13 +806,14 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             })
     );
 
-    let dynamic = SessionStateService::tool_state(manager.as_ref(), "root")
-        .await
-        .expect("tool state");
-    let plan_exit_tool_id = lash_core::ToolId::from("tool:plan_exit");
-    assert!(dynamic.get(&plan_exit_tool_id).is_some_and(|tool| {
-        tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
-    }));
+    // Executing plan_exit disables plan mode, so the catalog contribution
+    // removes plan_exit from the catalog (non-membership).
+    assert!(
+        !session
+            .resolved_tool_catalog("root")
+            .expect("catalog")
+            .has_callable_tool("plan_exit")
+    );
 }
 
 #[tokio::test]

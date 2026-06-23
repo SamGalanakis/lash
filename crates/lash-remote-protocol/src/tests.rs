@@ -702,7 +702,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 5);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 6);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());
@@ -844,7 +844,6 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         output_schema_projections: Vec::new(),
         output_contract: RemoteToolOutputContract::Static,
         examples: Vec::new(),
-        availability: None,
         activation: None,
         argument_projection: None,
         scheduling: None,

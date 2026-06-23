@@ -19,6 +19,9 @@ mod preflight;
 mod provider;
 pub(crate) mod session;
 
+#[cfg(all(test, feature = "test-provider"))]
+pub(crate) use plugins::cli_prompt_config;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -454,6 +457,18 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             .await
             .map_err(|err| anyhow::anyhow!("invalid MCP server configuration: {err}"))?,
     );
+    // Reference MCP deferred-resolution wiring (RLM only): resolve a Lashlang
+    // call-path absent from the resident catalog into an MCP Tool Grant on
+    // demand. Built from the MCP pool's currently enumerated tools.
+    let mcp_deferred_resolver: Option<lash::tools::SharedDeferredToolResolver> =
+        if execution_mode.is_rlm() {
+            let provider = lash_plugin_mcp::McpToolProvider::new(Arc::clone(mcp_factory.pool()));
+            Some(Arc::new(crate::examples::mcp_discovery::mcp_deferred_tool_resolver(
+                "mcp", &provider,
+            )))
+        } else {
+            None
+        };
     plugin_stack.push(mcp_factory);
     if args.info {
         let cwd = std::env::current_dir()
@@ -485,6 +500,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         prompt_layer,
         Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
         active_provider.clone(),
+        mcp_deferred_resolver,
         trace_path,
         trace_level,
     );

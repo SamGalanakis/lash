@@ -1,4 +1,4 @@
-use lash_core::{ToolAvailabilityConfig, ToolDefinition, ToolScheduling};
+use lash_core::{ToolDefinition, ToolScheduling};
 use lash_tool_support::{LashlangToolBinding, ToolDefinitionLashlangExt};
 
 pub fn batch_tool_definition() -> ToolDefinition {
@@ -31,7 +31,6 @@ pub fn batch_tool_definition() -> ToolDefinition {
     .with_examples(vec![
             r#"await tools.batch({ tool_calls: [{ tool: "read_file", parameters: { path: "src/main.rs" } }, { tool: "grep", parameters: { query: "ToolProvider crates/lash/src/" } }] })?"#.to_string(),
         ])
-    .with_availability(ToolAvailabilityConfig::callable())
     .with_lashlang_binding(LashlangToolBinding::new(["tools"], "batch"))
     .with_scheduling(ToolScheduling::Parallel)
 }

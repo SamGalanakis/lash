@@ -2,19 +2,17 @@ use std::collections::{BTreeSet, HashMap};
 #[cfg(feature = "semantic-tool-search")]
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(all(test, feature = "lashlang"))]
-use lash_lashlang_runtime::required_tool_lashlang_executable;
 use serde_json::Value;
 
-use crate::catalog::CatalogTool;
+use super::catalog::CatalogTool;
 #[cfg(feature = "lashlang")]
-use crate::common::module_filter;
-use crate::common::{
+use super::common::module_filter;
+use super::common::{
     FUZZY_SCORE_CAP, RRF_K, SEMANTIC_CANDIDATE_FLOOR, exclude_filter, limit_from_args, round_score,
     tokenize,
 };
 #[cfg(feature = "semantic-tool-search")]
-use crate::schema_index::semantic_index_text;
+use super::schema_index::semantic_index_text;
 
 #[derive(Clone, Debug)]
 struct FieldIndex {
@@ -663,45 +661,18 @@ mod tests {
     }
 
     fn catalog_tool_from_definition(tool: ToolDefinition) -> Value {
+        // Mirror the flat `project_tool_catalog` shape: id/name/description/
+        // bindings/activation/contract. The Lashlang call-path is derived from
+        // the `lashlang.tool` binding by `CatalogTool::from_value`.
         let manifest = tool.manifest();
-        let projected = json!({
+        json!({
             "id": manifest.id,
             "name": manifest.name,
             "description": manifest.description,
-            "availability": "searchable",
-            "callable": false,
-            "showcased": false,
-            "searchable": true,
+            "bindings": manifest.bindings,
             "activation": manifest.activation,
             "contract": manifest.compact_contract.clone().expect("compact contract"),
-        });
-
-        #[cfg(feature = "lashlang")]
-        {
-            let mut projected = projected;
-            let lashlang_binding = required_tool_lashlang_executable(&manifest)
-                .expect("catalog test tool has explicit Lashlang binding");
-            let call = lashlang_binding.call_path();
-            let projected_object = projected.as_object_mut().expect("catalog object");
-            projected_object.insert(
-                "module_path".to_string(),
-                json!(lashlang_binding.module_path.clone()),
-            );
-            projected_object.insert(
-                "operation".to_string(),
-                json!(lashlang_binding.operation.clone()),
-            );
-            projected_object.insert("call".to_string(), json!(call));
-            projected_object.insert(
-                "aliases".to_string(),
-                json!(lashlang_binding.aliases.clone()),
-            );
-            projected
-        }
-        #[cfg(not(feature = "lashlang"))]
-        {
-            projected
-        }
+        })
     }
 
     fn ranked_names(results: &[Value]) -> Vec<String> {

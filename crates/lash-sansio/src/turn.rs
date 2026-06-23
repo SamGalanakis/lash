@@ -156,7 +156,6 @@ mod tests {
             tool_specs: tool_catalog.model_tool_specs(),
             tool_names: tool_catalog.tool_names(),
             tool_names_fingerprint: tool_catalog.tool_names_fingerprint(),
-            omitted_tool_count: 0,
             execution_prompt: Arc::from("test prompt"),
             prompt_contributions: Vec::new(),
         });
@@ -172,7 +171,6 @@ mod tests {
             execution_prompt: Arc::clone(&turn_driver_preamble.execution_prompt),
             tool_names_fingerprint: turn_driver_preamble.tool_names_fingerprint,
             tool_names: Arc::clone(&turn_driver_preamble.tool_names),
-            omitted_tool_count: turn_driver_preamble.omitted_tool_count,
             contributions: prompt_contributions,
         });
         let prepared = build_turn(SansIoTurnInput {

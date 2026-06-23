@@ -828,33 +828,24 @@ impl SessionAdmin {
         .await
     }
 
-    async fn set_tool_availability(
+    async fn set_tool_membership(
         &self,
         tool_id: lash_core::ToolId,
-        availability: ToolAvailability,
+        present: bool,
     ) -> Result<u64> {
-        self.set_tool_availability_many(&[(tool_id, availability)])
-            .await
+        self.set_tool_membership_many(&[(tool_id, present)]).await
     }
 
-    async fn set_tool_availability_many(
+    async fn set_tool_membership_many(
         &self,
-        updates: &[(lash_core::ToolId, ToolAvailability)],
+        updates: &[(lash_core::ToolId, bool)],
     ) -> Result<u64> {
         let mut state = self.tool_state().await?;
-        for (tool_id, availability) in updates {
+        for (tool_id, present) in updates {
             state
-                .set_availability(tool_id, Some(*availability))
+                .set_membership(tool_id, *present)
                 .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
         }
-        self.apply_tool_state(state).await
-    }
-
-    async fn clear_tool_availability_override(&self, tool_id: lash_core::ToolId) -> Result<u64> {
-        let mut state = self.tool_state().await?;
-        state
-            .set_availability(&tool_id, None)
-            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
         self.apply_tool_state(state).await
     }
 
@@ -1028,30 +1019,23 @@ impl ToolAdmin {
         }
     }
 
-    pub async fn set_availability(
+    /// Toggle Tool Catalog membership for a tool. `present` adds it as a
+    /// member; `!present` removes it. Membership is the only availability fact.
+    pub async fn set_membership(
         &self,
         tool_id: impl Into<lash_core::ToolId>,
-        availability: ToolAvailability,
+        present: bool,
     ) -> Result<u64> {
         self.control
-            .set_tool_availability(tool_id.into(), availability)
+            .set_tool_membership(tool_id.into(), present)
             .await
     }
 
-    pub async fn set_availability_many(
+    pub async fn set_membership_many(
         &self,
-        updates: &[(lash_core::ToolId, ToolAvailability)],
+        updates: &[(lash_core::ToolId, bool)],
     ) -> Result<u64> {
-        self.control.set_tool_availability_many(updates).await
-    }
-
-    pub async fn clear_availability_override(
-        &self,
-        tool_id: impl Into<lash_core::ToolId>,
-    ) -> Result<u64> {
-        self.control
-            .clear_tool_availability_override(tool_id.into())
-            .await
+        self.control.set_tool_membership_many(updates).await
     }
 
     pub async fn active_manifests(&self) -> Result<Vec<ToolManifest>> {

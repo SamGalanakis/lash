@@ -1,4 +1,4 @@
-use lash_core::{ToolActivation, ToolAvailabilityConfig, ToolDefinition, ToolScheduling};
+use lash_core::{ToolActivation, ToolDefinition, ToolScheduling};
 use lash_tool_support::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use serde_json::{Value, json};
 
@@ -57,7 +57,6 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
         "await tools.search({ query: \"venmo send money private payment_card receiver_email\" })?"
             .into(),
     ])
-    .with_availability(ToolAvailabilityConfig::showcased())
     .with_activation(ToolActivation::Always)
     .with_lashlang_binding(
         LashlangToolBinding::new(["tools"], "search").with_aliases(["tool_search"]),

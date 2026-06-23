@@ -2,6 +2,9 @@
 struct ToolRegistryEntry {
     manifest: ToolManifest,
     binding: ToolBinding,
+    /// Tool Catalog membership. A member is callable; a non-member does not
+    /// exist to the model. Orphaned entries are never members.
+    member: bool,
 }
 
 impl ToolRegistryEntry {
@@ -9,6 +12,7 @@ impl ToolRegistryEntry {
         Self {
             manifest,
             binding: ToolBinding::Bound(source_id.into()),
+            member: true,
         }
     }
 
@@ -16,6 +20,7 @@ impl ToolRegistryEntry {
         Self {
             manifest,
             binding: ToolBinding::Orphaned,
+            member: true,
         }
     }
 
@@ -23,22 +28,22 @@ impl ToolRegistryEntry {
         self.binding == ToolBinding::Orphaned
     }
 
-    /// The manifest as exposed to surfaces, catalogs, and availability checks.
-    /// Orphaned entries are forced to `Off` in the view without mutating the
-    /// stored manifest, so the persisted override survives a later rebind and
-    /// export/restore round-trips stay byte-identical.
+    fn is_member(&self) -> bool {
+        self.member && !self.is_orphaned()
+    }
+
+    /// The manifest as exposed to surfaces and catalogs. Membership is the only
+    /// availability fact, so the view is just the stored manifest; orphaned and
+    /// host-removed entries are filtered out by the caller, not flagged here.
     fn view_manifest(&self) -> ToolManifest {
-        let mut manifest = self.manifest.clone();
-        if self.is_orphaned() {
-            manifest.availability_override = Some(crate::ToolAvailability::Off);
-        }
-        manifest
+        self.manifest.clone()
     }
 
     fn export(&self) -> ToolStateEntry {
         ToolStateEntry {
             manifest: self.manifest.clone(),
             orphaned: self.is_orphaned(),
+            member: self.member,
         }
     }
 }
