@@ -18,7 +18,6 @@ pub const LASHLANG_TYPE_LITERALS_SECTION: &str = r#"### Type literals
 #[serde(default)]
 pub struct RlmPromptFeatures {
     pub images: bool,
-    pub common_patterns: bool,
     pub type_literals: bool,
     pub decomposition: bool,
 }
@@ -27,7 +26,6 @@ impl Default for RlmPromptFeatures {
     fn default() -> Self {
         Self {
             images: true,
-            common_patterns: true,
             type_literals: true,
             decomposition: true,
         }
@@ -51,9 +49,6 @@ pub fn rlm_execution_section_for_host_environment(
         sections.push(section);
     }
     sections.push(render_builtins_section(features.images));
-    if features.common_patterns {
-        sections.push(render_common_mistakes_section(has_operations));
-    }
     if features.type_literals {
         sections.push(LASHLANG_TYPE_LITERALS_SECTION.to_string());
     }
@@ -67,6 +62,10 @@ pub fn rlm_execution_section_for_host_environment(
 }
 
 fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) -> Option<String> {
+    // Operations with real Lashlang types (trigger and other host primitives)
+    // are listed here. Tool-catalog operations are bridged with placeholder
+    // `any` types and documented in full under **Tools**, so they are skipped to
+    // avoid an uninformative `any -> any` duplicate of that section.
     let mut operation_lines = Vec::new();
     for (_, module) in surface.resources.module_instances() {
         if let Some(resource_type) =
@@ -83,6 +82,11 @@ fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) 
                 ))
         {
             for (operation, binding) in &resource_type.operations {
+                if matches!(binding.input_ty, lashlang::TypeExpr::Any)
+                    && matches!(binding.output_ty, lashlang::TypeExpr::Any)
+                {
+                    continue;
+                }
                 operation_lines.push(format!(
                     "- `await {}.{}({})? -> {}`",
                     module.alias,
@@ -158,7 +162,7 @@ fn render_host_environment_section(surface: &lashlang::LashlangHostEnvironment) 
 fn render_execution_intro(has_operations: bool) -> String {
     let mut section = String::from("### Operating contract\n\n");
     if has_operations {
-        section.push_str("Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Tools**; if a discovery tool is available, use it to find additional module call forms before calling them.");
+        section.push_str("Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax — `await module.operation({ ... })?` — from inside a paired `<lashlang>` block, using the real names and signatures listed under **Tools**. If a discovery tool is available, use it to find operations beyond those listed.");
     } else {
         section.push_str("Use plain prose only for direct conversational replies that need no computation. Use Lashlang to compute values, inspect current variables, validate data, or return structured/computed results. No module operations are available in this turn, so do not invent tool calls.");
     }
@@ -246,7 +250,7 @@ fn list_comprehension_language_bullet() -> String {
 }
 
 fn module_operations_language_bullet() -> String {
-    "- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string()
+    "- Module operations: call host capabilities through documented lowercase module paths, e.g. `await module.operation({ field: value })?` — the real names and signatures are under **Tools**. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools — do not assume a tool exists from generic syntax; call only operations documented under **Tools**. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string()
 }
 
 fn sleep_language_bullet() -> String {
@@ -348,26 +352,6 @@ fn render_builtins_section(images: bool) -> String {
     )
 }
 
-fn render_common_mistakes_section(has_operations: bool) -> String {
-    let tool_scope = if has_operations {
-        "- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Tools** or the **Host Surface**."
-    } else {
-        "- Do not infer module operations from generic Lashlang syntax. No module operations are available in this turn."
-    };
-    let verified_inputs = if has_operations {
-        "- Do not submit final results that depend on operations, files, edits, validation, or generated artifacts before observing the relevant result."
-    } else {
-        "- Do not submit final results that depend on current variables or validation before inspecting the relevant value."
-    };
-    let bullets = [
-        tool_scope,
-        verified_inputs,
-        "- Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters.",
-    ];
-
-    format!("### Common mistakes\n\n{}\n", bullets.join("\n"))
-}
-
 fn render_decomposition_section(has_operations: bool, processes: bool) -> String {
     let mut section = String::from(
         "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Large transient artifacts (files, search results, long pages, raw tool dumps) should stay in variables until you need a focused view; small durable state you consult each turn should stay visible.",
@@ -390,7 +374,7 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations && processes {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: web.search({ query: \"one\" })?,\n      two: web.search({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: module.operation({ query: \"one\" })?,\n      two: module.operation({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
     } else if has_operations {
         section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.");
     } else {
