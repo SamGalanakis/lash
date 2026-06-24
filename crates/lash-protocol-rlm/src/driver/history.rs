@@ -326,7 +326,10 @@ fn message_text(
     let (preview, raw_len) = head_tail_truncate(content, max_output_chars);
     let mut out = preview.to_string();
     if raw_len > max_output_chars {
-        let _ = write!(out, "\n\n(full: history[{index}].content)");
+        let _ = write!(
+            out,
+            "\n\n(preview only — full value retained; re-print history[{index}].content for the rest)"
+        );
     }
     if !attachments.is_empty() {
         out.push_str("\n\nAttachments:");
@@ -433,7 +436,10 @@ fn message_history_text_parts(parts: &[lash_core::Part]) -> String {
 
 fn projected_ref(projected_lossy: bool, reference: &str) -> String {
     if projected_lossy {
-        format!(", full: {reference}")
+        // State retention explicitly: a truncated preview is display-only, the
+        // full value is still live and re-printable. Models otherwise misread a
+        // short preview as lost state and stop mid-task.
+        format!(" — preview only, full value retained; re-print {reference} for the rest")
     } else {
         String::new()
     }
