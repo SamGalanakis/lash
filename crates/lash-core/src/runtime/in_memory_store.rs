@@ -41,6 +41,15 @@ impl InMemorySessionExecutionLease {
     }
 }
 
+#[derive(Clone, Copy)]
+enum InMemoryQueuedWorkClaimKind {
+    LeadingSessionCommand,
+    TurnWork {
+        boundary: crate::QueuedWorkClaimBoundary,
+        max_batches: usize,
+    },
+}
+
 pub struct InMemorySessionStore {
     clock: Arc<dyn crate::Clock>,
     pub(crate) session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
@@ -169,6 +178,118 @@ impl InMemorySessionStore {
         current.claimed_at_epoch_ms = now;
         current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
         Self::in_memory_session_execution_lease(session_id, current)
+    }
+
+    fn queued_batch_work_class(
+        batch: &crate::QueuedWorkBatch,
+    ) -> Result<crate::runtime::QueuedWorkClass, crate::store::StoreError> {
+        batch.work_class().ok_or_else(|| {
+            crate::store::StoreError::Backend(format!(
+                "queued-work batch `{}` has mixed or empty payload classes",
+                batch.batch_id
+            ))
+        })
+    }
+
+    fn claim_ready_queued_work_in_memory(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        kind: InMemoryQueuedWorkClaimKind,
+    ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
+        let max_batches = match kind {
+            InMemoryQueuedWorkClaimKind::LeadingSessionCommand => 1,
+            InMemoryQueuedWorkClaimKind::TurnWork { max_batches, .. } => max_batches,
+        };
+        if max_batches == 0 {
+            return Ok(None);
+        }
+        self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        let now = self.clock.timestamp_ms();
+        let mut queued = self.queued_work.lock().expect("lock queued work");
+        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        let claim_available = |entry: &InMemoryQueuedBatch| {
+            entry.claim_token.is_none()
+                || entry.claim_expires_at_ms <= now
+                || entry
+                    .claim_owner
+                    .as_ref()
+                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+        };
+        let claimable_indices = queued
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.batch.session_id == session_id
+                    && entry.batch.available_at_ms <= now
+                    && claim_available(entry)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if claimable_indices.is_empty() {
+            return Ok(None);
+        }
+        let candidates = claimable_indices
+            .iter()
+            .map(|index| {
+                let batch = &queued[*index].batch;
+                Ok(crate::store::queued_work::ClaimCandidate {
+                    enqueue_seq: batch.enqueue_seq,
+                    claim_fencing_token: queued[*index].claim_fencing_token,
+                    work_class: Self::queued_batch_work_class(batch)?,
+                    delivery_policy: batch.delivery_policy,
+                    slot_policy: batch.slot_policy,
+                    merge_key: batch.merge_key.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, crate::store::StoreError>>()?;
+        let selected_len = match kind {
+            InMemoryQueuedWorkClaimKind::LeadingSessionCommand => {
+                crate::store::queued_work::select_leading_session_command(&candidates)
+            }
+            InMemoryQueuedWorkClaimKind::TurnWork {
+                boundary,
+                max_batches,
+            } => crate::store::queued_work::select_turn_work_claim_prefix(
+                &candidates,
+                boundary,
+                max_batches,
+            ),
+        };
+        if selected_len == 0 {
+            return Ok(None);
+        }
+        let first_index = claimable_indices[0];
+        let first = queued[first_index].batch.clone();
+        let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
+        let claim_id = format!("recording-qwc:{}:{fencing_token}", first.enqueue_seq);
+        let lease_token = format!(
+            "{}:{}:{}:{claim_id}:{now}",
+            session_id, owner.owner_id, owner.incarnation_id
+        );
+        let expires_at = now.saturating_add(lease_ttl_ms);
+        let mut batches = Vec::new();
+        for index in claimable_indices.into_iter().take(selected_len) {
+            let entry = &mut queued[index];
+            entry.claim_id = Some(claim_id.clone());
+            entry.claim_token = Some(lease_token.clone());
+            entry.claim_owner = Some(owner.clone());
+            entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
+            entry.claim_expires_at_ms = expires_at;
+            batches.push(entry.batch.clone());
+        }
+        Ok(Some(crate::QueuedWorkClaim {
+            session_id: session_id.to_string(),
+            claim_id,
+            owner: owner.clone(),
+            lease_token,
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: expires_at,
+            batches,
+        }))
     }
 }
 
@@ -585,6 +706,22 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         Ok(stored)
     }
 
+    async fn claim_leading_ready_session_command(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
+        self.claim_ready_queued_work_in_memory(
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            InMemoryQueuedWorkClaimKind::LeadingSessionCommand,
+        )
+    }
+
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
@@ -594,80 +731,16 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         lease_ttl_ms: u64,
         max_batches: usize,
     ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
-        if max_batches == 0 {
-            return Ok(None);
-        }
-        self.verify_session_execution_lease(session_id, session_execution_lease)?;
-        let now = self.clock.timestamp_ms();
-        let mut queued = self.queued_work.lock().expect("lock queued work");
-        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
-        let claim_available = |entry: &InMemoryQueuedBatch| {
-            entry.claim_token.is_none()
-                || entry.claim_expires_at_ms <= now
-                || entry
-                    .claim_owner
-                    .as_ref()
-                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
-        };
-        let first_index = queued.iter().position(|entry| {
-            entry.batch.session_id == session_id
-                && entry.batch.available_at_ms <= now
-                && claim_available(entry)
-        });
-        let Some(first_index) = first_index else {
-            return Ok(None);
-        };
-        let first = queued[first_index].batch.clone();
-        if boundary == crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint
-            && first.delivery_policy != crate::DeliveryPolicy::EarliestSafeBoundary
-        {
-            return Ok(None);
-        }
-        let mut indices = vec![first_index];
-        if first.slot_policy == crate::SlotPolicy::Join {
-            for (index, entry) in queued.iter().enumerate().skip(first_index + 1) {
-                if indices.len() >= max_batches {
-                    break;
-                }
-                if entry.batch.session_id != session_id
-                    || entry.batch.available_at_ms > now
-                    || !claim_available(entry)
-                    || entry.batch.slot_policy != crate::SlotPolicy::Join
-                    || entry.batch.delivery_policy != first.delivery_policy
-                    || entry.batch.merge_key != first.merge_key
-                {
-                    break;
-                }
-                indices.push(index);
-            }
-        }
-        let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
-        let claim_id = format!("recording-qwc:{}:{fencing_token}", first.enqueue_seq);
-        let lease_token = format!(
-            "{}:{}:{}:{claim_id}:{now}",
-            session_id, owner.owner_id, owner.incarnation_id
-        );
-        let expires_at = now.saturating_add(lease_ttl_ms);
-        let mut batches = Vec::new();
-        for index in indices {
-            let entry = &mut queued[index];
-            entry.claim_id = Some(claim_id.clone());
-            entry.claim_token = Some(lease_token.clone());
-            entry.claim_owner = Some(owner.clone());
-            entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
-            entry.claim_expires_at_ms = expires_at;
-            batches.push(entry.batch.clone());
-        }
-        Ok(Some(crate::QueuedWorkClaim {
-            session_id: session_id.to_string(),
-            claim_id,
-            owner: owner.clone(),
-            lease_token,
-            fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: expires_at,
-            batches,
-        }))
+        self.claim_ready_queued_work_in_memory(
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            InMemoryQueuedWorkClaimKind::TurnWork {
+                boundary,
+                max_batches,
+            },
+        )
     }
 
     async fn renew_queued_work_claim(

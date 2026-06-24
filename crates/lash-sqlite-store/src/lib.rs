@@ -48,7 +48,8 @@ use lash_core::runtime::{
 };
 use lash_core::store::queued_work::{
     ClaimCandidate, QueuedWorkClaimLease, claim_scan_limit, derive_batch_id,
-    ensure_completion_owns_all_batches, renewed_claim, select_claim_prefix,
+    ensure_completion_owns_all_batches, renewed_claim, select_leading_session_command,
+    select_turn_work_claim_prefix,
 };
 use lash_core::store::{
     GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, RuntimeCommit,

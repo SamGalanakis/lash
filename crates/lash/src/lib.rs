@@ -144,8 +144,8 @@ pub mod persistence {
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-        QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
-        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+        QueuedWorkClass, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
+        RuntimeSessionState, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
     };
     pub use lash_core::store::queued_work;
     pub use lash_core::store::{

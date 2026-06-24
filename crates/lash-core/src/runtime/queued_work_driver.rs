@@ -27,11 +27,9 @@ pub trait QueuedWorkRunHandle: Send + Sync {
     /// narrowed to one session. The symmetric counterpart to
     /// [`ProcessRunHandle::claim_and_run_pending`](super::ProcessRunHandle::claim_and_run_pending).
     ///
-    /// Idempotency is the store claim's job ([`claim_ready_queued_work`]), not a
-    /// same-process memory guard. Hosts call this on an event (enqueue, process
-    /// wake, turn completion) instead of polling.
-    ///
-    /// [`claim_ready_queued_work`]: crate::store::RuntimePersistence::claim_ready_queued_work
+    /// Idempotency is the store scheduler's job, not a same-process memory
+    /// guard. Hosts call this on an event (enqueue, process wake, turn
+    /// completion) instead of polling.
     async fn claim_and_run_pending(
         &self,
         session_id: Option<&str>,

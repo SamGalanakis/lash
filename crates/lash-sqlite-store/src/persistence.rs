@@ -698,6 +698,165 @@ impl RuntimePersistence for Store {
             .map_err(sqlite_error)?
     }
 
+    async fn claim_leading_ready_session_command(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        let session_id = session_id.to_string();
+        let session_execution_lease = session_execution_lease.clone();
+        let owner = owner.clone();
+        self.conn
+            .write_flow(move |tx| {
+                let outcome: Result<TxOutcome<Option<QueuedWorkClaim>>, StoreError> = (|| {
+                    ensure_session_execution_lease_conn(
+                        tx,
+                        &session_id,
+                        &session_execution_lease,
+                    )?;
+                    let now = current_epoch_ms();
+                    let candidate_rows = {
+                        let mut stmt = tx
+                            .prepare(
+                                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                                 FROM queued_work_batches
+                                 WHERE session_id = ?1
+                                   AND available_at_ms <= ?2
+                                 ORDER BY enqueue_seq ASC
+                                 LIMIT ?3",
+                            )
+                            .map_err(sqlite_error)?;
+                        let rows = stmt
+                            .query_map(
+                                params![session_id, now as i64, claim_scan_limit(1)],
+                                queued_batch_row_from_sql,
+                            )
+                            .map_err(sqlite_error)?;
+                        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+                    };
+                    let candidate_rows = candidate_rows
+                        .into_iter()
+                        .filter(|row| {
+                            row.claim_token.is_none()
+                                || row.claim_expires_at_ms <= now
+                                || row
+                                    .claim_owner
+                                    .as_ref()
+                                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(&owner))
+                        })
+                        .collect::<Vec<_>>();
+                    let candidate_batches = candidate_rows
+                        .iter()
+                        .map(|row| queued_work_batch_from_conn(tx, row.clone()))
+                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    let candidates = candidate_rows
+                        .iter()
+                        .zip(candidate_batches.iter())
+                        .map(|(row, batch)| {
+                            Ok(ClaimCandidate {
+                                enqueue_seq: row.enqueue_seq,
+                                claim_fencing_token: row.claim_fencing_token,
+                                work_class: batch.work_class().ok_or_else(|| {
+                                    StoreError::Backend(format!(
+                                        "queued-work batch `{}` has mixed or empty payload classes",
+                                        batch.batch_id
+                                    ))
+                                })?,
+                                delivery_policy: decode_delivery_policy(
+                                    row.delivery_policy.clone(),
+                                )?,
+                                slot_policy: decode_slot_policy(row.slot_policy.clone())?,
+                                merge_key: decode_merge_key(row.merge_key_json.clone())?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    let selected_len = select_leading_session_command(&candidates);
+                    if selected_len == 0 {
+                        return Ok(TxOutcome::Commit(None));
+                    }
+                    let mut selected = candidate_rows;
+                    selected.truncate(selected_len);
+                    let mut selected_batches = candidate_batches;
+                    selected_batches.truncate(selected_len);
+                    let lease = QueuedWorkClaimLease::derive(
+                        &candidates[0],
+                        &session_id,
+                        &owner,
+                        now,
+                        lease_ttl_ms,
+                    );
+                    let liveness_json = encode_liveness(&owner.liveness)?;
+                    for row in &selected {
+                        let claimed = tx
+                            .execute(
+                                "UPDATE queued_work_batches
+                                 SET claim_id = ?3,
+                                     claim_owner_id = ?4,
+                                     claim_owner_incarnation_id = ?5,
+                                     claim_owner_liveness_json = ?6,
+                                     claim_token = ?7,
+                                     claim_fencing_token = claim_fencing_token + 1,
+                                     claim_claimed_at_ms = ?8,
+                                     claim_expires_at_ms = ?9
+                                 WHERE session_id = ?1
+                                   AND batch_id = ?2
+                                   AND (
+                                        claim_token IS NULL
+                                        OR claim_expires_at_ms <= ?8
+                                        OR (
+                                            claim_token = ?10
+                                            AND claim_owner_id = ?11
+                                            AND claim_owner_incarnation_id = ?12
+                                        )
+                                   )",
+                                params![
+                                    session_id,
+                                    row.batch_id,
+                                    lease.claim_id,
+                                    owner.owner_id.as_str(),
+                                    owner.incarnation_id.as_str(),
+                                    liveness_json.as_str(),
+                                    lease.lease_token,
+                                    now as i64,
+                                    lease.expires_at_epoch_ms as i64,
+                                    row.claim_token,
+                                    row.claim_owner.as_ref().map(|owner| owner.owner_id.as_str()),
+                                    row.claim_owner
+                                        .as_ref()
+                                        .map(|owner| owner.incarnation_id.as_str())
+                                ],
+                            )
+                            .map_err(sqlite_error)?;
+                        if claimed == 0 {
+                            return Ok(TxOutcome::Rollback(None));
+                        }
+                    }
+                    Ok(TxOutcome::Commit(Some(QueuedWorkClaim {
+                        session_id: session_id.clone(),
+                        claim_id: lease.claim_id,
+                        owner: owner.clone(),
+                        lease_token: lease.lease_token,
+                        fencing_token: lease.fencing_token,
+                        claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
+                        expires_at_epoch_ms: lease.expires_at_epoch_ms,
+                        batches: selected_batches,
+                    })))
+                })();
+                match outcome {
+                    Ok(TxOutcome::Commit(value)) => Ok(TxOutcome::Commit(Ok(value))),
+                    Ok(TxOutcome::Rollback(value)) => Ok(TxOutcome::Rollback(Ok(value))),
+                    Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+                }
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
@@ -755,12 +914,23 @@ impl RuntimePersistence for Store {
                                     .is_some_and(|holder| holder.is_definitely_dead_for_claimant(&owner))
                         })
                         .collect::<Vec<_>>();
+                    let candidate_batches = candidate_rows
+                        .iter()
+                        .map(|row| queued_work_batch_from_conn(tx, row.clone()))
+                        .collect::<Result<Vec<_>, StoreError>>()?;
                     let candidates = candidate_rows
                         .iter()
-                        .map(|row| {
+                        .zip(candidate_batches.iter())
+                        .map(|(row, batch)| {
                             Ok(ClaimCandidate {
                                 enqueue_seq: row.enqueue_seq,
                                 claim_fencing_token: row.claim_fencing_token,
+                                work_class: batch.work_class().ok_or_else(|| {
+                                    StoreError::Backend(format!(
+                                        "queued-work batch `{}` has mixed or empty payload classes",
+                                        batch.batch_id
+                                    ))
+                                })?,
                                 delivery_policy: decode_delivery_policy(
                                     row.delivery_policy.clone(),
                                 )?,
@@ -769,12 +939,15 @@ impl RuntimePersistence for Store {
                             })
                         })
                         .collect::<Result<Vec<_>, StoreError>>()?;
-                    let selected_len = select_claim_prefix(&candidates, boundary, max_batches);
+                    let selected_len =
+                        select_turn_work_claim_prefix(&candidates, boundary, max_batches);
                     if selected_len == 0 {
                         return Ok(TxOutcome::Commit(None));
                     }
                     let mut selected = candidate_rows;
                     selected.truncate(selected_len);
+                    let mut selected_batches = candidate_batches;
+                    selected_batches.truncate(selected_len);
                     let lease = QueuedWorkClaimLease::derive(
                         &candidates[0],
                         &session_id,
@@ -839,10 +1012,6 @@ impl RuntimePersistence for Store {
                             return Ok(TxOutcome::Rollback(None));
                         }
                     }
-                    let mut batches = Vec::new();
-                    for row in selected {
-                        batches.push(queued_work_batch_from_conn(tx, row)?);
-                    }
                     Ok(TxOutcome::Commit(Some(QueuedWorkClaim {
                         session_id: session_id.clone(),
                         claim_id: lease.claim_id,
@@ -851,7 +1020,7 @@ impl RuntimePersistence for Store {
                         fencing_token: lease.fencing_token,
                         claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
                         expires_at_epoch_ms: lease.expires_at_epoch_ms,
-                        batches,
+                        batches: selected_batches,
                     })))
                 })();
                 // Lower a `StoreError` into the rollback arm so the closure body

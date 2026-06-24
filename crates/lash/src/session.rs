@@ -610,6 +610,11 @@ impl LashSession {
         }
     }
 
+    /// Return all pending durable queued-work batches for this session.
+    ///
+    /// This is an admin/introspection view: it includes visible turn input,
+    /// process wakes, and session commands. UI queue previews should filter it
+    /// to visible `TurnInput` batches before rendering or selecting work.
     pub async fn queued_work(&self) -> Result<Vec<QueuedWorkBatch>> {
         let observation = self.runtime.observe();
         let store = observation.queue_store.as_ref().ok_or_else(|| {

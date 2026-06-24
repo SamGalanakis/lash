@@ -158,8 +158,8 @@ pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{
     DeliveryPolicy, MergeKey, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
     QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SessionCommand, SessionCommandReceipt,
-    SlotPolicy, process_wake_batch_draft,
+    QueuedWorkClass, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SessionCommand,
+    SessionCommandReceipt, SlotPolicy, process_wake_batch_draft,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,

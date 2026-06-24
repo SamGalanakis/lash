@@ -656,18 +656,13 @@ impl RuntimePersistence for PostgresSessionStore {
         Ok(queued)
     }
 
-    async fn claim_ready_queued_work(
+    async fn claim_leading_ready_session_command(
         &self,
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        boundary: QueuedWorkClaimBoundary,
         lease_ttl_ms: u64,
-        max_batches: usize,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
-        if max_batches == 0 {
-            return Ok(None);
-        }
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
         let now = current_epoch_ms();
@@ -685,7 +680,7 @@ impl RuntimePersistence for PostgresSessionStore {
         )
         .bind(session_id)
         .bind(now as i64)
-        .bind(claim_scan_limit(max_batches))
+        .bind(claim_scan_limit(1))
         .fetch_all(&mut *tx)
         .await
         .map_err(store_sqlx_error)?;
@@ -702,22 +697,36 @@ impl RuntimePersistence for PostgresSessionStore {
                 selected.push(row);
             }
         }
+        let mut selected_batches = Vec::new();
+        for row in &selected {
+            selected_batches.push(queued_work_batch_from_row(&mut tx, row.clone()).await?);
+        }
         let candidates = selected
             .iter()
-            .map(|row| ClaimCandidate {
-                enqueue_seq: row.enqueue_seq,
-                claim_fencing_token: row.claim_fencing_token,
-                delivery_policy: row.delivery_policy,
-                slot_policy: row.slot_policy,
-                merge_key: row.merge_key.clone(),
+            .zip(selected_batches.iter())
+            .map(|(row, batch)| {
+                Ok(ClaimCandidate {
+                    enqueue_seq: row.enqueue_seq,
+                    claim_fencing_token: row.claim_fencing_token,
+                    work_class: batch.work_class().ok_or_else(|| {
+                        StoreError::Backend(format!(
+                            "queued-work batch `{}` has mixed or empty payload classes",
+                            batch.batch_id
+                        ))
+                    })?,
+                    delivery_policy: row.delivery_policy,
+                    slot_policy: row.slot_policy,
+                    merge_key: row.merge_key.clone(),
+                })
             })
-            .collect::<Vec<_>>();
-        let selected_len = select_claim_prefix(&candidates, boundary, max_batches);
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let selected_len = select_leading_session_command(&candidates);
         if selected_len == 0 {
             tx.commit().await.map_err(store_sqlx_error)?;
             return Ok(None);
         }
         selected.truncate(selected_len);
+        selected_batches.truncate(selected_len);
         let lease =
             QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, lease_ttl_ms);
         let liveness_json = encode_liveness(&owner.liveness)?;
@@ -773,9 +782,149 @@ impl RuntimePersistence for PostgresSessionStore {
                 return Ok(None);
             }
         }
-        let mut batches = Vec::new();
-        for row in selected {
-            batches.push(queued_work_batch_from_row(&mut tx, row).await?);
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(Some(QueuedWorkClaim {
+            session_id: session_id.to_string(),
+            claim_id: lease.claim_id,
+            owner: owner.clone(),
+            lease_token: lease.lease_token,
+            fencing_token: lease.fencing_token,
+            claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
+            expires_at_epoch_ms: lease.expires_at_epoch_ms,
+            batches: selected_batches,
+        }))
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        boundary: QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        max_batches: usize,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        if max_batches == 0 {
+            return Ok(None);
+        }
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
+        let now = current_epoch_ms();
+        let rows = sqlx::query(
+            "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                    slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+             FROM lash_queued_work_batches
+             WHERE session_id = $1
+               AND available_at_ms <= $2
+             ORDER BY enqueue_seq ASC
+             LIMIT $3
+             FOR UPDATE SKIP LOCKED",
+        )
+        .bind(session_id)
+        .bind(now as i64)
+        .bind(claim_scan_limit(max_batches))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let mut selected = Vec::new();
+        for row in rows {
+            let row = queued_batch_row(row)?;
+            if row.claim_token.is_none()
+                || row.claim_expires_at_ms <= now
+                || row
+                    .claim_owner
+                    .as_ref()
+                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+            {
+                selected.push(row);
+            }
+        }
+        let mut selected_batches = Vec::new();
+        for row in &selected {
+            selected_batches.push(queued_work_batch_from_row(&mut tx, row.clone()).await?);
+        }
+        let candidates = selected
+            .iter()
+            .zip(selected_batches.iter())
+            .map(|(row, batch)| {
+                Ok(ClaimCandidate {
+                    enqueue_seq: row.enqueue_seq,
+                    claim_fencing_token: row.claim_fencing_token,
+                    work_class: batch.work_class().ok_or_else(|| {
+                        StoreError::Backend(format!(
+                            "queued-work batch `{}` has mixed or empty payload classes",
+                            batch.batch_id
+                        ))
+                    })?,
+                    delivery_policy: row.delivery_policy,
+                    slot_policy: row.slot_policy,
+                    merge_key: row.merge_key.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let selected_len = select_turn_work_claim_prefix(&candidates, boundary, max_batches);
+        if selected_len == 0 {
+            tx.commit().await.map_err(store_sqlx_error)?;
+            return Ok(None);
+        }
+        selected.truncate(selected_len);
+        selected_batches.truncate(selected_len);
+        let lease =
+            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, lease_ttl_ms);
+        let liveness_json = encode_liveness(&owner.liveness)?;
+        for row in &selected {
+            let changed = sqlx::query(
+                "UPDATE lash_queued_work_batches
+                 SET claim_id = $3,
+                     claim_owner_id = $4,
+                     claim_owner_incarnation_id = $5,
+                     claim_owner_liveness_json = $6,
+                     claim_token = $7,
+                     claim_fencing_token = claim_fencing_token + 1,
+                     claim_claimed_at_ms = $8,
+                     claim_expires_at_ms = $9
+                 WHERE session_id = $1
+                   AND batch_id = $2
+                   AND (
+                        claim_token IS NULL
+                        OR claim_expires_at_ms <= $8
+                        OR (
+                            claim_token = $10
+                            AND claim_owner_id = $11
+                            AND claim_owner_incarnation_id = $12
+                        )
+                   )",
+            )
+            .bind(session_id)
+            .bind(&row.batch_id)
+            .bind(&lease.claim_id)
+            .bind(&owner.owner_id)
+            .bind(&owner.incarnation_id)
+            .bind(&liveness_json)
+            .bind(&lease.lease_token)
+            .bind(now as i64)
+            .bind(lease.expires_at_epoch_ms as i64)
+            .bind(&row.claim_token)
+            .bind(
+                row.claim_owner
+                    .as_ref()
+                    .map(|owner| owner.owner_id.as_str()),
+            )
+            .bind(
+                row.claim_owner
+                    .as_ref()
+                    .map(|owner| owner.incarnation_id.as_str()),
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?
+            .rows_affected();
+            if changed == 0 {
+                tx.rollback().await.map_err(store_sqlx_error)?;
+                return Ok(None);
+            }
         }
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(Some(QueuedWorkClaim {
@@ -786,7 +935,7 @@ impl RuntimePersistence for PostgresSessionStore {
             fencing_token: lease.fencing_token,
             claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
             expires_at_epoch_ms: lease.expires_at_epoch_ms,
-            batches,
+            batches: selected_batches,
         }))
     }
 

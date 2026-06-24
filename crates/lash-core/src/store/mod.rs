@@ -991,7 +991,31 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         ))
     }
 
-    /// Claim the next ready queued-work group for `owner_id`.
+    /// Claim a leading ready session-command batch for `owner_id`.
+    ///
+    /// A command claim is returned only when the earliest ready claimable batch
+    /// is classified as [`crate::runtime::QueuedWorkClass::SessionCommand`].
+    /// Backends derive the class from queued payloads; no schema column is
+    /// required.
+    /// The default implementation reports queued work as unsupported.
+    async fn claim_leading_ready_session_command(
+        &self,
+        session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError> {
+        Err(StoreError::Backend(format!(
+            "queued work is not supported for session `{session_id}` by this test store"
+        )))
+    }
+
+    /// Claim the next ready turn-work group for `owner_id`.
+    ///
+    /// A turn-work claim is returned only when the earliest ready claimable
+    /// batch is classified as [`crate::runtime::QueuedWorkClass::TurnWork`].
+    /// Earlier ready session commands are not skipped and are never
+    /// materialized as turn input.
     ///
     /// The default implementation reports queued work as unsupported.
     async fn claim_ready_queued_work(
