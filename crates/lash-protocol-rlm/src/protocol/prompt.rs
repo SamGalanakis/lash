@@ -165,6 +165,15 @@ fn render_execution_intro(has_operations: bool) -> String {
     section.push_str(
         r#"
 
+### Persistence
+
+Keep going until the request is fully resolved. End your turn only when you `submit` a final answer or genuinely have nothing left to do — until then, every step is another `<lashlang>` block.
+
+- If you say you will do something ("let me…", "I'll keep going"), emit the `<lashlang>` block that does it in the same reply. Never describe an action and then stop without running it.
+- A long, truncated, or summarized transcript does not mean you lost state: your bound variables still hold the full values. `print` what you need and continue — do not restart or abandon the task.
+- You are solving the task, not narrating how it could be solved. Prefer acting over asking; ask only when genuinely blocked by a missing decision or permission.
+- If the trace is bloated or you want a clean slate, switch to a fresh frame with the continuation tool (see **Working with context**) — that is how to start over, not stopping.
+
 ### `print` vs `submit`
 
 - `print <expr>` — inspect a value and keep going; output appears on the next step. Print the part you need to decide the next step: a whole value when it is small and all of it is useful (e.g. state you consult each turn), otherwise selected fields, samples, or slices. Avoid dumping a large value when only part of it is relevant.
@@ -304,7 +313,7 @@ fn base_tail_language_bullets() -> [String; 3] {
     [
         "- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string(),
         "- Bare expressions are valid statements in normal blocks.".to_string(),
-        "- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available read-only values may be listed separately without value previews. Variables keep their full runtime value; `print` a variable (or the part you need) to see contents the prompt only summarizes.".to_string(),
+        "- Values already in scope are listed under **Bound Variables** (plus `history`) — use them directly in lashlang, don't recreate them.".to_string(),
     ]
 }
 
@@ -367,6 +376,9 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
         section.push_str(" Tool-specific lifecycle and output details live under **Tools**.");
     }
     section.push_str(
+        "\n\nTruncation in the transcript is a display window, not lost state. A value shown truncated or summarized still has its full contents live — in the bound variable that holds it, and re-printable via its `history[N].output[M]` handle. A short preview never means the data is gone; `print` the variable or the slice you need and keep going. Never restart or abandon a task because earlier output looks truncated.",
+    );
+    section.push_str(
         "\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need -> reason inline in lashlang.",
     );
     if has_operations {
@@ -378,9 +390,9 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations && processes {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: web.search({ query: \"one\" })?,\n      two: web.search({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: web.search({ query: \"one\" })?,\n      two: web.search({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
     } else if has_operations {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools** — don't infer a tool exists from these generic examples.");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.");
     } else {
         section.push_str("\n- No module operations are available in this turn — don't infer one exists from generic lashlang syntax.");
     }
