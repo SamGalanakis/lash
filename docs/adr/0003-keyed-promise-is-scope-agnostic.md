@@ -9,7 +9,7 @@ Event log, so Durable Wait resolution moves onto the EffectHost. The Process
 Event log becomes pure observability layered over that promise, not the
 resolution mechanism.
 
-The current code-level `ExecutionScope` name is promoted to `ExecutionScope`,
+The current code-level `EffectScope` name is promoted to `ExecutionScope`,
 because the scope now owns more than effect-host routing: it is the identity for
 replay, wait keys, cancellation, tracing, and environment binding.
 

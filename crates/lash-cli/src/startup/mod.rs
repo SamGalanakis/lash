@@ -466,38 +466,37 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         let provider = McpToolProvider::new(Arc::clone(mcp_factory.pool()));
         crate::examples::mcp_discovery::mcp_cataloged_tools("mcp", &provider)
     };
-    let mcp_catalog_records =
-        crate::examples::mcp_discovery::mcp_catalog_records(&mcp_cataloged_tools);
+    let has_deferred_mcp_catalog = execution_mode.is_rlm() && !mcp_cataloged_tools.is_empty();
+    let mcp_catalog_records = has_deferred_mcp_catalog
+        .then(|| crate::examples::mcp_discovery::mcp_catalog_records(&mcp_cataloged_tools))
+        .unwrap_or_default();
     let mcp_deferred_resolver: Option<lash::tools::SharedDeferredToolResolver> =
-        if execution_mode.is_rlm() {
+        if has_deferred_mcp_catalog {
             Some(Arc::new(
                 crate::examples::mcp_discovery::McpDeferredToolResolver::new(mcp_cataloged_tools),
             ))
         } else {
             None
         };
-    // Reference MCP tool-discovery example: a host-owned `search_tools` tool
-    // over a ranking index. In RLM, MCP tools stay non-resident and are exposed
-    // through this discovery overlay plus deferred grants. In standard mode,
-    // the MCP plugin remains a resident provider and discovery indexes the
-    // current catalog.
+    // Reference MCP tool-discovery example: install the host-owned
+    // `search_tools` overlay only when there is a deferred MCP tail to search.
+    // Resident catalog members already render through the protocol-native path.
     if execution_mode.is_rlm() {
-        plugin_stack.push(Arc::new(
-            crate::examples::mcp_discovery::ToolDiscoveryPluginFactory::with_catalog(
-                mcp_catalog_records,
-            ),
-        ));
-        plugin_stack.push(Arc::new(StaticPluginFactory::new(
-            "mcp",
-            PluginSpec::new().with_tool_provider(Arc::new(McpDeferredToolProvider::new(Arc::clone(
-                mcp_factory.pool(),
-            ))) as Arc<dyn ToolProvider>),
-        )));
+        if has_deferred_mcp_catalog {
+            plugin_stack.push(Arc::new(
+                crate::examples::mcp_discovery::ToolDiscoveryPluginFactory::with_catalog(
+                    mcp_catalog_records,
+                ),
+            ));
+            plugin_stack.push(Arc::new(StaticPluginFactory::new(
+                "mcp",
+                PluginSpec::new().with_tool_provider(Arc::new(McpDeferredToolProvider::new(
+                    Arc::clone(mcp_factory.pool()),
+                )) as Arc<dyn ToolProvider>),
+            )));
+        }
     } else {
         plugin_stack.push(mcp_factory);
-        plugin_stack.push(Arc::new(
-            crate::examples::mcp_discovery::ToolDiscoveryPluginFactory::new(),
-        ));
     }
     if args.info {
         let cwd = std::env::current_dir()

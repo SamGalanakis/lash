@@ -11,14 +11,12 @@ Use plain prose only for direct conversational replies that need no action or co
 Keep going until the request is fully resolved. End your turn only when you `submit` a final answer or genuinely have nothing left to do — until then, every step is another `<lashlang>` block.
 
 - If you say you will do something ("let me…", "I'll keep going"), emit the `<lashlang>` block that does it in the same reply. Never describe an action and then stop without running it.
-- A long, truncated, or summarized transcript does not mean you lost state: your bound variables still hold the full values. `print` what you need and continue — do not restart or abandon the task.
 - You are solving the task, not narrating how it could be solved. Prefer acting over asking; ask only when genuinely blocked by a missing decision or permission.
-- If the trace is bloated or you want a clean slate, switch to a fresh frame with the continuation tool (see **Working with context**) — that is how to start over, not stopping.
 
 ### `print` vs `submit`
 
 - `print <expr>` — inspect a value and keep going; output appears on the next step. Print the part you need to decide the next step: a whole value when it is small and all of it is useful (e.g. state you consult each turn), otherwise selected fields, samples, or slices. Avoid dumping a large value when only part of it is relevant.
-- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance.
+- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance. Keep the submitted value concise; do not include large variables such as diffs, full logs, raw command output, or other bulky dumps unless the user explicitly asks for them.
 
 Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
 
@@ -26,7 +24,7 @@ Do not submit final results that depend on operations, files, generated patches,
 
 ### Response shape
 
-Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose.
+Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose. If the block calls `submit`, that submitted value is the final answer; any preceding prose should be brief setup, not a second answer.
 
 
 ### Language

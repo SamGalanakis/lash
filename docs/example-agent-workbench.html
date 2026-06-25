@@ -134,7 +134,7 @@ submit { handle: handle, registrations: await triggers.list({ target: daily_dige
     <div class="section" id="host-wiring">
       <div class="section-header">
         <h2>Host Wiring</h2>
-        <p>The host declares source constructors such as <code>cron.Schedule</code> and <code>mail.received</code> through the plugin's <code>lashlang_resources()</code> hook. The button source is zero-config and exposed from trigger registration, whose payload type is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
+        <p>The host declares source constructors such as <code>cron.Schedule</code> and <code>mail.received</code> in a <code>lashlang::LashlangHostCatalog</code> (assembled by <code>workbench_lashlang_resources()</code>) wired into the Lashlang surface. The button source is zero-config and exposed from trigger registration, whose payload type is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
       </div>
       <pre data-lang="rust" data-snippet="example_agent_workbench#workbench-resources"><code>fn field(name: &amp;str, ty: lashlang::TypeExpr) -&gt; lashlang::TypeField {
     lashlang::TypeField {

@@ -70,7 +70,7 @@
             <tr><td><code>RuntimePersistence</code>, <code>SessionStoreFactory</code></td><td>SQLite, Postgres, host stores</td><td>Persist committed session graph state, final turn stamps, checkpoints, queued work, and the fenced session execution lane.</td></tr>
             <tr><td><code>ProcessRegistry</code>, <code>TriggerStore</code></td><td>SQLite, Postgres, host stores</td><td>Persist process records/events/leases/handle grants and source-keyed trigger subscriptions/deliveries.</td></tr>
             <tr><td><code>AttachmentStore</code></td><td>File, S3-compatible, host stores</td><td>Persist or serve attachment bytes while the graph stores refs and metadata.</td></tr>
-            <tr><td><code>ToolResultProjector</code>, <code>ToolDiscoveryContributor</code></td><td>Plugin crates</td><td>Project model-facing tool results and catalog/discovery metadata through explicit exclusive or additive plugin hooks.</td></tr>
+            <tr><td><code>ToolResultProjector</code>, <code>ToolCatalogContributor</code></td><td>Plugin crates</td><td>Project model-facing tool results and contribute tool-catalog entries through explicit exclusive or additive plugin hooks.</td></tr>
           </tbody>
         </table>
       </div>
