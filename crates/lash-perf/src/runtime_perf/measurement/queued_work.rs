@@ -6,7 +6,8 @@ async fn run_once_queued_work_claim_stress(
     chat_turns: usize,
 ) -> anyhow::Result<RuntimePerfRunResult> {
     let scenario = RuntimePerfScenario::QueuedWorkClaimStress;
-    let session_id = "runtime-perf-queued-work";
+    let session_id = format!("runtime-perf-{}", scenario.name());
+    let other_session_id = "runtime-perf-queued-work-other";
     let owner = lash_core::LeaseOwnerIdentity::opaque("runtime-perf", "queued-work-stress");
     let total_started = Instant::now();
     let before_memory = process_memory_sample();
@@ -15,6 +16,7 @@ async fn run_once_queued_work_claim_stress(
     let build_before_alloc = allocator_stats();
     let build_started = Instant::now();
     let store = Arc::new(RuntimePerfStore::default());
+    let mut runtime = build_runtime_with_store(scenario, Some(Arc::clone(&store)), None).await?;
     let build_runtime_ms = elapsed_ms(build_started);
     let build_runtime_alloc = alloc_delta(build_before_alloc, allocator_stats());
     let after_build_memory = process_memory_sample();
@@ -25,14 +27,15 @@ async fn run_once_queued_work_claim_stress(
         store
             .enqueue_queued_work(
                 QueuedWorkBatchDraft::new(
-                    "runtime-perf-queued-work-other",
+                    other_session_id,
                     DeliveryPolicy::EarliestSafeBoundary,
-                    SlotPolicy::Join,
-                    vec![QueuedWorkPayload::turn_input(TurnInput::text(format!(
-                        "other queued work {index}"
-                    )))],
+                    SlotPolicy::Exclusive,
+                    vec![QueuedWorkPayload::session_command(
+                        SessionCommand::RefreshToolCatalog {
+                            reason: format!("other queued work {index}"),
+                        },
+                    )],
                 )
-                .with_merge_key(MergeKey::Group("other-session-noise".to_string()))
                 .with_source_key(format!("other:{index}")),
             )
             .await?;
@@ -58,7 +61,11 @@ async fn run_once_queued_work_claim_stress(
         let (lease, phase) =
             measure_runtime_perf_async_phase("queued_work.claim_session_lease", async {
                 store
-                    .try_claim_session_execution_lease(session_id, &owner, QUEUED_WORK_CLAIM_TTL_MS)
+                    .try_claim_session_execution_lease(
+                        &session_id,
+                        &owner,
+                        QUEUED_WORK_CLAIM_TTL_MS,
+                    )
                     .await?
                     .acquired()
                     .ok_or_else(|| anyhow::anyhow!("queued-work stress lease was busy"))
@@ -68,7 +75,13 @@ async fn run_once_queued_work_claim_stress(
 
         let (_, phase) =
             measure_runtime_perf_async_phase("queued_work.enqueue_mixed_batch", async {
-                enqueue_queued_work_stress_turn(store.as_ref(), session_id, turn_index).await
+                enqueue_queued_work_stress_turn(
+                    store.as_ref(),
+                    &runtime,
+                    &session_id,
+                    turn_index,
+                )
+                .await
             })
             .await?;
         phase_profile.insert(phase.0, phase.1);
@@ -78,7 +91,7 @@ async fn run_once_queued_work_claim_stress(
             measure_runtime_perf_async_phase("queued_work.claim_session_command", async {
                 store
                     .claim_leading_ready_session_command(
-                        session_id,
+                        &session_id,
                         &lease.fence(),
                         &owner,
                         QUEUED_WORK_CLAIM_TTL_MS,
@@ -97,7 +110,7 @@ async fn run_once_queued_work_claim_stress(
             measure_runtime_perf_async_phase("queued_work.complete_session_command", async {
                 store
                     .commit_runtime_state(queued_work_stress_commit(
-                        session_id,
+                        &session_id,
                         &lease,
                         vec![command_claim.completion()],
                         false,
@@ -114,7 +127,7 @@ async fn run_once_queued_work_claim_stress(
             measure_runtime_perf_async_phase("queued_work.claim_join_turn_work", async {
                 store
                     .claim_ready_queued_work(
-                        session_id,
+                        &session_id,
                         &lease.fence(),
                         &owner,
                         QueuedWorkClaimBoundary::Idle,
@@ -165,7 +178,7 @@ async fn run_once_queued_work_claim_stress(
             measure_runtime_perf_async_phase("queued_work.reclaim_by_batch_ids", async {
                 store
                     .claim_ready_queued_work_by_batch_ids(
-                        session_id,
+                        &session_id,
                         &lease.fence(),
                         &owner,
                         QueuedWorkClaimBoundary::Idle,
@@ -190,7 +203,7 @@ async fn run_once_queued_work_claim_stress(
             measure_runtime_perf_async_phase("queued_work.complete_join_turn_work", async {
                 store
                     .commit_runtime_state(queued_work_stress_commit(
-                        session_id,
+                        &session_id,
                         &lease,
                         vec![join_claim.completion()],
                         false,
@@ -207,7 +220,7 @@ async fn run_once_queued_work_claim_stress(
             measure_runtime_perf_async_phase("queued_work.claim_exclusive_turn_work", async {
                 store
                     .claim_ready_queued_work(
-                        session_id,
+                        &session_id,
                         &lease.fence(),
                         &owner,
                         QueuedWorkClaimBoundary::Idle,
@@ -231,7 +244,7 @@ async fn run_once_queued_work_claim_stress(
             measure_runtime_perf_async_phase("queued_work.complete_exclusive_turn_work", async {
                 store
                     .commit_runtime_state(queued_work_stress_commit(
-                        session_id,
+                        &session_id,
                         &lease,
                         vec![exclusive_claim.completion()],
                         true,
@@ -247,7 +260,7 @@ async fn run_once_queued_work_claim_stress(
         let (pending, phase) =
             measure_runtime_perf_async_phase("queued_work.list_pending", async {
                 store
-                    .list_pending_queued_work(session_id)
+                    .list_pending_queued_work(&session_id)
                     .await
                     .map_err(anyhow::Error::from)
             })
@@ -301,11 +314,8 @@ async fn run_once_queued_work_claim_stress(
 
     let export_before_alloc = allocator_stats();
     let export_started = Instant::now();
-    let remaining_measured = store.list_queued_work(session_id).await?.len();
-    let remaining_other = store
-        .list_queued_work("runtime-perf-queued-work-other")
-        .await?
-        .len();
+    let remaining_measured = store.list_queued_work(&session_id).await?.len();
+    let remaining_other = store.list_queued_work(other_session_id).await?.len();
     let _export_shape = serde_json::json!({
         "enqueued_batches": enqueued_batches,
         "completed_batches": completed_batches,
@@ -318,6 +328,7 @@ async fn run_once_queued_work_claim_stress(
     let after_export_memory = process_memory_sample();
     let total_alloc = alloc_delta(total_before_alloc, allocator_stats());
     let last_turn_memory = turns.last().map(|turn| &turn.memory);
+    runtime.close().await?;
 
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
@@ -384,6 +395,7 @@ async fn run_once_queued_work_claim_stress(
 
 async fn enqueue_queued_work_stress_turn(
     store: &RuntimePerfStore,
+    runtime: &BenchmarkRuntime,
     session_id: &str,
     turn_index: usize,
 ) -> anyhow::Result<()> {
@@ -404,33 +416,24 @@ async fn enqueue_queued_work_stress_turn(
         .await?;
 
     for batch_index in 0..QUEUED_WORK_JOIN_BATCHES_PER_TURN {
-        store
-            .enqueue_queued_work(
-                QueuedWorkBatchDraft::new(
-                    session_id,
-                    DeliveryPolicy::EarliestSafeBoundary,
-                    SlotPolicy::Join,
-                    vec![QueuedWorkPayload::turn_input(TurnInput::text(format!(
-                        "queued work stress turn {turn_index} batch {batch_index}"
-                    )))],
-                )
-                .with_merge_key(MergeKey::Group(format!("turn:{turn_index}")))
-                .with_source_key(format!("turn:{turn_index}:join:{batch_index}")),
+        runtime
+            .enqueue_turn_input(
+                TurnInput::text(format!(
+                    "queued work stress turn {turn_index} batch {batch_index}"
+                )),
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+                format!("turn:{turn_index}:join:{batch_index}"),
             )
             .await?;
     }
 
-    store
-        .enqueue_queued_work(
-            QueuedWorkBatchDraft::new(
-                session_id,
-                DeliveryPolicy::EarliestSafeBoundary,
-                SlotPolicy::Exclusive,
-                vec![QueuedWorkPayload::turn_input(TurnInput::text(format!(
-                    "queued work stress exclusive {turn_index}"
-                )))],
-            )
-            .with_source_key(format!("turn:{turn_index}:exclusive")),
+    runtime
+        .enqueue_turn_input(
+            TurnInput::text(format!("queued work stress exclusive {turn_index}")),
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+            format!("turn:{turn_index}:exclusive"),
         )
         .await?;
     Ok(())

@@ -7,7 +7,7 @@ use anyhow::Context;
 use lash::usage::SessionUsageReport;
 use lash_core::llm::types::{LlmResponse, LlmUsage};
 use lash_core::runtime::{
-    DeliveryPolicy, MergeKey, QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkCompletion,
+    DeliveryPolicy, QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkCompletion,
     QueuedWorkPayload, RuntimeTurnPhase, RuntimeTurnPhaseProbe, SessionCommand, SlotPolicy,
 };
 use lash_core::sansio::{
@@ -36,9 +36,9 @@ use crate::perf_support::tempdir::make_temp_bench_dir;
 use crate::perf_support::time::{elapsed_ms, round3};
 
 use super::harness::{
-    RuntimePerfTraceConfig, benchmark_prompt, build_embed_core, build_runtime_with_sqlite_store,
-    build_runtime_with_store, prepare_turn, rlm_perf_projected_bindings, seed_runtime_state,
-    validate_runtime_perf_turn,
+    BenchmarkRuntime, RuntimePerfTraceConfig, benchmark_prompt, build_embed_core,
+    build_runtime_with_sqlite_store, build_runtime_with_store, prepare_turn,
+    rlm_perf_projected_bindings, seed_runtime_state, validate_runtime_perf_turn,
 };
 use super::scenarios::RuntimePerfScenario;
 use super::store::RuntimePerfStore;
