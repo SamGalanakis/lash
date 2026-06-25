@@ -86,6 +86,8 @@ mod tests {
         // the bar shows e.g. `36 · 0%` against a 1.1M-token window. The
         // meter should stay off until real input accounting lands.
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        app.repo_status = None;
+        app.cwd = String::new();
         app.usage.context_window = Some(1_100_000);
         app.start_turn();
         app.usage.live_output_tokens_estimate = 36;
