@@ -399,6 +399,19 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         ))
     }
 
+    async fn claim_leading_ready_session_command(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+    ) -> std::result::Result<
+        Option<lash_core::runtime::QueuedWorkClaim>,
+        lash_core::store::StoreError,
+    > {
+        Ok(None)
+    }
+
     async fn claim_ready_queued_work(
         &self,
         _session_id: &str,
