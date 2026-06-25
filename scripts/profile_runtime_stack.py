@@ -225,17 +225,56 @@ def report_metadata(
         }
 
     reported_stack_bytes = payload.get("worker_stack_bytes")
+    stack_profile = payload.get("stack_profile")
+    profile_stack_bytes = None
+    if isinstance(stack_profile, dict):
+        profile_stack_bytes = stack_profile.get("worker_stack_bytes")
     summaries = payload.get("summary")
     summary_scenarios: list[str] = []
+    summary_stack_accounted = False
     if isinstance(summaries, list):
         summary_scenarios = [
             item.get("scenario")
             for item in summaries
             if isinstance(item, dict) and isinstance(item.get("scenario"), str)
         ]
-    stack_accounted = reported_stack_bytes == stack_bytes
+        for item in summaries:
+            if not isinstance(item, dict) or item.get("scenario") != scenario:
+                continue
+            item_stack_profile = item.get("stack_profile")
+            summary_stack_accounted = (
+                isinstance(item_stack_profile, dict)
+                and item_stack_profile.get("worker_stack_bytes") == stack_bytes
+            )
+            break
+    results = payload.get("results")
+    result_stack_accounted = False
+    if isinstance(results, list):
+        for item in results:
+            if not isinstance(item, dict) or item.get("scenario") != scenario:
+                continue
+            item_stack_profile = item.get("stack_profile")
+            result_stack_accounted = (
+                isinstance(item_stack_profile, dict)
+                and item_stack_profile.get("worker_stack_bytes") == stack_bytes
+            )
+            break
+    stack_accounted = (
+        reported_stack_bytes == stack_bytes
+        and profile_stack_bytes == stack_bytes
+        and summary_stack_accounted
+        and result_stack_accounted
+    )
     scenario_reported = scenario in summary_scenarios
     failure_reasons = []
+    if reported_stack_bytes != stack_bytes:
+        failure_reasons.append("top_level_stack_size_not_accounted")
+    if profile_stack_bytes != stack_bytes:
+        failure_reasons.append("stack_profile_size_not_accounted")
+    if not summary_stack_accounted:
+        failure_reasons.append("summary_stack_size_not_accounted")
+    if not result_stack_accounted:
+        failure_reasons.append("result_stack_size_not_accounted")
     if not stack_accounted:
         failure_reasons.append("stack_size_not_accounted")
     if not scenario_reported:
@@ -244,6 +283,9 @@ def report_metadata(
     metadata: dict[str, object] = {
         "status": "ok" if not failure_reasons else "failed",
         "reported_worker_stack_bytes": reported_stack_bytes,
+        "reported_stack_profile": stack_profile if isinstance(stack_profile, dict) else None,
+        "summary_stack_accounted": summary_stack_accounted,
+        "result_stack_accounted": result_stack_accounted,
         "stack_accounted": stack_accounted,
         "summary_scenarios": summary_scenarios,
     }

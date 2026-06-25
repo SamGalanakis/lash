@@ -5,11 +5,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows-only fallback.
+    resource = None  # type: ignore[assignment]
 
 
 PERF_MODES = [
@@ -22,6 +28,7 @@ PERF_MODES = [
     "compiled_process_cache",
     "compiled_program_cache",
     "linked_program_cache",
+    "phase_breakdown",
 ]
 
 DEFAULT_PERF_MODES = [
@@ -34,8 +41,10 @@ DEFAULT_PERF_MODES = [
     "compiled_process_cache",
     "compiled_program_cache",
     "linked_program_cache",
+    "phase_breakdown",
 ]
 
+DEFAULT_STACK_BUDGET_BYTES = 2 * 1024 * 1024
 DEFAULT_BUDGET_FILE = Path(__file__).resolve().with_name("perf_guard_budgets.json")
 
 
@@ -73,6 +82,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exit non-zero when a Lashlang perf guard budget is exceeded.",
     )
+    parser.add_argument(
+        "--stack-budget-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Stack budget to record and apply to Lashlang profiling subprocesses. "
+            "Defaults to LASH_STACK_BUDGET_BYTES, LASH_RUST_MIN_STACK_BUDGET, "
+            "LASH_STACK_BUDGET_KB, or 2 MiB."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -83,6 +102,89 @@ def repo_root() -> Path:
 def default_out(root: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return root / ".benchmarks" / "lashlang-perf" / f"{stamp}.json"
+
+
+def parse_env_stack_bytes(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def default_stack_budget_bytes() -> int:
+    for name in ("LASH_STACK_BUDGET_BYTES", "LASH_RUST_MIN_STACK_BUDGET"):
+        parsed = parse_env_stack_bytes(os.environ.get(name))
+        if parsed is not None:
+            return parsed
+    stack_budget_kb = parse_env_stack_bytes(os.environ.get("LASH_STACK_BUDGET_KB"))
+    if stack_budget_kb is not None:
+        return stack_budget_kb * 1024
+    return DEFAULT_STACK_BUDGET_BYTES
+
+
+def apply_stack_budget(stack_budget_bytes: int) -> None:
+    os.environ.setdefault("RUST_MIN_STACK", str(stack_budget_bytes))
+    if resource is None:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    except (OSError, ValueError):
+        return
+    infinity = resource.RLIM_INFINITY
+    if soft != infinity and soft <= stack_budget_bytes:
+        return
+    if hard != infinity and stack_budget_bytes > hard:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_STACK, (stack_budget_bytes, hard))
+    except (OSError, ValueError):
+        return
+
+
+def process_stack_limits() -> tuple[int | None, int | None, bool]:
+    if resource is None:
+        return None, None, False
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    except (OSError, ValueError):
+        return None, None, False
+    infinity = resource.RLIM_INFINITY
+    soft_bytes = None if soft == infinity or soft < 0 else int(soft)
+    hard_bytes = None if hard == infinity or hard < 0 else int(hard)
+    return soft_bytes, hard_bytes, hard == infinity
+
+
+def current_stack_profile(stack_budget_bytes: int) -> dict[str, Any]:
+    rust_min_stack_bytes = parse_env_stack_bytes(os.environ.get("RUST_MIN_STACK"))
+    soft_bytes, hard_bytes, hard_unlimited = process_stack_limits()
+    if rust_min_stack_bytes is not None:
+        measured_stack_bytes = rust_min_stack_bytes
+        measured_stack_source = "rust_min_stack"
+    elif soft_bytes is not None:
+        measured_stack_bytes = soft_bytes
+        measured_stack_source = "process_stack_soft_limit"
+    else:
+        measured_stack_bytes = None
+        measured_stack_source = None
+    within_stack_budget = (
+        measured_stack_bytes <= stack_budget_bytes
+        if measured_stack_bytes is not None
+        else None
+    )
+    return {
+        "worker_stack_bytes": None,
+        "rust_min_stack_bytes": rust_min_stack_bytes,
+        "process_stack_soft_limit_bytes": soft_bytes,
+        "process_stack_hard_limit_bytes": hard_bytes,
+        "process_stack_hard_limit_unlimited": hard_unlimited,
+        "measured_stack_bytes": measured_stack_bytes,
+        "measured_stack_source": measured_stack_source,
+        "stack_budget_bytes": stack_budget_bytes,
+        "within_stack_budget": within_stack_budget,
+    }
 
 
 def resolve_requested(values: list[str], known: list[str], default: list[str]) -> list[str]:
@@ -353,8 +455,14 @@ def main() -> int:
     args = parse_args()
     root = repo_root()
     modes = resolve_requested(args.mode, PERF_MODES, DEFAULT_PERF_MODES)
+    stack_budget_bytes = (
+        args.stack_budget_bytes
+        if args.stack_budget_bytes is not None and args.stack_budget_bytes > 0
+        else default_stack_budget_bytes()
+    )
 
     maybe_build(root, args.debug, args.build)
+    apply_stack_budget(stack_budget_bytes)
     perf_bin = example_path(root, args.debug, "perf")
     profile_bin = example_path(root, args.debug, "profile")
 
@@ -366,6 +474,7 @@ def main() -> int:
     known_scenarios = load_scenarios(root, scenario_binary)
     scenarios = resolve_requested(args.scenario, known_scenarios, known_scenarios)
     profile_scenarios = resolve_profile_scenarios(args.profile_scenario, known_scenarios)
+    stack_profile = current_stack_profile(stack_budget_bytes)
 
     perf_results = []
     if not args.skip_perf:
@@ -377,6 +486,7 @@ def main() -> int:
                 parsed = parse_perf_output(run_command(root, [str(perf_bin), mode, scenario, str(iterations)]))
                 parsed["mode_arg"] = mode
                 parsed["scenario_arg"] = scenario
+                parsed["stack_profile"] = dict(stack_profile)
                 perf_results.append(parsed)
 
     profile_results = []
@@ -386,6 +496,7 @@ def main() -> int:
         for scenario in profile_scenarios:
             parsed = parse_profile_output(run_command(root, [str(profile_bin), scenario, str(max(args.profile_iterations, 1))]))
             parsed["scenario_arg"] = scenario
+            parsed["stack_profile"] = dict(stack_profile)
             profile_results.append(parsed)
 
     out_path = args.out or default_out(root)
@@ -395,6 +506,7 @@ def main() -> int:
         "kind": "lashlang-perf",
         "git": git_info(root),
         "build_mode": "debug" if args.debug else "release",
+        "stack_profile": stack_profile,
         "parameters": {
             "scenarios": scenarios,
             "modes": modes,
@@ -403,6 +515,7 @@ def main() -> int:
             "profile_iterations": max(args.profile_iterations, 1),
             "skip_perf": args.skip_perf,
             "skip_profile": args.skip_profile,
+            "stack_profile": stack_profile,
         },
         "perf_results": perf_results,
         "profile_results": profile_results,

@@ -6,17 +6,23 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use lash::usage::SessionUsageReport;
 use lash_core::llm::types::{LlmResponse, LlmUsage};
-use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
+use lash_core::runtime::{
+    DeliveryPolicy, MergeKey, QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkCompletion,
+    QueuedWorkPayload, RuntimeTurnPhase, RuntimeTurnPhaseProbe, SessionCommand, SlotPolicy,
+};
 use lash_core::sansio::{
     ChatContextProjector, CompletedToolCall, PendingToolCall, ProtocolDriverHandle,
     WaitingExecState, WaitingLlmState,
 };
+use lash_core::store::GraphCommitDelta;
 use lash_core::{
-    DriverAction, DriverContextView, Effect, ExecResponse, InputItem, LiveReplayResult,
-    LiveReplayStore, LiveReplaySubscribeResult, Message, MessageRole, ModelToolReturn, Part,
-    PartKind, ProtocolTurnOptions, PruneState, Response, SessionObservationEventPayload,
-    SessionRevision, TokenUsage, ToolCallOutput, ToolCancellation, ToolFailure, ToolFailureClass,
-    TurnFinish, TurnInput, TurnMachine, TurnMachineConfig, TurnOutcome, shared_parts,
+    DriverAction, DriverContextView, Effect, ExecResponse, HydratedSessionCheckpoint, InputItem,
+    LiveReplayResult, LiveReplayStore, LiveReplaySubscribeResult, Message, MessageRole,
+    ModelToolReturn, Part, PartKind, PersistedSessionConfig, ProtocolTurnOptions, PruneState,
+    Response, RuntimeCommit, RuntimePersistence, SessionExecutionLease,
+    SessionObservationEventPayload, SessionRevision, TokenUsage, ToolCallOutput, ToolCancellation,
+    ToolFailure, ToolFailureClass, TurnFinish, TurnInput, TurnMachine, TurnMachineConfig,
+    TurnOutcome, shared_parts,
 };
 use lash_protocol_rlm::RlmTurnInputExt;
 use serde::Serialize;
@@ -25,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::perf_support::memory::{ProcessMemorySample, diff_opt_i64, process_memory_sample};
 use crate::perf_support::metrics::BasicMetricSummary as RuntimePerfMetricSummary;
+use crate::perf_support::stack::StackProfile;
 use crate::perf_support::tempdir::make_temp_bench_dir;
 use crate::perf_support::time::{elapsed_ms, round3};
 
@@ -41,4 +48,5 @@ include!("measurement/phase_probe.rs");
 include!("measurement/live_replay.rs");
 include!("measurement/provider_scenarios.rs");
 include!("measurement/process_stress.rs");
+include!("measurement/queued_work.rs");
 include!("measurement/checkpoint.rs");

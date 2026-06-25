@@ -8,10 +8,10 @@ use lash::runtime::ProtocolTurnOptions;
 use lash::{RlmCore, TurnActivity, TurnEvent};
 use lash_cli::config::LashConfig;
 use lash_core::TurnInput;
-use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};
 use lash_harness_opt::strategies::gepa::{
     ReflectiveGepaStrategy, ReflectiveProposalRequest, ReflectiveProposer,
 };
+use lash_harness_opt::toybench::{ToybenchConfig, ToybenchProject};
 use lash_harness_opt::{
     Candidate, CandidateSelection, ComponentSelection, FrontierMode, HarnessOptStore,
     HarnessOptimizer, HarnessProject, OptimizationConfig, OptimizationRun, ProjectHarnessRunner,
@@ -50,7 +50,7 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum OptimizeProject {
-    Clbench {
+    Toybench {
         #[arg(long)]
         config: PathBuf,
         #[arg(long)]
@@ -90,7 +90,7 @@ enum OptimizeProject {
 
 #[derive(Subcommand, Debug)]
 enum CheckProject {
-    Clbench {
+    Toybench {
         #[arg(long)]
         config: PathBuf,
     },
@@ -98,7 +98,7 @@ enum CheckProject {
 
 #[derive(Subcommand, Debug)]
 enum EvalProject {
-    Clbench {
+    Toybench {
         #[arg(long)]
         config: PathBuf,
         #[arg(long)]
@@ -197,7 +197,7 @@ async fn async_main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Command::Optimize { project } => match project {
-            OptimizeProject::Clbench {
+            OptimizeProject::Toybench {
                 config,
                 run_dir,
                 max_metric_calls,
@@ -216,16 +216,16 @@ async fn async_main() -> Result<()> {
                 proposer_max_context_tokens,
                 proposer_prompt,
             } => {
-                let project = Arc::new(load_clbench_config(config).await?);
+                let project = Arc::new(load_toybench_config(config).await?);
                 let train = project.trainset().await?;
                 if train.is_empty() {
-                    bail!("clbench config has no train examples");
+                    bail!("toybench config has no train examples");
                 }
                 let val = project.valset().await?;
                 let provider = resolve_provider(provider_id.as_deref())?;
                 let run = OptimizationRun {
                     run_id: uuid::Uuid::new_v4().to_string(),
-                    experiment_id: "clbench".to_string(),
+                    experiment_id: "toybench".to_string(),
                     run_dir: run_dir.clone(),
                     config: OptimizationConfig {
                         max_metric_calls,
@@ -268,19 +268,19 @@ async fn async_main() -> Result<()> {
             }
         },
         Command::Check { project } => match project {
-            CheckProject::Clbench { config } => {
-                let project = load_clbench_config(config).await?;
+            CheckProject::Toybench { config } => {
+                let project = load_toybench_config(config).await?;
                 let seed = project.seed_candidate().await?;
                 let train = project.trainset().await?;
                 let val = project.valset().await?;
                 let test = project.testset().await?;
-                let _ = ClbenchProject::prompt_template(&seed)?;
-                let _ = ClbenchProject::user_directive(&seed)?;
+                let _ = ToybenchProject::prompt_template(&seed)?;
+                let _ = ToybenchProject::user_directive(&seed)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "status": "ok",
-                        "project": "clbench",
+                        "project": "toybench",
                         "mutable_components": seed.mutable_components.keys().collect::<Vec<_>>(),
                         "examples": {
                             "train": train.len(),
@@ -316,13 +316,13 @@ async fn async_main() -> Result<()> {
             );
         }
         Command::Eval { project } => match project {
-            EvalProject::Clbench {
+            EvalProject::Toybench {
                 config,
                 candidate,
                 split,
                 run_dir,
             } => {
-                let project = Arc::new(load_clbench_config(config).await?);
+                let project = Arc::new(load_toybench_config(config).await?);
                 let candidate: Candidate = serde_json::from_slice(
                     &tokio::fs::read(&candidate)
                         .await
@@ -336,7 +336,7 @@ async fn async_main() -> Result<()> {
                 };
                 let run = OptimizationRun {
                     run_id: uuid::Uuid::new_v4().to_string(),
-                    experiment_id: "clbench".to_string(),
+                    experiment_id: "toybench".to_string(),
                     run_dir: run_dir.unwrap_or_else(|| {
                         std::env::temp_dir()
                             .join(format!("lash-harness-opt-eval-{}", uuid::Uuid::new_v4()))
@@ -366,13 +366,13 @@ async fn async_main() -> Result<()> {
     Ok(())
 }
 
-async fn load_clbench_config(path: PathBuf) -> Result<ClbenchProject> {
+async fn load_toybench_config(path: PathBuf) -> Result<ToybenchProject> {
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("read {}", path.display()))?;
-    let config: ClbenchConfig =
+    let config: ToybenchConfig =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-    Ok(ClbenchProject::new(config))
+    Ok(ToybenchProject::new(config))
 }
 
 struct LashRlmReflectiveProposer {

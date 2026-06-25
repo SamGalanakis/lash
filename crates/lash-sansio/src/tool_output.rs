@@ -77,6 +77,14 @@ impl ToolCallOutput {
         }
     }
 
+    pub fn into_value_for_projection(self) -> Value {
+        match self.outcome {
+            ToolCallOutcome::Success(value) => value.into_json_value(),
+            ToolCallOutcome::Failure(failure) => failure.to_json_value(),
+            ToolCallOutcome::Cancelled(cancellation) => cancellation.to_json_value(),
+        }
+    }
+
     pub fn attachments(&self) -> Vec<AttachmentRef> {
         match &self.outcome {
             ToolCallOutcome::Success(value) => value.attachments(),
@@ -137,7 +145,29 @@ pub enum ToolValue {
 
 impl ToolValue {
     pub fn to_json_value(&self) -> Value {
-        serde_json::to_value(self).unwrap_or(Value::Null)
+        match self {
+            Self::Null => Value::Null,
+            Self::Bool(value) => Value::Bool(*value),
+            Self::Number(value) => Value::Number(value.clone()),
+            Self::String(value) => Value::String(value.clone()),
+            Self::Array(values) => Value::Array(values.iter().map(Self::to_json_value).collect()),
+            Self::Attachment(reference) => tagged_attachment_json(reference),
+            Self::Object(entries) => object_tool_value_to_json(entries),
+        }
+    }
+
+    pub fn into_json_value(self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Bool(value) => Value::Bool(value),
+            Self::Number(value) => Value::Number(value),
+            Self::String(value) => Value::String(value),
+            Self::Array(values) => {
+                Value::Array(values.into_iter().map(Self::into_json_value).collect())
+            }
+            Self::Attachment(reference) => tagged_attachment_json(&reference),
+            Self::Object(entries) => object_tool_value_into_json(entries),
+        }
     }
 
     pub fn from_json_value(value: Value) -> serde_json::Result<Self> {
@@ -220,6 +250,51 @@ impl ToolValue {
             }
         }
     }
+}
+
+fn tagged_attachment_json(reference: &AttachmentRef) -> Value {
+    let mut map = Map::with_capacity(2);
+    map.insert(
+        TAG_KEY.to_string(),
+        Value::String(ATTACHMENT_TAG.to_string()),
+    );
+    map.insert(
+        REF_KEY.to_string(),
+        serde_json::to_value(reference).unwrap_or(Value::Null),
+    );
+    Value::Object(map)
+}
+
+fn object_tool_value_to_json(entries: &BTreeMap<String, ToolValue>) -> Value {
+    let object = entries
+        .iter()
+        .map(|(key, value)| (key.clone(), value.to_json_value()))
+        .collect::<Map<_, _>>();
+    if entries.contains_key(TAG_KEY) {
+        escaped_object_tool_value_json(Value::Object(object))
+    } else {
+        Value::Object(object)
+    }
+}
+
+fn object_tool_value_into_json(entries: BTreeMap<String, ToolValue>) -> Value {
+    let contains_reserved_tag = entries.contains_key(TAG_KEY);
+    let object = entries
+        .into_iter()
+        .map(|(key, value)| (key, value.into_json_value()))
+        .collect::<Map<_, _>>();
+    if contains_reserved_tag {
+        escaped_object_tool_value_json(Value::Object(object))
+    } else {
+        Value::Object(object)
+    }
+}
+
+fn escaped_object_tool_value_json(entries: Value) -> Value {
+    let mut map = Map::with_capacity(2);
+    map.insert(TAG_KEY.to_string(), Value::String(OBJECT_TAG.to_string()));
+    map.insert(ENTRIES_KEY.to_string(), entries);
+    Value::Object(map)
 }
 
 impl From<Value> for ToolValue {
@@ -681,6 +756,25 @@ mod tests {
         assert_eq!(json[TAG_KEY], OBJECT_TAG);
         assert!(json[ENTRIES_KEY].is_object());
         assert_eq!(serde_json::from_value::<ToolValue>(json).unwrap(), value);
+    }
+
+    #[test]
+    fn consuming_projection_matches_tool_value_serialization() {
+        let value = ToolValue::Object(BTreeMap::from([
+            (
+                "attachment".to_string(),
+                ToolValue::Attachment(image_ref("img")),
+            ),
+            (
+                TAG_KEY.to_string(),
+                ToolValue::Array(vec![ToolValue::String("user".into())]),
+            ),
+        ]));
+        let serialized = serde_json::to_value(&value).unwrap();
+        assert_eq!(value.to_json_value(), serialized);
+
+        let output = ToolCallOutput::success(value);
+        assert_eq!(output.into_value_for_projection(), serialized);
     }
 
     #[test]

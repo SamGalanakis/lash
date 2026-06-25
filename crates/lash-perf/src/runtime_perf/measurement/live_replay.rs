@@ -258,6 +258,7 @@ async fn run_once_live_replay_pressure(chat_turns: usize) -> anyhow::Result<Runt
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),
@@ -481,6 +482,7 @@ async fn run_once_trace_jsonl(
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),

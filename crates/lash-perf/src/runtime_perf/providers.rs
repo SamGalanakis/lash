@@ -9,9 +9,9 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    Resolution, RuntimeEffectController, ToolContract, ToolDefinition, ToolManifest,
-    ToolOutputContract, ToolProvider, ToolResult, ToolScheduling, TriggerOccurrenceRequest,
-    empty_trigger_source_key,
+    DirectJsonSchema, DirectRequest, Resolution, RuntimeEffectController, ToolContract,
+    ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    TriggerOccurrenceRequest, empty_trigger_source_key,
 };
 #[cfg(test)]
 use lash_lashlang_runtime::tool_lashlang_binding;
@@ -90,6 +90,9 @@ pub(crate) struct BenchmarkLargeToolCatalog {
     cache: Arc<BenchmarkLargeToolCatalogCache>,
 }
 
+#[derive(Default)]
+pub(crate) struct BenchmarkObliqueTools;
+
 struct BenchmarkLargeToolCatalogCache {
     manifests: Vec<ToolManifest>,
     contracts: HashMap<String, Arc<ToolContract>>,
@@ -158,6 +161,33 @@ impl ToolProvider for BenchmarkEchoTool {
             "benchmark_slow" => execute_benchmark_slow(call).await,
             "benchmark_async" => execute_benchmark_async(call).await,
             _ => ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for BenchmarkObliqueTools {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        benchmark_oblique_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        benchmark_oblique_tool_definition_for(name)
+            .map(|definition| Arc::new(definition.contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "oblique_search" => execute_oblique_search(call).await,
+            "oblique_judge_candidates" => execute_oblique_judge_candidates(call).await,
+            "oblique_list_async_handles" => execute_oblique_list_async_handles(call).await,
+            _ => ToolResult::err_fmt(format_args!(
+                "Unknown benchmark oblique tool: {}",
+                call.name
+            )),
         }
     }
 }
@@ -486,6 +516,282 @@ fn benchmark_async_tool_definition() -> ToolDefinition {
         LashlangToolBinding::new(["tools"], "benchmark_async").with_authority_type("Tools"),
     )
     .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn benchmark_oblique_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        benchmark_oblique_search_tool_definition(),
+        benchmark_oblique_judge_tool_definition(),
+        benchmark_oblique_list_handles_tool_definition(),
+    ]
+}
+
+fn benchmark_oblique_tool_definition_for(name: &str) -> Option<ToolDefinition> {
+    match name {
+        "oblique_search" => Some(benchmark_oblique_search_tool_definition()),
+        "oblique_judge_candidates" => Some(benchmark_oblique_judge_tool_definition()),
+        "oblique_list_async_handles" => Some(benchmark_oblique_list_handles_tool_definition()),
+        _ => None,
+    }
+}
+
+fn benchmark_oblique_search_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "tool:oblique_search",
+        "oblique_search",
+        "Synthetic OBLIQ retrieval. Returns a ranked match list with full text and nested metadata inline.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "maxItems": 12
+                },
+                "mode": { "type": "string", "enum": ["hybrid", "bm25", "dense", "late"], "default": "hybrid" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 300, "default": 96 },
+                "candidate_pool": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 512 }
+            },
+            "required": ["queries"],
+            "additionalProperties": false
+        }),
+        oblique_search_output_schema(),
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["obliq"], "search").with_authority_type("Obliq"),
+    )
+    .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn benchmark_oblique_judge_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "tool:oblique_judge_candidates",
+        "oblique_judge_candidates",
+        "Synthetic OBLIQ candidate judge. Calls the direct completion client from inside the tool.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verifier_predicate": { "type": "string", "minLength": 1 },
+                "candidate_doc_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 600
+                },
+                "surface_bait": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "maxItems": 20
+                }
+            },
+            "required": ["verifier_predicate", "candidate_doc_ids"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ranked_doc_ids": { "type": "array", "items": { "type": "string" } },
+                "positive_doc_ids": { "type": "array", "items": { "type": "string" } },
+                "direct_completion": { "type": "object", "additionalProperties": true }
+            },
+            "required": ["ranked_doc_ids", "positive_doc_ids", "direct_completion"],
+            "additionalProperties": false
+        }),
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["obliq"], "judge_candidates").with_authority_type("Obliq"),
+    )
+    .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn benchmark_oblique_list_handles_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "tool:oblique_list_async_handles",
+        "oblique_list_async_handles",
+        "Synthetic live async handle listing shaped like the OBLIQ helper tool.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "monitor": { "type": "object", "additionalProperties": true },
+                "subagent": { "type": "object", "additionalProperties": true },
+                "tool": { "type": "object", "additionalProperties": true }
+            },
+            "required": ["monitor", "subagent", "tool"],
+            "additionalProperties": false
+        }),
+    )
+    .with_lashlang_binding(
+        LashlangToolBinding::new(["obliq"], "list_async_handles").with_authority_type("Obliq"),
+    )
+    .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn oblique_search_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "matches": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "rank": { "type": "integer" },
+                        "doc_id": { "type": "string" },
+                        "score": { "type": "number" },
+                        "text": { "type": "string" },
+                        "metadata": { "type": "object", "additionalProperties": true }
+                    },
+                    "required": ["rank", "doc_id", "score", "text", "metadata"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["matches"],
+        "additionalProperties": false
+    })
+}
+
+async fn execute_oblique_search(call: lash_core::ToolCall<'_>) -> ToolResult {
+    tokio::task::yield_now().await;
+    let limit = call
+        .args
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(96)
+        .clamp(1, 128) as usize;
+    let query_count = call
+        .args
+        .get("queries")
+        .and_then(serde_json::Value::as_array)
+        .map(|queries| queries.len().max(1))
+        .unwrap_or(1);
+    let mode = call
+        .args
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("hybrid");
+    let matches = (0..limit)
+        .map(|index| {
+            serde_json::json!({
+                "rank": index + 1,
+                "doc_id": format!("doc_{query_count}_{index:04}"),
+                "score": 1.0 / (index + 1) as f64,
+                "text": oblique_doc_text(index),
+                "metadata": {
+                    "mode": mode,
+                    "source": {
+                        "subset": "math",
+                        "family": format!("latent-pattern-{}", index % 8),
+                        "path": ["obliq", "analogues", "math"]
+                    },
+                    "signals": {
+                        "dense": 0.72,
+                        "bm25": 13.5 + index as f64,
+                        "late_interaction": index % 3 == 0
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    ToolResult::ok(serde_json::json!({ "matches": matches }))
+}
+
+async fn execute_oblique_judge_candidates(call: lash_core::ToolCall<'_>) -> ToolResult {
+    let candidate_ids = call
+        .args
+        .get("candidate_doc_ids")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .take(64)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if candidate_ids.is_empty() {
+        return ToolResult::err_fmt("oblique_judge_candidates requires candidate_doc_ids");
+    }
+    let completion = match call
+        .context
+        .direct_completions()
+        .complete(
+            oblique_judge_direct_request(&candidate_ids),
+            "oblique_judge",
+        )
+        .await
+    {
+        Ok(completion) => completion,
+        Err(err) => return ToolResult::err_fmt(err.to_string()),
+    };
+    let direct_completion = serde_json::from_str(&completion.text).unwrap_or_else(|_| {
+        serde_json::json!({
+            "text": completion.text
+        })
+    });
+    let ranked_doc_ids = candidate_ids.iter().take(24).cloned().collect::<Vec<_>>();
+    let positive_doc_ids = candidate_ids
+        .iter()
+        .step_by(5)
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    ToolResult::ok(serde_json::json!({
+        "ranked_doc_ids": ranked_doc_ids,
+        "positive_doc_ids": positive_doc_ids,
+        "direct_completion": direct_completion,
+    }))
+}
+
+async fn execute_oblique_list_async_handles(_call: lash_core::ToolCall<'_>) -> ToolResult {
+    tokio::task::yield_now().await;
+    ToolResult::ok(serde_json::json!({
+        "monitor": { "rerank": { "__handle__": "monitor", "id": "rerank-monitor" } },
+        "subagent": { "explore": { "__handle__": "subagent", "id": "explore-subagent" } },
+        "tool": { "search": { "__handle__": "tool", "id": "search-tool" } }
+    }))
+}
+
+fn oblique_judge_direct_request(candidate_ids: &[String]) -> DirectRequest {
+    DirectRequest::json_schema(
+        "mock-model",
+        format!(
+            "Judge {} synthetic OBLIQ candidates and return stable JSON.",
+            candidate_ids.len()
+        ),
+        DirectJsonSchema {
+            name: "runtime_perf_oblique_judge".to_string(),
+            strict: true,
+            schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ranked_doc_ids", "rationale"],
+                "properties": {
+                    "ranked_doc_ids": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "rationale": { "type": "string" }
+                }
+            }),
+        },
+    )
+}
+
+fn oblique_doc_text(index: usize) -> String {
+    const CHUNK: &str = "abstract strategy transfers across topics: compare latent operator, invariant, proof sketch, distractor surface, and retrieval evidence. ";
+    let mut text = format!("Document {index:04}. ");
+    for repeat in 0..8 {
+        text.push_str(CHUNK);
+        text.push_str(&format!("segment={repeat}; "));
+    }
+    text
 }
 
 #[async_trait::async_trait]
@@ -905,8 +1211,10 @@ fn benchmark_stream_profile_for_request(
     scenario: RuntimePerfScenario,
     request: &LlmRequest,
 ) -> BenchmarkStreamProfile {
-    if matches!(scenario, RuntimePerfScenario::RlmSubagentSpawn)
-        && request_text(request).contains("Subagent capability: default. Depth: 1/5.")
+    if matches!(
+        scenario,
+        RuntimePerfScenario::RlmSubagentSpawn | RuntimePerfScenario::RlmObliqueStackMix
+    ) && request_text(request).contains("Subagent capability: default. Depth: 1/5.")
     {
         return text_profile(lashlang_block("submit { len: len(chunk) }"));
     }
@@ -943,6 +1251,17 @@ fn benchmark_stream_profile_for_request(
                         "GMAIL_LIST_MESSAGES",
                         "exec_command"
                     ]
+                })
+                .to_string(),
+            );
+        }
+        if request.output_spec.as_ref().is_some_and(|spec| {
+            matches!(spec, LlmOutputSpec::JsonSchema(schema) if schema.name == "runtime_perf_oblique_judge")
+        }) {
+            return text_profile(
+                serde_json::json!({
+                    "ranked_doc_ids": ["doc_4_0000", "doc_4_0005", "doc_4_0010"],
+                    "rationale": "synthetic direct judge response"
                 })
                 .to_string(),
             );
@@ -1284,6 +1603,71 @@ submit "runtime perf benchmark ok""#,
             );
             text_profile(text)
         }
+        RuntimePerfScenario::RlmObliqueStackMix => {
+            let text = lashlang_block(
+                r#"
+process explore(agents: Agents) {
+  result = await agents.spawn({
+    capability: "default",
+    task: "Return `{ len: len(chunk) }` using the seeded chunk.",
+    seed: { chunk: ["obliq", "retrieval", "rerank", "trace"] },
+    output: Type { len: int }
+  })?
+  finish result
+}
+
+first_pool = await obliq.search({
+  queries: [
+    "latent algebraic invariant transfer",
+    "proof strategy analogue with distractor wording",
+    "operator comparison under hidden structure",
+    "same abstract solution different surface topic"
+  ],
+  mode: "hybrid",
+  limit: 72,
+  candidate_pool: 512
+})?
+
+second_pool = await obliq.search({
+  queries: [
+    "geometric proof reused as combinatorial invariant",
+    "relevance by method not vocabulary",
+    "avoid surface lexical overlap"
+  ],
+  mode: "hybrid",
+  limit: 72,
+  candidate_pool: 512
+})?
+
+candidate_ids = []
+for match in first_pool.matches {
+  candidate_ids = push(candidate_ids, match.doc_id)
+}
+for match in second_pool.matches {
+  candidate_ids = push(candidate_ids, match.doc_id)
+}
+
+subagent_handle = start explore(agents: agents)
+handles = await obliq.list_async_handles({})?
+judged = await obliq.judge_candidates({
+  verifier_predicate: "documents share the same abstract proof strategy, not topic words",
+  candidate_doc_ids: candidate_ids,
+  surface_bait: ["same vocabulary", "same topic"]
+})?
+subagent = (await subagent_handle)?
+
+print {
+  first_pool: first_pool,
+  second_pool: second_pool,
+  handles: handles,
+  judged: judged,
+  subagent: subagent
+}
+
+submit "runtime perf benchmark ok""#,
+            );
+            text_profile(text)
+        }
         RuntimePerfScenario::RlmLlmQuery => {
             let text = lashlang_block(
                 r#"
@@ -1452,6 +1836,46 @@ mod tests {
         // catalog resolves no contracts (rendering is lazy and protocol-owned).
         assert_eq!(surface.callable_tools().len(), GMAIL_LIKE_TOOL_NAMES.len());
         assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn oblique_fixture_exposes_retrieval_judge_and_handle_tools_to_lashlang() {
+        let definitions = benchmark_oblique_tool_definitions();
+        assert_eq!(definitions.len(), 3);
+        let bindings = definitions
+            .iter()
+            .map(|definition| {
+                let binding = tool_lashlang_binding(&definition.manifest)
+                    .expect("valid lashlang binding")
+                    .expect("oblique fixture tool has lashlang binding");
+                (
+                    definition.name().to_string(),
+                    binding.module_path,
+                    binding.operation,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(bindings.contains(&(
+            "oblique_search".to_string(),
+            vec!["obliq".to_string()],
+            Some("search".to_string())
+        )));
+        assert!(bindings.contains(&(
+            "oblique_judge_candidates".to_string(),
+            vec!["obliq".to_string()],
+            Some("judge_candidates".to_string())
+        )));
+        assert!(bindings.contains(&(
+            "oblique_list_async_handles".to_string(),
+            vec!["obliq".to_string()],
+            Some("list_async_handles".to_string())
+        )));
+        let search_contract = benchmark_oblique_search_tool_definition().contract;
+        assert!(search_contract.output_contract.is_static());
+        assert_eq!(
+            search_contract.output_schema,
+            oblique_search_output_schema()
+        );
     }
 
     #[test]

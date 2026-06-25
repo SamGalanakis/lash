@@ -11,6 +11,7 @@ use lash_perf::perf_support::metrics::{
 };
 use lash_perf::perf_support::paths;
 use lash_perf::perf_support::report as report_support;
+use lash_perf::perf_support::stack::{DEFAULT_STACK_BUDGET_BYTES, StackProfile};
 
 use super::measurement::{UiPerfRunResult, run_once};
 use super::scenarios::{BENCH_HEIGHT, BENCH_WIDTH, UiPerfProfile, UiPerfScenario, UiPerfWorkload};
@@ -18,6 +19,7 @@ use super::scenarios::{BENCH_HEIGHT, BENCH_WIDTH, UiPerfProfile, UiPerfScenario,
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UiPerfScenarioReport {
     scenario: String,
+    stack_profile: StackProfile,
     results: Vec<UiPerfRunResult>,
     summary: BTreeMap<String, UiPerfMetricSummary>,
     counters: BTreeMap<String, u64>,
@@ -51,6 +53,7 @@ pub(crate) struct UiPerfRunParameters {
     enforce_budgets: bool,
     compare_inputs: Vec<PathBuf>,
     dhat_out: Option<PathBuf>,
+    stack_profile: StackProfile,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +62,7 @@ pub(crate) struct UiPerfReport {
     version: String,
     git: UiPerfGitInfo,
     build_mode: String,
+    stack_profile: StackProfile,
     parameters: UiPerfRunParameters,
     scenarios: Vec<UiPerfScenarioReport>,
 }
@@ -91,6 +95,7 @@ pub(crate) fn run_cli(
     let workload = profile.workload();
     let scenarios = resolve_scenarios(&scenario_filters)?;
     let runs = runs.max(1);
+    let stack_profile = StackProfile::capture(None, Some(DEFAULT_STACK_BUDGET_BYTES));
 
     for _ in 0..warmups {
         for scenario in &scenarios {
@@ -112,12 +117,15 @@ pub(crate) fn run_cli(
     for scenario in &scenarios {
         let mut results = Vec::with_capacity(runs);
         for _ in 0..runs {
-            results.push(run_once(*scenario, workload)?);
+            let mut result = run_once(*scenario, workload)?;
+            result.stack_profile = Some(stack_profile.clone());
+            results.push(result);
         }
         let summary = summarize_samples(&results);
         let budgets = evaluate_budgets(*scenario, &summary);
         scenario_reports.push(UiPerfScenarioReport {
             scenario: scenario.name().to_string(),
+            stack_profile: stack_profile.clone(),
             counters: summarize_counters(&results),
             summary,
             results,
@@ -138,6 +146,7 @@ pub(crate) fn run_cli(
         } else {
             "release".to_string()
         },
+        stack_profile: stack_profile.clone(),
         parameters: UiPerfRunParameters {
             width: BENCH_WIDTH,
             height: BENCH_HEIGHT,
@@ -152,6 +161,7 @@ pub(crate) fn run_cli(
             enforce_budgets,
             compare_inputs,
             dhat_out: dhat_out_path.clone(),
+            stack_profile,
         },
         scenarios: scenario_reports,
     };
@@ -164,6 +174,7 @@ pub(crate) fn run_cli(
             "out": out_path,
             "dhat_out": report.parameters.dhat_out,
             "profile": profile.name(),
+            "stack_profile": report.stack_profile,
             "summary": report
                 .scenarios
                 .iter()

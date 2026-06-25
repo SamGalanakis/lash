@@ -17,6 +17,23 @@ import profile_lashlang  # noqa: E402
 import profile_runtime_stack  # noqa: E402
 
 
+def stack_profile(
+    stack_bytes: int = 2 * 1024 * 1024,
+    stack_budget_bytes: int = 2 * 1024 * 1024,
+) -> dict[str, object]:
+    return {
+        "worker_stack_bytes": None,
+        "rust_min_stack_bytes": None,
+        "process_stack_soft_limit_bytes": stack_bytes,
+        "process_stack_hard_limit_bytes": None,
+        "process_stack_hard_limit_unlimited": True,
+        "measured_stack_bytes": stack_bytes,
+        "measured_stack_source": "process_stack_soft_limit",
+        "stack_budget_bytes": stack_budget_bytes,
+        "within_stack_budget": stack_bytes <= stack_budget_bytes,
+    }
+
+
 class RuntimeStackProfilerTests(unittest.TestCase):
     def run_fake_sample(
         self,
@@ -58,9 +75,35 @@ if mode == "malformed_report":
 
 reported_stack = stack_bytes + 1 if mode == "wrong_stack" else stack_bytes
 reported_scenario = f"{{scenario}}_other" if mode == "missing_scenario" else scenario
+if mode == "missing_stack_profile":
+    out.write_text(json.dumps({{
+        "worker_stack_bytes": reported_stack,
+        "summary": [{{"scenario": reported_scenario}}],
+    }}))
+    raise SystemExit(0)
 out.write_text(json.dumps({{
     "worker_stack_bytes": reported_stack,
-    "summary": [{{"scenario": reported_scenario}}],
+    "stack_profile": {{
+        "worker_stack_bytes": reported_stack,
+        "stack_budget_bytes": 2097152,
+        "within_stack_budget": reported_stack <= 2097152,
+    }},
+    "summary": [{{
+        "scenario": reported_scenario,
+        "stack_profile": {{
+            "worker_stack_bytes": reported_stack,
+            "stack_budget_bytes": 2097152,
+            "within_stack_budget": reported_stack <= 2097152,
+        }},
+    }}],
+    "results": [{{
+        "scenario": reported_scenario,
+        "stack_profile": {{
+            "worker_stack_bytes": reported_stack,
+            "stack_budget_bytes": 2097152,
+            "within_stack_budget": reported_stack <= 2097152,
+        }},
+    }}],
 }}))
 """
             )
@@ -139,11 +182,25 @@ out.write_text(json.dumps({{
         self.assertEqual(sample["status"], "failed")
         self.assertIn("missing_runtime_perf_scenario", sample["failure_reasons"])
 
+    def test_run_sample_rejects_missing_stack_profile(self) -> None:
+        sample = self.run_fake_sample("missing_stack_profile")
+
+        self.assertEqual(sample["status"], "failed")
+        self.assertIn("stack_profile_size_not_accounted", sample["failure_reasons"])
+        self.assertIn("summary_stack_size_not_accounted", sample["failure_reasons"])
+        self.assertIn("result_stack_size_not_accounted", sample["failure_reasons"])
+
     def test_run_sample_accepts_accounted_scenario_report(self) -> None:
         sample = self.run_fake_sample("ok")
 
         self.assertEqual(sample["status"], "ok")
         self.assertEqual(sample["reported_worker_stack_bytes"], 128 * 1024)
+        self.assertEqual(
+            sample["reported_stack_profile"]["worker_stack_bytes"],
+            128 * 1024,
+        )
+        self.assertIs(sample["summary_stack_accounted"], True)
+        self.assertIs(sample["result_stack_accounted"], True)
         self.assertIs(sample["stack_accounted"], True)
         self.assertEqual(sample["summary_scenarios"], ["standard"])
         self.assertEqual(sample["stderr_tail"], "")
@@ -242,7 +299,32 @@ class ProfileGuardCoverageTests(unittest.TestCase):
                 "returncode": 0,
                 "expected_scenarios": ["standard"],
                 "report": {
-                    "summary": [{"scenario": "standard"}],
+                    "worker_stack_bytes": 2 * 1024 * 1024,
+                    "stack_profile": {
+                        "worker_stack_bytes": 2 * 1024 * 1024,
+                        "stack_budget_bytes": 2 * 1024 * 1024,
+                        "within_stack_budget": True,
+                    },
+                    "summary": [
+                        {
+                            "scenario": "standard",
+                            "stack_profile": {
+                                "worker_stack_bytes": 2 * 1024 * 1024,
+                                "stack_budget_bytes": 2 * 1024 * 1024,
+                                "within_stack_budget": True,
+                            },
+                        }
+                    ],
+                    "results": [
+                        {
+                            "scenario": "standard",
+                            "stack_profile": {
+                                "worker_stack_bytes": 2 * 1024 * 1024,
+                                "stack_budget_bytes": 2 * 1024 * 1024,
+                                "within_stack_budget": True,
+                            },
+                        }
+                    ],
                     "budget_results": [{"passed": True}],
                 },
             },
@@ -253,13 +335,35 @@ class ProfileGuardCoverageTests(unittest.TestCase):
             },
             "ui": {
                 "returncode": 0,
-                "report": {"scenarios": [{"scenario": "history_render"}]},
+                "report": {
+                    "stack_profile": stack_profile(),
+                    "parameters": {"stack_profile": stack_profile()},
+                    "scenarios": [
+                        {
+                            "scenario": "history_render",
+                            "stack_profile": stack_profile(),
+                            "results": [{"stack_profile": stack_profile()}],
+                        }
+                    ],
+                },
             },
             "lashlang": {
                 "returncode": 0,
                 "report": {
-                    "perf_results": [{"scenario_arg": "baseline"}],
-                    "profile_results": [{"scenario_arg": "baseline"}],
+                    "stack_profile": stack_profile(),
+                    "parameters": {"stack_profile": stack_profile()},
+                    "perf_results": [
+                        {
+                            "scenario_arg": "baseline",
+                            "stack_profile": stack_profile(),
+                        }
+                    ],
+                    "profile_results": [
+                        {
+                            "scenario_arg": "baseline",
+                            "stack_profile": stack_profile(),
+                        }
+                    ],
                     "budget_results": [{"passed": True}],
                 },
             },
@@ -276,6 +380,7 @@ class ProfileGuardCoverageTests(unittest.TestCase):
                 "expected_scenarios": ["standard", "trace_jsonl_standard"],
                 "report": {
                     "summary": [{"scenario": "standard"}],
+                    "results": [{"scenario": "standard"}],
                     "budget_results": [{"passed": False, "metric": "total_alloc_bytes"}],
                 },
             },
@@ -309,9 +414,92 @@ class ProfileGuardCoverageTests(unittest.TestCase):
         self.assertIn("missing_section", kinds)
         self.assertIn("missing_runtime_scenario", kinds)
         self.assertIn("runtime_budget_failed", kinds)
+        self.assertIn("runtime_stack_profile_missing", kinds)
+        self.assertIn("runtime_summary_stack_profile_missing", kinds)
+        self.assertIn("runtime_result_stack_profile_missing", kinds)
         self.assertIn("stack_budget_failed", kinds)
         self.assertIn("stack_size_not_accounted", kinds)
         self.assertIn("missing_lashlang_perf_results", kinds)
+        self.assertIn("lashlang_stack_profile_missing", kinds)
+        self.assertIn("lashlang_parameter_stack_profile_missing", kinds)
+        self.assertIn("lashlang_profile_result_stack_profile_missing", kinds)
+
+    def test_coverage_reports_stack_budget_gaps_and_failures(self) -> None:
+        unbudgeted = stack_profile()
+        unbudgeted.pop("stack_budget_bytes")
+        oversized = stack_profile(4 * 1024 * 1024)
+        payload = {
+            "runtime": {
+                "returncode": 0,
+                "expected_scenarios": ["standard"],
+                "report": {
+                    "worker_stack_bytes": 4 * 1024 * 1024,
+                    "stack_profile": {
+                        "worker_stack_bytes": 4 * 1024 * 1024,
+                        "measured_stack_bytes": 4 * 1024 * 1024,
+                        "stack_budget_bytes": 2 * 1024 * 1024,
+                        "within_stack_budget": False,
+                    },
+                    "summary": [
+                        {
+                            "scenario": "standard",
+                            "stack_profile": {
+                                "worker_stack_bytes": 4 * 1024 * 1024,
+                                "measured_stack_bytes": 4 * 1024 * 1024,
+                            },
+                        }
+                    ],
+                    "results": [
+                        {
+                            "scenario": "standard",
+                            "stack_profile": {
+                                "worker_stack_bytes": 4 * 1024 * 1024,
+                                "measured_stack_bytes": 4 * 1024 * 1024,
+                                "stack_budget_bytes": 2 * 1024 * 1024,
+                                "within_stack_budget": False,
+                            },
+                        }
+                    ],
+                    "budget_results": [{"passed": True}],
+                },
+            },
+            "runtime_stack": {
+                "returncode": 0,
+                "expected_scenarios": ["standard"],
+                "first_success_stack_bytes": {"standard": 2 * 1024 * 1024},
+            },
+            "ui": {
+                "returncode": 0,
+                "report": {
+                    "stack_profile": unbudgeted,
+                    "parameters": {"stack_profile": stack_profile()},
+                    "scenarios": [{"scenario": "history_render", "stack_profile": stack_profile()}],
+                },
+            },
+            "lashlang": {
+                "returncode": 0,
+                "report": {
+                    "stack_profile": oversized,
+                    "parameters": {"stack_profile": stack_profile()},
+                    "perf_results": [{"scenario_arg": "baseline", "stack_profile": stack_profile()}],
+                    "profile_results": [
+                        {"scenario_arg": "baseline", "stack_profile": oversized}
+                    ],
+                    "budget_results": [{"passed": True}],
+                },
+            },
+        }
+
+        coverage = profile_guard.evaluate_guard_coverage(payload)
+        kinds = {finding["kind"] for finding in coverage["findings"]}
+
+        self.assertFalse(coverage["passed"])
+        self.assertIn("runtime_stack_budget_failed", kinds)
+        self.assertIn("runtime_summary_stack_budget_missing", kinds)
+        self.assertIn("runtime_result_stack_budget_failed", kinds)
+        self.assertIn("ui_stack_budget_missing", kinds)
+        self.assertIn("lashlang_stack_budget_failed", kinds)
+        self.assertIn("lashlang_profile_result_stack_budget_failed", kinds)
 
 
 class LashlangBudgetTests(unittest.TestCase):

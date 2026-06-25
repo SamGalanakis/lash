@@ -62,6 +62,10 @@ impl LashlangAstPath {
         Self(Vec::new())
     }
 
+    pub(crate) fn from_indices(indices: &[u32]) -> Self {
+        Self(indices.to_vec())
+    }
+
     pub(crate) fn child(&self, index: usize) -> Self {
         let mut path = self.0.clone();
         path.push(index as u32);

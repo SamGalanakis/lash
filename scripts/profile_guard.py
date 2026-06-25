@@ -261,6 +261,283 @@ def failed_budget_results(report: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def stack_profile_is_measured(stack_profile: Any) -> bool:
+    if not isinstance(stack_profile, dict):
+        return False
+    return any(
+        isinstance(stack_profile.get(key), int)
+        for key in (
+            "measured_stack_bytes",
+            "worker_stack_bytes",
+            "rust_min_stack_bytes",
+            "process_stack_soft_limit_bytes",
+        )
+    )
+
+
+def require_measured_stack_profile(
+    findings: list[dict[str, Any]],
+    *,
+    stack_profile: Any,
+    missing_kind: str,
+    unmeasured_kind: str,
+    missing_budget_kind: str,
+    budget_failed_kind: str,
+    section: str,
+    context: dict[str, Any] | None = None,
+    enforce_budget: bool = True,
+) -> None:
+    context = context or {}
+    if not isinstance(stack_profile, dict):
+        findings.append({"kind": missing_kind, "section": section, **context})
+        return
+    if not stack_profile_is_measured(stack_profile):
+        findings.append({"kind": unmeasured_kind, "section": section, **context})
+    if not isinstance(stack_profile.get("stack_budget_bytes"), int):
+        findings.append({"kind": missing_budget_kind, "section": section, **context})
+    if enforce_budget and stack_profile.get("within_stack_budget") is False:
+        findings.append(
+            {
+                "kind": budget_failed_kind,
+                "section": section,
+                **context,
+                "actual": stack_profile.get("measured_stack_bytes"),
+                "budget": stack_profile.get("stack_budget_bytes"),
+            }
+        )
+
+
+def runtime_report_stack_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    worker_stack_bytes = report.get("worker_stack_bytes")
+    stack_profile = report.get("stack_profile")
+    if not isinstance(stack_profile, dict):
+        findings.append(
+            {
+                "kind": "runtime_stack_profile_missing",
+                "section": "runtime",
+            }
+        )
+    elif stack_profile.get("worker_stack_bytes") != worker_stack_bytes:
+        findings.append(
+            {
+                "kind": "runtime_stack_profile_mismatch",
+                "section": "runtime",
+                "worker_stack_bytes": worker_stack_bytes,
+                "profile_worker_stack_bytes": stack_profile.get("worker_stack_bytes"),
+            }
+        )
+    elif not isinstance(stack_profile.get("stack_budget_bytes"), int):
+        findings.append({"kind": "runtime_stack_budget_missing", "section": "runtime"})
+    elif stack_profile.get("within_stack_budget") is False:
+        findings.append(
+            {
+                "kind": "runtime_stack_budget_failed",
+                "section": "runtime",
+                "actual": stack_profile.get("measured_stack_bytes"),
+                "budget": stack_profile.get("stack_budget_bytes"),
+            }
+        )
+
+    for summary in report.get("summary", []):
+        if not isinstance(summary, dict):
+            continue
+        summary_stack_profile = summary.get("stack_profile")
+        if not isinstance(summary_stack_profile, dict):
+            findings.append(
+                {
+                    "kind": "runtime_summary_stack_profile_missing",
+                    "section": "runtime",
+                    "scenario": summary.get("scenario"),
+                }
+            )
+        elif summary_stack_profile.get("worker_stack_bytes") != worker_stack_bytes:
+            findings.append(
+                {
+                    "kind": "runtime_summary_stack_profile_mismatch",
+                    "section": "runtime",
+                    "scenario": summary.get("scenario"),
+                    "worker_stack_bytes": worker_stack_bytes,
+                    "summary_worker_stack_bytes": summary_stack_profile.get(
+                        "worker_stack_bytes"
+                    ),
+                }
+            )
+        elif not isinstance(summary_stack_profile.get("stack_budget_bytes"), int):
+            findings.append(
+                {
+                    "kind": "runtime_summary_stack_budget_missing",
+                    "section": "runtime",
+                    "scenario": summary.get("scenario"),
+                }
+            )
+        elif summary_stack_profile.get("within_stack_budget") is False:
+            findings.append(
+                {
+                    "kind": "runtime_summary_stack_budget_failed",
+                    "section": "runtime",
+                    "scenario": summary.get("scenario"),
+                    "actual": summary_stack_profile.get("measured_stack_bytes"),
+                    "budget": summary_stack_profile.get("stack_budget_bytes"),
+                }
+            )
+    for result in report.get("results", []):
+        if not isinstance(result, dict):
+            continue
+        result_stack_profile = result.get("stack_profile")
+        if not isinstance(result_stack_profile, dict):
+            findings.append(
+                {
+                    "kind": "runtime_result_stack_profile_missing",
+                    "section": "runtime",
+                    "scenario": result.get("scenario"),
+                }
+            )
+        elif result_stack_profile.get("worker_stack_bytes") != worker_stack_bytes:
+            findings.append(
+                {
+                    "kind": "runtime_result_stack_profile_mismatch",
+                    "section": "runtime",
+                    "scenario": result.get("scenario"),
+                    "worker_stack_bytes": worker_stack_bytes,
+                    "result_worker_stack_bytes": result_stack_profile.get("worker_stack_bytes"),
+                }
+            )
+        elif not isinstance(result_stack_profile.get("stack_budget_bytes"), int):
+            findings.append(
+                {
+                    "kind": "runtime_result_stack_budget_missing",
+                    "section": "runtime",
+                    "scenario": result.get("scenario"),
+                }
+            )
+        elif result_stack_profile.get("within_stack_budget") is False:
+            findings.append(
+                {
+                    "kind": "runtime_result_stack_budget_failed",
+                    "section": "runtime",
+                    "scenario": result.get("scenario"),
+                    "actual": result_stack_profile.get("measured_stack_bytes"),
+                    "budget": result_stack_profile.get("stack_budget_bytes"),
+                }
+            )
+    return findings
+
+
+def ui_report_stack_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    require_measured_stack_profile(
+        findings,
+        stack_profile=report.get("stack_profile"),
+        missing_kind="ui_stack_profile_missing",
+        unmeasured_kind="ui_stack_profile_unmeasured",
+        missing_budget_kind="ui_stack_budget_missing",
+        budget_failed_kind="ui_stack_budget_failed",
+        section="ui",
+        enforce_budget=False,
+    )
+    parameters = report.get("parameters")
+    parameter_stack_profile = (
+        parameters.get("stack_profile") if isinstance(parameters, dict) else None
+    )
+    require_measured_stack_profile(
+        findings,
+        stack_profile=parameter_stack_profile,
+        missing_kind="ui_parameter_stack_profile_missing",
+        unmeasured_kind="ui_parameter_stack_profile_unmeasured",
+        missing_budget_kind="ui_parameter_stack_budget_missing",
+        budget_failed_kind="ui_parameter_stack_budget_failed",
+        section="ui",
+        enforce_budget=False,
+    )
+    for scenario in report.get("scenarios", []):
+        if not isinstance(scenario, dict):
+            continue
+        context = {"scenario": scenario.get("scenario")}
+        require_measured_stack_profile(
+            findings,
+            stack_profile=scenario.get("stack_profile"),
+            missing_kind="ui_scenario_stack_profile_missing",
+            unmeasured_kind="ui_scenario_stack_profile_unmeasured",
+            missing_budget_kind="ui_scenario_stack_budget_missing",
+            budget_failed_kind="ui_scenario_stack_budget_failed",
+            section="ui",
+            context=context,
+            enforce_budget=False,
+        )
+        for result in scenario.get("results", []):
+            if not isinstance(result, dict):
+                continue
+            require_measured_stack_profile(
+                findings,
+                stack_profile=result.get("stack_profile"),
+                missing_kind="ui_result_stack_profile_missing",
+                unmeasured_kind="ui_result_stack_profile_unmeasured",
+                missing_budget_kind="ui_result_stack_budget_missing",
+                budget_failed_kind="ui_result_stack_budget_failed",
+                section="ui",
+                context=context,
+                enforce_budget=False,
+            )
+    return findings
+
+
+def lashlang_report_stack_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    require_measured_stack_profile(
+        findings,
+        stack_profile=report.get("stack_profile"),
+        missing_kind="lashlang_stack_profile_missing",
+        unmeasured_kind="lashlang_stack_profile_unmeasured",
+        missing_budget_kind="lashlang_stack_budget_missing",
+        budget_failed_kind="lashlang_stack_budget_failed",
+        section="lashlang",
+    )
+    parameters = report.get("parameters")
+    parameter_stack_profile = (
+        parameters.get("stack_profile") if isinstance(parameters, dict) else None
+    )
+    require_measured_stack_profile(
+        findings,
+        stack_profile=parameter_stack_profile,
+        missing_kind="lashlang_parameter_stack_profile_missing",
+        unmeasured_kind="lashlang_parameter_stack_profile_unmeasured",
+        missing_budget_kind="lashlang_parameter_stack_budget_missing",
+        budget_failed_kind="lashlang_parameter_stack_budget_failed",
+        section="lashlang",
+    )
+    for result in report.get("perf_results", []):
+        if not isinstance(result, dict):
+            continue
+        require_measured_stack_profile(
+            findings,
+            stack_profile=result.get("stack_profile"),
+            missing_kind="lashlang_perf_result_stack_profile_missing",
+            unmeasured_kind="lashlang_perf_result_stack_profile_unmeasured",
+            missing_budget_kind="lashlang_perf_result_stack_budget_missing",
+            budget_failed_kind="lashlang_perf_result_stack_budget_failed",
+            section="lashlang",
+            context={
+                "scenario": result.get("scenario_arg"),
+                "mode": result.get("mode_arg"),
+            },
+        )
+    for result in report.get("profile_results", []):
+        if not isinstance(result, dict):
+            continue
+        require_measured_stack_profile(
+            findings,
+            stack_profile=result.get("stack_profile"),
+            missing_kind="lashlang_profile_result_stack_profile_missing",
+            unmeasured_kind="lashlang_profile_result_stack_profile_unmeasured",
+            missing_budget_kind="lashlang_profile_result_stack_budget_missing",
+            budget_failed_kind="lashlang_profile_result_stack_budget_failed",
+            section="lashlang",
+            context={"scenario": result.get("scenario_arg")},
+        )
+    return findings
+
+
 def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     required_sections = ["runtime", "runtime_stack", "ui", "lashlang"]
@@ -294,16 +571,19 @@ def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
             )
     for budget in failed_budget_results(runtime):
         findings.append({"kind": "runtime_budget_failed", "section": "runtime", "budget": budget})
+    findings.extend(runtime_report_stack_findings(runtime))
 
     ui = payload.get("ui", {}).get("report", {})
     if not ui_summary_names(ui):
         findings.append({"kind": "missing_ui_scenarios", "section": "ui"})
+    findings.extend(ui_report_stack_findings(ui))
 
     lashlang = payload.get("lashlang", {}).get("report", {})
     if not lashlang.get("perf_results"):
         findings.append({"kind": "missing_lashlang_perf_results", "section": "lashlang"})
     if not lashlang.get("profile_results"):
         findings.append({"kind": "missing_lashlang_profile_results", "section": "lashlang"})
+    findings.extend(lashlang_report_stack_findings(lashlang))
     for budget in failed_budget_results(lashlang):
         findings.append(
             {"kind": "lashlang_budget_failed", "section": "lashlang", "budget": budget}

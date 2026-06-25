@@ -47,7 +47,8 @@ fn expr_key(expr: &Expr) -> usize {
 
 fn lashlang_execution_paths(program: &Program) -> FxHashMap<usize, LashlangAstPath> {
     let mut paths = FxHashMap::default();
-    collect_lashlang_execution_paths(&program.main, LashlangAstPath::root(), &mut paths);
+    let mut path = Vec::new();
+    collect_lashlang_execution_paths(&program.main, &mut path, &mut paths);
     paths
 }
 
@@ -58,38 +59,41 @@ fn expression_source_spans(program: &Program) -> FxHashMap<usize, Span> {
         .map(|source_span| (source_span.path.clone(), source_span.span))
         .collect::<FxHashMap<_, _>>();
     let mut spans = FxHashMap::default();
-    collect_expression_source_spans(&program.main, Vec::new(), &spans_by_path, &mut spans);
+    let mut path = Vec::new();
+    collect_expression_source_spans(&program.main, &mut path, &spans_by_path, &mut spans);
     spans
 }
 
 fn collect_expression_source_spans(
     expr: &Expr,
-    path: Vec<u32>,
+    path: &mut Vec<u32>,
     spans_by_path: &FxHashMap<Vec<u32>, Span>,
     spans: &mut FxHashMap<usize, Span>,
 ) {
-    if let Some(span) = spans_by_path.get(&path).copied() {
+    if let Some(span) = spans_by_path.get(path.as_slice()).copied() {
         spans.insert(expr_key(expr), span);
     }
     for (index, child) in expr.children().enumerate() {
-        let mut child_path = path.clone();
-        child_path.push(index as u32);
-        collect_expression_source_spans(child, child_path, spans_by_path, spans);
+        path.push(index as u32);
+        collect_expression_source_spans(child, path, spans_by_path, spans);
+        path.pop();
     }
 }
 
 fn collect_lashlang_execution_paths(
     expr: &Expr,
-    path: LashlangAstPath,
+    path: &mut Vec<u32>,
     paths: &mut FxHashMap<usize, LashlangAstPath>,
 ) {
-    paths.insert(expr_key(expr), path.clone());
+    paths.insert(expr_key(expr), LashlangAstPath::from_indices(path));
     if let Expr::LabelAnnotated { expr, .. } = expr {
         collect_lashlang_execution_paths(expr, path, paths);
         return;
     }
     for (index, child) in expr.children().enumerate() {
-        collect_lashlang_execution_paths(child, path.child(index), paths);
+        path.push(index as u32);
+        collect_lashlang_execution_paths(child, path, paths);
+        path.pop();
     }
 }
 

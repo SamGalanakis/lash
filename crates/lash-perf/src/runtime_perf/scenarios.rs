@@ -35,6 +35,7 @@ pub(crate) enum RuntimePerfScenario {
     RlmLargePrint,
     RlmStreamedPairedLashlang,
     RlmLargeToolCatalog,
+    RlmObliqueStackMix,
     ObservationalMemory,
     ObservationalMemoryMaintenance,
     OpenAiCompatStream,
@@ -52,10 +53,11 @@ pub(crate) enum RuntimePerfScenario {
     LiveReplayPressure,
     TraceJsonlStandard,
     TraceJsonlExtended,
+    QueuedWorkClaimStress,
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 32] = [
+    pub(crate) const DEFAULTS: [Self; 34] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -71,6 +73,7 @@ impl RuntimePerfScenario {
         Self::RlmLargePrint,
         Self::RlmStreamedPairedLashlang,
         Self::RlmLargeToolCatalog,
+        Self::RlmObliqueStackMix,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
@@ -88,8 +91,9 @@ impl RuntimePerfScenario {
         Self::LiveReplayPressure,
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
+        Self::QueuedWorkClaimStress,
     ];
-    pub(crate) const KNOWN: [Self; 32] = [
+    pub(crate) const KNOWN: [Self; 34] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -105,6 +109,7 @@ impl RuntimePerfScenario {
         Self::RlmLargePrint,
         Self::RlmStreamedPairedLashlang,
         Self::RlmLargeToolCatalog,
+        Self::RlmObliqueStackMix,
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
@@ -122,6 +127,7 @@ impl RuntimePerfScenario {
         Self::LiveReplayPressure,
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
+        Self::QueuedWorkClaimStress,
     ];
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -141,6 +147,7 @@ impl RuntimePerfScenario {
             "rlm_large_print" => Some(Self::RlmLargePrint),
             "rlm_streamed_paired_lashlang" => Some(Self::RlmStreamedPairedLashlang),
             "rlm_large_tool_catalog" => Some(Self::RlmLargeToolCatalog),
+            "rlm_oblique_stack_mix" => Some(Self::RlmObliqueStackMix),
             "observational_memory" => Some(Self::ObservationalMemory),
             "observational_memory_maintenance" => Some(Self::ObservationalMemoryMaintenance),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
@@ -158,6 +165,7 @@ impl RuntimePerfScenario {
             "live_replay_pressure" => Some(Self::LiveReplayPressure),
             "trace_jsonl_standard" => Some(Self::TraceJsonlStandard),
             "trace_jsonl_extended" => Some(Self::TraceJsonlExtended),
+            "queued_work_claim_stress" => Some(Self::QueuedWorkClaimStress),
             _ => None,
         }
     }
@@ -179,6 +187,7 @@ impl RuntimePerfScenario {
             Self::RlmLargePrint => "rlm_large_print",
             Self::RlmStreamedPairedLashlang => "rlm_streamed_paired_lashlang",
             Self::RlmLargeToolCatalog => "rlm_large_tool_catalog",
+            Self::RlmObliqueStackMix => "rlm_oblique_stack_mix",
             Self::ObservationalMemory => "observational_memory",
             Self::ObservationalMemoryMaintenance => "observational_memory_maintenance",
             Self::OpenAiCompatStream => "openai_compat_stream",
@@ -196,6 +205,7 @@ impl RuntimePerfScenario {
             Self::LiveReplayPressure => "live_replay_pressure",
             Self::TraceJsonlStandard => "trace_jsonl_standard",
             Self::TraceJsonlExtended => "trace_jsonl_extended",
+            Self::QueuedWorkClaimStress => "queued_work_claim_stress",
         }
     }
 
@@ -218,7 +228,8 @@ impl RuntimePerfScenario {
             | Self::SqliteStoreReopen
             | Self::TurnCheckpoint
             | Self::LiveReplayPressure
-            | Self::TraceJsonlStandard => ExecutionMode::Standard,
+            | Self::TraceJsonlStandard
+            | Self::QueuedWorkClaimStress => ExecutionMode::Standard,
             Self::Rlm
             | Self::RlmToolCalls
             | Self::RlmAsyncToolCompletion
@@ -231,6 +242,7 @@ impl RuntimePerfScenario {
             | Self::RlmLargePrint
             | Self::RlmStreamedPairedLashlang
             | Self::RlmLargeToolCatalog
+            | Self::RlmObliqueStackMix
             | Self::EmbedRlm
             | Self::TraceJsonlExtended => ExecutionMode::Rlm,
         }
