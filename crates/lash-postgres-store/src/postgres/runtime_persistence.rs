@@ -350,6 +350,7 @@ impl RuntimePersistence for PostgresSessionStore {
         lease_ttl_ms: u64,
     ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        lock_session_execution_lease_tx(&mut tx, session_id).await?;
         let now = current_epoch_ms();
         let current = load_session_execution_lease_tx(&mut tx, session_id).await?;
         if current
@@ -411,6 +412,7 @@ impl RuntimePersistence for PostgresSessionStore {
         lease_ttl_ms: u64,
     ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        lock_session_execution_lease_tx(&mut tx, session_id).await?;
         let now = current_epoch_ms();
         let current = load_session_execution_lease_tx(&mut tx, session_id).await?;
         let Some(current) = current else {
@@ -1227,6 +1229,28 @@ fn row_to_session_execution_lease(
         claimed_at_epoch_ms: row.claimed_at_ms,
         expires_at_epoch_ms: row.expires_at_ms,
     })
+}
+
+/// Serialize concurrent session-execution-lease claims for one session.
+///
+/// `try_claim`/`reclaim` read the current lease and then conditionally
+/// `acquire` it. That check-then-act is not atomic under Postgres READ
+/// COMMITTED, so two concurrent first claims can both observe no live lease and
+/// both `ON CONFLICT DO UPDATE`, leaving two acquired winners. A
+/// transaction-scoped advisory lock keyed by the session id makes the sequence
+/// mutually exclusive per session; Postgres releases it automatically when the
+/// transaction ends. (SQLite and the in-memory store serialize writers
+/// globally, so they do not need this.)
+async fn lock_session_execution_lease_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0::bigint))")
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(store_sqlx_error)?;
+    Ok(())
 }
 
 async fn acquire_session_execution_lease_tx(
