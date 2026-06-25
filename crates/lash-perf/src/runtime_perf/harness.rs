@@ -199,6 +199,25 @@ impl BenchmarkRuntime {
             .await;
     }
 
+    pub(crate) async fn enqueue_turn_input(
+        &self,
+        input: lash::TurnInput,
+        delivery_policy: lash::persistence::DeliveryPolicy,
+        slot_policy: lash::persistence::SlotPolicy,
+        id: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .enqueue(input)
+            .delivery_policy(delivery_policy)
+            .slot_policy(slot_policy)
+            .id(id)
+            .send()
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn run_turn(
         &self,
         input: lash::TurnInput,
