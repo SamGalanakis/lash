@@ -340,6 +340,23 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
         self.inner.enqueue_queued_work(batch).await
     }
 
+    async fn claim_leading_ready_session_command(
+        &self,
+        session_id: &str,
+        session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        owner: &lash_core::LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<lash_core::runtime::QueuedWorkClaim>, lash_core::StoreError> {
+        self.inner
+            .claim_leading_ready_session_command(
+                session_id,
+                session_execution_lease,
+                owner,
+                lease_ttl_ms,
+            )
+            .await
+    }
+
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
