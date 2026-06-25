@@ -378,7 +378,10 @@ fn step_output_text(
         for (image_index, image) in images.iter().enumerate() {
             let rendered = serde_json::to_string(image)
                 .unwrap_or_else(|_| "{\"error\":\"unrenderable image\"}".to_string());
-            let _ = write!(out, "\n- history[{index}].images[{image_index}]: {rendered}");
+            let _ = write!(
+                out,
+                "\n- history[{index}].images[{image_index}]: {rendered}"
+            );
         }
     }
     if let Some(error) = error {

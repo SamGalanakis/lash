@@ -17,9 +17,9 @@ use lash_rlm_types::{RlmCreateExtras, RlmFinalAnswerFormat, RlmTermination};
 use crate::projection::rlm_protocol_event;
 use crate::rlm_support::decode_rlm_options;
 
-use history::{RlmHistoryRenderInput, build_rlm_history_messages_from_turn};
 #[cfg(test)]
 use history::render_history_messages;
+use history::{RlmHistoryRenderInput, build_rlm_history_messages_from_turn};
 
 /// Cell shared between the RLM protocol plugin's turn-prepare hook (writer)
 /// and the projector (reader). The plugin's hook captures `prompt_usage`
@@ -575,8 +575,7 @@ mod tests {
     #[test]
     fn long_user_message_gets_full_history_reference() {
         let projector = projector(10);
-        let history =
-            projector.format_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")]);
+        let history = projector.format_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")]);
 
         assert!(history.contains("re-print history[0].content"));
         assert!(history.contains("... (16 characters omitted) ..."));
@@ -610,7 +609,10 @@ mod tests {
         let history = projector.format_history(&[step_event(0, "print big", &output)]);
 
         assert!(history.contains("full value retained"), "{history}");
-        assert!(history.contains("re-print history[0].output[0]"), "{history}");
+        assert!(
+            history.contains("re-print history[0].output[0]"),
+            "{history}"
+        );
         // The bare, easily-misread "chars, full: <ref>" framing is gone.
         assert!(!history.contains("chars, full: history"), "{history}");
     }
@@ -628,7 +630,10 @@ mod tests {
         .to_string();
         let history = projector.format_history(&[step_event(0, "print result", &raw)]);
 
-        assert!(history.contains("re-print history[0].output[0]"), "{history}");
+        assert!(
+            history.contains("re-print history[0].output[0]"),
+            "{history}"
+        );
         let status = history.find(r#""status":"failed""#).expect("status field");
         let error = history.find(r#""error":"boom""#).expect("error field");
         let exit = history.find(r#""exit_code":2"#).expect("exit field");
@@ -832,9 +837,10 @@ mod tests {
         // The printed image rides the user observation message for the step.
         assert!(messages.iter().any(|message| {
             matches!(message.role, LlmRole::User)
-                && message.blocks.iter().any(|block| {
-                    matches!(block, LlmContentBlock::Image { attachment_idx: 0 })
-                })
+                && message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, LlmContentBlock::Image { attachment_idx: 0 }))
         }));
     }
 
@@ -1022,10 +1028,8 @@ mod tests {
     #[test]
     fn incremental_render_extends_cached_prefix_on_subsequent_calls() {
         let projector = projector(100);
-        let initial = projector.format_history(&[
-            user_event("u1", "first"),
-            step_event(0, "print 1", "1"),
-        ]);
+        let initial =
+            projector.format_history(&[user_event("u1", "first"), step_event(0, "print 1", "1")]);
         assert!(initial.contains("first"));
         assert!(initial.contains("<lashlang>\nprint 1\n</lashlang>"));
 

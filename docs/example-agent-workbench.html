@@ -60,7 +60,7 @@
         <article class="panel"><h3>Mock inbox accounts</h3><p>The accounts tab connects mock inboxes projected into the Lashlang host environment as typed <code>inbox.&lt;slug&gt;</code> modules; delivering a message emits <code>mail.received</code>, the demo's third trigger source beside the button and the cron clock.</p></article>
         <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
         <article class="panel"><h3>Browser reconnect</h3><p><code>/api/events</code> merges workbench product rows with <code>RemoteSessionObservationEvent</code> rows from <code>subscribe_and_recover_remote</code>; the browser persists the latest cursor and reloads <code>/api/state</code> on <code>replay_gap</code>.</p></article>
-        <article class="panel"><h3>Restate turn control</h3><p>User turns, queued catalog refreshes, button triggers, inbox deliveries, session deletion, and cron jobs submit through Restate ingress. The host stores returned invocation ids, and <code>stop turn</code> cancels the active invocation through Restate Admin.</p></article>
+        <article class="panel"><h3>Restate turn control</h3><p>User turns, queued catalog refreshes, button triggers, inbox deliveries, session deletion, and cron jobs submit through Restate ingress. Returned invocation ids are process-local cancellation handles; the workbench does not persist a submitted/running work-item lifecycle.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>SessionProcessAdmin</code> facade.</p></article>
       </div>
     </div>
@@ -70,6 +70,7 @@
         <h2>Browser Stream And Reconnect</h2>
         <p>The workbench keeps product state and Lash observation state separate on purpose. Product state is the durable app projection; live replay is the semantic session stream that lets a browser reconnect without making turn-local streaming a public resume protocol.</p>
       </div>
+      <p>Restate owns in-flight workflow replay by <code>turn_id</code>, Lash owns the session execution lease and final turn commit, and the workbench app stream stores only user-visible product events plus reconnect cursors.</p>
       <div class="listing">
         <div class="listing__row">
           <div class="listing__label">snapshot</div>

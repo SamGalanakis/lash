@@ -122,6 +122,9 @@ pub(crate) async fn send_message_restate(
         model_selection.model,
         model_selection.model_variant,
     );
+    // The workflow id is the stable turn id. The app does not persist a
+    // submitted/running work-item row; Restate owns in-flight replay and the
+    // app outbox stores only product-visible rows keyed by turn_id.
     let ingress = state
         .restate_ingress_url()
         .map(str::to_string)
@@ -262,6 +265,8 @@ async fn run_restate_chat_turn_and_persist(
         .turn_id(request.turn_id.clone())
         .model(turn_model)
         .require_submit()?
+        // Durable in-flight work crosses the EffectHost boundary; the terminal
+        // product row below is derived from Lash's TurnOutput.
         .effects(controller)
         .stream_to(&ui_events)
         .await;
