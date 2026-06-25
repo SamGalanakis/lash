@@ -28,7 +28,6 @@ use crate::prompt_tool::{CliPromptBridge, cli_ask_plugin_factory};
 
 const CLI_AUTONOMOUS_INTRO: &str = "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.";
 const CLI_AUTONOMOUS_EXECUTION: &str = "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.";
-const CLI_RLM_RESPONSE_GUIDANCE: &str = "- Use plain prose for direct conversational answers that need no Lashlang action or computation.\n- Use `<lashlang>` when calling tools, inspecting variables, computing values, editing, validating, or returning structured/computed results.\n- Use `submit` only from inside Lashlang, after the relevant result has been observed.\n- Do not answer once in prose and again via `submit`.\n- When calling `submit`, keep the submitted value concise. Do not include large variables such as diffs, full logs, raw command output, or other bulky dumps unless the user explicitly asks for them. Prefer short prose. If you use `format`, use it with small values rather than large captured variables.";
 
 pub(super) struct PluginFactorySurfaceInput<'a> {
     pub(super) autonomous: bool,
@@ -151,7 +150,7 @@ fn retain_autonomous_tools(snapshot: &mut ToolState) {
     snapshot.retain(|_, entry| autonomous_tool_allowed(&entry.manifest().name));
 }
 
-pub(crate) fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
+pub(crate) fn cli_prompt_config(autonomous: bool, _execution_mode: &ExecutionMode) -> PromptLayer {
     let mut intro_entries = vec![PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro)];
     intro_entries.push(PromptTemplateEntry::slot(PromptSlot::Intro));
 
@@ -189,16 +188,6 @@ pub(crate) fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode
         layer.add_contribution(
             PromptContribution::new(PromptSlot::Execution, "", CLI_AUTONOMOUS_EXECUTION)
                 .with_priority(100),
-        );
-    }
-    if execution_mode.is_rlm() {
-        layer.add_contribution(
-            PromptContribution::new(
-                PromptSlot::Execution,
-                "RLM Response Finalization",
-                CLI_RLM_RESPONSE_GUIDANCE,
-            )
-            .with_priority(200),
         );
     }
     layer
@@ -301,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn rlm_prompt_config_uses_execution_slot_and_contribution() {
+    fn rlm_prompt_config_uses_protocol_owned_execution_guidance() {
         let layer = cli_prompt_config(false, &ExecutionMode::Rlm);
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
@@ -323,15 +312,12 @@ mod tests {
                 }
             )
         }));
-        assert!(contributions.iter().any(|contribution| {
-            contribution.slot == PromptSlot::Execution
-                && contribution.content.as_ref() == CLI_RLM_RESPONSE_GUIDANCE
-        }));
-        assert!(CLI_RLM_RESPONSE_GUIDANCE.contains("Use plain prose"));
-        assert!(CLI_RLM_RESPONSE_GUIDANCE.contains("Use `<lashlang>`"));
         assert!(
-            CLI_RLM_RESPONSE_GUIDANCE
-                .contains("Do not answer once in prose and again via `submit`")
+            !contributions.iter().any(|contribution| {
+                contribution.slot == PromptSlot::Execution
+                    && contribution.title.as_deref() == Some("RLM Response Finalization")
+            }),
+            "RLM response-shape guidance belongs to the protocol execution section"
         );
     }
 
@@ -344,11 +330,9 @@ mod tests {
             .flat_map(|slot| slot.contributions.iter())
             .collect::<Vec<_>>();
 
-        assert!(
-            !contributions
-                .iter()
-                .any(|contribution| contribution.content.as_ref() == CLI_RLM_RESPONSE_GUIDANCE)
-        );
+        assert!(!contributions.iter().any(|contribution| {
+            contribution.title.as_deref() == Some("RLM Response Finalization")
+        }));
     }
 
     #[test]

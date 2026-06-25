@@ -124,7 +124,7 @@ pub(crate) async fn render_bound_variables(
 ) -> PromptContribution {
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in `<lashlang>` blocks; do not recreate them manually.".to_string(),
-        "Small values are shown in full; larger ones show their type, size, and a truncated preview (record keys, or the head and tail of a list/string) — `print` such a variable (or the part you need) to see the rest.".to_string(),
+        "Small values are shown in full; larger ones show only a truncated preview (record keys, or the head and tail of a list/string) — but the variable still holds its COMPLETE value. A short preview never means state was lost; `print` the variable (or the part you need) to see the rest.".to_string(),
     ];
 
     // Drop cache slots for variables that no longer exist.
@@ -256,6 +256,11 @@ fn render_row_line(row: &WorkRow, registry: &SchemaRegistry) -> String {
     };
     if let Some(preview) = &row.preview {
         line.push_str(&format!(" ≈ {preview}"));
+    }
+    if row.size_hint.is_some() {
+        // The preview is display-only; reassure the value is still live so the
+        // model `print`s it rather than concluding state was lost.
+        line.push_str(&format!(" (full value live — `print {}`)", row.name));
     }
     line
 }

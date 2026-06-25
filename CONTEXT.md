@@ -6,8 +6,8 @@
 - **Trigger Source Key**: Stable routing identity for one configured Trigger Source.
 - **Trigger Event Type**: Declared event kind that may occur on a Trigger Source, with a named payload shape. Examples include a button press, schedule tick, or webhook delivery.
 - **Trigger Occurrence**: Session-agnostic world occurrence recorded for a Trigger Source and routed to interested runtime subscribers. It is not queued session work, and it is distinct from a Process Signal addressed to one process.
-- **Queued Work**: Durable, session-scoped runtime ingress for work that must enter one session at a turn boundary. It may carry turn input, process wakes, or runtime maintenance command payloads; it does not carry Trigger Occurrences or timers.
-- **Queued Turn**: Queued Work whose payload is user-visible `TurnInput`.
+- **Queued Work**: Durable, session-scoped runtime ingress for work that must enter one session at a turn boundary; it does not carry Trigger Occurrences or timers. Each batch classifies (`QueuedWorkClass`) as either a `SessionCommand` (a session mutation such as `RefreshToolCatalog { reason }`, which never becomes prompt text) or `TurnWork` (turn-producing work: `TurnInput` or `ProcessWake`). Core drains ready leading `SessionCommand` batches in enqueue order before claiming the next ready `TurnWork` group.
+- **Queued Turn**: `TurnWork` Queued Work whose payload is user-visible `TurnInput`.
 - **Agent Frame**: Durable context boundary inside a session. Opening a new Agent Frame continues the same session from new initial context while prior frame content remains durable and inspectable.
 - **Agent Frame Reason**: Open label describing why an Agent Frame was opened. Core defines common labels but the label set is not exhaustive.
 - **Compaction**: Deliberate transition to a new Agent Frame seeded from an assistant summary message of earlier context. It continues the same assignment with reduced future model context, without deleting or rewriting prior frame content.
@@ -63,7 +63,8 @@ The `lash` facade owns app-facing vocabulary. Lower-level crates may expose inte
 
 - `Ctrl+C` is reserved for cancel/dismiss/quit semantics: close suggestions or overlays, cancel an active turn, clear a non-empty draft, then quit only from an idle empty prompt.
 - Copy uses `Ctrl+Shift+C` by default. `Ctrl+U` deletes draft text to the start of the line, `Ctrl+K` deletes to the end, and history/document scrolling uses PgUp/PgDn, mouse wheel, and scroll gestures.
-- The status bar exposes execution mode beside model and variant, for example `lash · gpt-5.5 · standard · medium`; context usage is labeled as `ctx`.
+- `Ctrl+P` opens the command and settings palette — a searchable overlay of settings actions (theme, model, variant, and other commands) applied directly without typing a slash command.
+- The status bar shows model and reasoning variant joined, then execution mode, then plugin modes, for example `gpt-5.5 medium · standard`; it carries no `lash` brand prefix. Context usage is labeled as `ctx`.
 - Queue previews sit directly above the input. Early-injected work is labeled `Will send in this turn`; next-turn work is labeled `Queued for next turn`.
 - The `/resume` picker hides zero-turn sessions when any non-empty session exists. If only empty sessions exist it shows them with `No messages yet`; direct `/resume <id-or-name>` may still target any session.
 

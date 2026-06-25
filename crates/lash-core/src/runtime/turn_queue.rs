@@ -98,6 +98,13 @@ pub enum QueuedWorkPayload {
     SessionCommand { command: Box<SessionCommand> },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedWorkClass {
+    SessionCommand,
+    TurnWork,
+}
+
 impl QueuedWorkPayload {
     pub fn turn_input(input: TurnInput) -> Self {
         Self::TurnInput {
@@ -114,6 +121,13 @@ impl QueuedWorkPayload {
     pub fn session_command(command: SessionCommand) -> Self {
         Self::SessionCommand {
             command: Box::new(command),
+        }
+    }
+
+    pub fn work_class(&self) -> QueuedWorkClass {
+        match self {
+            Self::SessionCommand { .. } => QueuedWorkClass::SessionCommand,
+            Self::TurnInput { .. } | Self::ProcessWake { .. } => QueuedWorkClass::TurnWork,
         }
     }
 }
@@ -137,6 +151,20 @@ pub struct QueuedWorkBatch {
     pub available_at_ms: u64,
     pub enqueued_at_ms: u64,
     pub items: Vec<QueuedWorkItem>,
+}
+
+impl QueuedWorkBatch {
+    pub fn work_class(&self) -> Option<QueuedWorkClass> {
+        work_class_for_payloads(self.items.iter().map(|item| &item.payload))
+    }
+
+    pub fn is_session_command_work(&self) -> bool {
+        self.work_class() == Some(QueuedWorkClass::SessionCommand)
+    }
+
+    pub fn is_turn_work(&self) -> bool {
+        self.work_class() == Some(QueuedWorkClass::TurnWork)
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -183,6 +211,20 @@ impl QueuedWorkBatchDraft {
         self.merge_key = merge_key;
         self
     }
+
+    pub fn work_class(&self) -> Option<QueuedWorkClass> {
+        work_class_for_payloads(self.payloads.iter())
+    }
+}
+
+fn work_class_for_payloads<'a>(
+    payloads: impl IntoIterator<Item = &'a QueuedWorkPayload>,
+) -> Option<QueuedWorkClass> {
+    let mut payloads = payloads.into_iter();
+    let first = payloads.next()?.work_class();
+    payloads
+        .all(|payload| payload.work_class() == first)
+        .then_some(first)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

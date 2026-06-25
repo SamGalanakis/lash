@@ -128,8 +128,9 @@ pub fn catalogue_preview_contribution_for_entries_with_options(
     let search_call = options.search_call_path.trim().to_string();
     let search_tool_name = options.search_tool_name.trim().to_string();
     let mut rendered = format!(
-        "Catalogued capabilities: {catalogued_count} capabilities are searchable through `{search_call}(...)`.\n\
-         When a task needs a capability not documented here, run `await {search_call}({{ query: \"...\" }})?` and call the returned module path directly. \
+        "The capabilities below are callable directly by their module path; the listing is usually enough to call them. \
+         Use `{search_call}(...)` only if you need more detail than shown, or to find a capability not listed here — \
+         `await {search_call}({{ query: \"...\" }})?`, then call the returned module path. \
          Results use the same compact contract shape as resident capabilities: call path, signature, description, and capped examples."
     );
 
@@ -252,7 +253,12 @@ mod tests {
         assert!(
             contribution
                 .content
-                .contains("Catalogued capabilities: 2 capabilities")
+                .contains("callable directly by their module path")
+        );
+        assert!(
+            contribution
+                .content
+                .contains("only if you need more detail than shown")
         );
         assert!(
             contribution

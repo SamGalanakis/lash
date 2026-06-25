@@ -12,6 +12,13 @@ Lash has several sources of deferred runtime work: user turn input, early turn i
 
 Lash keeps one durable runtime ingress: **Queued Work**. Every queued payload is stored and claimed through the runtime persistence contract. The CLI never treats local prepared drafts as authoritative queue records.
 
+Queued payloads have two runtime classes derived from their existing payload variants:
+
+- `SessionCommand`: session mutations such as `RefreshToolCatalog`.
+- `TurnWork`: turn-producing work, currently `TurnInput` and `ProcessWake`.
+
+Core owns scheduling across those classes. A queued drain consumes ready leading `SessionCommand` batches in enqueue order before it claims the next ready `TurnWork` group. Selected batch-id drains follow the same rule: earlier ready session commands are completed first, and the selected ids must still be the next runnable turn-work group. Session commands never become prompt text.
+
 The CLI projects that single ingress into separate user-visible surfaces:
 
 - queued-turn preview for visible `TurnInput` payloads only,
@@ -22,8 +29,9 @@ Slash commands remain CLI host commands and are never queued as model work. Tool
 
 ## Consequences
 
-- Queue preview is reconstructed from `LashSession::queued_work()`.
-- Dispatch claims durable batch ids selected from that snapshot.
+- `LashSession::queued_work()` is an admin/introspection view of all pending work classes.
+- Queue preview is reconstructed by filtering that admin view to visible `TurnInput` batches.
+- Dispatch claims durable turn-input batch ids selected from that filtered snapshot; core drains any earlier session commands before claiming the selected turn work.
 - Accepted or claimed queued turns disappear from preview when the runtime claims or starts them.
 - Process wakes and session commands never appear as queued user input.
 - Triggers and timers never appear as queued work at all; a matched trigger occurrence may start a process, and only that process's wake enters queued work at a safe turn boundary.

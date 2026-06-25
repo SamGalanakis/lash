@@ -5,10 +5,11 @@ is started: start writes durable intent, and a lash-owned `DurableProcessWorker`
 is the *sole* executor of every non-terminal process, behind a single-owner
 `ProcessLease`. There is no off-lease in-process spawn — out-of-turn starts no
 longer run on a detached `tokio::spawn`. The registry's non-terminal rows are the
-durable work queue, and a `ProcessWorkRunner` drains them **on poke, on a poll
-tick, and once at startup**. So the *first* run of an out-of-turn start is itself
-lease-protected and prompt (a poke fires after the start), not merely eventually
-recovered by the next restart's sweep. This closes the turn-vs-trigger asymmetry
+durable work queue, and a `ProcessWorkDriver` drains them **after a successful
+start and once on session open**. So the *first* run of an out-of-turn start is
+itself lease-protected and prompt (the driver is invoked directly after the
+start), not merely eventually recovered by the next restart's sweep. This closes
+the turn-vs-trigger asymmetry
 — processes started by matched trigger occurrences run durably and recover on
 crash, exactly like turn-started ones — and removes the double-execution window
 the startup-only sweep left open. Timers and recurring jobs are host-owned
@@ -129,7 +130,7 @@ registry events plus process leases:
 | Unit    | Single-owner lease | Resumable state             | Recovery entry         |
 | ------- | ------------------ | --------------------------- | ---------------------- |
 | Turn    | effect-host history | host-recorded effects       | workflow handler replay |
-| Process | `ProcessLease`     | registry events + journal   | `drive_pending_processes` (poke/poll/startup) |
+| Process | `ProcessLease`     | registry events + journal   | `drive_pending_processes` (on start / on open) |
 
 The `DurableProcessWorker` — the Restate execution authority via
 `RestateCoreProcessRunner` / `LashProcessWorkflow` — is the single executor for
@@ -175,24 +176,26 @@ A generalization of code that already existed for turns — not a new subsystem:
   Idempotent by `process_id`: terminal
   processes are never on the worklist, and a process that became terminal between
   the list and the claim is detected and skipped.
-- **`ProcessWorkRunner` + `ProcessWorkPoke`** — the loop that *drives*
-  `drive_pending_processes` promptly: a `tokio::select!` over a `Notify` (poke)
-  and a poll interval, plus one startup drive that folds in what used to be a
-  separate boot-time recovery sweep. A `ProcessRunHandle` selects the tier: the
-  inline handle delegates to the worker's `drive_pending_processes`; the Restate
-  handle fences-submits `LashProcessWorkflow/{process_id}` per non-terminal row.
-  The control seam pokes after every successful `Start` — idempotently, since the
-  runner skips leased/terminal rows and the durable submit is keyed-idempotent —
-  so in-turn-inline, trigger delivery, and other explicit out-of-turn starts
-  are all driven the same way.
-  The poke handle lives on the runtime host, not the trait-object controller.
+- **`ProcessWorkDriver` (`claim_and_run_pending`)** — the seam that *drives*
+  `drive_pending_processes` promptly: invoked directly after a successful start
+  and once on session open (`drive_process_on_open`), the latter folding in what
+  used to be a separate boot-time recovery sweep. A `ProcessRunHandle` selects
+  the tier: the inline `InlineProcessRunHandle` delegates to the worker's
+  `drive_pending_processes`; the Restate `RestateProcessIngressRunner` POSTs
+  `LashProcessWorkflow/{process_id}/run/send` to the ingress per non-terminal
+  row (Restate coalesces by workflow key, so duplicate submits are idempotent).
+  The control seam drives the driver after every successful `Start` —
+  idempotently, since the driver skips leased/terminal rows and the durable
+  submit is keyed-idempotent — so in-turn-inline, trigger delivery, and other
+  explicit out-of-turn starts are all driven the same way.
+  The driver lives on the runtime host, not the trait-object controller.
 
 ## Idempotency
 
 Two layers, both in place. **Start-idempotency**: the registry's `process_id`
 uniqueness is the replay boundary for process admin issued outside a turn
 lease — `ProcessCommandRunner::run` (`process_runners/control.rs`) routes every
-command through the explicitly selected controller and pokes the work runner
+command through the explicitly selected controller and drives the work driver
 after a successful `Start`, and a duplicate `Start` re-registers the same row
 rather than spawning a second execution. **Execution-idempotency**: the
 `ProcessLease` ensures a recovered, non-terminal process is re-run by exactly
@@ -240,18 +243,18 @@ durable intent and execute via the worker. The silent
 gone — out of turn there is no turn-scoped controller, so the host's explicitly
 named runtime effect controller is used for the effect that registers the row. A
 `Start` only *registers* the row (the inline off-lease `tokio::spawn` is
-deleted), and `ProcessCommandRunner::run` pokes the host's
-`ProcessWorkRunner` after a successful `Start`. The runner is wired by the
+deleted), and `ProcessCommandRunner::run` drives the host's
+`ProcessWorkDriver` after a successful `Start`. The driver is wired by the
 host through one of two facade sources: `.process_registry(...)` selects the
-inline source — the default runner's `DurableProcessWorkerConfig` is built
+inline source — the default driver's `DurableProcessWorkerConfig` is built
 eagerly at `build()` (failing loudly with
 `EmbedError::ProcessRegistryRequiresStoreFactory` when no session store
-factory is wired) and the runner is spawned lazily exactly once on the first
-`session().open()` that needs it — while `.process_work_driver(...)` installs
-an externally owned runner whose registry becomes the core's process registry,
-so no inline runner is spawned. A Restate deployment registers the
-ingress-client runner at the serve path (`lash-restate/src/lib.rs`) and hands
-the core its poke.
+factory is wired) and the inline driver is constructed lazily exactly once on
+the first `session().open()` that needs it — while `.process_work_driver(...)`
+installs an externally owned driver whose registry becomes the core's process
+registry, so no inline driver is constructed. A Restate deployment builds a
+`RestateProcessDeployment` and passes its `process_work_driver()` into the core
+(`lash-restate/src/lib.rs`).
 
 An emitter-supplied durability API was **not** added — the worker owns execution
 durability, not the emitter.
@@ -285,11 +288,12 @@ terminal are carried as request config / tool-access, not lost.
 - `crates/lash-core/src/runtime/process_worker.rs` — `DurableProcessWorker`:
   `drive_pending_processes`, `ensure_durable_store_facets`, `ensure_stable_process_id`,
   lease-renewing run.
-- `crates/lash-core/src/runtime/process_work_runner.rs` — `ProcessWorkRunner`
-  (poke + poll + startup loop), `ProcessWorkPoke`, `ProcessRunHandle` /
+- `crates/lash-core/src/runtime/process_work_driver.rs` — `ProcessWorkDriver`
+  (`claim_and_run_pending`, driven on start / on open), `ProcessRunHandle` /
   `InlineProcessRunHandle`.
-- `crates/lash/src/core.rs` — `ProcessWorkRunnerSlot` (lazy default-runner spawn
-  on first open), `.process_registry(...)` / `.process_work_driver(...)`.
+- `crates/lash/src/core.rs` — `InlineWorkDriverSlot` / `ProcessWorkDriverSetup`
+  (lazy default-driver construction on first open),
+  `.process_registry(...)` / `.process_work_driver(...)`.
 - `crates/lash-core/src/runtime/process/model.rs` — `ProcessLease` /
   `ProcessLeaseCompletion`, typed `ProcessExecutionEnvSpec`.
 - `crates/lash-core/src/runtime/process/validation.rs` — start-time and

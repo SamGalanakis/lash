@@ -578,7 +578,7 @@ mod tests {
         let history =
             projector.format_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")]);
 
-        assert!(history.contains("full: history[0].content"));
+        assert!(history.contains("re-print history[0].content"));
         assert!(history.contains("... (16 characters omitted) ..."));
         assert!(!history.contains("user_input_"));
     }
@@ -594,8 +594,25 @@ mod tests {
         let output = "x".repeat(60 * 1024);
         let history = projector.format_history(&[step_event(0, "print big", &output)]);
 
-        assert!(history.contains("full: history[0].output[0]"));
+        assert!(history.contains("re-print history[0].output[0]"));
+        assert!(history.contains("full value retained"));
         assert!(history.contains("...truncated..."));
+    }
+
+    #[test]
+    fn truncated_step_output_states_value_is_retained_not_lost() {
+        // A truncated preview must read as display-only, not lost state — the
+        // inference gpt-5.5 got wrong when it stopped a /spring-cleaning
+        // mid-task ("I can't continue from the previous tool state"). The note
+        // names the re-print handle and states the value is retained.
+        let projector = projector(10);
+        let output = "x".repeat(60 * 1024);
+        let history = projector.format_history(&[step_event(0, "print big", &output)]);
+
+        assert!(history.contains("full value retained"), "{history}");
+        assert!(history.contains("re-print history[0].output[0]"), "{history}");
+        // The bare, easily-misread "chars, full: <ref>" framing is gone.
+        assert!(!history.contains("chars, full: history"), "{history}");
     }
 
     #[test]
@@ -611,7 +628,7 @@ mod tests {
         .to_string();
         let history = projector.format_history(&[step_event(0, "print result", &raw)]);
 
-        assert!(history.contains("full: history[0].output[0]"), "{history}");
+        assert!(history.contains("re-print history[0].output[0]"), "{history}");
         let status = history.find(r#""status":"failed""#).expect("status field");
         let error = history.find(r#""error":"boom""#).expect("error field");
         let exit = history.find(r#""exit_code":2"#).expect("exit field");

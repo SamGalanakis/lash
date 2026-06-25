@@ -302,6 +302,60 @@ fn durable_queue_snapshot_preserves_order_and_cache_is_display_only() {
 }
 
 #[test]
+fn durable_queue_snapshot_filters_session_commands_from_preview_state() {
+    fn batch(
+        batch_id: &str,
+        enqueue_seq: u64,
+        payload: lash_core::runtime::QueuedWorkPayload,
+    ) -> lash_core::runtime::QueuedWorkBatch {
+        lash_core::runtime::QueuedWorkBatch {
+            batch_id: batch_id.to_string(),
+            session_id: "test-session-id".to_string(),
+            enqueue_seq,
+            source_key: Some(format!("source:{batch_id}")),
+            delivery_policy: lash_core::DeliveryPolicy::EarliestSafeBoundary,
+            slot_policy: lash_core::SlotPolicy::Exclusive,
+            merge_key: lash_core::runtime::MergeKey::Never,
+            available_at_ms: 0,
+            enqueued_at_ms: 0,
+            items: vec![lash_core::runtime::QueuedWorkItem {
+                item_id: format!("{batch_id}:item:0"),
+                payload,
+            }],
+        }
+    }
+
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.set_queued_work_snapshot(vec![
+        batch(
+            "command",
+            1,
+            lash_core::runtime::QueuedWorkPayload::session_command(
+                lash_core::SessionCommand::RefreshToolCatalog {
+                    reason: "interactive-sync-runtime-tools".to_string(),
+                },
+            ),
+        ),
+        batch(
+            "turn",
+            2,
+            lash_core::runtime::QueuedWorkPayload::turn_input(lash_core::TurnInput::text(
+                "visible turn",
+            )),
+        ),
+    ]);
+
+    assert_eq!(
+        app.queued_work_snapshot()
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["turn"]
+    );
+    assert!(app.has_queued_messages());
+}
+
+#[test]
 fn queued_work_started_removes_claimed_batch_from_preview() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let first_id = app.test_seed_queued_turn_snapshot(

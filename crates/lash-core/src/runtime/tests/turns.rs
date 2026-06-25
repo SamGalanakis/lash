@@ -247,6 +247,46 @@ async fn enqueue_turn_input_for_checkpoint(
         .expect("enqueue turn input");
 }
 
+async fn enqueue_idle_turn_input(
+    store: &RecordingStore,
+    session_id: &str,
+    text: &str,
+) -> crate::QueuedWorkBatch {
+    crate::store::RuntimePersistence::enqueue_queued_work(
+        store,
+        crate::QueuedWorkBatchDraft::new(
+            session_id.to_string(),
+            crate::DeliveryPolicy::AfterCurrentTurnCommit,
+            crate::SlotPolicy::Exclusive,
+            vec![crate::QueuedWorkPayload::turn_input(TurnInput::text(text))],
+        ),
+    )
+    .await
+    .expect("enqueue idle turn input")
+}
+
+async fn enqueue_session_command(
+    store: &RecordingStore,
+    session_id: &str,
+    reason: &str,
+) -> crate::QueuedWorkBatch {
+    crate::store::RuntimePersistence::enqueue_queued_work(
+        store,
+        crate::QueuedWorkBatchDraft::new(
+            session_id.to_string(),
+            crate::DeliveryPolicy::EarliestSafeBoundary,
+            crate::SlotPolicy::Exclusive,
+            vec![crate::QueuedWorkPayload::session_command(
+                crate::SessionCommand::RefreshToolCatalog {
+                    reason: reason.to_string(),
+                },
+            )],
+        ),
+    )
+    .await
+    .expect("enqueue session command")
+}
+
 #[tokio::test]
 async fn session_config_change_hook_receives_context_window_updates() {
     let observed = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -852,6 +892,137 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
         message.role == crate::MessageRole::User
             && message.parts.iter().any(|part| part.content == "hello")
     }));
+}
+
+#[tokio::test]
+async fn command_only_queued_work_drain_completes_without_turn() {
+    let (mut runtime, store) =
+        standard_runtime_with_transport_and_queue_store(mock_provider(Vec::new())).await;
+    let command = enqueue_session_command(store.as_ref(), "root", "test refresh").await;
+
+    let drained = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "command-only-queue-drain"),
+        ))
+        .await
+        .expect("command-only drain succeeds");
+
+    assert!(drained.is_none());
+    assert!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("list queue after command-only drain")
+            .is_empty(),
+        "command batch `{}` should be completed",
+        command.batch_id
+    );
+}
+
+#[tokio::test]
+async fn leading_session_command_drains_before_queued_turn() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "queued answer".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "queued answer".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let command = enqueue_session_command(store.as_ref(), "root", "refresh before turn").await;
+    let turn = enqueue_idle_turn_input(store.as_ref(), "root", "user turn").await;
+    let turn_events = RecordingTurnEvents::default();
+
+    let drained = runtime
+        .stream_next_queued_work(
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "command-before-turn-drain"),
+            )
+            .with_turn_events(&turn_events),
+        )
+        .await
+        .expect("queued drain succeeds")
+        .expect("queued turn runs after command");
+
+    assert_eq!(drained.assistant_output.safe_text, "queued answer");
+    assert!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("list queue after command plus turn")
+            .is_empty(),
+        "command `{}` and turn `{}` should both be completed",
+        command.batch_id,
+        turn.batch_id
+    );
+    let started_batch_ids = turn_events
+        .snapshot()
+        .into_iter()
+        .find_map(|activity| match activity.event {
+            crate::TurnEvent::QueuedWorkStarted { batch_ids, .. } => Some(batch_ids),
+            _ => None,
+        })
+        .expect("queued work started event");
+    assert_eq!(started_batch_ids, vec![turn.batch_id]);
+}
+
+#[tokio::test]
+async fn later_session_command_does_not_jump_earlier_queued_turn() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "first turn answer".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "first turn answer".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let turn = enqueue_idle_turn_input(store.as_ref(), "root", "first user turn").await;
+    let command = enqueue_session_command(store.as_ref(), "root", "refresh after turn").await;
+
+    let drained = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "turn-before-command-drain"),
+        ))
+        .await
+        .expect("queued turn drain succeeds")
+        .expect("first queued turn runs");
+
+    assert_eq!(drained.assistant_output.safe_text, "first turn answer");
+    assert_eq!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("list queue after first turn")
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![command.batch_id.as_str()],
+        "later command should remain after turn `{}` runs",
+        turn.batch_id
+    );
+
+    let command_only = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "later-command-drain"),
+        ))
+        .await
+        .expect("later command drain succeeds");
+    assert!(command_only.is_none());
+    assert!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("list queue after later command")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

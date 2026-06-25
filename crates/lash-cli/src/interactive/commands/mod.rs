@@ -204,7 +204,11 @@ pub(super) async fn dispatch_queued_turn(
         return Ok(false);
     };
     let queued_batches = session.queued_work().await?;
-    let ready_batches = ready_batches_for_idle_dispatch(&queued_batches);
+    let visible_batches = queued_batches
+        .into_iter()
+        .filter(batch_has_visible_turn_input)
+        .collect::<Vec<_>>();
+    let ready_batches = ready_batches_for_idle_dispatch(&visible_batches);
     if ready_batches.is_empty() {
         return Ok(false);
     }

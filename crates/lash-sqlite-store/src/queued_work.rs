@@ -76,6 +76,7 @@ pub(crate) fn queued_work_batch_from_conn(
     })
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct QueuedBatchRow {
     pub(crate) enqueue_seq: u64,
     pub(crate) batch_id: String,

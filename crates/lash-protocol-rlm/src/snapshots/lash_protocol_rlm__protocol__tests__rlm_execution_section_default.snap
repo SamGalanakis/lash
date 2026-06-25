@@ -4,12 +4,19 @@ expression: "rlm_execution_section_for_host_environment(RlmPromptFeatures::defau
 ---
 ### Operating contract
 
-Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a paired `<lashlang>` block. Start from operations listed under **Tools**; if a discovery tool is available, use it to find additional module call forms before calling them.
+Use plain prose only for direct conversational replies that need no action or computation. Use Lashlang when you need to call an available operation, inspect variables, compute values, edit, validate, or return structured/computed results. Invoke documented operations with module syntax — `await module.operation({ ... })?` — from inside a paired `<lashlang>` block, using the real names and signatures listed under **Tools**. If a discovery tool is available, use it to find operations beyond those listed.
+
+### Persistence
+
+Keep going until the request is fully resolved. End your turn only when you `submit` a final answer or genuinely have nothing left to do — until then, every step is another `<lashlang>` block.
+
+- If you say you will do something ("let me…", "I'll keep going"), emit the `<lashlang>` block that does it in the same reply. Never describe an action and then stop without running it.
+- You are solving the task, not narrating how it could be solved. Prefer acting over asking; ask only when genuinely blocked by a missing decision or permission.
 
 ### `print` vs `submit`
 
 - `print <expr>` — inspect a value and keep going; output appears on the next step. Print the part you need to decide the next step: a whole value when it is small and all of it is useful (e.g. state you consult each turn), otherwise selected fields, samples, or slices. Avoid dumping a large value when only part of it is relevant.
-- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance.
+- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance. Keep the submitted value concise; do not include large variables such as diffs, full logs, raw command output, or other bulky dumps unless the user explicitly asks for them.
 
 Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
 
@@ -17,7 +24,7 @@ Do not submit final results that depend on operations, files, generated patches,
 
 ### Response shape
 
-Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose.
+Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose. If the block calls `submit`, that submitted value is the final answer; any preceding prose should be brief setup, not a second answer.
 
 
 ### Language
@@ -27,7 +34,7 @@ Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The s
 - Strings: `"..."` and `'...'` support `\n`, `\r`, `\t`, escaped matching quotes, and `\\`; `"""..."""` and `'''...'''` are multiline with the same escapes. Raw strings `r"..."`, `r'...'`, `r"""..."""`, and `r'''...'''` preserve content exactly. Use raw strings for JSON, Markdown, patches, shell scripts, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers. Use `format(...)` for interpolation; there are no f-strings.
 - Assign with `name = expr`. Variables persist across `<lashlang>` blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
 - List comprehensions: `[expr for name in iterable]` and `[expr for name in iterable if condition]`; multiple `for`/`if` clauses run left-to-right like Python. Comprehension bindings are local and do not overwrite outer variables. Use explicit loops when you need mutation, `break`, or `continue`.
-- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.
+- Module operations: call host capabilities through documented lowercase module paths, e.g. `await module.operation({ field: value })?` — the real names and signatures are under **Tools**. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools — do not assume a tool exists from generic syntax; call only operations documented under **Tools**. `?` aborts the block with sanitized operation metadata if the operation fails.
 - Sleep: pause foreground code or process code with `sleep for "5s"` or `sleep until deadline`. Durations accept milliseconds, `ms`, `s`, `m`, or `h`; deadlines accept RFC3339 text or Unix epoch milliseconds.
 - Background processes: `process name(param: TYPE) { ... }` declares a reusable process definition. Add typed inbound signals with `signals { name: TYPE }` when the process receives external messages, e.g. `process worker() signals { approve: { ok: bool } } { payload = wait_signal("approve") finish payload }`. `handle = start name(param: value)` creates one process run from that definition and returns its run handle; matching trigger occurrences can also create process runs through registered triggers. For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) { await mail.send({ body: body })? finish true }` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use `yield value`, `wake value`, `finish value`, `fail value`, or `payload = wait_signal("name")`. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the process success value. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Parallelism comes from starting all independent process handles before waiting for any of them; join a list or record of handles with `results = await handles`. `await handle` waits and returns a result wrapper like `{ ok: true, value: ... }`; when you need fields from the `finish` value, use `result = (await handle)?` and then read `result.field`. Cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({})?` for running runs, `await processes.list({ definition: name })?` for runs of a definition, and `await processes.list({ status: "any" })?` for visible run history.
 - Signalling processes: `signal_run(handle, "name", payload)` sends a typed `signal.name` event to a running process and may be used from the foreground turn as well as inside a process body, like `await handle` and `cancel handle`. The receiving side, `payload = wait_signal("name")`, parks a process until that named signal arrives and is only valid inside a process body.
@@ -35,15 +42,7 @@ Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The s
 - Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent module operations, use aggregate await: `results = await { first: module.a({ ... }), second: module.b({ ... }), label: "kept" }`; direct receiver-call leaves in nested lists/records fan out through the host scheduler, pure value leaves are preserved, and results keep the same shape. Put `?` on each operation leaf you want unwrapped, e.g. `first: module.a({ ... })?`; all siblings finish before the first source-order failure is reported. Process parallelism still comes from starting all independent process handles before joining them with `await handles` or `await { key: handle }`.
 - Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements in normal blocks.
-- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available read-only values may be listed separately without value previews. Variables keep their full runtime value; `print` a variable (or the part you need) to see contents the prompt only summarizes.
-
-### Host Surface
-
-Awaited runtime operations:
-
-- `await files.read(any)? -> any`
-- `await web.fetch(any)? -> any`
-- `await web.search(any)? -> any`
+- Values already in scope are listed under **Bound Variables** (plus `history`) — use them directly in lashlang, don't recreate them.
 
 ### Builtins
 
@@ -67,13 +66,6 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
 
 
-### Common mistakes
-
-- Do not infer a tool exists from generic Lashlang syntax. Use only operations listed in **Tools** or the **Host Surface**.
-- Do not submit final results that depend on operations, files, edits, validation, or generated artifacts before observing the relevant result.
-- Do not submit raw intermediate dumps. Inspect with `print`, then submit a concise answer once you know what matters.
-
-
 ### Type literals
 
 `Type { field: shape, ... }` describes a record shape. Field separators are commas (trailing comma OK).
@@ -94,19 +86,21 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 
 Your turn's REPL trace is your working memory — keep it decision-sized and current. Large transient artifacts (files, search results, long pages, raw tool dumps) should stay in variables until you need a focused view; small durable state you consult each turn should stay visible. Tool-specific lifecycle and output details live under **Tools**.
 
+Truncation in the transcript is a display window, not lost state. A value shown truncated or summarized still has its full contents live — in the bound variable that holds it, and re-printable via its `history[N].output[M]` handle. A short preview never means the data is gone; `print` the variable or the slice you need and keep going. Never restart or abandon a task because earlier output looks truncated.
+
 Choose the lightest mechanism that preserves progress:
 
 - Current variables already hold what you need -> reason inline in lashlang.
 - Several independent slow operations are needed -> use aggregate await over a record/list of direct module calls plus any pure values you want preserved, putting `?` on each operation leaf that should unwrap.
 - The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.
-- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools** — don't infer a tool exists from these generic examples.
+- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.
 
 Example parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):
 
     <lashlang>
     results = await {
-      one: web.search({ query: "one" })?,
-      two: web.search({ query: "two" })?
+      one: module.operation({ query: "one" })?,
+      two: module.operation({ query: "two" })?
     }
     submit format("First result: {}\n\nSecond result: {}", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))
     </lashlang>

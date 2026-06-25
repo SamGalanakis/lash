@@ -11,11 +11,10 @@ use lash_core::store::{
     GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    BlobRef, DeliveryPolicy, GcReport, LeaseOwnerIdentity, RuntimeCommit, RuntimePersistence,
+    BlobRef, GcReport, LeaseOwnerIdentity, RuntimeCommit, RuntimePersistence,
     SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
     SessionExecutionLeaseFence, SessionGraph, SessionNodeRecord, SessionReadScope,
-    SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
-    current_epoch_ms,
+    SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport, current_epoch_ms,
 };
 
 #[derive(Clone)]
@@ -35,6 +34,15 @@ struct RuntimePerfSessionExecutionLease {
     fencing_token: u64,
     claimed_at_epoch_ms: u64,
     expires_at_epoch_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+enum RuntimePerfQueuedWorkClaimKind {
+    LeadingSessionCommand,
+    TurnWork {
+        boundary: QueuedWorkClaimBoundary,
+        max_batches: usize,
+    },
 }
 
 fn session_fence_equivalent(
@@ -120,6 +128,118 @@ impl RuntimePerfStore {
             current.claimed_at_epoch_ms = 0;
             current.expires_at_epoch_ms = 0;
         }
+    }
+
+    fn queued_batch_work_class(
+        batch: &QueuedWorkBatch,
+    ) -> Result<lash_core::runtime::QueuedWorkClass, StoreError> {
+        batch.work_class().ok_or_else(|| {
+            StoreError::Backend(format!(
+                "queued-work batch `{}` has mixed or empty payload classes",
+                batch.batch_id
+            ))
+        })
+    }
+
+    fn claim_ready_queued_work_perf(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        kind: RuntimePerfQueuedWorkClaimKind,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        let max_batches = match kind {
+            RuntimePerfQueuedWorkClaimKind::LeadingSessionCommand => 1,
+            RuntimePerfQueuedWorkClaimKind::TurnWork { max_batches, .. } => max_batches,
+        };
+        if max_batches == 0 {
+            return Ok(None);
+        }
+        self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        let now = current_epoch_ms();
+        let mut queued = self.queued_work.lock().expect("lock perf queued work");
+        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        let claim_available = |entry: &RuntimePerfQueuedBatch| {
+            entry.claim_token.is_none()
+                || entry.claim_expires_at_ms <= now
+                || entry
+                    .claim_owner
+                    .as_ref()
+                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+        };
+        let claimable_indices = queued
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.batch.session_id == session_id
+                    && entry.batch.available_at_ms <= now
+                    && claim_available(entry)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if claimable_indices.is_empty() {
+            return Ok(None);
+        }
+        let candidates = claimable_indices
+            .iter()
+            .map(|index| {
+                let batch = &queued[*index].batch;
+                Ok(store::queued_work::ClaimCandidate {
+                    enqueue_seq: batch.enqueue_seq,
+                    claim_fencing_token: queued[*index].claim_fencing_token,
+                    work_class: Self::queued_batch_work_class(batch)?,
+                    delivery_policy: batch.delivery_policy,
+                    slot_policy: batch.slot_policy,
+                    merge_key: batch.merge_key.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let selected_len = match kind {
+            RuntimePerfQueuedWorkClaimKind::LeadingSessionCommand => {
+                store::queued_work::select_leading_session_command(&candidates)
+            }
+            RuntimePerfQueuedWorkClaimKind::TurnWork {
+                boundary,
+                max_batches,
+            } => store::queued_work::select_turn_work_claim_prefix(
+                &candidates,
+                boundary,
+                max_batches,
+            ),
+        };
+        if selected_len == 0 {
+            return Ok(None);
+        }
+        let first_index = claimable_indices[0];
+        let first = queued[first_index].batch.clone();
+        let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
+        let claim_id = format!("perf-qwc:{}:{fencing_token}", first.enqueue_seq);
+        let lease_token = format!(
+            "{session_id}:{}:{}:{claim_id}:{now}",
+            owner.owner_id, owner.incarnation_id
+        );
+        let expires_at = now.saturating_add(lease_ttl_ms);
+        let mut batches = Vec::new();
+        for index in claimable_indices.into_iter().take(selected_len) {
+            let entry = &mut queued[index];
+            entry.claim_id = Some(claim_id.clone());
+            entry.claim_token = Some(lease_token.clone());
+            entry.claim_owner = Some(owner.clone());
+            entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
+            entry.claim_expires_at_ms = expires_at;
+            batches.push(entry.batch.clone());
+        }
+        Ok(Some(QueuedWorkClaim {
+            session_id: session_id.to_string(),
+            claim_id,
+            owner: owner.clone(),
+            lease_token,
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: expires_at,
+            batches,
+        }))
     }
 }
 
@@ -596,6 +716,22 @@ impl RuntimePersistence for RuntimePerfStore {
         Ok(stored)
     }
 
+    async fn claim_leading_ready_session_command(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        self.claim_ready_queued_work_perf(
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            RuntimePerfQueuedWorkClaimKind::LeadingSessionCommand,
+        )
+    }
+
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
@@ -605,72 +741,16 @@ impl RuntimePersistence for RuntimePerfStore {
         lease_ttl_ms: u64,
         max_batches: usize,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
-        if max_batches == 0 {
-            return Ok(None);
-        }
-        self.verify_session_execution_lease(session_id, session_execution_lease)?;
-        let now = current_epoch_ms();
-        let mut queued = self.queued_work.lock().expect("lock perf queued work");
-        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
-        let first_index = queued.iter().position(|entry| {
-            entry.batch.session_id == session_id
-                && entry.batch.available_at_ms <= now
-                && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
-        });
-        let Some(first_index) = first_index else {
-            return Ok(None);
-        };
-        let first = queued[first_index].batch.clone();
-        if boundary == QueuedWorkClaimBoundary::ActiveTurnCheckpoint
-            && first.delivery_policy != DeliveryPolicy::EarliestSafeBoundary
-        {
-            return Ok(None);
-        }
-        let mut indices = vec![first_index];
-        if first.slot_policy == SlotPolicy::Join {
-            for (index, entry) in queued.iter().enumerate().skip(first_index + 1) {
-                if indices.len() >= max_batches {
-                    break;
-                }
-                if entry.batch.session_id != session_id
-                    || entry.batch.available_at_ms > now
-                    || (entry.claim_token.is_some() && entry.claim_expires_at_ms > now)
-                    || entry.batch.slot_policy != SlotPolicy::Join
-                    || entry.batch.delivery_policy != first.delivery_policy
-                    || entry.batch.merge_key != first.merge_key
-                {
-                    break;
-                }
-                indices.push(index);
-            }
-        }
-        let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
-        let claim_id = format!("perf-qwc:{}:{fencing_token}", first.enqueue_seq);
-        let lease_token = format!(
-            "{session_id}:{}:{}:{claim_id}:{now}",
-            owner.owner_id, owner.incarnation_id
-        );
-        let expires_at = now.saturating_add(lease_ttl_ms);
-        let mut batches = Vec::new();
-        for index in indices {
-            let entry = &mut queued[index];
-            entry.claim_id = Some(claim_id.clone());
-            entry.claim_token = Some(lease_token.clone());
-            entry.claim_owner = Some(owner.clone());
-            entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
-            entry.claim_expires_at_ms = expires_at;
-            batches.push(entry.batch.clone());
-        }
-        Ok(Some(QueuedWorkClaim {
-            session_id: session_id.to_string(),
-            claim_id,
-            owner: owner.clone(),
-            lease_token,
-            fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: expires_at,
-            batches,
-        }))
+        self.claim_ready_queued_work_perf(
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            RuntimePerfQueuedWorkClaimKind::TurnWork {
+                boundary,
+                max_batches,
+            },
+        )
     }
 
     async fn renew_queued_work_claim(

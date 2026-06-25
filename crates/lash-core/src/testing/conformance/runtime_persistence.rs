@@ -103,6 +103,7 @@ where
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_exact_claim_uses_selected_batch_ids(make()).await;
+    queued_work_classes_gate_command_and_turn_claims(make()).await;
     queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
     queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions(make()).await;
     queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
@@ -136,6 +137,19 @@ fn queued_draft(
     slot_policy: SlotPolicy,
 ) -> QueuedWorkBatchDraft {
     queued_turn_input_draft(session_id, text, delivery_policy, slot_policy)
+}
+
+fn queued_session_command_draft(session_id: &str, reason: &str) -> QueuedWorkBatchDraft {
+    QueuedWorkBatchDraft::new(
+        session_id,
+        DeliveryPolicy::EarliestSafeBoundary,
+        SlotPolicy::Exclusive,
+        vec![QueuedWorkPayload::session_command(
+            crate::SessionCommand::RefreshToolCatalog {
+                reason: reason.to_string(),
+            },
+        )],
+    )
 }
 
 fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
@@ -1251,6 +1265,152 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
             .map(|batch| batch.batch_id.as_str())
             .collect::<Vec<_>>(),
         vec![second.batch_id.as_str()]
+    );
+}
+
+async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn RuntimePersistence>) {
+    let command = store
+        .enqueue_queued_work(queued_session_command_draft("root", "refresh before turn"))
+        .await
+        .expect("enqueue command");
+    let turn = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "user turn",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue turn");
+
+    let rejected_turn_lease =
+        claim_session_execution_lease_for_test(&store, "root", "turn-owner").await;
+    assert!(
+        store
+            .claim_ready_queued_work(
+                "root",
+                &rejected_turn_lease.fence(),
+                &lease_owner("turn-owner"),
+                QueuedWorkClaimBoundary::Idle,
+                60_000,
+                10,
+            )
+            .await
+            .expect("turn claim with leading command")
+            .is_none(),
+        "turn claims must not skip a leading session command"
+    );
+    release_session_execution_lease_for_test(&store, &rejected_turn_lease).await;
+
+    let command_lease =
+        claim_session_execution_lease_for_test(&store, "root", "command-owner").await;
+    let command_claim = store
+        .claim_leading_ready_session_command(
+            "root",
+            &command_lease.fence(),
+            &lease_owner("command-owner"),
+            60_000,
+        )
+        .await
+        .expect("claim leading command")
+        .expect("leading command claim exists");
+    assert_eq!(
+        command_claim
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![command.batch_id.as_str()]
+    );
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(command_lease.fence())
+                .releasing_session_execution_lease(command_lease.completion())
+                .completing_queue_claim(command_claim.completion()),
+        )
+        .await
+        .expect("complete command claim");
+
+    let selected_turn_lease =
+        claim_session_execution_lease_for_test(&store, "root", "turn-owner").await;
+    let selected_turn = store
+        .claim_ready_queued_work_by_batch_ids(
+            "root",
+            &selected_turn_lease.fence(),
+            &lease_owner("turn-owner"),
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            std::slice::from_ref(&turn.batch_id),
+        )
+        .await
+        .expect("claim selected turn after command")
+        .expect("selected turn claim exists");
+    release_session_execution_lease_for_test(&store, &selected_turn_lease).await;
+    assert_eq!(selected_turn.batches[0].batch_id, turn.batch_id);
+
+    let first_turn = store
+        .enqueue_queued_work(queued_draft(
+            "turn-first",
+            "first turn",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue first turn");
+    let second_command = store
+        .enqueue_queued_work(queued_session_command_draft("turn-first", "later refresh"))
+        .await
+        .expect("enqueue later command");
+    let rejected_command_lease =
+        claim_session_execution_lease_for_test(&store, "turn-first", "command-owner").await;
+    assert!(
+        store
+            .claim_leading_ready_session_command(
+                "turn-first",
+                &rejected_command_lease.fence(),
+                &lease_owner("command-owner"),
+                60_000,
+            )
+            .await
+            .expect("claim command behind turn")
+            .is_none(),
+        "session commands must not jump ahead of earlier turn work"
+    );
+    let turn_claim = store
+        .claim_ready_queued_work(
+            "turn-first",
+            &rejected_command_lease.fence(),
+            &lease_owner("command-owner"),
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            10,
+        )
+        .await
+        .expect("claim turn before later command")
+        .expect("turn claim exists");
+    assert_eq!(turn_claim.batches[0].batch_id, first_turn.batch_id);
+    store
+        .abandon_queued_work_claim(&turn_claim)
+        .await
+        .expect("abandon turn claim");
+    release_session_execution_lease_for_test(&store, &rejected_command_lease).await;
+    assert_eq!(
+        store
+            .list_queued_work("turn-first")
+            .await
+            .expect("list turn-first queue")
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            first_turn.batch_id.as_str(),
+            second_command.batch_id.as_str()
+        ]
     );
 }
 

@@ -346,7 +346,7 @@ submit { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
         let first_prompt = prompts.first().expect("at least one model request");
         // preview: the catalogue-preview prompt advertised the indexed tail.
         assert!(
-            first_prompt.contains("Catalogued capabilities"),
+            first_prompt.contains("Catalogued Capabilities"),
             "catalogue-preview prompt contribution did not reach the model"
         );
         assert!(

@@ -611,24 +611,30 @@ impl LashRuntime {
             return Ok(None);
         };
         let session_execution_fence = session_execution_lease.fence();
-        if self
-            .drain_next_session_command(&session_execution_fence)
-            .await?
-            .is_some()
-        {
-            session_execution_lease
-                .release_if_live()
+        loop {
+            match self
+                .drain_next_session_command(&session_execution_fence)
                 .await
-                .map_err(|err| {
-                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
-                })?;
-            return Ok(None);
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(err) => {
+                    let _ = session_execution_lease.release_if_live().await;
+                    return Err(err);
+                }
+            }
         }
         let Some(store) = self
             .session
             .as_ref()
             .and_then(|session| session.history_store())
         else {
+            session_execution_lease
+                .release_if_live()
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+                })?;
             return Ok(None);
         };
         let claim = if let Some(batch_ids) = selected_batch_ids {

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::LeaseOwnerIdentity;
 use super::StoreError;
+use crate::runtime::QueuedWorkClass;
 use crate::{
     DeliveryPolicy, MergeKey, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkCompletion,
     SlotPolicy,
@@ -27,6 +28,7 @@ use crate::{
 pub struct ClaimCandidate {
     pub enqueue_seq: u64,
     pub claim_fencing_token: u64,
+    pub work_class: QueuedWorkClass,
     pub delivery_policy: DeliveryPolicy,
     pub slot_policy: SlotPolicy,
     pub merge_key: MergeKey,
@@ -39,10 +41,26 @@ pub fn claim_scan_limit(max_batches: usize) -> i64 {
     (max_batches as i64).saturating_add(32)
 }
 
-/// Select the prefix of `candidates` that a single claim may take.
+/// Select a leading session-command batch.
+///
+/// Returns `1` only when the earliest ready claimable batch is a
+/// [`QueuedWorkClass::SessionCommand`]. Session commands are intentionally
+/// claimed one batch at a time so the runtime applies each mutation and
+/// completion through its normal fenced commit path before moving to the next.
+pub fn select_leading_session_command(candidates: &[ClaimCandidate]) -> usize {
+    candidates
+        .first()
+        .is_some_and(|candidate| candidate.work_class == QueuedWorkClass::SessionCommand)
+        .then_some(1)
+        .unwrap_or(0)
+}
+
+/// Select the prefix of turn-work `candidates` that a single claim may take.
 ///
 /// Returns the number of leading candidates to claim (`0` means no claim):
 ///
+/// * The queue head must be [`QueuedWorkClass::TurnWork`]. Earlier ready
+///   session commands are never skipped or materialized as turn input.
 /// * An [`QueuedWorkClaimBoundary::ActiveTurnCheckpoint`] boundary only
 ///   admits work whose head batch is
 ///   [`DeliveryPolicy::EarliestSafeBoundary`].
@@ -50,7 +68,7 @@ pub fn claim_scan_limit(max_batches: usize) -> i64 {
 /// * A [`SlotPolicy::Join`] head extends through immediately following
 ///   `Join` batches with the same delivery policy and merge key, up to
 ///   `max_batches`.
-pub fn select_claim_prefix(
+pub fn select_turn_work_claim_prefix(
     candidates: &[ClaimCandidate],
     boundary: QueuedWorkClaimBoundary,
     max_batches: usize,
@@ -61,6 +79,9 @@ pub fn select_claim_prefix(
     let Some(first) = candidates.first() else {
         return 0;
     };
+    if first.work_class != QueuedWorkClass::TurnWork {
+        return 0;
+    }
     if boundary == QueuedWorkClaimBoundary::ActiveTurnCheckpoint
         && first.delivery_policy != DeliveryPolicy::EarliestSafeBoundary
     {
@@ -72,6 +93,7 @@ pub fn select_claim_prefix(
     let mut selected = 1;
     for candidate in &candidates[1..] {
         if selected >= max_batches
+            || candidate.work_class != QueuedWorkClass::TurnWork
             || candidate.slot_policy != SlotPolicy::Join
             || candidate.delivery_policy != first.delivery_policy
             || candidate.merge_key != first.merge_key
@@ -186,6 +208,7 @@ mod tests {
 
     fn candidate(
         enqueue_seq: u64,
+        work_class: QueuedWorkClass,
         delivery_policy: DeliveryPolicy,
         slot_policy: SlotPolicy,
         merge_key: MergeKey,
@@ -193,6 +216,7 @@ mod tests {
         ClaimCandidate {
             enqueue_seq,
             claim_fencing_token: 0,
+            work_class,
             delivery_policy,
             slot_policy,
             merge_key,
@@ -204,19 +228,21 @@ mod tests {
         let candidates = vec![
             candidate(
                 1,
+                QueuedWorkClass::TurnWork,
                 DeliveryPolicy::EarliestSafeBoundary,
                 SlotPolicy::Exclusive,
                 MergeKey::Never,
             ),
             candidate(
                 2,
+                QueuedWorkClass::TurnWork,
                 DeliveryPolicy::EarliestSafeBoundary,
                 SlotPolicy::Exclusive,
                 MergeKey::Never,
             ),
         ];
         assert_eq!(
-            select_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 8),
+            select_turn_work_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 8),
             1
         );
     }
@@ -226,6 +252,7 @@ mod tests {
         let join = |seq| {
             candidate(
                 seq,
+                QueuedWorkClass::TurnWork,
                 DeliveryPolicy::EarliestSafeBoundary,
                 SlotPolicy::Join,
                 MergeKey::PayloadDefault,
@@ -233,7 +260,7 @@ mod tests {
         };
         let candidates = vec![join(1), join(2), join(3), join(4)];
         assert_eq!(
-            select_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 3),
+            select_turn_work_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 3),
             3
         );
     }
@@ -243,19 +270,21 @@ mod tests {
         let candidates = vec![
             candidate(
                 1,
+                QueuedWorkClass::TurnWork,
                 DeliveryPolicy::EarliestSafeBoundary,
                 SlotPolicy::Join,
                 MergeKey::Group("a".to_string()),
             ),
             candidate(
                 2,
+                QueuedWorkClass::TurnWork,
                 DeliveryPolicy::EarliestSafeBoundary,
                 SlotPolicy::Join,
                 MergeKey::Group("b".to_string()),
             ),
         ];
         assert_eq!(
-            select_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 8),
+            select_turn_work_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 8),
             1
         );
     }
@@ -264,12 +293,13 @@ mod tests {
     fn active_turn_checkpoint_boundary_gates_on_delivery_policy() {
         let candidates = vec![candidate(
             1,
+            QueuedWorkClass::TurnWork,
             DeliveryPolicy::AfterCurrentTurnCommit,
             SlotPolicy::Exclusive,
             MergeKey::Never,
         )];
         assert_eq!(
-            select_claim_prefix(
+            select_turn_work_claim_prefix(
                 &candidates,
                 QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
                 8
@@ -279,10 +309,61 @@ mod tests {
     }
 
     #[test]
+    fn leading_session_command_blocks_turn_work_claim() {
+        let candidates = vec![
+            candidate(
+                1,
+                QueuedWorkClass::SessionCommand,
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Exclusive,
+                MergeKey::Never,
+            ),
+            candidate(
+                2,
+                QueuedWorkClass::TurnWork,
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Exclusive,
+                MergeKey::Never,
+            ),
+        ];
+        assert_eq!(select_leading_session_command(&candidates), 1);
+        assert_eq!(
+            select_turn_work_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 8),
+            0
+        );
+    }
+
+    #[test]
+    fn later_session_command_does_not_join_turn_work_claim() {
+        let candidates = vec![
+            candidate(
+                1,
+                QueuedWorkClass::TurnWork,
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+                MergeKey::PayloadDefault,
+            ),
+            candidate(
+                2,
+                QueuedWorkClass::SessionCommand,
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+                MergeKey::PayloadDefault,
+            ),
+        ];
+        assert_eq!(select_leading_session_command(&candidates), 0);
+        assert_eq!(
+            select_turn_work_claim_prefix(&candidates, QueuedWorkClaimBoundary::Idle, 8),
+            1
+        );
+    }
+
+    #[test]
     fn lease_derivation_is_deterministic_and_advances_fencing() {
         let head = ClaimCandidate {
             enqueue_seq: 7,
             claim_fencing_token: 2,
+            work_class: QueuedWorkClass::TurnWork,
             delivery_policy: DeliveryPolicy::EarliestSafeBoundary,
             slot_policy: SlotPolicy::Exclusive,
             merge_key: MergeKey::Never,

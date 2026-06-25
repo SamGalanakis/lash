@@ -476,13 +476,11 @@ impl LashRuntime {
             return Ok(None);
         };
         let claim = store
-            .claim_ready_queued_work(
+            .claim_leading_ready_session_command(
                 &self.state.session_id,
                 session_execution_lease,
                 &self.runtime_lease_owner,
-                crate::QueuedWorkClaimBoundary::Idle,
                 crate::QUEUED_WORK_CLAIM_TTL_MS,
-                1,
             )
             .await
             .map_err(super::runtime_error_from_store_commit)?;
@@ -490,13 +488,13 @@ impl LashRuntime {
             return Ok(None);
         };
         let Some((batch, command)) = claim.exclusive_session_command() else {
-            store
-                .abandon_queued_work_claim(&claim)
-                .await
-                .map_err(|err| {
-                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
-                })?;
-            return Ok(None);
+            return Err(RuntimeError::new(
+                "session_command_claim",
+                format!(
+                    "queued-work claim `{}` did not contain exactly one session command batch",
+                    claim.claim_id
+                ),
+            ));
         };
         let batch_id = batch.batch_id.clone();
         let source_key = batch.source_key.clone().unwrap_or_else(|| batch_id.clone());

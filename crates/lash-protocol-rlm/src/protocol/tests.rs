@@ -361,7 +361,6 @@ fn execution_section_can_disable_image_guidance() {
     assert!(!section.contains("image.size"));
     assert!(section.contains("### Language"));
     assert!(section.contains("### Builtins"));
-    assert!(section.contains("### Common mistakes"));
     assert!(section.contains("### Type literals"));
 }
 

@@ -24,6 +24,13 @@ fn queued_work_batch_ids(batches: &[QueuedWorkBatch]) -> std::collections::HashS
     batches.iter().map(|batch| batch.batch_id.clone()).collect()
 }
 
+fn batch_has_turn_input(batch: &QueuedWorkBatch) -> bool {
+    batch
+        .items
+        .iter()
+        .any(|item| matches!(item.payload, QueuedWorkPayload::TurnInput { .. }))
+}
+
 pub(crate) fn turn_input_display_text(input: &lash_core::TurnInput) -> String {
     input
         .items
@@ -130,6 +137,10 @@ impl App {
     }
 
     pub fn set_queued_work_snapshot(&mut self, batches: Vec<QueuedWorkBatch>) {
+        let batches = batches
+            .into_iter()
+            .filter(batch_has_turn_input)
+            .collect::<Vec<_>>();
         let visible_batch_ids = queued_work_batch_ids(&batches);
         let suppressed_before = self.queues.suppressed_preview_batch_ids.len();
         self.queues
