@@ -111,6 +111,7 @@ async fn run_once_openai_responses_sse_parse(
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),
@@ -269,6 +270,7 @@ async fn run_once_direct_llm_client(chat_turns: usize) -> anyhow::Result<Runtime
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),

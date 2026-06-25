@@ -48,6 +48,25 @@ def fmt_ns(n: float | None) -> str:
     return f"{n:.1f}ns"
 
 
+def fmt_stack_profile(profile: Any) -> str | None:
+    if not isinstance(profile, dict):
+        return None
+    measured = profile.get("measured_stack_bytes")
+    budget = profile.get("stack_budget_bytes")
+    source = profile.get("measured_stack_source") or "unknown"
+    within = profile.get("within_stack_budget")
+    parts = []
+    if isinstance(measured, int | float):
+        parts.append(f"stack={fmt_bytes(measured)}")
+    if isinstance(budget, int | float):
+        parts.append(f"budget={fmt_bytes(budget)}")
+    if parts:
+        parts.append(f"source={source}")
+    if isinstance(within, bool):
+        parts.append(f"within_budget={'yes' if within else 'no'}")
+    return "  " + "  ".join(parts) if parts else None
+
+
 def is_dhat(payload: dict[str, Any]) -> bool:
     return "dhatFileVersion" in payload and "ftbl" in payload
 
@@ -97,6 +116,9 @@ def summarize_runtime(report: dict[str, Any]) -> str:
     lines.append(f"version: {report.get('version', '?')}  scenarios: {', '.join(report.get('scenarios', []))}")
     if report.get("dhat_out"):
         lines.append(f"dhat profile: {report['dhat_out']}")
+    stack_text = fmt_stack_profile(report.get("stack_profile"))
+    if stack_text:
+        lines.append(stack_text.strip())
     lines.append("")
 
     for s in report.get("summary", []):
@@ -258,6 +280,9 @@ def summarize_profile_guard(report: dict[str, Any]) -> str:
         worker_stack = runtime_report.get("worker_stack_bytes")
         if isinstance(worker_stack, int | float):
             lines.append(f"  worker_stack={fmt_bytes(worker_stack)}")
+        stack_text = fmt_stack_profile(runtime_report.get("stack_profile"))
+        if stack_text:
+            lines.append(stack_text)
         for item in summaries:
             counters = item.get("sample_extra_counters") or {}
             counter_text = ""
@@ -294,6 +319,9 @@ def summarize_profile_guard(report: dict[str, Any]) -> str:
     ui_scenarios = ui_report.get("scenarios", [])
     if ui_scenarios:
         lines.append("## ui")
+        stack_text = fmt_stack_profile(ui_report.get("stack_profile"))
+        if stack_text:
+            lines.append(stack_text)
         for item in ui_scenarios:
             failed = [
                 budget for budget in item.get("budgets", []) if not budget.get("passed")
@@ -310,6 +338,9 @@ def summarize_profile_guard(report: dict[str, Any]) -> str:
             if not budget.get("passed")
         ]
         lines.append("## lashlang")
+        stack_text = fmt_stack_profile(lashlang_report.get("stack_profile"))
+        if stack_text:
+            lines.append(stack_text)
         lines.append(
             f"  perf_results={len(lashlang_report.get('perf_results', []))}  "
             f"profile_results={len(lashlang_report.get('profile_results', []))}  "
@@ -412,6 +443,9 @@ def summarize_ui(report: dict[str, Any]) -> str:
     )
     if params.get("dhat_out"):
         lines.append(f"dhat profile: {params['dhat_out']}")
+    stack_text = fmt_stack_profile(report.get("stack_profile"))
+    if stack_text:
+        lines.append(stack_text.strip())
     if params.get("compare_inputs"):
         lines.append("comparison inputs: " + ", ".join(str(p) for p in params["compare_inputs"]))
     lines.append("")
@@ -476,6 +510,9 @@ def summarize_lashlang(report: dict[str, Any]) -> str:
         f"scenarios={', '.join(params.get('scenarios', []))}  "
         f"modes={', '.join(params.get('modes', []))}"
     )
+    stack_text = fmt_stack_profile(report.get("stack_profile"))
+    if stack_text:
+        lines.append(stack_text.strip())
     lines.append("")
 
     perf_results = report.get("perf_results", [])
@@ -490,6 +527,20 @@ def summarize_lashlang(report: dict[str, Any]) -> str:
                 f"allocs={row.get('allocations_per_iter', 0):>8}  "
                 f"bytes={fmt_bytes(row.get('allocated_bytes_per_iter', 0)):>10s}"
             )
+            if "phase_total_ns_per_iter" in row:
+                lines.append(
+                    f"    {'phase_total':12s} "
+                    f"avg={fmt_ns(row.get('phase_total_ns_per_iter')):>10s}  "
+                    f"allocs={row.get('phase_total_allocations_per_iter', 0):>8}  "
+                    f"bytes={fmt_bytes(row.get('phase_total_allocated_bytes_per_iter', 0)):>10s}"
+                )
+                for phase in ("parse", "link", "compile", "execute"):
+                    lines.append(
+                        f"    {phase:12s} "
+                        f"avg={fmt_ns(row.get(f'{phase}_ns_per_iter')):>10s}  "
+                        f"allocs={row.get(f'{phase}_allocations_per_iter', 0):>8}  "
+                        f"bytes={fmt_bytes(row.get(f'{phase}_allocated_bytes_per_iter', 0)):>10s}"
+                    )
             if (
                 "process_cache_hits" in row
                 or "program_cache_hits" in row

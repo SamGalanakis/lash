@@ -6,8 +6,8 @@ use bench_support::{
 };
 use lashlang::{
     CompiledProcessCache, CompiledProgramCache, ExecutionEnvironment, ExecutionOutcome,
-    ExecutionScratch, InMemoryLashlangArtifactStore, LashlangArtifactStore, LinkedProgramCache,
-    ProjectedBindings, State, compile_linked, execute, prewarm,
+    ExecutionScratch, InMemoryLashlangArtifactStore, LashlangArtifactStore, LinkedModule,
+    LinkedProgramCache, ProjectedBindings, State, compile_linked, execute, prewarm,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
@@ -91,6 +91,7 @@ enum Mode {
     CompiledProcessCache,
     CompiledProgramCache,
     LinkedProgramCache,
+    PhaseBreakdown,
 }
 
 fn main() {
@@ -117,6 +118,7 @@ fn main() {
             Mode::LinkArtifact => 25_000,
             Mode::ArtifactRoundtrip => 10_000,
             Mode::CompiledProgramCache | Mode::LinkedProgramCache => 25_000,
+            Mode::PhaseBreakdown => 10_000,
         });
 
     let scenarios = parse_scenarios(scenario_arg.as_deref());
@@ -141,6 +143,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
     let mut program_cache_stats = None;
     let mut linked_cache_stats = None;
     let mut artifact_bytes = None;
+    let mut phase_breakdown = None;
 
     reset_alloc_counters();
     let mut started = Instant::now();
@@ -261,9 +264,38 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             }
             linked_cache_stats = Some(cache.stats());
         }
+        Mode::PhaseBreakdown => {
+            phase_breakdown = Some(run_phase_breakdown(
+                rt,
+                scenario,
+                source.as_str(),
+                iterations,
+            ));
+        }
     }
     let elapsed = started.elapsed();
     let allocs = alloc_snapshot();
+    let phase_totals = phase_breakdown.as_ref().map(|phases| {
+        phases.iter().fold(
+            PhaseBreakdownMetric::zero("phase_total"),
+            |mut total, phase| {
+                total.ns_per_iter += phase.ns_per_iter;
+                total.allocations_per_iter += phase.allocations_per_iter;
+                total.allocated_bytes_per_iter += phase.allocated_bytes_per_iter;
+                total
+            },
+        )
+    });
+    let allocations_per_iter = phase_totals
+        .as_ref()
+        .map(|total| total.allocations_per_iter)
+        .unwrap_or(allocs.allocations as f64 / iterations as f64);
+    let allocated_bytes_per_iter = phase_totals
+        .as_ref()
+        .map(|total| total.allocated_bytes_per_iter)
+        .unwrap_or(allocs.allocated_bytes as f64 / iterations as f64);
+    let allocations = allocations_per_iter * iterations as f64;
+    let allocated_bytes = allocated_bytes_per_iter * iterations as f64;
 
     println!("lashlang perf");
     println!("mode: {mode:?}");
@@ -278,17 +310,11 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
         "ns_per_iter: {:.1}",
         elapsed.as_nanos() as f64 / iterations as f64
     );
-    println!("allocations: {}", allocs.allocations);
+    println!("allocations: {:.0}", allocations);
     println!("deallocations: {}", allocs.deallocations);
-    println!("allocated_bytes: {}", allocs.allocated_bytes);
-    println!(
-        "allocations_per_iter: {:.3}",
-        allocs.allocations as f64 / iterations as f64
-    );
-    println!(
-        "allocated_bytes_per_iter: {:.1}",
-        allocs.allocated_bytes as f64 / iterations as f64
-    );
+    println!("allocated_bytes: {:.0}", allocated_bytes);
+    println!("allocations_per_iter: {:.3}", allocations_per_iter);
+    println!("allocated_bytes_per_iter: {:.1}", allocated_bytes_per_iter);
     println!("peak_live_bytes: {}", allocs.peak_live_bytes);
     if let Some(stats) = process_cache_stats {
         println!("process_cache_hits: {}", stats.hits);
@@ -307,6 +333,108 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
         println!("linked_cache_misses: {}", stats.misses);
         println!("linked_cache_evictions: {}", stats.evictions);
         println!("linked_cache_entries: {}", stats.entries);
+    }
+    if let Some(phases) = phase_breakdown {
+        if let Some(total) = phase_totals {
+            println!("{}_ns_per_iter: {:.1}", total.name, total.ns_per_iter);
+            println!(
+                "{}_allocations_per_iter: {:.3}",
+                total.name, total.allocations_per_iter
+            );
+            println!(
+                "{}_allocated_bytes_per_iter: {:.1}",
+                total.name, total.allocated_bytes_per_iter
+            );
+        }
+        for phase in phases {
+            println!("{}_ns_per_iter: {:.1}", phase.name, phase.ns_per_iter);
+            println!(
+                "{}_allocations_per_iter: {:.3}",
+                phase.name, phase.allocations_per_iter
+            );
+            println!(
+                "{}_allocated_bytes_per_iter: {:.1}",
+                phase.name, phase.allocated_bytes_per_iter
+            );
+        }
+    }
+}
+
+struct PhaseBreakdownMetric {
+    name: &'static str,
+    ns_per_iter: f64,
+    allocations_per_iter: f64,
+    allocated_bytes_per_iter: f64,
+}
+
+impl PhaseBreakdownMetric {
+    fn zero(name: &'static str) -> Self {
+        Self {
+            name,
+            ns_per_iter: 0.0,
+            allocations_per_iter: 0.0,
+            allocated_bytes_per_iter: 0.0,
+        }
+    }
+}
+
+fn run_phase_breakdown(
+    rt: &tokio::runtime::Runtime,
+    scenario: Scenario,
+    source: &str,
+    iterations: usize,
+) -> Vec<PhaseBreakdownMetric> {
+    let parsed = lashlang::parse(source).expect("benchmark program should parse");
+    let linked = LinkedModule::link(parsed.clone(), benchmark_host_environment())
+        .expect("benchmark program should link");
+    let compiled = compile_linked(&linked);
+    let projected = projected_bindings(scenario);
+    let host = BenchHost;
+    let mut scratch = ExecutionScratch::new();
+
+    let parse = measure_phase("parse", iterations, || {
+        let parsed =
+            lashlang::parse(std::hint::black_box(source)).expect("benchmark program should parse");
+        std::hint::black_box(parsed);
+    });
+    let link = measure_phase("link", iterations, || {
+        let linked = LinkedModule::link(
+            std::hint::black_box(parsed.clone()),
+            benchmark_host_environment(),
+        )
+        .expect("benchmark program should link");
+        std::hint::black_box(linked.module_ref);
+    });
+    let compile = measure_phase("compile", iterations, || {
+        let compiled = compile_linked(std::hint::black_box(&linked));
+        std::hint::black_box(compiled.compile_stats());
+    });
+    let execute = measure_phase("execute", iterations, || {
+        let mut state = seeded_state_for(scenario);
+        let outcome = execute_benchmark(rt, &compiled, &mut state, &host, &mut scratch, &projected);
+        expect_finished(outcome);
+    });
+
+    vec![parse, link, compile, execute]
+}
+
+fn measure_phase(
+    name: &'static str,
+    iterations: usize,
+    mut run: impl FnMut(),
+) -> PhaseBreakdownMetric {
+    reset_alloc_counters();
+    let started = Instant::now();
+    for _ in 0..iterations {
+        run();
+    }
+    let elapsed = started.elapsed();
+    let allocs = alloc_snapshot();
+    PhaseBreakdownMetric {
+        name,
+        ns_per_iter: elapsed.as_nanos() as f64 / iterations as f64,
+        allocations_per_iter: allocs.allocations as f64 / iterations as f64,
+        allocated_bytes_per_iter: allocs.allocated_bytes as f64 / iterations as f64,
     }
 }
 
@@ -352,8 +480,9 @@ fn parse_mode(value: &str) -> Mode {
         "compiled_process_cache" => Mode::CompiledProcessCache,
         "compiled_program_cache" => Mode::CompiledProgramCache,
         "linked_program_cache" => Mode::LinkedProgramCache,
+        "phase_breakdown" => Mode::PhaseBreakdown,
         other => panic!(
-            "unknown mode `{other}`; expected one_shot, prewarmed_one_shot, link_artifact, compiled_execute, snapshot, artifact_roundtrip, compiled_process_cache, compiled_program_cache, or linked_program_cache"
+            "unknown mode `{other}`; expected one_shot, prewarmed_one_shot, link_artifact, compiled_execute, snapshot, artifact_roundtrip, compiled_process_cache, compiled_program_cache, linked_program_cache, or phase_breakdown"
         ),
     }
 }

@@ -18,8 +18,8 @@ mod engine;
 mod model;
 mod pareto;
 
-pub mod clbench;
 pub mod strategies;
+pub mod toybench;
 
 mod sqlite_store;
 pub use sqlite_store::SqliteHarnessStore;
@@ -582,8 +582,8 @@ mod tests {
     }
 
     #[test]
-    fn clbench_seed_candidate_exposes_only_mutable_clbench_components() {
-        let candidate = clbench::ClbenchProject::seed_candidate_static();
+    fn toybench_seed_candidate_exposes_only_mutable_toybench_components() {
+        let candidate = toybench::ToybenchProject::seed_candidate_static();
         let keys = candidate
             .mutable_components
             .keys()
@@ -593,9 +593,9 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                clbench::MEMORY_GUIDANCE_COMPONENT,
-                clbench::PROMPT_TEMPLATE_COMPONENT,
-                clbench::USER_DIRECTIVE_COMPONENT
+                toybench::MEMORY_GUIDANCE_COMPONENT,
+                toybench::PROMPT_TEMPLATE_COMPONENT,
+                toybench::USER_DIRECTIVE_COMPONENT
             ]
         );
         assert!(

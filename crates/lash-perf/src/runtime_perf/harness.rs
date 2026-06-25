@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
     BENCHMARK_MAIL_RECEIVED_SOURCE_TYPE, BenchmarkEchoTool, BenchmarkLargeToolCatalog,
-    BenchmarkWorkbenchMailTool, benchmark_provider, benchmark_stream_profile,
+    BenchmarkObliqueTools, BenchmarkWorkbenchMailTool, benchmark_provider,
+    benchmark_stream_profile,
 };
 use super::scenarios::{ExecutionMode, RuntimePerfScenario};
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
@@ -526,11 +527,20 @@ pub(crate) async fn build_runtime_with_store(
     if matches!(scenario, RuntimePerfScenario::RlmLlmQuery) {
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
     }
-    if matches!(scenario, RuntimePerfScenario::RlmSubagentSpawn) {
+    if matches!(
+        scenario,
+        RuntimePerfScenario::RlmSubagentSpawn | RuntimePerfScenario::RlmObliqueStackMix
+    ) {
         plugin_stack.push(Arc::new(lash_subagents::SubagentsPluginFactory::new(
             Arc::new(lash_subagents::CapabilityRegistry::new().with(Arc::new(
                 lash_subagents::StaticCapability::new("default", lash_core::SessionSpec::inherit()),
             ))),
+        )));
+    }
+    if matches!(scenario, RuntimePerfScenario::RlmObliqueStackMix) {
+        plugin_stack.push(Arc::new(StaticPluginFactory::new(
+            "runtime_perf_oblique_tools",
+            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkObliqueTools)),
         )));
     }
     if matches!(
@@ -954,6 +964,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
+        RuntimePerfScenario::RlmObliqueStackMix => format!(
+            "Turn {} in RLM mode. Exercise the OBLIQ-style search, subagent, live-handle, direct judge, trace, and large print paths, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
         RuntimePerfScenario::RlmToolCalls => format!(
             "Turn {} in RLM mode. Exercise the benchmark_echo tool path and reply with exactly: {}",
             turn_index + 1,
@@ -1108,6 +1126,10 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::TraceJsonlExtended => format!(
             "Turn {} in extended JSONL trace benchmark mode. Run the Lashlang block and submit exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::QueuedWorkClaimStress => format!(
+            "Turn {} in queued-work claim stress benchmark mode. Claim, renew, complete, and verify queued work.",
             turn_index + 1
         ),
     }

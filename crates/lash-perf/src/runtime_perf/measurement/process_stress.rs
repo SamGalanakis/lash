@@ -330,6 +330,7 @@ async fn run_once_process_list_stress(chat_turns: usize) -> anyhow::Result<Runti
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),

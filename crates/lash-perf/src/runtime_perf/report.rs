@@ -11,6 +11,7 @@ use crate::perf_support::metrics::{
 };
 use crate::perf_support::paths;
 use crate::perf_support::report as report_support;
+use crate::perf_support::stack::{DEFAULT_STACK_BUDGET_BYTES, StackProfile};
 use crate::perf_support::time::round3;
 
 use super::measurement::*;
@@ -24,6 +25,7 @@ pub(crate) struct RuntimePerfReport {
     runs: usize,
     chat_turns: usize,
     worker_stack_bytes: usize,
+    stack_profile: StackProfile,
     scenarios: Vec<String>,
     dhat_out: Option<PathBuf>,
     results: Vec<RuntimePerfRunResult>,
@@ -66,6 +68,7 @@ pub async fn run_cli(
     let scenarios = resolve_scenarios(&scenario_filters)?;
     let runs = runs.max(1);
     let chat_turns = chat_turns.max(1);
+    let stack_profile = stack_profile(worker_stack_bytes);
 
     for _ in 0..warmups {
         for scenario in &scenarios {
@@ -86,12 +89,14 @@ pub async fn run_cli(
     let mut results = Vec::with_capacity(runs * scenarios.len());
     for _ in 0..runs {
         for scenario in &scenarios {
-            results.push(run_once(*scenario, chat_turns).await?);
+            let mut result = run_once(*scenario, chat_turns).await?;
+            result.stack_profile = Some(stack_profile.clone());
+            results.push(result);
         }
     }
     dhat::finish_dhat_profiler(profiler);
 
-    let summary = summarize(&results, &scenarios, chat_turns);
+    let summary = summarize(&results, &scenarios, chat_turns, &stack_profile);
     let budget_results = evaluate_budgets(&summary, &scenarios);
     let report = RuntimePerfReport {
         created_at: Utc::now().to_rfc3339(),
@@ -100,6 +105,7 @@ pub async fn run_cli(
         runs,
         chat_turns,
         worker_stack_bytes,
+        stack_profile,
         scenarios: scenarios
             .iter()
             .map(|scenario| scenario.name().to_string())
@@ -118,6 +124,7 @@ pub async fn run_cli(
             "out": out_path,
             "dhat_out": report.dhat_out,
             "worker_stack_bytes": report.worker_stack_bytes,
+            "stack_profile": report.stack_profile,
             "summary": report.summary,
             "budget_results": report.budget_results,
         }))?
@@ -158,6 +165,10 @@ fn resolve_dhat_output_path(
     dhat::resolve_dhat_output_path(enable_dhat, report_out, dhat_out, "runtime-perf")
 }
 
+fn stack_profile(worker_stack_bytes: usize) -> StackProfile {
+    StackProfile::capture(Some(worker_stack_bytes), Some(DEFAULT_STACK_BUDGET_BYTES))
+}
+
 fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<RuntimePerfScenario>> {
     report_support::resolve_named_scenarios(
         filters,
@@ -172,6 +183,7 @@ fn summarize(
     results: &[RuntimePerfRunResult],
     scenarios: &[RuntimePerfScenario],
     chat_turns: usize,
+    stack_profile: &StackProfile,
 ) -> Vec<RuntimePerfScenarioSummary> {
     scenarios
         .iter()
@@ -187,6 +199,7 @@ fn summarize(
                 scenario: scenario.name().to_string(),
                 runs: matching.len(),
                 chat_turns,
+                stack_profile: stack_profile.clone(),
                 build_runtime_ms: summarize_metric(
                     matching
                         .iter()
@@ -450,6 +463,20 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "process_list_stress.render_live_json",
             "process_list_stress.render_all_json",
         ],
+        RuntimePerfScenario::QueuedWorkClaimStress => &[
+            "queued_work.claim_session_lease",
+            "queued_work.enqueue_mixed_batch",
+            "queued_work.claim_session_command",
+            "queued_work.complete_session_command",
+            "queued_work.claim_join_turn_work",
+            "queued_work.renew_join_claim",
+            "queued_work.abandon_join_claim",
+            "queued_work.reclaim_by_batch_ids",
+            "queued_work.complete_join_turn_work",
+            "queued_work.claim_exclusive_turn_work",
+            "queued_work.complete_exclusive_turn_work",
+            "queued_work.list_pending",
+        ],
         RuntimePerfScenario::TurnCheckpoint => &[
             "standard_llm_checkpoint",
             "standard_parallel_tools_checkpoint",
@@ -500,6 +527,29 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "rlm_lashlang.compile_link",
             "rlm_lashlang.execute",
             "rlm_lashlang.print_project",
+        ],
+        RuntimePerfScenario::RlmObliqueStackMix => &[
+            "context_transform",
+            "before_turn_hooks",
+            "prompt_build",
+            "effect_loop",
+            "finalize_turn",
+            "persist_turn",
+            "final_commit",
+            "post_persist_hooks",
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.execute",
+            "rlm_lashlang.print_project",
+            "rlm_process.prepare_start",
+            "rlm_process.start",
+            "rlm_process.await_handle",
+            "process.await_handle",
+            "rlm_process.load_artifact",
+            "rlm_process.resolve_environment",
+            "rlm_process.compile",
+            "rlm_process.build_context",
+            "rlm_process.execute",
+            "rlm_process.shutdown",
         ],
         RuntimePerfScenario::RlmStreamedPairedLashlang => &[
             "context_transform",
@@ -558,6 +608,7 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
         RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
         RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 1_000_000_000.0,
+        RuntimePerfScenario::RlmObliqueStackMix => 1_500_000_000.0,
         RuntimePerfScenario::RlmStreamedPairedLashlang => 128_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 128_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
@@ -574,6 +625,7 @@ fn steady_state_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 128_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 750_000_000.0,
+        RuntimePerfScenario::RlmObliqueStackMix => 1_000_000_000.0,
         RuntimePerfScenario::RlmStreamedPairedLashlang => 64_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 96_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
@@ -597,9 +649,9 @@ fn wall_clock_budget_ms(scenario: RuntimePerfScenario) -> f64 {
         RuntimePerfScenario::RlmAsyncToolCompletion => 1_000.0,
         RuntimePerfScenario::RlmTriggerMailPipeline => 2_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 2_000.0,
-        RuntimePerfScenario::ToolDiscoverySearch | RuntimePerfScenario::RlmLargeToolCatalog => {
-            20_000.0
-        }
+        RuntimePerfScenario::ToolDiscoverySearch
+        | RuntimePerfScenario::RlmLargeToolCatalog
+        | RuntimePerfScenario::RlmObliqueStackMix => 20_000.0,
         RuntimePerfScenario::LiveReplayPressure => 5_000.0,
         _ => 10_000.0,
     }
@@ -857,6 +909,34 @@ mod tests {
             steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmLargePrint)
                 <= 750_000_000.0
         );
+    }
+
+    #[test]
+    fn rlm_oblique_stack_mix_requires_stack_sensitive_phase_metrics() {
+        let phases = required_phases(RuntimePerfScenario::RlmObliqueStackMix);
+        for expected in [
+            "rlm_lashlang.compile_link",
+            "rlm_lashlang.execute",
+            "rlm_lashlang.print_project",
+            "rlm_process.prepare_start",
+            "rlm_process.start",
+            "rlm_process.await_handle",
+            "rlm_process.execute",
+            "process.await_handle",
+        ] {
+            assert!(
+                phases.contains(&expected),
+                "missing required phase {expected}"
+            );
+        }
+        assert!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmObliqueStackMix) <= 1_500_000_000.0
+        );
+        assert!(
+            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmObliqueStackMix)
+                <= 1_000_000_000.0
+        );
+        assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmObliqueStackMix) <= 20_000.0);
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use super::*;
 
-pub const MEMORY_GUIDANCE_COMPONENT: &str = "clbench.memory_guidance";
-pub const PROMPT_TEMPLATE_COMPONENT: &str = "clbench.prompt_template";
-pub const USER_DIRECTIVE_COMPONENT: &str = "clbench.user_directive";
+pub const MEMORY_GUIDANCE_COMPONENT: &str = "toybench.memory_guidance";
+pub const PROMPT_TEMPLATE_COMPONENT: &str = "toybench.prompt_template";
+pub const USER_DIRECTIVE_COMPONENT: &str = "toybench.user_directive";
 
-pub const CLBENCH_MEMORY_GUIDANCE: &str = r#"Use your persistent RLM REPL as memory. The following globals are bound for this turn:
+pub const TOYBENCH_MEMORY_GUIDANCE: &str = r#"Use your persistent RLM REPL as memory. The following globals are bound for this turn:
 
 - `iteration: int` — current benchmark iteration
 - `current_query: str` — the task this turn must answer
@@ -36,7 +36,7 @@ submit answer
 pub const DEFAULT_USER_DIRECTIVE: &str = "Choose the next benchmark action.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ClbenchConfig {
+pub struct ToybenchConfig {
     #[serde(default = "default_experiment_id")]
     pub experiment_id: String,
     #[serde(default)]
@@ -48,16 +48,16 @@ pub struct ClbenchConfig {
 }
 
 fn default_experiment_id() -> String {
-    "clbench".to_string()
+    "toybench".to_string()
 }
 
 #[derive(Clone, Debug)]
-pub struct ClbenchProject {
-    config: ClbenchConfig,
+pub struct ToybenchProject {
+    config: ToybenchConfig,
 }
 
-impl ClbenchProject {
-    pub fn new(config: ClbenchConfig) -> Self {
+impl ToybenchProject {
+    pub fn new(config: ToybenchConfig) -> Self {
         Self { config }
     }
 
@@ -75,13 +75,13 @@ impl ClbenchProject {
                     "list_process_handles"
                 ]),
             )]),
-            metadata: BTreeMap::from([("project".to_string(), json!("clbench"))]),
+            metadata: BTreeMap::from([("project".to_string(), json!("toybench"))]),
         }
         .with_component(MutableComponent {
             id: MEMORY_GUIDANCE_COMPONENT.to_string(),
-            description: Some("CLBench-specific persistent memory guidance".to_string()),
+            description: Some("Toybench persistent memory guidance".to_string()),
             value: ComponentValue::Text {
-                text: CLBENCH_MEMORY_GUIDANCE.to_string(),
+                text: TOYBENCH_MEMORY_GUIDANCE.to_string(),
             },
             constraints: ComponentConstraints {
                 max_chars: Some(8_000),
@@ -106,19 +106,19 @@ impl ClbenchProject {
         .with_component(MutableComponent {
             id: PROMPT_TEMPLATE_COMPONENT.to_string(),
             description: Some(
-                "CLBench-specific prompt-template section layout and static text".to_string(),
+                "Toybench prompt-template section layout and static text".to_string(),
             ),
             value: ComponentValue::PromptTemplate {
-                template: clbench_prompt_template(CLBENCH_MEMORY_GUIDANCE),
+                template: toybench_prompt_template(TOYBENCH_MEMORY_GUIDANCE),
             },
             constraints: ComponentConstraints {
-                preserve_terms: vec!["Continual Memory".to_string(), "Execution".to_string()],
+                preserve_terms: vec!["Toy Memory".to_string(), "Execution".to_string()],
                 ..Default::default()
             },
         })
         .with_component(MutableComponent {
             id: USER_DIRECTIVE_COMPONENT.to_string(),
-            description: Some("Per-turn CLBench next-action directive".to_string()),
+            description: Some("Per-turn toybench next-action directive".to_string()),
             value: ComponentValue::Text {
                 text: DEFAULT_USER_DIRECTIVE.to_string(),
             },
@@ -158,7 +158,7 @@ impl ClbenchProject {
 }
 
 #[async_trait]
-impl HarnessProject for ClbenchProject {
+impl HarnessProject for ToybenchProject {
     async fn seed_candidate(&self) -> Result<Candidate> {
         Ok(Self::seed_candidate_static())
     }
@@ -234,7 +234,7 @@ impl HarnessProject for ClbenchProject {
             records: vec![TraceRecord::new(
                 context,
                 TraceEvent::TurnStarted {
-                    metadata: BTreeMap::from([("project".to_string(), json!("clbench"))]),
+                    metadata: BTreeMap::from([("project".to_string(), json!("toybench"))]),
                 },
             )],
         };
@@ -281,10 +281,10 @@ impl HarnessProject for ClbenchProject {
     }
 }
 
-pub fn clbench_prompt_template(memory_guidance: &str) -> PromptTemplate {
+pub fn toybench_prompt_template(memory_guidance: &str) -> PromptTemplate {
     PromptTemplate::new(vec![
         PromptTemplateSection::untitled(vec![PromptTemplateEntry::text(
-            "You are being evaluated by Continual Learning Bench, which tests whether an agent improves from feedback across sequential task instances.",
+            "You are being evaluated by Toy Bench, which tests whether an agent improves from feedback across sequential task instances.",
         )]),
         PromptTemplateSection::titled(
             "Execution",
@@ -294,7 +294,7 @@ pub fn clbench_prompt_template(memory_guidance: &str) -> PromptTemplate {
             ],
         ),
         PromptTemplateSection::titled(
-            "Continual Memory",
+            "Toy Memory",
             vec![PromptTemplateEntry::text(memory_guidance)],
         ),
         PromptTemplateSection::titled(

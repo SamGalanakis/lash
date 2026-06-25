@@ -141,6 +141,7 @@ async fn run_once_turn_checkpoint(chat_turns: usize) -> anyhow::Result<RuntimePe
     Ok(RuntimePerfRunResult {
         scenario: RuntimePerfScenario::TurnCheckpoint.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),
@@ -606,7 +607,9 @@ fn assert_restored_exec(
     expected_code: &str,
 ) -> anyhow::Result<()> {
     match next_checkpoint_effect(machine) {
-        Some(Effect::ExecCode { id, code, .. }) if id == expected_id && code == expected_code => Ok(()),
+        Some(Effect::ExecCode { id, code, .. }) if id == expected_id && code == expected_code => {
+            Ok(())
+        }
         Some(_) => anyhow::bail!("restored checkpoint did not replay matching ExecCode"),
         None => anyhow::bail!("restored checkpoint had no ExecCode"),
     }
@@ -747,6 +750,7 @@ pub(crate) async fn run_once_embed(
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),

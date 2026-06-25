@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+use lash_perf::perf_support::stack::StackProfile;
 use lash_perf::perf_support::time::elapsed_ms;
 
 use super::export_cases::run_html_export_once;
@@ -15,6 +16,7 @@ use super::workloads::run_slow_snapshot_once;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UiPerfRunResult {
+    pub(crate) stack_profile: Option<StackProfile>,
     pub(crate) build_case_ms: f64,
     pub(crate) total_ms: f64,
     pub(crate) total_blocks: usize,
@@ -26,6 +28,7 @@ pub(crate) struct UiPerfRunResult {
 impl UiPerfRunResult {
     pub(crate) fn new(started: Instant) -> Self {
         Self {
+            stack_profile: None,
             build_case_ms: 0.0,
             total_ms: elapsed_ms(started),
             total_blocks: 0,

@@ -134,6 +134,9 @@ pub(crate) async fn run_once(
         RuntimePerfScenario::ProcessListStress => {
             return run_once_process_list_stress(chat_turns).await;
         }
+        RuntimePerfScenario::QueuedWorkClaimStress => {
+            return run_once_queued_work_claim_stress(chat_turns).await;
+        }
         RuntimePerfScenario::EmbedStandard | RuntimePerfScenario::EmbedRlm => {
             return run_once_embed(scenario, chat_turns).await;
         }
@@ -152,6 +155,7 @@ pub(crate) async fn run_once(
         | RuntimePerfScenario::RlmLargePrint
         | RuntimePerfScenario::RlmStreamedPairedLashlang
         | RuntimePerfScenario::RlmLargeToolCatalog
+        | RuntimePerfScenario::RlmObliqueStackMix
         | RuntimePerfScenario::ObservationalMemory
         | RuntimePerfScenario::ObservationalMemoryMaintenance
         | RuntimePerfScenario::OpenAiCompatStream
@@ -173,9 +177,12 @@ pub(crate) async fn run_once(
     } else {
         None
     };
-    let lashlang_trace_root = if matches!(scenario, RuntimePerfScenario::RlmTriggerMailPipeline) {
+    let lashlang_trace_root = if matches!(
+        scenario,
+        RuntimePerfScenario::RlmTriggerMailPipeline | RuntimePerfScenario::RlmObliqueStackMix
+    ) {
         Some(make_temp_bench_dir(
-            "lash-runtime-perf-rlm-trigger-mail-pipeline",
+            format!("lash-runtime-perf-{}", scenario.name()).as_str(),
         )?)
     } else {
         None
@@ -183,7 +190,8 @@ pub(crate) async fn run_once(
     let trace_config = lashlang_trace_root
         .as_ref()
         .map(|root| RuntimePerfTraceConfig {
-            trace_jsonl_path: None,
+            trace_jsonl_path: matches!(scenario, RuntimePerfScenario::RlmObliqueStackMix)
+                .then(|| root.join("trace.jsonl")),
             lashlang_execution_jsonl_path: Some(root.join("lashlang-execution.jsonl")),
             trace_level: lash::tracing::TraceLevel::Extended,
         });
@@ -419,6 +427,7 @@ pub(crate) async fn run_once(
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
         chat_turns,
+        stack_profile: None,
         build_runtime_ms,
         seed_state_ms,
         run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),

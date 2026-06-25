@@ -211,9 +211,10 @@ async fn execute_lashlang(
     env: &lashlang::ExecutionEnvironment<'_, LashlangProcessHost<'_>>,
     cancellation: CancellationToken,
 ) -> lash_core::ProcessAwaitOutput {
+    let mut execution = Box::pin(lashlang::execute(compiled.as_ref(), state, env));
     tokio::select! {
         _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process was cancelled"),
-        result = lashlang::execute(compiled.as_ref(), state, env) => {
+        result = execution.as_mut() => {
             if cancellation.is_cancelled() {
                 process_lashlang_cancelled("lashlang process was cancelled")
             } else {

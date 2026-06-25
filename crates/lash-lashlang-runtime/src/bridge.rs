@@ -10,7 +10,14 @@ pub fn lashlang_value_to_json(
 pub fn protocol_tool_reply_to_lashlang_value(
     reply: lash_core::ToolInvocationReply,
 ) -> Result<LashlangValue, ExecutionHostError> {
-    protocol_tool_output_to_lashlang_value(&reply.output)
+    let output = reply.output;
+    let is_success = output.is_success();
+    let value = output.into_value_for_projection();
+    if is_success {
+        Ok(lashlang::from_json(value))
+    } else {
+        Err(ExecutionHostError::new(json_error_message(value)))
+    }
 }
 
 pub fn protocol_tool_output_to_lashlang_value(
