@@ -46,7 +46,7 @@ summary = format(
   stats_value.seen,
   stats_value.index_count
 )
-submit summary
+finish summary
 "#
         }
         Scenario::LanguageHostEnvironment => {
@@ -145,7 +145,7 @@ validated = validate(
   },
   Payload
 )
-submit {
+finish {
   direct: direct,
   awaited: awaited,
   positional: positional,
@@ -169,7 +169,7 @@ handles = {
 }
 results = await handles
 formatted = [results.alpha?, results.beta?, results.gamma?]
-submit join(formatted, ",")
+finish join(formatted, ",")
 "#
         }
         Scenario::DirectUnwrap => {
@@ -177,7 +177,7 @@ submit join(formatted, ",")
 first = await tools.echo({ value: "alpha" })?
 second = await tools.echo({ value: format("{0}:{1}", first, "beta") })?
 third = await tools.echo({ value: join([first, second], ",") })?
-submit third
+finish third
 "#
         }
         Scenario::GeneralFanout => {
@@ -187,7 +187,7 @@ results = await {
   left: start echo(value: format("{0}:{1}", seed[0], len(seed))),
   right: start echo(value: format("{0}:{1}", seed[1], len(seed)))
 }
-submit format("{0}|{1}", results.left?, results.right?)
+finish format("{0}|{1}", results.left?, results.right?)
 "#
         }
         Scenario::LoopControl => {
@@ -209,7 +209,7 @@ for outer in items {
   }
   kept = kept + 1
 }
-submit { kept: kept, skipped: skipped, outer: outer }
+finish { kept: kept, skipped: skipped, outer: outer }
 "#
         }
         Scenario::IndexedAssignment => {
@@ -227,7 +227,7 @@ summary = []
 for group in keys(counts) {
   summary = summary + [format("{0}:{1}", group, state.groups[group].count)]
 }
-submit { counts: counts, state: state, summary: join(summary, ",") }
+finish { counts: counts, state: state, summary: join(summary, ",") }
 "#
         }
         Scenario::ProjectedValues => {
@@ -258,7 +258,7 @@ summary = {
   body_truthy: body_truthy,
   body_text: docs.body
 }
-submit summary
+finish summary
 "#
         }
         Scenario::LargeData => {
@@ -290,7 +290,7 @@ payload = {
   odds: len(odds),
   summary: join(lines, "|")
 }
-submit validate(payload, Type {
+finish validate(payload, Type {
   count: int,
   total: int,
   groups: dict,
@@ -329,7 +329,7 @@ validated = [
   validate(r4, TypeA),
   validate(r5, TypeA)
 ]
-submit join([
+finish join([
   validated[0].value,
   validated[1].value,
   validated[2].value,
@@ -361,7 +361,7 @@ summary = {
   first: proj.items[0],
   field: proj.record.topic
 }
-submit summary
+finish summary
 "#
         }
         Scenario::TypeSystemStress => {
@@ -396,7 +396,7 @@ for i in range(0, 64) {
   }
   items = push(items, validate(raw, Item))
 }
-submit {
+finish {
   count: len(items),
   first: items[0].title,
   last: items[63].title,
@@ -410,7 +410,7 @@ missing = await tools.missing_tool({ value: "x" })
 boom = await tools.boom({ reason: "explicit" })
 ok = await tools.echo({ value: "still-running" })
 probe = await shell.exec({ cmd: "test -f Cargo.lock" })
-submit {
+finish {
   missing_ok: missing.ok,
   missing_error: contains(missing.error, "unknown tool"),
   boom_ok: boom.ok,
@@ -435,7 +435,7 @@ results = await {
   probe: probe
 }
 cancel second
-submit {
+finish {
   first: results.first.value.claim,
   second: results.second.value.claim,
   llm: results.llm.value.text,
@@ -450,7 +450,7 @@ head = slice(snap.projected.body, 0, 16)
 materialized = to_string(snap.projected.body)
 nested_head = snap.mixed.nested.projected_title
 snap.mixed.count = snap.mixed.count + 1
-submit {
+finish {
   id: snap.id,
   normal_title: snap.normal.title,
   head: head,
@@ -475,7 +475,7 @@ frame = await control.continue_as({
       started_agent: agent
     }
   })?
-submit {
+finish {
   frame_id: frame.frame_id,
   task: frame.task,
   seed_keys: frame.seed_keys,
@@ -508,7 +508,7 @@ button_handle = await triggers.register({
 })?
 registrations = await triggers.list({ target: daily_digest })?
 cancelled = await triggers.cancel({ handle: daily_handle })?
-submit {
+finish {
   daily_handle: daily_handle.id,
   button_handle: button_handle.id,
   registration_count: len(registrations),
@@ -544,7 +544,7 @@ pieces = [
   len(split(plain, "\n")),
   slice(plain, 0, 5)
 ]
-submit {
+finish {
   patch_head: slice(patch, 0, 15),
   script_head: slice(script, 0, 7),
   plain_lines: len(split(plain, "\n")),
@@ -567,7 +567,7 @@ for i in range(0, len(items), stride) {
 text = "alpha beta gamma beta delta"
 first_beta = find(text, "beta")
 second_beta = find(text, "beta", first_beta + 1)
-submit {
+finish {
   count: len(items),
   first: items[0],
   last: items[-1],
@@ -597,7 +597,7 @@ batched_results = await {
   second: start echo(value: right.value)
 }
 batched = { first: batched_results.first, second: batched_results.second, computed: computed }
-submit {
+finish {
   left: left.value,
   right: right.value,
   computed: computed,
@@ -620,7 +620,7 @@ metadata = {
   missing: img.missing
 }
 print img
-submit {
+finish {
   metadata: metadata,
   descriptor_has_type: contains(descriptor, "\"type\":\"image\""),
   descriptor_has_id: contains(descriptor, "\"id\":\"img-1\""),

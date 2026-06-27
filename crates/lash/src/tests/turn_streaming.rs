@@ -543,7 +543,7 @@ async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Resul
         .disable_queued_work_driver()
         .build()?;
     let session = core.session("queued-turn-run").open().await?;
-    let receipt = session
+    session
         .enqueue(TurnInput::text("queued work"))
         .id("queued-request")
         .send()
@@ -551,7 +551,6 @@ async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Resul
 
     let output = session
         .queued_turn()
-        .batch_ids([receipt.batch_id.clone()])
         .run()
         .await?
         .expect("queued turn should run");
@@ -571,14 +570,13 @@ async fn queued_turn_explicit_effects_create_queue_drain_scope_internally() -> R
         .disable_queued_work_driver()
         .build()?;
     let session = core.session("queued-explicit-effects").open().await?;
-    let receipt = session
+    session
         .enqueue(TurnInput::text("queued handler"))
         .send()
         .await?;
 
     let output = session
         .queued_turn()
-        .batch_ids([receipt.batch_id])
         .drain_id("handler-drain")
         .effects(&recorder)
         .run()
@@ -1020,6 +1018,7 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let turn = tokio::spawn(async move {
         turn_session
             .turn(TurnInput::text("hello"))
+            .turn_id("queued-input-turn")
             .stream_to(turn_events.as_ref())
             .await
     });
@@ -1029,6 +1028,7 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
         .admin()
         .injection()
         .inject_turn_input(
+            "queued-input-turn",
             Some("queue-1".to_string()),
             lash_core::PluginMessage::text(lash_core::MessageRole::User, "queued follow-up"),
         )
@@ -1226,19 +1226,13 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
         .build()
         .expect("core");
     let session = core.session("cancel-queued-drain").open().await?;
-    let receipt = session
+    session
         .enqueue(TurnInput::text("hang queued"))
         .send()
         .await?;
 
     let drainer = session.clone();
-    let drain = tokio::spawn(async move {
-        drainer
-            .queued_turn()
-            .batch_ids([receipt.batch_id])
-            .run()
-            .await
-    });
+    let drain = tokio::spawn(async move { drainer.queued_turn().run().await });
     started_rx.await.expect("queued drain reached the provider");
     assert_eq!(session.cancel_running_turns(), 1);
 
@@ -1264,8 +1258,8 @@ async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
         .expect("core");
     let session = core.session("await-queued").open().await?;
     let receipt = session
-        .enqueue(TurnInput::text("queued work"))
-        .send()
+        .commands()
+        .refresh_tool_catalog("await queued work test", "await-queued-refresh")
         .await?;
 
     let waiter_session = session.clone();
@@ -1277,13 +1271,10 @@ async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     assert!(!waiter.is_finished(), "waiter resolved before any drain");
 
-    let output = session
-        .queued_turn()
-        .batch_ids([receipt.batch_id.clone()])
-        .run()
-        .await?
-        .expect("queued turn should run");
-    assert_eq!(output.assistant_message(), Some("echo: queued work"));
+    assert!(
+        session.queued_turn().run().await?.is_none(),
+        "a session-command-only drain should not produce a model turn"
+    );
 
     tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
         .await
@@ -1660,7 +1651,7 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
     assert_eq!(prose, "echo: stream");
     assert!(!events.snapshot().await.iter().any(|event| matches!(
         &event.event,
-        TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+        TurnEvent::FinalValue { .. } | TurnEvent::ToolValue { .. }
     )));
     Ok(())
 }
@@ -1718,9 +1709,9 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 #[test]
 fn rlm_streamed_lashlang_cell_uses_captured_body_when_final_text_is_raw() -> Result<()> {
     run_async_test_on_stack_budget("rlm-streamed-cell-raw-final-test", || async {
-        const RAW_FINAL: &str = "Visible before cell.\n<lashlang>\npayload = r\"\"\"```markdown\ninside\n```\"\"\"\nsubmit \"streamed raw final ok\"\n</lashlang>";
+        const RAW_FINAL: &str = "Visible before cell.\n<lashlang>\npayload = r\"\"\"```markdown\ninside\n```\"\"\"\nfinish \"streamed raw final ok\"\n</lashlang>";
         const EXPECTED_CODE: &str =
-            "payload = r\"\"\"```markdown\ninside\n```\"\"\"\nsubmit \"streamed raw final ok\"";
+            "payload = r\"\"\"```markdown\ninside\n```\"\"\"\nfinish \"streamed raw final ok\"";
 
         let provider = crate::testing::TestProvider::builder()
             .kind("stream-raw-final-test")
@@ -1734,7 +1725,7 @@ fn rlm_streamed_lashlang_cell_uses_captured_body_when_final_text_is_raw() -> Res
                     " cell.\n<lash",
                     "lang>\npayload = r\"\"\"",
                     "```markdown\ninside\n",
-                    "```\"\"\"\nsubmit ",
+                    "```\"\"\"\nfinish ",
                     "\"streamed raw final ok\"\n</lashlang>",
                 ] {
                     stream.send(LlmStreamEvent::Delta(chunk.to_string()));
@@ -1767,10 +1758,10 @@ fn rlm_streamed_lashlang_cell_uses_captured_body_when_final_text_is_raw() -> Res
 
         assert!(matches!(
             result.outcome,
-            TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+            TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
         ));
         assert_eq!(
-            result.submitted_value(),
+            result.final_value(),
             Some(&serde_json::json!("streamed raw final ok"))
         );
 
@@ -1778,7 +1769,7 @@ fn rlm_streamed_lashlang_cell_uses_captured_body_when_final_text_is_raw() -> Res
         let prose = assistant_prose(&events);
         assert_eq!(prose, "Visible before cell.\n");
         assert!(!prose.contains("<lashlang>"));
-        assert!(!prose.contains("submit"));
+        assert!(!prose.contains("finish"));
         assert!(!prose.contains("```markdown"));
 
         let code_started = events
@@ -1804,9 +1795,9 @@ fn rlm_streamed_lashlang_cell_uses_captured_body_when_final_text_is_raw() -> Res
 
         let terminal_output = events
             .iter()
-            .find(|event| matches!(&event.event, TurnEvent::SubmittedValue { .. }))
+            .find(|event| matches!(&event.event, TurnEvent::FinalValue { .. }))
             .expect("terminal output");
-        let TurnEvent::SubmittedValue { value } = &terminal_output.event else {
+        let TurnEvent::FinalValue { value } = &terminal_output.event else {
             unreachable!();
         };
         assert_eq!(value, &serde_json::json!("streamed raw final ok"));
@@ -1825,7 +1816,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![lashlang_block(
             r#"value = await tools.app_lookup({})?
-submit "done""#,
+finish "done""#,
         )]))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -1842,7 +1833,7 @@ submit "done""#,
 
     assert!(matches!(
         result.outcome,
-        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
     ));
     let events = events.snapshot().await;
     let code_started = events
@@ -1863,7 +1854,7 @@ submit "done""#,
         .expect("code completed");
     let terminal_output = events
         .iter()
-        .position(|event| matches!(&event.event, TurnEvent::SubmittedValue { .. }))
+        .position(|event| matches!(&event.event, TurnEvent::FinalValue { .. }))
         .expect("terminal output");
     assert!(code_started < tool_started);
     assert!(tool_started < tool_completed);
@@ -1932,7 +1923,7 @@ submit "done""#,
             .count(),
         read_view.messages().len()
     );
-    let TurnEvent::SubmittedValue { value } = &events[terminal_output].event else {
+    let TurnEvent::FinalValue { value } = &events[terminal_output].event else {
         unreachable!();
     };
     assert_eq!(value, &serde_json::json!("done"));
@@ -1951,7 +1942,7 @@ async fn rlm_pending_host_tool_completion_resumes_lashlang_await_inner() -> Resu
     let events = Arc::new(RecordingEvents::default());
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![lashlang_block(
-            "value = await tools.app_lookup({})?\nsubmit value",
+            "value = await tools.app_lookup({})?\nfinish value",
         )]))
         .model(mock_model_spec())
         .tools(Arc::new(PendingAppTools::new(key_tx)))
@@ -1998,17 +1989,17 @@ async fn rlm_pending_host_tool_completion_resumes_lashlang_await_inner() -> Resu
     let result = turn.await.expect("turn task")?;
     assert!(matches!(
         result.outcome,
-        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
     ));
-    assert_eq!(result.submitted_value(), Some(&payload));
+    assert_eq!(result.final_value(), Some(&payload));
     let events = events.snapshot().await;
     let terminal_output = events
         .iter()
         .find_map(|activity| match &activity.event {
-            TurnEvent::SubmittedValue { value } => Some(value),
+            TurnEvent::FinalValue { value } => Some(value),
             _ => None,
         })
-        .expect("terminal submitted value");
+        .expect("terminal final value");
     assert_eq!(terminal_output, &payload);
     Ok(())
 }
@@ -2032,7 +2023,7 @@ process lookup(tools: Tools) {
 }
 handle = start lookup(tools: tools)
 result = (await handle)?
-submit result"#,
+finish result"#,
         )]))
         .model(mock_model_spec())
         .tools(Arc::new(PendingAppTools::new(key_tx)))
@@ -2079,17 +2070,17 @@ submit result"#,
     let result = turn.await.expect("turn task")?;
     assert!(matches!(
         result.outcome,
-        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
     ));
-    assert_eq!(result.submitted_value(), Some(&payload));
+    assert_eq!(result.final_value(), Some(&payload));
     let events = events.snapshot().await;
     let terminal_output = events
         .iter()
         .find_map(|activity| match &activity.event {
-            TurnEvent::SubmittedValue { value } => Some(value),
+            TurnEvent::FinalValue { value } => Some(value),
             _ => None,
         })
-        .expect("terminal submitted value");
+        .expect("terminal final value");
     assert_eq!(terminal_output, &payload);
     Ok(())
 }
@@ -2105,7 +2096,7 @@ async fn continue_as_observation_emits_frame_switch_then_commit_inner() -> Resul
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             lashlang_block(r#"await control.continue_as({ task: "finish in a fresh frame" })?"#),
-            lashlang_block(r#"submit "done after continue_as""#),
+            lashlang_block(r#"finish "done after continue_as""#),
         ]))
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -2115,7 +2106,7 @@ async fn continue_as_observation_emits_frame_switch_then_commit_inner() -> Resul
 
     let output = session.turn(TurnInput::text("switch frames")).run().await?;
     assert_eq!(
-        output.submitted_value(),
+        output.final_value(),
         Some(&serde_json::json!("done after continue_as"))
     );
 
@@ -2241,7 +2232,7 @@ process lookup(tools: Tools) {
 }
 h = start lookup(tools: tools)
 value = await h
-submit value"#,
+finish value"#,
         )]))
         .model(mock_model_spec())
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
@@ -2281,7 +2272,7 @@ submit value"#,
     release_tx.send(()).expect("release tool provider");
     let result = turn.await.expect("turn task")?;
     assert_eq!(
-        result.submitted_value(),
+        result.final_value(),
         Some(&serde_json::json!({
             "ok": true,
             "value": { "answer": "ready" },
@@ -2311,7 +2302,7 @@ process lookup(tools: Tools) {
 }
 h = start lookup(tools: tools)
 value = await h
-submit value"#,
+finish value"#,
         )]))
         .model(mock_model_spec())
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
@@ -2364,7 +2355,7 @@ submit value"#,
 }
 
 #[tokio::test]
-async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()> {
+async fn natural_rlm_completion_emits_no_terminal_output() -> Result<()> {
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec!["done in prose"]))
         .model(mock_model_spec())
@@ -2374,7 +2365,7 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
 
     let result = session
         .turn(TurnInput::text("answer directly"))
-        .allow_prose_or_submit()?
+        .allow_prose_or_finish()?
         .stream_to(events.as_ref())
         .await?;
 
@@ -2385,7 +2376,7 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
     let events = events.snapshot().await;
     assert!(!events.iter().any(|event| matches!(
         &event.event,
-        TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+        TurnEvent::FinalValue { .. } | TurnEvent::ToolValue { .. }
     )));
     assert_eq!(assistant_prose(&events), "done in prose");
     let read_view = result.state.read_view();
@@ -2400,42 +2391,42 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
 }
 
 #[tokio::test]
-async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
+async fn finish_required_rlm_completion_emits_terminal_output() -> Result<()> {
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![lashlang_block(
-            r#"submit "done via submit""#,
+            r#"finish "done via finish""#,
         )]))
         .model(mock_model_spec())
         .build()?;
     let session = core
-        .session("rlm-submit-required-completion")
+        .session("rlm-finish-required-completion")
         .open()
         .await?;
     let events = Arc::new(RecordingEvents::default());
 
     let result = session
-        .turn(TurnInput::text("submit"))
-        .require_submit()?
+        .turn(TurnInput::text("finish"))
+        .require_finish()?
         .stream_to(events.as_ref())
         .await?;
 
     assert!(matches!(
         result.outcome,
-        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
     ));
     assert_eq!(
-        result.submitted_value(),
-        Some(&serde_json::json!("done via submit"))
+        result.final_value(),
+        Some(&serde_json::json!("done via finish"))
     );
     let events = events.snapshot().await;
     let terminal_output = events
         .iter()
-        .find(|event| matches!(&event.event, TurnEvent::SubmittedValue { .. }))
+        .find(|event| matches!(&event.event, TurnEvent::FinalValue { .. }))
         .expect("terminal output");
-    let TurnEvent::SubmittedValue { value } = &terminal_output.event else {
+    let TurnEvent::FinalValue { value } = &terminal_output.event else {
         unreachable!();
     };
-    assert_eq!(value, &serde_json::json!("done via submit"));
+    assert_eq!(value, &serde_json::json!("done via finish"));
     Ok(())
 }
 
@@ -2444,7 +2435,7 @@ async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Re
     let core = explicit_ephemeral_facets(RlmCore::builder())
         .provider(queued_text_provider(vec![
             lashlang_block("this is not valid lashlang"),
-            lashlang_block(r#"submit "recovered""#),
+            lashlang_block(r#"finish "recovered""#),
         ]))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))

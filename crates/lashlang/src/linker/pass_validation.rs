@@ -350,12 +350,8 @@ impl<'module> Linker<'module> {
     fn infer_completion(&self, expr: &Expr, scope: &mut Scope) -> Result<Completion, LinkError> {
         match expr {
             Expr::LabelAnnotated { expr, .. } => self.infer_completion(expr, scope),
-            Expr::Finish(Some(value)) => Ok(Completion {
+            Expr::Finish(value) => Ok(Completion {
                 finishes: vec![self.infer_expr_type(value, scope)?],
-                can_fallthrough: false,
-            }),
-            Expr::Finish(None) => Ok(Completion {
-                finishes: vec![TypeExpr::Null],
                 can_fallthrough: false,
             }),
             Expr::Fail(_) => Ok(Completion {
@@ -629,12 +625,10 @@ impl<'module> Linker<'module> {
             Expr::SignalRun { .. }
             | Expr::Cancel(_)
             | Expr::Print(_)
-            | Expr::Submit(_)
             | Expr::Yield(_)
             | Expr::Wake(_)
             | Expr::Fail(_) => TypeExpr::Null,
-            Expr::Finish(Some(inner)) => self.infer_expr_type(inner, scope)?,
-            Expr::Finish(None) => TypeExpr::Null,
+            Expr::Finish(inner) => self.infer_expr_type(inner, scope)?,
             Expr::BuiltinCall { name, .. } => builtin_return_type(name.as_str()),
             Expr::Field { target, field } => {
                 self.field_type(&self.infer_expr_type(target, scope)?, field, scope.span)?

@@ -206,7 +206,7 @@ pub enum TurnFinish {
     AssistantMessage {
         text: String,
     },
-    SubmittedValue {
+    FinalValue {
         value: serde_json::Value,
     },
     ToolValue {

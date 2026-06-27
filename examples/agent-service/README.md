@@ -73,7 +73,7 @@ local Docker networking needs different addresses.
 
 In Restate mode the Axum app still serves `AGENT_SERVICE_ADDR`, the same process
 also serves a Restate endpoint on `AGENT_SERVICE_RESTATE_ADDR`, and browser
-turns submit the app-specific `AgentServiceTurnWorkflow/{turn_id}/run/send`
+turns finish the app-specific `AgentServiceTurnWorkflow/{turn_id}/run/send`
 through `RESTATE_INGRESS_URL`. The endpoint also binds Lash's generic
 `LashProcessWorkflow`, backed by `RestateCoreProcessRunner` and the same
 deployment-level `processes.db`, so background process starts from a turn are
@@ -129,21 +129,21 @@ The plugin demonstrates:
 - Additive semantic streaming: thinking is shown live from
   `TurnEvent::ReasoningDelta`, assistant prose as
   `TurnEvent::AssistantProseDelta`, code/tool activity as structured cards, and
-  RLM `submit` as `TurnEvent::SubmittedValue`.
+  RLM `finish` as `TurnEvent::FinalValue`.
 - Runtime persistence is handled by `SqliteSessionStoreFactory`; each request
   opens the Lash session from the chat id and store instead of keeping runtime
   sessions in a process-global map.
 - Product persistence is app-owned: chat rows, board snapshots, reasoning, code
   blocks, tool cards, tool outbox events, and titles stay in the app database.
   The final assistant row is derived from `TurnOutput` terminal semantics,
-  preferring `submit` / tool terminal values over streamed prose.
+  preferring `finish` / tool terminal values over streamed prose.
 - The app database uses `rusqlite` on `tokio::task::spawn_blocking`, keeping the
   example dependency-light without blocking Axum worker tasks on SQLite calls.
 
-This example opts into `.require_submit()`, so the assistant's final user-facing
-text should be placed in `submit`. RLM also supports `.allow_prose_or_submit()`
+This example opts into `.require_finish()`, so the assistant's final user-facing
+text should be placed in `finish`. RLM also supports `.allow_prose_or_finish()`
 for turns where direct prose may finish without a lashlang block.
-`SubmittedValue` appears when a turn finishes through `submit`; `ToolValue`
+`FinalValue` appears when a turn finishes through `finish`; `ToolValue`
 appears when a tool terminal control finishes the turn. Prose-only completion is
 already visible through assistant prose deltas.
 
@@ -155,7 +155,7 @@ and `play_move` to `board.play` with `LashlangToolBinding`:
 <lashlang>
 board = await board.read({})?
 move = await board.play({ cell: 4 })?
-submit "I played the center."
+finish "I played the center."
 </lashlang>
 ```
 

@@ -178,7 +178,7 @@ handle = await triggers.register({
   inputs: { event: trigger.event },
   name: "inbox concierge"
 })?
-submit format("Inbox concierge registered as `{}`.", handle)
+finish format("Inbox concierge registered as `{}`.", handle)
 </lashlang>
 ```
 
@@ -206,7 +206,7 @@ handle = await triggers.register({
   name: "button watcher"
 })?
 registrations = await triggers.list({ name: "button watcher" })?
-submit format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
+finish format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
 </lashlang>
 ```
 
@@ -230,7 +230,7 @@ handle = await triggers.register({
   name: "daily_digest"
 })?
 registrations = await triggers.list({ target: daily_digest })?
-submit format("Registered daily digest `{}`. Active matching registrations: {}.", handle, len(registrations))
+finish format("Registered daily digest `{}`. Active matching registrations: {}.", handle, len(registrations))
 </lashlang>
 ```
 

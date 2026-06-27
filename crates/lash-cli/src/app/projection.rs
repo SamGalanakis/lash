@@ -2,7 +2,7 @@ use super::*;
 use crate::assistant_text::normalize_assistant_text;
 use crate::skill_prompt::strip_appended_skill_blocks;
 use lash_export::transcript::{
-    TranscriptEntryKind, projection_transcript_entries, submitted_value_display_text,
+    TranscriptEntryKind, final_value_display_text, projection_transcript_entries,
 };
 use std::collections::HashMap;
 
@@ -548,7 +548,7 @@ fn append_lashlang_step_items(
         timeline.push(UiTimelineItem::Error(error.clone()));
     }
     if let Some(final_output) = &step.final_output {
-        let _ = push_assistant_text_item(timeline, &submitted_value_display_text(final_output));
+        let _ = push_assistant_text_item(timeline, &final_value_display_text(final_output));
     }
 }
 
@@ -855,7 +855,7 @@ fn is_internal_rlm_message(message: &Message) -> bool {
         // RLM assistant conversation nodes are loop machinery. The visible
         // answer is projected from the trajectory final_output instead.
         MessageRole::Assistant => true,
-        // RLM system nodes are protocol-loop prompts, such as submit reminders
+        // RLM system nodes are protocol-loop prompts, such as finish reminders
         // injected after prose-only responses. They are instructions to the
         // model, not user-visible transcript content.
         MessageRole::System => true,

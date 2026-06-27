@@ -273,6 +273,7 @@ fn materialize_test_provider_spec(spec: &ProviderSpec) -> Result<ProviderHandle,
         .unwrap_or("rlm-subagent-smoke");
     match scenario {
         "standard-echo" => Ok(standard_echo_provider().into_handle()),
+        "standard-slow-echo" => Ok(standard_slow_echo_provider().into_handle()),
         "rlm-subagent-smoke" => Ok(rlm_subagent_smoke_provider().into_handle()),
         "rlm-workspace-smoke" => Ok(rlm_workspace_smoke_provider().into_handle()),
         "rlm-nonzero-exit-smoke" => Ok(rlm_nonzero_exit_smoke_provider().into_handle()),
@@ -309,6 +310,36 @@ fn standard_echo_provider() -> lash_core::testing::TestProvider {
 }
 
 #[cfg(feature = "test-provider")]
+fn standard_slow_echo_provider() -> lash_core::testing::TestProvider {
+    lash_core::testing::TestProvider::builder()
+        .kind("test")
+        .serialize_config(|| {
+            serde_json::json!({
+                "scenario": "standard-slow-echo",
+            })
+        })
+        .complete(|request| async move {
+            let response = if request_contains_text(&request, "queued after escape") {
+                "test-provider echo: queued after escape"
+            } else if request_contains_text(&request, "slow initial prompt") {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                "test-provider echo: slow initial prompt"
+            } else {
+                "test-provider echo: interactive prompt"
+            };
+            Ok(lash_core::LlmResponse {
+                full_text: response.to_string(),
+                parts: vec![lash_core::llm::types::LlmOutputPart::Text {
+                    text: response.to_string(),
+                    response_meta: None,
+                }],
+                ..Default::default()
+            })
+        })
+        .build()
+}
+
+#[cfg(feature = "test-provider")]
 fn rlm_subagent_smoke_provider() -> lash_core::testing::TestProvider {
     lash_core::testing::TestProvider::builder()
         .kind("test")
@@ -320,16 +351,16 @@ fn rlm_subagent_smoke_provider() -> lash_core::testing::TestProvider {
         .complete(|request| async move {
             let response = if request_contains_subagent_prompt(&request) {
                 r#"<lashlang>
-submit { value: "subagent-ok" }
+finish { value: "subagent-ok" }
 </lashlang>"#
             } else {
                 r#"<lashlang>
 result = await agents.spawn({
   capability: "explore",
-  task: "Submit `{ value: \"subagent-ok\" }` exactly.",
+  task: "Finish `{ value: \"subagent-ok\" }` exactly.",
   output: Type { value: str }
 })?
-submit result.value
+finish result.value
 </lashlang>"#
             };
             Ok(lash_core::LlmResponse {
@@ -358,9 +389,9 @@ fn rlm_workspace_smoke_provider() -> lash_core::testing::TestProvider {
 pwd = await shell.exec({ cmd: "pwd" })?
 write = await shell.exec({ cmd: "printf '%s\n' workspace-smoke-ok > qc-workspace.txt" })?
 if write.exit_code == 0 {
-  submit format("workspace-smoke-ok cwd={}", trim(pwd.output))
+  finish format("workspace-smoke-ok cwd={}", trim(pwd.output))
 } else {
-  submit format("workspace-smoke-failed exit={}", write.exit_code)
+  finish format("workspace-smoke-failed exit={}", write.exit_code)
 }
 </lashlang>"#;
             Ok(lash_core::LlmResponse {
@@ -387,7 +418,7 @@ fn rlm_nonzero_exit_smoke_provider() -> lash_core::testing::TestProvider {
         .complete(|_request| async move {
             let response = r#"<lashlang>
 result = await shell.exec({ cmd: "sh -c 'echo qc-nonzero-stderr >&2; exit 7'" })?
-submit format("nonzero-smoke-ok exit={}", result.exit_code)
+finish format("nonzero-smoke-ok exit={}", result.exit_code)
 </lashlang>"#;
             Ok(lash_core::LlmResponse {
                 full_text: response.to_string(),
@@ -414,7 +445,7 @@ fn request_contains_text(request: &lash_core::LlmRequest, needle: &str) -> bool 
 #[cfg(feature = "test-provider")]
 fn request_contains_subagent_prompt(request: &lash_core::LlmRequest) -> bool {
     request_contains_text(request, "Subagent capability: explore. Depth: 1/5.")
-        || request_contains_text(request, "Submit `{ value: \\\"subagent-ok\\\" }` exactly.")
+        || request_contains_text(request, "Finish `{ value: \\\"subagent-ok\\\" }` exactly.")
 }
 
 #[cfg(test)]

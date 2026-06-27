@@ -14,7 +14,7 @@ async fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Valu
     state.globals.insert(name.to_string(), value);
     match execute_program(&program, &mut state, &Host).await? {
         ExecutionOutcome::Finished(value) => Ok(value),
-        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Continued => panic!("expected `finish` in test program"),
         ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
@@ -369,7 +369,7 @@ async fn exec_with_global_state(
     let outcome = execute_compiled(&compile_program(&program), &mut state, &Host).await?;
     match outcome {
         ExecutionOutcome::Finished(value) => Ok((value, state)),
-        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Continued => panic!("expected `finish` in test program"),
         ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
@@ -427,7 +427,7 @@ async fn exec_with_projected(
     .await?;
     match outcome {
         ExecutionOutcome::Finished(value) => Ok((value, state)),
-        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Continued => panic!("expected `finish` in test program"),
         ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
@@ -438,7 +438,7 @@ async fn projected_list_len_and_index_are_lazy() {
     let projected = projected_list_bindings("history", Arc::clone(&list));
 
     let (value, _) = exec_with_projected(
-        "submit { n: len(history), first: history[0], missing: history[9] }",
+        "finish { n: len(history), first: history[0], missing: history[9] }",
         &projected,
     )
     .await
@@ -459,12 +459,12 @@ async fn projected_bindings_are_read_only_and_not_snapshotted() {
     let list = TestProjectedValue::new(vec![Value::String("entry".into())]);
     let projected = projected_list_bindings("history", Arc::clone(&list));
 
-    let err = exec_with_projected("history = []\nsubmit history", &projected)
+    let err = exec_with_projected("history = []\nfinish history", &projected)
         .await
         .expect_err("projected root assignment should fail");
     assert!(err.to_string().contains("read-only projected binding"));
 
-    let (_, state) = exec_with_projected("alias = history\nsubmit alias[0]", &projected)
+    let (_, state) = exec_with_projected("alias = history\nfinish alias[0]", &projected)
         .await
         .expect("alias should materialize");
     assert!(state.snapshot().globals.get("history").is_none());
@@ -490,7 +490,7 @@ async fn projected_children_can_be_lazy_inside_ordinary_records() {
     );
 
     let (value, _) = exec_with_projected(
-        "submit { title: rules.title, first_body_item: rules.body[0] }",
+        "finish { title: rules.title, first_body_item: rules.body[0] }",
         &projected,
     )
     .await
@@ -509,13 +509,13 @@ async fn projected_children_can_be_lazy_inside_ordinary_records() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn print_projected_leaves_projection_to_host_and_submit_materializes() {
+async fn print_projected_leaves_projection_to_host_and_finish_materializes() {
     let list = TestProjectedValue::new(vec![Value::String("entry".into())]);
     let projected = projected_list_bindings("history", Arc::clone(&list));
 
-    let (value, _) = exec_with_projected("print history\nsubmit history", &projected)
+    let (value, _) = exec_with_projected("print history\nfinish history", &projected)
         .await
-        .expect("projected print and submit");
+        .expect("projected print and finish");
     let _ = to_json(&value);
 
     assert_eq!(list.render_count.load(Ordering::SeqCst), 0);
@@ -595,11 +595,11 @@ async fn flat_search_match_projected_text_separates_slice_snapshot_and_stringify
     let (value, state) = exec_with_global_state(
         "r",
         Value::Record(Arc::new(result_record)),
-        "m = r.matches[0]\nhead = slice(m.text, 10, 30)\nsubmit { title: m.title, head: head }",
+        "m = r.matches[0]\nhead = slice(m.text, 10, 30)\nfinish { title: m.title, head: head }",
     )
     .await
     .expect("projected search result should run");
-    let record = value.as_record().expect("submitted record");
+    let record = value.as_record().expect("final record");
     assert_eq!(record["title"], Value::String("first".into()));
     assert_eq!(record["head"], Value::String("abcdefghijklmnopqrst".into()));
     assert_eq!(text.slice_count.load(Ordering::SeqCst), 1);
@@ -621,7 +621,7 @@ async fn flat_search_match_projected_text_separates_slice_snapshot_and_stringify
     assert_eq!(text.render_count.load(Ordering::SeqCst), 0);
     assert_eq!(text.materialize_count.load(Ordering::SeqCst), 0);
 
-    let program = crate::parse("submit to_string(m.text)").expect("program should parse");
+    let program = crate::parse("finish to_string(m.text)").expect("program should parse");
     let mut state = State::from_snapshot(snapshot);
     let outcome = execute_program(&program, &mut state, &Host)
         .await
@@ -678,7 +678,7 @@ async fn projected_values_match_normal_values_for_language_operations() {
           formatted: format("ctx={}", input.context),
           text: to_string(input.record)
         }
-        submit out
+        finish out
         "#,
     )
     .await;
@@ -698,7 +698,7 @@ async fn projected_values_match_normal_values_for_ranges_validation_and_iteratio
         for i in range(input.start, input.end) {
           total = total + i
         }
-        submit {
+        finish {
           range_values: range(input.start, input.end),
           total: total,
           validated: validate(input.item, Type { name: str, version: str })
@@ -710,11 +710,11 @@ async fn projected_values_match_normal_values_for_ranges_validation_and_iteratio
 
 #[tokio::test(flavor = "current_thread")]
 async fn projected_empty_rejects_scalar_like_normal_empty() {
-    let normal = exec_with_global_state("n", Value::Number(1.0), "submit empty(n)")
+    let normal = exec_with_global_state("n", Value::Number(1.0), "finish empty(n)")
         .await
         .expect_err("normal scalar empty should fail");
     let projected = projected_value_binding("n", Value::Number(1.0));
-    let projected_err = exec_with_projected("submit empty(n)", &projected)
+    let projected_err = exec_with_projected("finish empty(n)", &projected)
         .await
         .expect_err("projected scalar empty should fail");
     assert_eq!(projected_err, normal);
@@ -960,101 +960,101 @@ async fn projected_host_descriptors_can_override_all_lazy_receiver_operations() 
     let record = from_json(serde_json::json!({ "a": 1, "b": 2 }));
     let list = from_json(serde_json::json!(["a", "b", "c"]));
 
-    assert_override_uses_hook("submit p.a", "p", record.clone(), "get_field").await;
-    assert_override_uses_hook("submit p[1]", "p", list.clone(), "get_index").await;
-    assert_override_uses_hook("submit len(p)", "p", list.clone(), "len").await;
-    assert_override_uses_hook("submit empty(p)", "p", list.clone(), "empty").await;
-    assert_override_uses_hook("submit keys(p)", "p", record.clone(), "keys").await;
-    assert_override_uses_hook("submit values(p)", "p", record.clone(), "values").await;
-    assert_override_uses_hook(r#"submit contains(p, "b")"#, "p", list.clone(), "contains").await;
+    assert_override_uses_hook("finish p.a", "p", record.clone(), "get_field").await;
+    assert_override_uses_hook("finish p[1]", "p", list.clone(), "get_index").await;
+    assert_override_uses_hook("finish len(p)", "p", list.clone(), "len").await;
+    assert_override_uses_hook("finish empty(p)", "p", list.clone(), "empty").await;
+    assert_override_uses_hook("finish keys(p)", "p", record.clone(), "keys").await;
+    assert_override_uses_hook("finish values(p)", "p", record.clone(), "values").await;
+    assert_override_uses_hook(r#"finish contains(p, "b")"#, "p", list.clone(), "contains").await;
     assert_override_uses_hook(
-        r#"submit find(p, "ph")"#,
+        r#"finish find(p, "ph")"#,
         "p",
         Value::String("alpha".into()),
         "find",
     )
     .await;
     assert_override_uses_hook(
-        r#"submit grep_text(p, "beta")"#,
+        r#"finish grep_text(p, "beta")"#,
         "p",
         Value::String("alpha\nbeta\n".into()),
         "grep_text",
     )
     .await;
     assert_override_uses_hook(
-        r#"submit starts_with(p, "al")"#,
+        r#"finish starts_with(p, "al")"#,
         "p",
         Value::String("alpha".into()),
         "starts_with",
     )
     .await;
     assert_override_uses_hook(
-        r#"submit ends_with(p, "ha")"#,
+        r#"finish ends_with(p, "ha")"#,
         "p",
         Value::String("alpha".into()),
         "ends_with",
     )
     .await;
     assert_override_uses_hook(
-        r#"submit split(p, ",")"#,
+        r#"finish split(p, ",")"#,
         "p",
         Value::String("a,b".into()),
         "split",
     )
     .await;
-    assert_override_uses_hook(r#"submit join(p, "|")"#, "p", list.clone(), "join").await;
+    assert_override_uses_hook(r#"finish join(p, "|")"#, "p", list.clone(), "join").await;
     assert_override_uses_hook(
-        "submit trim(p)",
+        "finish trim(p)",
         "p",
         Value::String("  alpha  ".into()),
         "trim",
     )
     .await;
     assert_override_uses_hook(
-        "submit slice(p, 1, 3)",
+        "finish slice(p, 1, 3)",
         "p",
         Value::String("alpha".into()),
         "slice",
     )
     .await;
-    assert_override_uses_hook("submit push(p, \"d\")", "p", list, "push").await;
+    assert_override_uses_hook("finish push(p, \"d\")", "p", list, "push").await;
     assert_override_uses_hook(
-        "submit to_int(p)",
+        "finish to_int(p)",
         "p",
         Value::String("42".into()),
         "to_number",
     )
     .await;
     assert_override_uses_hook(
-        "submit to_float(p)",
+        "finish to_float(p)",
         "p",
         Value::String("42.5".into()),
         "to_number",
     )
     .await;
     assert_override_uses_hook(
-        "submit json_parse(p)",
+        "finish json_parse(p)",
         "p",
         Value::String("{\"ok\":true}".into()),
         "json_parse",
     )
     .await;
     assert_override_uses_hook(
-        "submit slice(\"abcdef\", p, null)",
+        "finish slice(\"abcdef\", p, null)",
         "p",
         Value::Number(2.0),
         "slice_bound",
     )
     .await;
-    assert_override_uses_hook("submit range(p, 4)", "p", Value::Number(1.0), "range_bound").await;
+    assert_override_uses_hook("finish range(p, 4)", "p", Value::Number(1.0), "range_bound").await;
     assert_override_uses_hook(
-        "submit range(0, p, 2)",
+        "finish range(0, p, 2)",
         "p",
         Value::Number(4.0),
         "range_bound",
     )
     .await;
-    assert_override_uses_hook("submit p ? 1 : 2", "p", Value::Number(1.0), "truthy").await;
+    assert_override_uses_hook("finish p ? 1 : 2", "p", Value::Number(1.0), "truthy").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1062,7 +1062,7 @@ async fn image_values_expose_read_only_metadata_fields() {
     let value = exec_with_global(
         "img",
         test_image(),
-        "submit [img.id, img.label, img.size, img.width, img.height, img.missing]",
+        "finish [img.id, img.label, img.size, img.width, img.height, img.missing]",
     )
     .await
     .expect("image fields should read");
@@ -1102,16 +1102,16 @@ async fn image_values_serialize_as_descriptors() {
         r#"{"height":480,"id":"img-1","label":"chart.png","size":1234,"type":"image","width":640}"#
     );
     assert_eq!(
-        exec_with_global("img", image.clone(), "submit img")
+        exec_with_global("img", image.clone(), "finish img")
             .await
-            .expect("submit image"),
+            .expect("finish image"),
         image
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn image_values_are_immutable_and_len_is_unsupported() {
-    let err = exec_with_global("img", test_image(), "img.label = \"other\"\nsubmit img")
+    let err = exec_with_global("img", test_image(), "img.label = \"other\"\nfinish img")
         .await
         .expect_err("image field assignment should fail");
     assert_eq!(
@@ -1121,7 +1121,7 @@ async fn image_values_are_immutable_and_len_is_unsupported() {
         }
     );
 
-    let err = exec_with_global("img", test_image(), "submit len(img)")
+    let err = exec_with_global("img", test_image(), "finish len(img)")
         .await
         .expect_err("len image should fail");
     assert_eq!(
@@ -1143,7 +1143,7 @@ async fn false_if_branch_and_finish_inside_loop_are_covered() {
         } else {
           out = 2
         }
-        submit out
+        finish out
         "#,
     )
     .await
@@ -1153,13 +1153,13 @@ async fn false_if_branch_and_finish_inside_loop_are_covered() {
     let value = exec(
         r#"
         for x in [1, 2] {
-          submit x
+          finish x
         }
-        submit 0
+        finish 0
         "#,
     )
     .await
-    .expect("submit inside loop should bubble out");
+    .expect("finish inside loop should bubble out");
     assert_eq!(value, Value::Number(1.0));
 }
 
@@ -1195,7 +1195,7 @@ async fn await_record_process_starts_and_joins_handles() {
                         .unwrap_or(Value::Null);
                     Ok(AbilityResult::Value(value))
                 }
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
@@ -1214,7 +1214,7 @@ async fn await_record_process_starts_and_joins_handles() {
           left: start echo(value: "a"),
           right: start echo(value: "b")
         }
-        submit [result.left?, result.right?]
+        finish [result.left?, result.right?]
         "#,
     )
     .expect("program should parse");

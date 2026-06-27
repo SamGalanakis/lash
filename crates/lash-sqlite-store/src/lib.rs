@@ -78,6 +78,7 @@ mod effect_replay;
 mod graph;
 mod leases;
 mod lifecycle;
+mod pending_turn_inputs;
 mod persistence;
 mod process_registry;
 mod queued_work;
@@ -89,6 +90,7 @@ pub use effect_replay::{
     SqliteEffectHost, SqliteEffectReplayOptions, SqliteRuntimeEffectController,
 };
 use leases::*;
+use pending_turn_inputs::*;
 use queued_work::*;
 use schema::{
     StoreBacking, apply_pragmas, ensure_effect_schema, ensure_process_schema, ensure_schema,

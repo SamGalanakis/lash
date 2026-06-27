@@ -15,7 +15,7 @@ pub(crate) fn turn_limit_final_message(message_id: String, max_turns: usize) -> 
                 1. Summary of what you accomplished\n\
                 2. List of remaining tasks not yet completed\n\
                 3. Recommended next steps\n\
-                Do NOT emit a <lashlang> block, invoke module operations, or call submit/control.continue_as."
+                Do NOT emit a <lashlang> block, invoke module operations, or call finish/control.continue_as."
             ),
             attachment: None,
             tool_call_id: None,
@@ -60,12 +60,12 @@ fn prose_message(content: String, origin: Option<lash_core::MessageOrigin>) -> M
     }
 }
 
-pub(super) fn submit_required_reminder_message(requires_schema: bool) -> Message {
+pub(super) fn finish_required_reminder_message(requires_schema: bool) -> Message {
     let id = fresh_message_id();
     let content = if requires_schema {
-        "Deliver the final answer from a paired `<lashlang>...</lashlang>` block by calling `submit <value>` with a value matching the required output schema. Plain text before the block is not delivered."
+        "Deliver the final answer from a paired `<lashlang>...</lashlang>` block by calling `finish <value>` with a value matching the required output schema. Plain text before the block is recorded only as progress."
     } else {
-        "Deliver the final answer from a paired `<lashlang>...</lashlang>` block by calling `submit <value>`. Plain text before the block is not delivered."
+        "Your prose was recorded, but this turn requires an explicit final value. Add a paired `<lashlang>...</lashlang>` block containing `finish <value>`. Use `finish null` only when null is intentional."
     };
     Message {
         id: id.clone(),
@@ -89,7 +89,7 @@ pub(super) fn submit_required_reminder_message(requires_schema: bool) -> Message
     }
 }
 
-pub(super) fn submit_schema_mismatch_message(error_text: &str) -> Message {
+pub(super) fn finish_schema_mismatch_message(error_text: &str) -> Message {
     let id = fresh_message_id();
     Message {
         id: id.clone(),
@@ -98,7 +98,33 @@ pub(super) fn submit_schema_mismatch_message(error_text: &str) -> Message {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
             content: format!(
-                "The `submit` value didn't match the required output schema:\n{error_text}\n\nFix the value and call `submit <corrected>` from another paired `<lashlang>...</lashlang>` block."
+                "The `finish` value didn't match the required output schema:\n{error_text}\n\nFix the value and call `finish <corrected>` from another paired `<lashlang>...</lashlang>` block."
+            ),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: Some(lash_core::MessageOrigin::Plugin {
+            plugin_id: "rlm_protocol".to_string(),
+            transient: false,
+        }),
+    }
+}
+
+pub(super) fn invalid_lashlang_cell_message(error_text: &str) -> Message {
+    let id = fresh_message_id();
+    Message {
+        id: id.clone(),
+        role: MessageRole::System,
+        parts: shared_parts(vec![Part {
+            id: format!("{id}.p0"),
+            kind: PartKind::Text,
+            content: format!(
+                "{error_text}\n\nReply again using exactly one paired `<lashlang>...</lashlang>` block, with no text after `</lashlang>`."
             ),
             attachment: None,
             tool_call_id: None,

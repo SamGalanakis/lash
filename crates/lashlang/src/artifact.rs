@@ -829,10 +829,9 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
         Expr::ResultUnwrap(expr) => write_unary_expr(writer, "unwrap", expr, normalizer),
         Expr::Cancel(expr) => write_unary_expr(writer, "cancel", expr, normalizer),
         Expr::Print(expr) => write_unary_expr(writer, "print", expr, normalizer),
-        Expr::Submit(expr) => write_optional_expr(writer, "submit", expr, normalizer),
         Expr::Yield(expr) => write_unary_expr(writer, "yield", expr, normalizer),
         Expr::Wake(expr) => write_unary_expr(writer, "wake", expr, normalizer),
-        Expr::Finish(expr) => write_optional_expr(writer, "finish", expr, normalizer),
+        Expr::Finish(expr) => write_unary_expr(writer, "finish", expr, normalizer),
         Expr::Fail(expr) => write_unary_expr(writer, "fail", expr, normalizer),
         Expr::BuiltinCall { name, args } => {
             writer.atom("builtin-call");
@@ -890,22 +889,6 @@ fn write_unary_expr(
 ) {
     writer.atom(tag);
     write_expr(writer, expr, normalizer);
-}
-
-fn write_optional_expr(
-    writer: &mut HashWriter,
-    tag: &'static str,
-    expr: &Option<Box<Expr>>,
-    normalizer: &NameNormalizer,
-) {
-    writer.atom(tag);
-    match expr {
-        Some(expr) => {
-            writer.atom("some");
-            write_expr(writer, expr, normalizer);
-        }
-        None => writer.atom("none"),
-    }
 }
 
 fn write_resource_ref(writer: &mut HashWriter, resource: &ResourceRefExpr) {
@@ -1416,10 +1399,8 @@ impl<'program> RequirementsCollector<'program> {
                 self.collect_expr(expr, scope);
                 Some(RequirementBinding::Value)
             }
-            Expr::Submit(expr) | Expr::Finish(expr) => {
-                if let Some(expr) = expr {
-                    self.collect_expr(expr, scope);
-                }
+            Expr::Finish(expr) => {
+                self.collect_expr(expr, scope);
                 Some(RequirementBinding::Value)
             }
             Expr::BuiltinCall { args, .. } => {

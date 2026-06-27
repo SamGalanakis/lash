@@ -341,7 +341,7 @@ impl Compiler {
                 body,
             } => self.compile_for_expr(binding, iterable, body, false),
             Expr::While { condition, body } => self.compile_while_expr(condition, body, false),
-            Expr::Submit(_) | Expr::Finish(_) | Expr::Fail(_) | Expr::Break | Expr::Continue => {
+            Expr::Finish(_) | Expr::Fail(_) | Expr::Break | Expr::Continue => {
                 self.compile_expr(expression);
             }
             expression => {
@@ -844,7 +844,6 @@ impl Compiler {
             | Expr::ResultUnwrap(_)
             | Expr::Cancel(_)
             | Expr::Print(_)
-            | Expr::Submit(_)
             | Expr::Yield(_)
             | Expr::Wake(_)
             | Expr::Finish(_)

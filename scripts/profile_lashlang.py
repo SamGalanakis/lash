@@ -227,7 +227,15 @@ def maybe_build(root: Path, debug: bool, build: bool) -> None:
 
 
 def example_path(root: Path, debug: bool, name: str) -> Path:
-    return root / "target" / ("debug" if debug else "release") / "examples" / name
+    return cargo_target_dir(root) / ("debug" if debug else "release") / "examples" / name
+
+
+def cargo_target_dir(root: Path) -> Path:
+    value = os.environ.get("CARGO_TARGET_DIR")
+    if value:
+        path = Path(value)
+        return path if path.is_absolute() else root / path
+    return root / "target"
 
 
 def run_command(root: Path, cmd: list[str]) -> str:

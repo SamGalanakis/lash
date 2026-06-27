@@ -40,7 +40,7 @@ flowchart TB
   Emit["source owner emits occurrence<br/>TriggerStore.record_occurrence (session-agnostic)"]
   Match["reserve_matching_deliveries<br/>match by source_type + source_key"]
   Start["start target process (idempotent effect)<br/>with stored registrant + env_ref"]
-  Wake["process wake → session input queue<br/>EarliestSafeBoundary"]
+  Wake["process wake → queued work<br/>EarliestSafeBoundary"]
   Turn["turn runs → commit to session graph"]
   Decl --> Reg
   Reg -.subscription.-> Match
@@ -84,7 +84,7 @@ flowchart TB
             <h2>Only The Wake Is Session-Ordered</h2>
             <p>Starting a process is safe at any time. It is independent background work. The one place a trigger occurrence touches a session's turn state is an optional <strong>wake</strong> the matched process emits.</p>
           </div>
-          <p>A trigger-started process is durable background work (lease-protected, crash-recovered through <code>DurableProcessWorker</code>); see <a href="./durability.html">durability</a>. When it has a wake target and wakes an agent, the wake is written to <em>that session's</em> input queue and delivered at <code>EarliestSafeBoundary</code>: immediately when the session is idle, at the next safe boundary while a turn runs. With no live wake target, the wake remains a process event and no delivery is materialized. Triggers are therefore a separate runtime-level ingress and never appear as queued session work themselves; only the resulting wake enters the queue. The full queued-work model is in <a href="./queued-work-ingress.md">queued-work ingress</a>.</p>
+          <p>A trigger-started process is durable background work (lease-protected, crash-recovered through <code>DurableProcessWorker</code>); see <a href="./durability.html">durability</a>. When it has a wake target and wakes an agent, the wake is written to <em>that session's</em> queued work and delivered at <code>EarliestSafeBoundary</code>: immediately when the session is idle, or at the next safe boundary while a turn runs. With no live wake target, the wake remains a process event and no delivery is materialized. Triggers are therefore a separate runtime-level ingress and never appear as queued user input themselves; only the resulting wake enters queued work. The full ingress model is in <a href="./queued-work-ingress.md">queued-work ingress</a>.</p>
         </div>
 
         <div class="section">

@@ -214,3 +214,150 @@ async fn ensure_queued_work_completion_tx(
     }
     Ok(())
 }
+
+#[derive(Clone, Debug)]
+struct PendingTurnInputRow {
+    enqueue_seq: u64,
+    input_id: String,
+    session_id: String,
+    source_key: Option<String>,
+    ingress_json: String,
+    state: lash_core::TurnInputState,
+    input_json: String,
+    enqueued_at_ms: u64,
+    claim_fencing_token: u64,
+    claim_owner: Option<LeaseOwnerIdentity>,
+    claim_token: Option<String>,
+    claim_expires_at_ms: u64,
+}
+
+fn pending_turn_input_row(row: PgRow) -> Result<PendingTurnInputRow, StoreError> {
+    let state = lash_core::TurnInputState::from_wire_str(row.get::<String, _>("state").as_str())
+        .ok_or_else(|| StoreError::Backend("invalid pending turn-input state".to_string()))?;
+    Ok(PendingTurnInputRow {
+        enqueue_seq: row.get::<i64, _>("enqueue_seq") as u64,
+        input_id: row.get("input_id"),
+        session_id: row.get("session_id"),
+        source_key: row.get("source_key"),
+        ingress_json: row.get("ingress_json"),
+        state,
+        input_json: row.get("input_json"),
+        enqueued_at_ms: row.get::<i64, _>("enqueued_at_ms") as u64,
+        claim_fencing_token: row.get::<i64, _>("claim_fencing_token") as u64,
+        claim_owner: lease_owner_from_columns(
+            row.get("claim_owner_id"),
+            row.get("claim_owner_incarnation_id"),
+            row.get("claim_owner_liveness_json"),
+        ),
+        claim_token: row.get("claim_token"),
+        claim_expires_at_ms: row.get::<i64, _>("claim_expires_at_ms") as u64,
+    })
+}
+
+fn pending_turn_input_from_row(
+    row: PendingTurnInputRow,
+) -> Result<lash_core::PendingTurnInput, StoreError> {
+    Ok(lash_core::PendingTurnInput {
+        input_id: row.input_id,
+        session_id: row.session_id,
+        enqueue_seq: row.enqueue_seq,
+        source_key: row.source_key,
+        ingress: store_decode_json(&row.ingress_json, "turn-input ingress")?,
+        state: row.state,
+        enqueued_at_ms: row.enqueued_at_ms,
+        input: store_decode_json(&row.input_json, "turn input")?,
+    })
+}
+
+async fn load_pending_turn_input(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+    input_id: &str,
+) -> Result<Option<lash_core::PendingTurnInput>, StoreError> {
+    let row = sqlx::query(
+        "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                state, input_json, enqueued_at_ms, claim_fencing_token,
+                claim_owner_id, claim_owner_incarnation_id,
+                claim_owner_liveness_json, claim_token, claim_expires_at_ms
+         FROM lash_pending_turn_inputs
+         WHERE session_id = $1 AND input_id = $2",
+    )
+    .bind(session_id)
+    .bind(input_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(store_sqlx_error)?;
+    row.map(pending_turn_input_row)
+        .transpose()?
+        .map(pending_turn_input_from_row)
+        .transpose()
+}
+
+async fn ensure_turn_input_completion_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    completed: &lash_core::TurnInputCompletion,
+) -> Result<(), StoreError> {
+    for input_id in &completed.input_ids {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1::BIGINT FROM lash_pending_turn_inputs
+             WHERE session_id = $1
+               AND input_id = $2
+               AND claim_id = $3
+               AND claim_token = $4
+             LIMIT 1",
+        )
+        .bind(&completed.session_id)
+        .bind(input_id)
+        .bind(&completed.claim_id)
+        .bind(&completed.lease_token)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        if exists.is_none() {
+            return Err(StoreError::TurnInputClaimExpired {
+                session_id: completed.session_id.clone(),
+                claim_id: completed.claim_id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct TurnInputClaimLease {
+    claim_id: String,
+    lease_token: String,
+    fencing_token: u64,
+    claimed_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+}
+
+impl TurnInputClaimLease {
+    fn derive(
+        head: &PendingTurnInputRow,
+        session_id: &str,
+        owner: &LeaseOwnerIdentity,
+        now_epoch_ms: u64,
+        lease_ttl_ms: u64,
+    ) -> Self {
+        let fencing_token = head.claim_fencing_token.saturating_add(1);
+        let claim_id = format!("tic:{}:{fencing_token}", head.enqueue_seq);
+        let lease_token = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    session_id, owner.owner_id, owner.incarnation_id, claim_id, now_epoch_ms
+                )
+                .as_bytes(),
+            )
+        );
+        Self {
+            claim_id,
+            lease_token,
+            fencing_token,
+            claimed_at_epoch_ms: now_epoch_ms,
+            expires_at_epoch_ms: now_epoch_ms.saturating_add(lease_ttl_ms),
+        }
+    }
+}

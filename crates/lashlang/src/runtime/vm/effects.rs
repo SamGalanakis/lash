@@ -27,7 +27,6 @@ pub(super) enum VmEffect {
     CancelHandle,
     Print,
     ProcessEvent(ProcessEventKind),
-    Submit,
     Finish,
     Fail,
 }
@@ -253,18 +252,6 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 self.last_value = Some(Value::Null);
                 self.stack.push(Value::Null);
             }
-            VmEffect::Submit => {
-                let value = self.pop_stack()?;
-                let value = self
-                    .host
-                    .perform(AbilityOp::Submit(value))
-                    .await
-                    .and_then(|result| result.into_value("submit"))
-                    .map_err(|err| RuntimeError::ValueError {
-                        message: format!("submit failed: {err}"),
-                    })?;
-                return Ok(Some(VmOutcome::Finished(value)));
-            }
             VmEffect::Finish => {
                 let value = self.pop_stack()?;
                 let value = self
@@ -275,7 +262,10 @@ impl<H: ExecutionHost> Vm<'_, H> {
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("finish failed: {err}"),
                     })?;
-                return Ok(Some(VmOutcome::ProcessFinished(value)));
+                return Ok(Some(match self.mode {
+                    super::control::VmMode::Foreground => VmOutcome::Finished(value),
+                    super::control::VmMode::Process => VmOutcome::ProcessFinished(value),
+                }));
             }
             VmEffect::Fail => {
                 let value = self.pop_stack()?;

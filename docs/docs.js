@@ -81,7 +81,7 @@
         {
           title: "Turns and streams",
           href: "embedding-turns.html",
-          summary: "Turn outcomes, live semantic activity, streaming sinks, usage events, and RLM submit behavior.",
+          summary: "Turn outcomes, live semantic activity, streaming sinks, usage events, and RLM finish behavior.",
           kind: "guide",
         },
         {

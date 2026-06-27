@@ -48,7 +48,7 @@ impl Compiler {
             Expr::SleepUntil(_) => self.lashlang_execution_site(expr, "sleep", "sleep until"),
             Expr::WaitSignal { .. } => self.lashlang_execution_site(expr, "wait", "wait_signal"),
             Expr::SignalRun { .. } => self.lashlang_execution_site(expr, "signal", "signal_run"),
-            Expr::Submit(_) | Expr::Finish(_) => {
+            Expr::Finish(_) => {
                 self.lashlang_execution_site(expr, "terminal", "result")
             }
             Expr::Fail(_) => self.lashlang_execution_site(expr, "terminal", "failure"),

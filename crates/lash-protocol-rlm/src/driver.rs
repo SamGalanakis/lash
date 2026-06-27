@@ -17,9 +17,9 @@ use lash_rlm_types::{RlmCreateExtras, RlmFinalAnswerFormat, RlmTermination};
 use crate::projection::rlm_protocol_event;
 use crate::rlm_support::decode_rlm_options;
 
-use history::{RlmHistoryRenderInput, build_rlm_history_messages_from_turn};
 #[cfg(test)]
 use history::render_history_messages;
+use history::{RlmHistoryRenderInput, build_rlm_history_messages_from_turn};
 
 /// Cell shared between the RLM protocol plugin's turn-prepare hook (writer)
 /// and the projector (reader). The plugin's hook captures `prompt_usage`
@@ -202,19 +202,30 @@ mod catalogue_tests {
     }
 
     #[test]
-    fn finish_finalization_prompt_defaults_to_submit_guidance() {
+    fn finish_finalization_prompt_defaults_to_natural_guidance() {
         let prompt = rlm_finalization_prompt(&RlmTermination::default());
 
-        assert!(prompt.contains("submit <value>"));
+        assert!(prompt.contains("prose-only response finishes"));
+        assert!(prompt.contains("without `finish` is progress"));
     }
 
     #[test]
-    fn prose_or_submit_finalization_prompt_allows_direct_prose() {
-        let prompt = rlm_finalization_prompt(&RlmTermination::ProseOrSubmit);
+    fn finish_required_schema_finalization_prompt_requires_value() {
+        let prompt = rlm_finalization_prompt(&RlmTermination::FinishRequired {
+            schema: Some(serde_json::json!({ "type": "object" })),
+        });
 
-        assert!(prompt.contains("Either finish your turn with prose only"));
-        assert!(prompt.contains("or use `submit` in lashlang"));
-        assert!(prompt.contains("Do not duplicate"));
+        assert!(prompt.contains("finish <value>"));
+        assert!(prompt.contains("REQUIRED OUTPUT"));
+    }
+
+    #[test]
+    fn natural_finalization_prompt_allows_direct_prose() {
+        let prompt = rlm_finalization_prompt(&RlmTermination::Natural);
+
+        assert!(prompt.contains("prose-only response finishes"));
+        assert!(prompt.contains("finish <value>"));
+        assert!(prompt.contains("raw final value"));
     }
 }
 
@@ -280,7 +291,7 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
 
 fn required_output_block(termination: &RlmTermination) -> Option<String> {
     match termination {
-        RlmTermination::SubmitRequired {
+        RlmTermination::FinishRequired {
             schema: Some(schema),
         } => Some(render_value_schema_contract(schema)),
         _ => None,
@@ -290,27 +301,35 @@ fn required_output_block(termination: &RlmTermination) -> Option<String> {
 fn final_answer_format_prompt(options: &RlmCreateExtras) -> Option<String> {
     if matches!(
         options.termination,
-        RlmTermination::SubmitRequired { schema: Some(_) }
+        RlmTermination::FinishRequired { schema: Some(_) }
     ) {
         return None;
     }
     match options.final_answer_format.as_ref()? {
         RlmFinalAnswerFormat::Markdown => Some(
-            "When using `submit`, submit a nicely formatted Markdown string, not a raw record/list/tool-result value."
-                .to_string(),
+            match options.termination {
+                RlmTermination::FinishRequired { schema: None } => {
+                    "When finishing, call `finish <value>` with a nicely formatted Markdown string, not a raw record/list/tool-result value."
+                }
+                RlmTermination::Natural => {
+                    "Write prose-only final answers as nicely formatted Markdown. If you intentionally use `finish <value>`, use a Markdown string for user-facing answers, not a raw record/list/tool-result value."
+                }
+                RlmTermination::FinishRequired { schema: Some(_) } => unreachable!(),
+            }
+            .to_string(),
         ),
         RlmFinalAnswerFormat::Custom { guidance } => {
             let guidance = guidance.trim();
             (!guidance.is_empty()).then(|| guidance.to_string())
         }
-        RlmFinalAnswerFormat::RawSubmitValue => None,
+        RlmFinalAnswerFormat::RawFinalValue => None,
     }
 }
 
 fn render_value_schema_contract(schema: &serde_json::Value) -> String {
     let input_contract = lash_core::ToolDefinition::raw(
-        "tool:submit",
-        "submit",
+        "tool:finish",
+        "finish",
         "",
         schema.clone(),
         serde_json::json!({}),
@@ -319,8 +338,8 @@ fn render_value_schema_contract(schema: &serde_json::Value) -> String {
 
     if input_contract.parameters.is_empty() {
         return lash_core::ToolDefinition::raw(
-            "tool:submit",
-            "submit",
+            "tool:finish",
+            "finish",
             "",
             lash_core::ToolDefinition::default_input_schema(),
             schema.clone(),
@@ -369,11 +388,14 @@ fn compact_doc_line(value: &serde_json::Value) -> Option<String> {
 
 fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
     match termination {
-        RlmTermination::SubmitRequired { .. } => {
-            "The turn must finish through `submit <value>`. Prose alone does not end the turn."
+        RlmTermination::FinishRequired { schema: Some(_) } => {
+            "The turn must finish through `finish <value>` in a lashlang block, and `<value>` must match the REQUIRED OUTPUT contract. Prose alone does not end the turn."
         }
-        RlmTermination::ProseOrSubmit => {
-            "Either finish your turn with prose only, without a lashlang block, or use `submit` in lashlang. Do not duplicate the submitted answer in prose."
+        RlmTermination::FinishRequired { schema: None } => {
+            "The turn must finish through `finish <value>` in a lashlang block. Prose alone does not end the turn. Use `finish null` only when null is intentional."
+        }
+        RlmTermination::Natural => {
+            "A prose-only response finishes the turn as the final answer. A lashlang block without `finish` is progress and continues the loop. Use `finish <value>` only when you intentionally need a raw final value."
         }
     }
 }
@@ -575,8 +597,7 @@ mod tests {
     #[test]
     fn long_user_message_gets_full_history_reference() {
         let projector = projector(10);
-        let history =
-            projector.format_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")]);
+        let history = projector.format_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")]);
 
         assert!(history.contains("re-print history[0].content"));
         assert!(history.contains("... (16 characters omitted) ..."));
@@ -610,7 +631,10 @@ mod tests {
         let history = projector.format_history(&[step_event(0, "print big", &output)]);
 
         assert!(history.contains("full value retained"), "{history}");
-        assert!(history.contains("re-print history[0].output[0]"), "{history}");
+        assert!(
+            history.contains("re-print history[0].output[0]"),
+            "{history}"
+        );
         // The bare, easily-misread "chars, full: <ref>" framing is gone.
         assert!(!history.contains("chars, full: history"), "{history}");
     }
@@ -628,7 +652,10 @@ mod tests {
         .to_string();
         let history = projector.format_history(&[step_event(0, "print result", &raw)]);
 
-        assert!(history.contains("re-print history[0].output[0]"), "{history}");
+        assert!(
+            history.contains("re-print history[0].output[0]"),
+            "{history}"
+        );
         let status = history.find(r#""status":"failed""#).expect("status field");
         let error = history.find(r#""error":"boom""#).expect("error field");
         let exit = history.find(r#""exit_code":2"#).expect("exit field");
@@ -832,9 +859,10 @@ mod tests {
         // The printed image rides the user observation message for the step.
         assert!(messages.iter().any(|message| {
             matches!(message.role, LlmRole::User)
-                && message.blocks.iter().any(|block| {
-                    matches!(block, LlmContentBlock::Image { attachment_idx: 0 })
-                })
+                && message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, LlmContentBlock::Image { attachment_idx: 0 }))
         }));
     }
 
@@ -920,7 +948,7 @@ mod tests {
                 turn_causes: &[],
                 max_output_chars: 1000,
                 protocol_iteration: 1,
-                finalization: "Call submit",
+                finalization: "Call finish",
                 required_output: Some(&schema_contract),
                 final_answer_format: None,
                 budget_suffix: None,
@@ -944,30 +972,30 @@ mod tests {
     #[test]
     fn final_answer_format_guidance_renders_markdown_for_unstructured_turns() {
         let guidance = final_answer_format_prompt(&RlmCreateExtras {
-            termination: RlmTermination::SubmitRequired { schema: None },
+            termination: RlmTermination::FinishRequired { schema: None },
             final_answer_format: Some(RlmFinalAnswerFormat::Markdown),
         })
         .expect("markdown guidance");
 
-        assert!(guidance.contains("Markdown string"));
+        assert!(guidance.contains("call `finish <value>` with a nicely formatted Markdown string"));
         assert!(guidance.contains("not a raw record/list/tool-result value"));
     }
 
     #[test]
     fn final_answer_format_guidance_honors_custom_text_and_raw_suppression() {
         let custom = final_answer_format_prompt(&RlmCreateExtras {
-            termination: RlmTermination::ProseOrSubmit,
+            termination: RlmTermination::Natural,
             final_answer_format: Some(RlmFinalAnswerFormat::Custom {
-                guidance: "  Submit concise release-note Markdown.  ".to_string(),
+                guidance: "  Finish concise release-note Markdown.  ".to_string(),
             }),
         })
         .expect("custom guidance");
-        assert_eq!(custom, "Submit concise release-note Markdown.");
+        assert_eq!(custom, "Finish concise release-note Markdown.");
 
         assert!(
             final_answer_format_prompt(&RlmCreateExtras {
-                termination: RlmTermination::SubmitRequired { schema: None },
-                final_answer_format: Some(RlmFinalAnswerFormat::RawSubmitValue),
+                termination: RlmTermination::FinishRequired { schema: None },
+                final_answer_format: Some(RlmFinalAnswerFormat::RawFinalValue),
             })
             .is_none()
         );
@@ -976,7 +1004,7 @@ mod tests {
     #[test]
     fn required_output_schema_suppresses_final_answer_format_guidance() {
         let guidance = final_answer_format_prompt(&RlmCreateExtras {
-            termination: RlmTermination::SubmitRequired {
+            termination: RlmTermination::FinishRequired {
                 schema: Some(serde_json::json!({ "type": "object" })),
             },
             final_answer_format: Some(RlmFinalAnswerFormat::Markdown),
@@ -1022,10 +1050,8 @@ mod tests {
     #[test]
     fn incremental_render_extends_cached_prefix_on_subsequent_calls() {
         let projector = projector(100);
-        let initial = projector.format_history(&[
-            user_event("u1", "first"),
-            step_event(0, "print 1", "1"),
-        ]);
+        let initial =
+            projector.format_history(&[user_event("u1", "first"), step_event(0, "print 1", "1")]);
         assert!(initial.contains("first"));
         assert!(initial.contains("<lashlang>\nprint 1\n</lashlang>"));
 

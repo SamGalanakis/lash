@@ -380,7 +380,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        code: "submit \"hi\"".to_string(),
+        code: "finish \"hi\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
@@ -468,7 +468,7 @@ fn rlm_trajectory_final_output_projects_as_assistant_text() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        code: "submit \"Hi!\"".to_string(),
+        code: "finish \"Hi!\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
@@ -500,6 +500,44 @@ fn rlm_trajectory_final_output_projects_as_assistant_text() {
 }
 
 #[test]
+fn rlm_trajectory_null_final_output_keeps_prose_and_suppresses_final_value() {
+    let assistant = assistant_reasoning_text_message("a1", "", "Answer in streamed prose.");
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "lashlang_step_0".to_string(),
+        protocol_iteration: 0,
+        code: "finish".to_string(),
+        output: Vec::new(),
+        images: Vec::new(),
+        error: None,
+        final_output: Some(serde_json::Value::Null),
+    };
+    let events = vec![
+        conversation_event(assistant.clone()),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        )),
+    ];
+
+    let blocks = timeline_items_from_test_read_view(
+        &events,
+        &[assistant],
+        &[],
+        &UiProjectionState::default(),
+    );
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(variants, vec!["AssistantText", "LashlangCode"]);
+
+    let assistant_texts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            UiTimelineItem::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["Answer in streamed prose."]);
+}
+
+#[test]
 fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     let user = text_message("u1", MessageRole::User, "hi");
     let assistant_reasoning = assistant_reasoning_text_message("a0", "I'll answer directly.", "");
@@ -507,7 +545,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        code: "submit \"Hi!\"".to_string(),
+        code: "finish \"Hi!\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
@@ -550,12 +588,12 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
 }
 
 #[test]
-fn finish_turn_replaces_live_submitted_value_with_projection() {
+fn finish_turn_replaces_live_final_value_with_projection() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("What time is it".into(), Vec::new());
     app.push_prepared_user_input(&turn);
     app.start_turn();
-    app.handle_turn_activity(TurnActivity::independent(TurnEvent::SubmittedValue {
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::FinalValue {
         value: serde_json::json!("Current system time: Fri May 15 11:35:52 PM CEST 2026"),
     }));
 
@@ -563,7 +601,7 @@ fn finish_turn_replaces_live_submitted_value_with_projection() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        code: "submit \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"".to_string(),
+        code: "finish \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
@@ -595,9 +633,9 @@ fn finish_turn_replaces_live_submitted_value_with_projection() {
 }
 
 #[test]
-fn submitted_value_turn_event_projects_as_assistant_text() {
+fn final_value_turn_event_projects_as_assistant_text() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.handle_turn_activity(TurnActivity::independent(TurnEvent::SubmittedValue {
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::FinalValue {
         value: serde_json::json!("**done**"),
     }));
 
@@ -605,6 +643,20 @@ fn submitted_value_turn_event_projects_as_assistant_text() {
         app.timeline.last(),
         Some(UiTimelineItem::AssistantText(text)) if text == "**done**"
     ));
+}
+
+#[test]
+fn null_final_value_turn_event_does_not_project_as_assistant_text() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::FinalValue {
+        value: serde_json::Value::Null,
+    }));
+
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|block| matches!(block, UiTimelineItem::AssistantText(_)))
+    );
 }
 
 #[test]
@@ -641,7 +693,7 @@ fn rlm_trajectory_final_output_does_not_inline_hidden_tool_call_projection() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        code: "now = await shell.exec({ cmd: \"date\" })?\nsubmit trim(now.output)".to_string(),
+        code: "now = await shell.exec({ cmd: \"date\" })?\nfinish trim(now.output)".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
@@ -672,7 +724,7 @@ fn rlm_activity_journal_projects_tool_rows_after_matching_lashlang_block() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        code: "now = await shell.exec({ cmd: \"date\" })?\nsubmit trim(now.output)".to_string(),
+        code: "now = await shell.exec({ cmd: \"date\" })?\nfinish trim(now.output)".to_string(),
         output: Vec::new(),
         images: Vec::new(),
         error: None,
@@ -736,7 +788,7 @@ fn finish_turn_from_read_view_preserves_live_lashlang_tool_activity_from_cli_jou
     app.start_turn();
     app.handle_turn_activity(TurnActivity::independent(TurnEvent::CodeBlockStarted {
         language: "lashlang".to_string(),
-        code: "now = await tools.exec_command({ cmd: \"date\" })?\nsubmit trim(now.output)"
+        code: "now = await tools.exec_command({ cmd: \"date\" })?\nfinish trim(now.output)"
             .to_string(),
         graph_key: None,
     }));
@@ -769,7 +821,7 @@ fn finish_turn_from_read_view_preserves_live_lashlang_tool_activity_from_cli_jou
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "lashlang_step_0".to_string(),
         protocol_iteration: 0,
-        code: "now = await tools.exec_command({ cmd: \"date\" })?\nsubmit trim(now.output)"
+        code: "now = await tools.exec_command({ cmd: \"date\" })?\nfinish trim(now.output)"
             .to_string(),
         output: Vec::new(),
         images: Vec::new(),
@@ -1013,7 +1065,7 @@ fn interrupted_read_view_appends_only_uncommitted_tail() {
 }
 
 #[test]
-fn interrupted_read_view_hides_rlm_submit_reminder_system_messages() {
+fn interrupted_read_view_hides_rlm_finish_reminder_system_messages() {
     let messages = vec![
         text_message("m0", MessageRole::User, "What time is it?"),
         text_message("m1", MessageRole::Assistant, "Checking the system time."),
@@ -1021,7 +1073,7 @@ fn interrupted_read_view_hides_rlm_submit_reminder_system_messages() {
             "m2",
             MessageRole::System,
             "rlm_protocol",
-            "Deliver the final answer from a paired `<lashlang>...</lashlang>` block by calling `submit <value>`. Plain text before the block is not delivered.",
+            "Your prose was recorded, but this turn requires an explicit final value. Add a paired `<lashlang>...</lashlang>` block containing `finish <value>`. Use `finish null` only when null is intentional.",
         ),
     ];
     let events = events_from_messages(&messages);
@@ -1036,9 +1088,9 @@ fn interrupted_read_view_hides_rlm_submit_reminder_system_messages() {
     assert!(
         !blocks.iter().any(|block| matches!(
             block,
-            UiTimelineItem::SystemMessage(text) if text.contains("Deliver the final answer")
+            UiTimelineItem::SystemMessage(text) if text.contains("explicit final value")
         )),
-        "RLM protocol submit reminder leaked into interrupted UI: {blocks:#?}"
+        "RLM protocol finish reminder leaked into interrupted UI: {blocks:#?}"
     );
     assert!(blocks.iter().any(|block| matches!(
         block,

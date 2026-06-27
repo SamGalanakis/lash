@@ -328,7 +328,8 @@ pub(crate) fn build_benchmark_harness(
         | UiPerfScenario::FileIndexStorm
         | UiPerfScenario::TimelineProjection
         | UiPerfScenario::ActivityProjection
-        | UiPerfScenario::HtmlExport => None,
+        | UiPerfScenario::HtmlExport
+        | UiPerfScenario::TurnInterruptSteerReconciliation => None,
     };
 
     UiPerfHarness {

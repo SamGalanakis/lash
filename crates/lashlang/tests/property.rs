@@ -29,9 +29,7 @@ impl ExecutionHost for DeterministicHost {
                     operation.operation
                 ))),
             },
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
-                Ok(AbilityResult::Value(value))
-            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -52,7 +50,7 @@ fn run_execute(
 fn finished(outcome: ExecutionOutcome) -> Value {
     match outcome {
         ExecutionOutcome::Finished(value) => value,
-        ExecutionOutcome::Continued => panic!("expected `submit`"),
+        ExecutionOutcome::Continued => panic!("expected `finish`"),
         ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
@@ -184,6 +182,7 @@ fn ident_strategy() -> impl Strategy<Value = String> {
             "if" | "else"
                 | "for"
                 | "in"
+                | "finish"
                 | "submit"
                 | "print"
                 | "call"
@@ -261,7 +260,7 @@ proptest! {
         value in gen_value_strategy()
     ) {
         let expected = value.to_value();
-        let source = format!("{ident} = {}\nsubmit {ident}\n", value.to_source());
+        let source = format!("{ident} = {}\nfinish {ident}\n", value.to_source());
         let host = DeterministicHost;
         let mut state = State::new();
 
@@ -280,7 +279,7 @@ proptest! {
         ident in ident_strategy(),
         value in gen_value_strategy()
     ) {
-        let source = format!("{ident} = {}\nsubmit {ident}\n", value.to_source());
+        let source = format!("{ident} = {}\nfinish {ident}\n", value.to_source());
         let program = parse(&source).expect("generated source should parse");
         let rendered = canonical_program_source(&program).expect("canonical source should render");
         let reparsed = parse(&rendered).expect("canonical source should parse");
@@ -315,7 +314,7 @@ proptest! {
             .iter()
             .map(|(key, value)| (key.clone(), value.to_value()))
             .collect();
-        let source = format!("result = {}\nsubmit result\n", value.to_source());
+        let source = format!("result = {}\nfinish result\n", value.to_source());
         let host = DeterministicHost;
 
         let mut fresh = State::from_snapshot(Snapshot {
@@ -342,7 +341,7 @@ proptest! {
         value in gen_value_strategy()
     ) {
         let source = format!(
-            "r = await tools.echo({{ value: {} }})\nsubmit r\n",
+            "r = await tools.echo({{ value: {} }})\nfinish r\n",
             value.to_source()
         );
         let host = DeterministicHost;
@@ -363,7 +362,7 @@ proptest! {
     ) {
         let expected = if condition { yes.to_value() } else { no.to_value() };
         let source = format!(
-            "result = {} ? {} : {}\nsubmit result\n",
+            "result = {} ? {} : {}\nfinish result\n",
             if condition { "true" } else { "false" },
             yes.to_source(),
             no.to_source()
@@ -380,7 +379,7 @@ proptest! {
     fn generated_type_literal_always_produces_valid_json_schema(
         ty in gen_type_strategy(6)
     ) {
-        let source = format!("x = {}\nsubmit x\n", ty.to_source());
+        let source = format!("x = {}\nfinish x\n", ty.to_source());
         let host = DeterministicHost;
         let mut state = State::new();
         let outcome = run_execute(&source, &mut state, &host);
@@ -437,8 +436,8 @@ fn gen_field_name() -> impl Strategy<Value = String> {
     "[a-z][a-z0-9_]{0,6}".prop_map(|s| {
         // Avoid reserved identifiers that could shadow keywords.
         const RESERVED: &[&str] = &[
-            "if", "else", "for", "in", "start", "await", "cancel", "submit", "print", "call",
-            "and", "or", "not", "true", "false", "null",
+            "if", "else", "for", "in", "start", "await", "cancel", "finish", "submit", "print",
+            "call", "and", "or", "not", "true", "false", "null",
         ];
         if RESERVED.iter().any(|r| *r == s) {
             format!("{s}_")

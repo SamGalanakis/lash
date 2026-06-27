@@ -125,7 +125,7 @@ process on_button(event: app.ButtonPressed) {
   finish event.color
 }
 source = app.button({})
-submit source
+finish source
 "#,
         environment: &environment,
         artifact_store: Some(artifact_store.as_ref()),

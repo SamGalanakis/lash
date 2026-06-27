@@ -35,6 +35,16 @@ struct InMemorySessionExecutionLease {
     expires_at_epoch_ms: u64,
 }
 
+#[derive(Clone)]
+struct InMemoryPendingTurnInput {
+    input: crate::PendingTurnInput,
+    claim_id: Option<String>,
+    claim_token: Option<String>,
+    claim_owner: Option<crate::LeaseOwnerIdentity>,
+    claim_fencing_token: u64,
+    claim_expires_at_ms: u64,
+}
+
 impl InMemorySessionExecutionLease {
     fn is_live(&self, now: u64) -> bool {
         self.lease_token.is_some() && self.expires_at_epoch_ms > now
@@ -65,6 +75,8 @@ pub struct InMemorySessionStore {
     session_execution_leases: Mutex<HashMap<String, InMemorySessionExecutionLease>>,
     queued_work: Mutex<Vec<InMemoryQueuedBatch>>,
     queued_work_next_seq: Mutex<u64>,
+    pending_turn_inputs: Mutex<Vec<InMemoryPendingTurnInput>>,
+    pending_turn_input_next_seq: Mutex<u64>,
 }
 
 impl InMemorySessionStore {
@@ -86,6 +98,8 @@ impl InMemorySessionStore {
             session_execution_leases: Mutex::new(HashMap::new()),
             queued_work: Mutex::new(Vec::new()),
             queued_work_next_seq: Mutex::new(0),
+            pending_turn_inputs: Mutex::new(Vec::new()),
+            pending_turn_input_next_seq: Mutex::new(0),
         }
     }
 
@@ -291,6 +305,99 @@ impl InMemorySessionStore {
             batches,
         }))
     }
+
+    fn claim_pending_turn_inputs_in_memory(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+        mode: crate::TurnInputClaimMode,
+    ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
+        if max_inputs == 0 {
+            return Ok(None);
+        }
+        self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        let now = self.clock.timestamp_ms();
+        let mut pending = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock pending turn input");
+        pending.sort_by_key(|entry| entry.input.enqueue_seq);
+        let claim_available = |entry: &InMemoryPendingTurnInput| {
+            entry.claim_token.is_none()
+                || entry.claim_expires_at_ms <= now
+                || entry
+                    .claim_owner
+                    .as_ref()
+                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+        };
+        let selected_indices = pending
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.input.session_id == session_id
+                    && claim_available(entry)
+                    && match &mode {
+                        crate::TurnInputClaimMode::ActiveTurn {
+                            turn_id,
+                            checkpoint,
+                        } => {
+                            entry.input.state == crate::TurnInputState::PendingActive
+                                && entry
+                                    .input
+                                    .ingress
+                                    .active_turn_id()
+                                    .is_some_and(|active| active == turn_id)
+                                && entry.input.ingress.admits_checkpoint(*checkpoint)
+                        }
+                        crate::TurnInputClaimMode::NextTurn => {
+                            entry.input.state.is_next_turn_pending()
+                        }
+                    }
+            })
+            .map(|(index, _)| index)
+            .take(max_inputs)
+            .collect::<Vec<_>>();
+        let Some(first_index) = selected_indices.first().copied() else {
+            return Ok(None);
+        };
+        let fencing_token = pending[first_index].claim_fencing_token.saturating_add(1);
+        let claim_id = format!(
+            "recording-tic:{}:{fencing_token}",
+            pending[first_index].input.enqueue_seq
+        );
+        let lease_token = format!(
+            "{}:{}:{}:{claim_id}:{now}",
+            session_id, owner.owner_id, owner.incarnation_id
+        );
+        let expires_at = now.saturating_add(lease_ttl_ms);
+        let mut inputs = Vec::new();
+        for index in selected_indices {
+            let entry = &mut pending[index];
+            entry.claim_id = Some(claim_id.clone());
+            entry.claim_token = Some(lease_token.clone());
+            entry.claim_owner = Some(owner.clone());
+            entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
+            entry.claim_expires_at_ms = expires_at;
+            if matches!(mode, crate::TurnInputClaimMode::ActiveTurn { .. }) {
+                entry.input.state = crate::TurnInputState::Accepted;
+            }
+            inputs.push(entry.input.clone());
+        }
+        Ok(Some(crate::TurnInputClaim {
+            session_id: session_id.to_string(),
+            claim_id,
+            owner: owner.clone(),
+            lease_token,
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: expires_at,
+            mode,
+            inputs,
+        }))
+    }
 }
 
 impl Default for InMemorySessionStore {
@@ -449,6 +556,56 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                     && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
                     && completed.batch_ids.contains(&entry.batch.batch_id))
             });
+        }
+        for completed in &commit.completed_turn_input_claims {
+            let mut pending = self
+                .pending_turn_inputs
+                .lock()
+                .expect("lock pending turn input");
+            let matches = pending
+                .iter()
+                .filter(|entry| {
+                    entry.input.session_id == completed.session_id
+                        && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
+                        && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
+                        && completed.input_ids.contains(&entry.input.input_id)
+                })
+                .count();
+            if matches != completed.input_ids.len() {
+                return Err(crate::store::StoreError::TurnInputClaimExpired {
+                    session_id: completed.session_id.clone(),
+                    claim_id: completed.claim_id.clone(),
+                });
+            }
+            pending.retain(|entry| {
+                !(entry.input.session_id == completed.session_id
+                    && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
+                    && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
+                    && completed.input_ids.contains(&entry.input.input_id))
+            });
+        }
+        if let Some(turn_id) = commit.interrupted_turn_input_turn_id.as_deref() {
+            let mut pending = self
+                .pending_turn_inputs
+                .lock()
+                .expect("lock pending turn input");
+            for entry in pending.iter_mut() {
+                if entry.input.session_id == commit.session_id
+                    && entry.input.state == crate::TurnInputState::PendingActive
+                    && entry
+                        .input
+                        .ingress
+                        .active_turn_id()
+                        .is_some_and(|active| active == turn_id)
+                {
+                    entry.input.state = crate::TurnInputState::DeferredNextTurn;
+                    entry.input.ingress = crate::TurnInputIngress::NextTurn;
+                    entry.claim_id = None;
+                    entry.claim_token = None;
+                    entry.claim_owner = None;
+                    entry.claim_expires_at_ms = 0;
+                }
+            }
         }
         let mut graph = self.session_graph.lock().expect("lock graph");
         let mut committed_node_ids = Vec::new();
@@ -651,6 +808,180 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         completion: &crate::SessionExecutionLeaseCompletion,
     ) -> Result<(), crate::store::StoreError> {
         self.release_session_execution_lease_in_memory(completion);
+        Ok(())
+    }
+
+    async fn enqueue_pending_turn_input(
+        &self,
+        draft: crate::PendingTurnInputDraft,
+    ) -> Result<crate::PendingTurnInput, crate::store::StoreError> {
+        let mut pending = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock pending turn input");
+        if let Some(source_key) = draft.source_key.as_deref()
+            && let Some(existing) = pending.iter().find(|entry| {
+                entry.input.session_id == draft.session_id
+                    && entry.input.source_key.as_deref() == Some(source_key)
+                    && !matches!(
+                        entry.input.state,
+                        crate::TurnInputState::Cancelled | crate::TurnInputState::Completed
+                    )
+            })
+        {
+            return Ok(existing.input.clone());
+        }
+        let mut next_seq = self
+            .pending_turn_input_next_seq
+            .lock()
+            .expect("lock pending turn input seq");
+        *next_seq = next_seq.saturating_add(1);
+        let input_id = draft
+            .input_id
+            .unwrap_or_else(|| format!("recording-ti-{next_seq}"));
+        let enqueued_at_ms = self.clock.timestamp_ms();
+        let state = match draft.ingress {
+            crate::TurnInputIngress::ActiveTurn { .. } => crate::TurnInputState::PendingActive,
+            crate::TurnInputIngress::NextTurn => crate::TurnInputState::DeferredNextTurn,
+        };
+        let stored = crate::PendingTurnInput {
+            input_id,
+            session_id: draft.session_id,
+            enqueue_seq: *next_seq,
+            source_key: draft.source_key,
+            ingress: draft.ingress,
+            state,
+            enqueued_at_ms,
+            input: draft.input,
+        };
+        pending.push(InMemoryPendingTurnInput {
+            input: stored.clone(),
+            claim_id: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_fencing_token: 0,
+            claim_expires_at_ms: 0,
+        });
+        pending.sort_by_key(|entry| entry.input.enqueue_seq);
+        Ok(stored)
+    }
+
+    async fn list_pending_turn_inputs(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::PendingTurnInput>, crate::store::StoreError> {
+        let now = self.clock.timestamp_ms();
+        let mut inputs = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock pending turn input")
+            .iter()
+            .filter(|entry| {
+                entry.input.session_id == session_id
+                    && !matches!(
+                        entry.input.state,
+                        crate::TurnInputState::Cancelled | crate::TurnInputState::Completed
+                    )
+                    && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+            })
+            .map(|entry| entry.input.clone())
+            .collect::<Vec<_>>();
+        inputs.sort_by_key(|input| input.enqueue_seq);
+        Ok(inputs)
+    }
+
+    async fn cancel_pending_turn_input(
+        &self,
+        session_id: &str,
+        input_id: &str,
+    ) -> Result<Option<crate::PendingTurnInput>, crate::store::StoreError> {
+        let now = self.clock.timestamp_ms();
+        let mut pending = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock pending turn input");
+        let Some(index) = pending.iter().position(|entry| {
+            entry.input.session_id == session_id && entry.input.input_id == input_id
+        }) else {
+            return Ok(None);
+        };
+        let entry = &pending[index];
+        if entry.claim_token.is_some() && entry.claim_expires_at_ms > now {
+            return Ok(None);
+        }
+        Ok(Some(pending.remove(index).input))
+    }
+
+    async fn claim_active_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: crate::CheckpointKind,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
+        self.claim_pending_turn_inputs_in_memory(
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            max_inputs,
+            crate::TurnInputClaimMode::ActiveTurn {
+                turn_id: turn_id.to_string(),
+                checkpoint,
+            },
+        )
+    }
+
+    async fn claim_next_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
+        self.claim_pending_turn_inputs_in_memory(
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            max_inputs,
+            crate::TurnInputClaimMode::NextTurn,
+        )
+    }
+
+    async fn abandon_turn_input_claim(
+        &self,
+        claim: &crate::TurnInputClaim,
+    ) -> Result<(), crate::store::StoreError> {
+        let mut pending = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock pending turn input");
+        for entry in pending.iter_mut() {
+            if entry.input.session_id == claim.session_id
+                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
+                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
+            {
+                if matches!(entry.input.state, crate::TurnInputState::Accepted) {
+                    match &claim.mode {
+                        crate::TurnInputClaimMode::ActiveTurn { .. } => {
+                            entry.input.state = crate::TurnInputState::PendingActive;
+                        }
+                        crate::TurnInputClaimMode::NextTurn => {
+                            entry.input.state = crate::TurnInputState::DeferredNextTurn;
+                        }
+                    }
+                }
+                entry.claim_id = None;
+                entry.claim_token = None;
+                entry.claim_owner = None;
+                entry.claim_expires_at_ms = 0;
+            }
+        }
         Ok(())
     }
 

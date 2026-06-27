@@ -11,11 +11,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import profile_cli_release_stack
+import profile_cli_stack
 import profile_runtime_stack
 
+DEFAULT_CLI_RELEASE_STACK_SCENARIOS = profile_cli_release_stack.DEFAULT_SCENARIOS
+DEFAULT_CLI_STACK_SCENARIOS = profile_cli_stack.DEFAULT_SCENARIOS
 DEFAULT_STACK_SCENARIOS = profile_runtime_stack.DEFAULT_SCENARIOS
 QUICK_STACKS = ["2m"]
 FULL_STACKS = ["64k", "128k", "256k", "320k", "512k", "1m", "2m", "8m"]
+FULL_CLI_STACKS = ["512k", "768k", "1m", "1536k", "2m", "4m", "8m"]
+FULL_CLI_RELEASE_STACKS = ["512k", "1m", "2m", "4m", "8m"]
 STACK_BUDGET_BYTES = 2 * 1024 * 1024
 
 
@@ -80,6 +86,30 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Worker stack size for the stack lane, e.g. 2m. Defaults by profile.",
+    )
+    parser.add_argument(
+        "--cli-stack-scenario",
+        action="append",
+        default=[],
+        help="CLI/UI stack-sensitivity scenario. Defaults to the UI stack guard set.",
+    )
+    parser.add_argument(
+        "--cli-stack-bytes",
+        action="append",
+        default=[],
+        help="Worker stack size for the CLI stack lane, e.g. 2m. Defaults by profile.",
+    )
+    parser.add_argument(
+        "--cli-release-stack-scenario",
+        action="append",
+        default=[],
+        help="Release-binary CLI stack scenario. Defaults to the release CLI stack set.",
+    )
+    parser.add_argument(
+        "--cli-release-stack-bytes",
+        action="append",
+        default=[],
+        help="Worker stack size for the release-binary CLI stack lane, e.g. 2m.",
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -186,7 +216,6 @@ def runtime_cmd(args: argparse.Namespace, root: Path, out: Path, *, dhat: bool =
 def stack_cmd(args: argparse.Namespace, root: Path, out: Path) -> list[str]:
     cmd = [
         *script_cmd("profile_runtime_stack.py", root),
-        "--no-build",
         f"--out={out}",
         f"--runs={args.runtime_runs if args.runtime_runs is not None else 1}",
         f"--warmups={args.runtime_warmups if args.runtime_warmups is not None else 0}",
@@ -214,6 +243,46 @@ def ui_cmd(args: argparse.Namespace, root: Path, out: Path) -> list[str]:
         cmd.extend(["--scenario", scenario])
     if args.enforce:
         cmd.append("--enforce-budgets")
+    return cmd
+
+
+def cli_stack_cmd(args: argparse.Namespace, root: Path, out: Path) -> list[str]:
+    cmd = [
+        *script_cmd("profile_cli_stack.py", root),
+        "--profile",
+        args.profile,
+        f"--out={out}",
+        f"--runs={args.ui_runs if args.ui_runs is not None else 1}",
+        f"--warmups={args.ui_warmups if args.ui_warmups is not None else 0}",
+        f"--timeout-seconds={args.timeout_seconds}",
+    ]
+    append_common_binary_args(cmd, args)
+    for feature in args.cli_cargo_feature:
+        cmd.extend(["--cargo-feature", feature])
+    for scenario in args.cli_stack_scenario or DEFAULT_CLI_STACK_SCENARIOS:
+        cmd.extend(["--scenario", scenario])
+    stacks = args.cli_stack_bytes or (QUICK_STACKS if args.profile == "quick" else FULL_CLI_STACKS)
+    for stack in stacks:
+        cmd.extend(["--stack-bytes", stack])
+    return cmd
+
+
+def cli_release_stack_cmd(args: argparse.Namespace, root: Path, out: Path) -> list[str]:
+    cmd = [
+        *script_cmd("profile_cli_release_stack.py", root),
+        f"--out={out}",
+        f"--timeout-seconds={args.timeout_seconds}",
+    ]
+    append_common_binary_args(cmd, args)
+    for feature in args.cli_cargo_feature:
+        cmd.extend(["--cargo-feature", feature])
+    for scenario in args.cli_release_stack_scenario or DEFAULT_CLI_RELEASE_STACK_SCENARIOS:
+        cmd.extend(["--scenario", scenario])
+    stacks = args.cli_release_stack_bytes or (
+        QUICK_STACKS if args.profile == "quick" else FULL_CLI_RELEASE_STACKS
+    )
+    for stack in stacks:
+        cmd.extend(["--stack-bytes", stack])
     return cmd
 
 
@@ -259,6 +328,50 @@ def failed_budget_results(report: dict[str, Any]) -> list[dict[str, Any]]:
         for item in report.get("budget_results", [])
         if isinstance(item, dict) and not item.get("passed")
     ]
+
+
+def stack_lane_build_identity_findings(
+    lane: dict[str, Any],
+    *,
+    section: str,
+    expected_release: bool,
+    expected_cargo_features: list[str],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    report = lane.get("report")
+    if not isinstance(report, dict):
+        findings.append({"kind": "stack_lane_report_missing", "section": section})
+        return findings
+    binary_metadata = report.get("binary_metadata")
+    if not isinstance(binary_metadata, dict) or not isinstance(
+        binary_metadata.get("sha256"), str
+    ):
+        findings.append({"kind": "stack_lane_binary_identity_missing", "section": section})
+    git = report.get("git")
+    if not isinstance(git, dict) or not isinstance(git.get("sha"), str):
+        findings.append({"kind": "stack_lane_git_identity_missing", "section": section})
+    if report.get("release") != expected_release:
+        findings.append(
+            {
+                "kind": "stack_lane_release_mode_mismatch",
+                "section": section,
+                "expected": expected_release,
+                "actual": report.get("release"),
+            }
+        )
+    cargo_features = report.get("cargo_features")
+    if not isinstance(cargo_features, list) or set(cargo_features) != set(
+        expected_cargo_features
+    ):
+        findings.append(
+            {
+                "kind": "stack_lane_cargo_features_mismatch",
+                "section": section,
+                "expected": sorted(expected_cargo_features),
+                "actual": sorted(cargo_features) if isinstance(cargo_features, list) else None,
+            }
+        )
+    return findings
 
 
 def stack_profile_is_measured(stack_profile: Any) -> bool:
@@ -540,7 +653,14 @@ def lashlang_report_stack_findings(report: dict[str, Any]) -> list[dict[str, Any
 
 def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
-    required_sections = ["runtime", "runtime_stack", "ui", "lashlang"]
+    required_sections = [
+        "runtime",
+        "runtime_stack",
+        "ui",
+        "cli_stack",
+        "cli_release_stack",
+        "lashlang",
+    ]
     for section in required_sections:
         value = payload.get(section)
         if not isinstance(value, dict):
@@ -556,6 +676,24 @@ def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
                     "returncode": value.get("returncode"),
                 }
             )
+
+    stack_identity_sections = ["runtime_stack", "cli_stack", "cli_release_stack"]
+    stack_git_shas = {}
+    for section in stack_identity_sections:
+        lane = payload.get(section, {})
+        report = lane.get("report", {}) if isinstance(lane, dict) else {}
+        git = report.get("git", {}) if isinstance(report, dict) else {}
+        sha = git.get("sha") if isinstance(git, dict) else None
+        if isinstance(sha, str):
+            stack_git_shas[section] = sha
+    if len(set(stack_git_shas.values())) > 1:
+        findings.append(
+            {
+                "kind": "stack_lane_git_identity_mismatch",
+                "section": "coverage",
+                "shas": stack_git_shas,
+            }
+        )
 
     runtime = payload.get("runtime", {}).get("report", {})
     expected_runtime = set(payload.get("runtime", {}).get("expected_scenarios", []))
@@ -589,7 +727,17 @@ def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
             {"kind": "lashlang_budget_failed", "section": "lashlang", "budget": budget}
         )
 
+    expected_release = bool(payload.get("release"))
     stack = payload.get("runtime_stack", {})
+    if isinstance(stack, dict):
+        findings.extend(
+            stack_lane_build_identity_findings(
+                stack,
+                section="runtime_stack",
+                expected_release=expected_release,
+                expected_cargo_features=stack.get("expected_cargo_features", []),
+            )
+        )
     first_success = stack.get("first_success_stack_bytes", {})
     expected_stack = set(stack.get("expected_scenarios", []))
     for scenario in sorted(expected_stack):
@@ -641,6 +789,112 @@ def evaluate_guard_coverage(payload: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
+    cli_stack = payload.get("cli_stack", {})
+    if isinstance(cli_stack, dict):
+        findings.extend(
+            stack_lane_build_identity_findings(
+                cli_stack,
+                section="cli_stack",
+                expected_release=expected_release,
+                expected_cargo_features=cli_stack.get("expected_cargo_features", []),
+            )
+        )
+    cli_first_success = cli_stack.get("first_success_stack_bytes", {})
+    expected_cli_stack = set(cli_stack.get("expected_scenarios", []))
+    for scenario in sorted(expected_cli_stack):
+        value = cli_first_success.get(scenario)
+        if not isinstance(value, int):
+            findings.append(
+                {
+                    "kind": "missing_cli_stack_success",
+                    "section": "cli_stack",
+                    "scenario": scenario,
+                }
+            )
+        elif value > STACK_BUDGET_BYTES:
+            findings.append(
+                {
+                    "kind": "cli_stack_budget_failed",
+                    "section": "cli_stack",
+                    "scenario": scenario,
+                    "actual": value,
+                    "budget": STACK_BUDGET_BYTES,
+                }
+            )
+    for sample in cli_stack.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        if sample.get("status") == "ok" and sample.get("stack_accounted") is not True:
+            findings.append(
+                {
+                    "kind": "cli_stack_size_not_accounted",
+                    "section": "cli_stack",
+                    "scenario": sample.get("scenario"),
+                    "stack_bytes": sample.get("stack_bytes"),
+                    "reported_worker_stack_bytes": sample.get("reported_worker_stack_bytes"),
+                }
+            )
+        reported_scenarios = sample.get("reported_scenarios")
+        scenario = sample.get("scenario")
+        if (
+            sample.get("status") == "ok"
+            and isinstance(scenario, str)
+            and (not isinstance(reported_scenarios, list) or scenario not in reported_scenarios)
+        ):
+            findings.append(
+                {
+                    "kind": "cli_stack_scenario_not_reported",
+                    "section": "cli_stack",
+                    "scenario": scenario,
+                    "stack_bytes": sample.get("stack_bytes"),
+                }
+            )
+
+    cli_release_stack = payload.get("cli_release_stack", {})
+    if isinstance(cli_release_stack, dict):
+        findings.extend(
+            stack_lane_build_identity_findings(
+                cli_release_stack,
+                section="cli_release_stack",
+                expected_release=expected_release,
+                expected_cargo_features=cli_release_stack.get("expected_cargo_features", []),
+            )
+        )
+    release_first_success = cli_release_stack.get("first_success_stack_bytes", {})
+    expected_release_stack = set(cli_release_stack.get("expected_scenarios", []))
+    for scenario in sorted(expected_release_stack):
+        value = release_first_success.get(scenario)
+        if not isinstance(value, int):
+            findings.append(
+                {
+                    "kind": "missing_cli_release_stack_success",
+                    "section": "cli_release_stack",
+                    "scenario": scenario,
+                }
+            )
+        elif value > STACK_BUDGET_BYTES:
+            findings.append(
+                {
+                    "kind": "cli_release_stack_budget_failed",
+                    "section": "cli_release_stack",
+                    "scenario": scenario,
+                    "actual": value,
+                    "budget": STACK_BUDGET_BYTES,
+                }
+            )
+    for sample in cli_release_stack.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        if sample.get("status") == "ok" and sample.get("stack_env_accounted") is not True:
+            findings.append(
+                {
+                    "kind": "cli_release_stack_env_not_accounted",
+                    "section": "cli_release_stack",
+                    "scenario": sample.get("scenario"),
+                    "stack_bytes": sample.get("stack_bytes"),
+                }
+            )
+
     return {
         "passed": not findings,
         "findings": findings,
@@ -658,6 +912,8 @@ def main() -> int:
     runtime_out = out.with_name(f"{out.stem}.runtime.json")
     stack_out = out.with_name(f"{out.stem}.runtime-stack.json")
     ui_out = out.with_name(f"{out.stem}.ui.json")
+    cli_stack_out = out.with_name(f"{out.stem}.cli-stack.json")
+    cli_release_stack_out = out.with_name(f"{out.stem}.cli-release-stack.json")
     lashlang_out = out.with_name(f"{out.stem}.lashlang.json")
 
     print("Running runtime perf lane", file=sys.stderr)
@@ -671,6 +927,17 @@ def main() -> int:
     print("Running UI perf lane", file=sys.stderr)
     ui_rc, ui_payload, _ = run_json(ui_cmd(args, root, ui_out), root)
     ui_report = load_report_file(ui_out, ui_payload)
+
+    print("Running CLI stack lane", file=sys.stderr)
+    cli_stack_rc, cli_stack_payload, _ = run_json(cli_stack_cmd(args, root, cli_stack_out), root)
+    cli_stack_report = load_report_file(cli_stack_out, cli_stack_payload)
+
+    print("Running release CLI stack lane", file=sys.stderr)
+    cli_release_stack_rc, cli_release_stack_payload, _ = run_json(
+        cli_release_stack_cmd(args, root, cli_release_stack_out),
+        root,
+    )
+    cli_release_stack_report = load_report_file(cli_release_stack_out, cli_release_stack_payload)
 
     print("Running Lashlang perf lane", file=sys.stderr)
     lashlang_rc, lashlang_payload, _ = run_json(lashlang_cmd(args, root, lashlang_out), root)
@@ -704,7 +971,9 @@ def main() -> int:
             "expected_scenarios": stack_report.get(
                 "scenarios", args.stack_scenario or DEFAULT_STACK_SCENARIOS
             ),
+            "expected_cargo_features": list(args.cargo_feature),
             "first_success_stack_bytes": stack_report.get("first_success_stack_bytes", {}),
+            "stack_budget_bytes": stack_report.get("stack_budget_bytes", STACK_BUDGET_BYTES),
             "samples": stack_report.get("samples", []),
             "report": stack_report,
         },
@@ -712,6 +981,50 @@ def main() -> int:
             "returncode": ui_rc,
             "out": str(ui_out),
             "report": ui_report,
+        },
+        "cli_stack": {
+            "returncode": cli_stack_rc,
+            "out": str(cli_stack_out),
+            "expected_scenarios": cli_stack_report.get(
+                "scenarios", args.cli_stack_scenario or DEFAULT_CLI_STACK_SCENARIOS
+            ),
+            "expected_cargo_features": [
+                "bench",
+                *args.cargo_feature,
+                *args.cli_cargo_feature,
+            ],
+            "first_success_stack_bytes": cli_stack_report.get("first_success_stack_bytes", {}),
+            "stack_budget_bytes": cli_stack_report.get(
+                "stack_budget_bytes", STACK_BUDGET_BYTES
+            ),
+            "samples": cli_stack_report.get("samples", []),
+            "report": cli_stack_report,
+        },
+        "cli_release_stack": {
+            "returncode": cli_release_stack_rc,
+            "out": str(cli_release_stack_out),
+            "expected_scenarios": cli_release_stack_report.get(
+                "scenarios",
+                args.cli_release_stack_scenario or DEFAULT_CLI_RELEASE_STACK_SCENARIOS,
+            ),
+            "expected_cargo_features": [
+                *args.cargo_feature,
+                *args.cli_cargo_feature,
+                *profile_cli_release_stack.required_features_for_scenarios(
+                    cli_release_stack_report.get(
+                        "scenarios",
+                        args.cli_release_stack_scenario or DEFAULT_CLI_RELEASE_STACK_SCENARIOS,
+                    )
+                ),
+            ],
+            "first_success_stack_bytes": cli_release_stack_report.get(
+                "first_success_stack_bytes", {}
+            ),
+            "stack_budget_bytes": cli_release_stack_report.get(
+                "stack_budget_bytes", STACK_BUDGET_BYTES
+            ),
+            "samples": cli_release_stack_report.get("samples", []),
+            "report": cli_release_stack_report,
         },
         "lashlang": {
             "returncode": lashlang_rc,
@@ -747,6 +1060,8 @@ def main() -> int:
                 "runtime_out": str(runtime_out),
                 "runtime_stack_out": str(stack_out),
                 "ui_out": str(ui_out),
+                "cli_stack_out": str(cli_stack_out),
+                "cli_release_stack_out": str(cli_release_stack_out),
                 "lashlang_out": str(lashlang_out),
             },
             indent=2,

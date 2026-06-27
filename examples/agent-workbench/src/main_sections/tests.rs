@@ -437,7 +437,7 @@ mod tests {
             .complete(|_request| async {
                 Ok(text_response(
                     r#"<lashlang>
-submit "observed through live replay"
+finish "observed through live replay"
 </lashlang>"#,
                 ))
             })
@@ -468,14 +468,14 @@ submit "observed through live replay"
         session
             .turn(lash::TurnInput::text("exercise observation stream"))
             .model(model)
-            .require_submit()
-            .expect("require submit")
+            .require_finish()
+            .expect("require finish")
             .run()
             .await
             .expect("turn");
 
         let mut saw_cursor = false;
-        let mut saw_submitted_value_observation = false;
+        let mut saw_final_value_observation = false;
         for _ in 0..64 {
             let item = tokio::time::timeout(Duration::from_secs(2), rx.recv())
                 .await
@@ -490,14 +490,14 @@ submit "observed through live replay"
                     let value = serde_json::to_value(&event).expect("remote event json");
                     if value.pointer("/type").and_then(Value::as_str) == Some("turn_activity")
                         && value.pointer("/activity/type").and_then(Value::as_str)
-                            == Some("submitted_value")
+                            == Some("final_value")
                     {
-                        saw_submitted_value_observation = true;
+                        saw_final_value_observation = true;
                     }
                 }
                 StreamItem::ReplayGap { .. } | StreamItem::Message { .. } | StreamItem::Error { .. } | StreamItem::Done => {}
             }
-            if saw_cursor && saw_submitted_value_observation {
+            if saw_cursor && saw_final_value_observation {
                 break;
             }
         }
@@ -505,7 +505,7 @@ submit "observed through live replay"
 
         assert!(saw_cursor, "stream should expose a replay cursor");
         assert!(
-            saw_submitted_value_observation,
+            saw_final_value_observation,
             "stream should expose turn activity through session observation"
         );
         let _ = std::fs::remove_dir_all(data_dir);
@@ -531,7 +531,7 @@ submit "observed through live replay"
             .complete(|_request| async {
                 Ok(text_response(
                     r#"<lashlang>
-submit "gap source"
+finish "gap source"
 </lashlang>"#,
                 ))
             })
@@ -567,8 +567,8 @@ submit "gap source"
         session
             .turn(lash::TurnInput::text("trim cursor"))
             .model(model)
-            .require_submit()
-            .expect("require submit")
+            .require_finish()
+            .expect("require finish")
             .run()
             .await
             .expect("turn");
@@ -721,7 +721,7 @@ submit "gap source"
             .kind("workbench-test")
             .complete(|_| async {
                 Ok(text_response(
-                    "<lashlang>\nresult = await inbox.test.send({ title: \"Hi\", text: \"Yo\" })?\nsubmit result.id\n</lashlang>",
+                    "<lashlang>\nresult = await inbox.test.send({ title: \"Hi\", text: \"Yo\" })?\nfinish result.id\n</lashlang>",
                 ))
             })
             .build()
@@ -766,7 +766,7 @@ submit "gap source"
             .run()
             .await
             .expect("turn should resolve inbox.test.send, not fail with unknown name");
-        assert_eq!(output.submitted_value(), Some(&serde_json::json!("test-1")));
+        assert_eq!(output.final_value(), Some(&serde_json::json!("test-1")));
         assert_eq!(mail_world.inbox("test").expect("inbox").len(), 1);
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -806,7 +806,7 @@ initial = await {
   test: inbox.test.list({})?,
   test2: inbox.test2.list({})?
 }
-submit initial
+finish initial
 </lashlang>"#,
                 ))
             })
@@ -844,7 +844,7 @@ submit initial
         .expect("parallel inbox list turn must not hang")
         .expect("parallel inbox list turn");
         assert_eq!(
-            output.submitted_value(),
+            output.final_value(),
             Some(&serde_json::json!({
                 "test": { "account": "test", "messages": [] },
                 "test2": { "account": "test2", "messages": [] }
@@ -1182,13 +1182,13 @@ submit initial
     }
 
     #[test]
-    fn button_trigger_occurrence_is_submitted_to_restate_workflow() {
+    fn button_trigger_occurrence_is_finishted_to_restate_workflow() {
         run_async_test_on_stack_budget("workbench-trigger-restate-test", || {
-            button_trigger_occurrence_is_submitted_to_restate_workflow_inner()
+            button_trigger_occurrence_is_finishted_to_restate_workflow_inner()
         });
     }
 
-    async fn button_trigger_occurrence_is_submitted_to_restate_workflow_inner() {
+    async fn button_trigger_occurrence_is_finishted_to_restate_workflow_inner() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-queue-runner-{}",
             uuid::Uuid::new_v4()
@@ -1693,11 +1693,11 @@ submit initial
         };
         let invocation_id = tokio::time::timeout(
             Duration::from_secs(60),
-            restate::submit_user_turn(state, request),
+            restate::finish_user_turn(state, request),
         )
         .await
             .expect("Restate-backed workbench turn timed out")
-            .expect("submit Restate-backed workbench turn");
+            .expect("finish Restate-backed workbench turn");
         state.track_restate_invocation(&state.current_session_id(), &turn_id, invocation_id.clone());
         invocation_id
     }
@@ -1823,7 +1823,7 @@ submit initial
                         )))
                     } else {
                         Ok(text_response(
-                            "<lashlang>\nsubmit \"cron tick observed\"\n</lashlang>",
+                            "<lashlang>\nfinish \"cron tick observed\"\n</lashlang>",
                         ))
                     }
                 }
@@ -1841,7 +1841,7 @@ submit initial
         let restate_http = reqwest::Client::new();
         let active_restate_invocations = ActiveRestateInvocations::default();
         let queued_work_driver =
-            lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
+            lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkFinishter {
                 session_ids: session_ids.clone(),
                 store_factory: Arc::clone(&core_store_factory),
                 restate_ingress_url: restate_ingress_url.clone(),
@@ -2218,7 +2218,7 @@ submit initial
             .await
             .expect("register trigger route");
         assert_eq!(
-            output.submitted_value(),
+            output.final_value(),
             Some(&serde_json::json!("registered"))
         );
     }
@@ -2449,7 +2449,7 @@ submit initial
           inputs: { event: trigger.event },
           name: "remembered"
         })?
-        submit "registered"
+        finish "registered"
         "#
     }
 
@@ -2466,7 +2466,7 @@ submit initial
           inputs: { tick: trigger.event },
           name: "cron smoke"
         })?
-        submit "cron registered"
+        finish "cron registered"
         "#
     }
 }

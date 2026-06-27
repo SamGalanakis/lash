@@ -64,6 +64,11 @@ pub enum StoreError {
         session_id: String,
         claim_id: String,
     },
+    #[error("turn input claim `{claim_id}` for session `{session_id}` is missing or expired")]
+    TurnInputClaimExpired {
+        session_id: String,
+        claim_id: String,
+    },
     #[error("session execution lease for session `{session_id}` is missing or expired")]
     SessionExecutionLeaseExpired { session_id: String },
     #[error(
@@ -281,6 +286,9 @@ pub struct RuntimeCommit {
     pub usage_deltas: Vec<crate::TokenLedgerEntry>,
     pub turn_commit: Option<RuntimeTurnCommitStamp>,
     pub completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
+    pub completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_turn_input_turn_id: Option<String>,
     /// Attachment ids whose bytes are referenced by this commit and
     /// should be stamped `committed` in the write-ahead manifest as
     /// part of the same SQL transaction. The backend marks each id
@@ -720,6 +728,8 @@ impl RuntimeCommit {
             usage_deltas: usage_deltas.to_vec(),
             turn_commit: None,
             completed_queue_claims: Vec::new(),
+            completed_turn_input_claims: Vec::new(),
+            interrupted_turn_input_turn_id: None,
             committed_attachment_ids: Vec::new(),
         }
     }
@@ -742,6 +752,8 @@ impl RuntimeCommit {
             usage_deltas: usage_deltas.to_vec(),
             turn_commit: None,
             completed_queue_claims: Vec::new(),
+            completed_turn_input_claims: Vec::new(),
+            interrupted_turn_input_turn_id: None,
             committed_attachment_ids: Vec::new(),
         }
     }
@@ -777,6 +789,29 @@ impl RuntimeCommit {
         completed_queue_claims: impl IntoIterator<Item = crate::QueuedWorkCompletion>,
     ) -> Self {
         self.completed_queue_claims.extend(completed_queue_claims);
+        self
+    }
+
+    pub fn completing_turn_input_claim(
+        mut self,
+        completed_turn_input_claim: crate::TurnInputCompletion,
+    ) -> Self {
+        self.completed_turn_input_claims
+            .push(completed_turn_input_claim);
+        self
+    }
+
+    pub fn completing_turn_input_claims(
+        mut self,
+        completed_turn_input_claims: impl IntoIterator<Item = crate::TurnInputCompletion>,
+    ) -> Self {
+        self.completed_turn_input_claims
+            .extend(completed_turn_input_claims);
+        self
+    }
+
+    pub fn deferring_interrupted_turn_inputs(mut self, turn_id: impl Into<String>) -> Self {
+        self.interrupted_turn_input_turn_id = Some(turn_id.into());
         self
     }
 
@@ -932,6 +967,78 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         &self,
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
+
+    /// Persist model-visible user input into the pending turn-input lifecycle.
+    ///
+    /// Active-turn ingress is claimed only by the matching live turn at a
+    /// checkpoint. Next-turn ingress is claimed only by idle dispatch. User
+    /// input must not be represented as generic queued work.
+    async fn enqueue_pending_turn_input(
+        &self,
+        _input: crate::PendingTurnInputDraft,
+    ) -> Result<crate::PendingTurnInput, StoreError> {
+        Err(StoreError::Backend(
+            "pending turn input is not supported by this test store".to_string(),
+        ))
+    }
+
+    /// List pending user inputs for UI reconciliation and queue preview.
+    ///
+    /// This excludes completed/cancelled rows and rows currently held by a live
+    /// claim. Expired claims are visible again according to their state.
+    async fn list_pending_turn_inputs(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<crate::PendingTurnInput>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Cancel an unclaimed pending user input by id.
+    async fn cancel_pending_turn_input(
+        &self,
+        _session_id: &str,
+        _input_id: &str,
+    ) -> Result<Option<crate::PendingTurnInput>, StoreError> {
+        Ok(None)
+    }
+
+    /// Claim active-turn input at a checkpoint for the live turn id.
+    async fn claim_active_turn_inputs(
+        &self,
+        session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: crate::CheckpointKind,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> Result<Option<crate::TurnInputClaim>, StoreError> {
+        Err(StoreError::Backend(format!(
+            "pending turn input is not supported for session `{session_id}` by this test store"
+        )))
+    }
+
+    /// Claim queued next-turn input at idle.
+    async fn claim_next_turn_inputs(
+        &self,
+        session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> Result<Option<crate::TurnInputClaim>, StoreError> {
+        Err(StoreError::Backend(format!(
+            "pending turn input is not supported for session `{session_id}` by this test store"
+        )))
+    }
+
+    /// Abandon a held pending-turn-input claim so it can be reclaimed.
+    async fn abandon_turn_input_claim(
+        &self,
+        _claim: &crate::TurnInputClaim,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 
     /// Try to claim the durable single-writer execution lane for `session_id`.
     ///

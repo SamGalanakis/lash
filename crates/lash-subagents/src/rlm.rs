@@ -252,7 +252,7 @@ handles = {{
   second: start research(agents: agents, task: "Research the second topic")
 }}
 results = await handles
-submit {{ first: results.first?, second: results.second? }}"#
+finish {{ first: results.first?, second: results.second? }}"#
             ),
             // Schema-first: the highest-leverage shape — bind a typed result.
             format!(

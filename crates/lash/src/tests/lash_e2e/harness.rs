@@ -21,7 +21,7 @@ pub(super) struct LashE2eCase {
     pub(super) session_id: &'static str,
     pub(super) scripted_provider_responses: Vec<String>,
     pub(super) root_prompt: &'static str,
-    pub(super) expected_submitted_value: Option<serde_json::Value>,
+    pub(super) expected_final_value: Option<serde_json::Value>,
     pub(super) tool_provider: Option<Arc<dyn ToolProvider>>,
     pub(super) install_subagents: bool,
     pub(super) max_turns: Option<usize>,
@@ -92,14 +92,14 @@ pub(super) async fn run_turn_case_without_success_assertions(
         final_process_list,
     };
 
-    if let Some(expected) = &case.expected_submitted_value {
+    if let Some(expected) = &case.expected_final_value {
         let Some(output) = run.turn_output.as_ref() else {
             panic!("{} did not run a turn", case.name);
         };
         assert_eq!(
-            output.submitted_value(),
+            output.final_value(),
             Some(expected),
-            "{} submitted value mismatch",
+            "{} final value mismatch",
             case.name
         );
     }
@@ -276,7 +276,7 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
     let process_registry = Arc::new(TestLocalProcessRegistry::default());
     let prompt_captures = Arc::new(StdMutex::new(Vec::new()));
     let provider = scripted_provider(
-        vec![lashlang_block(r#"submit { child: "done", scoped: true }"#)],
+        vec![lashlang_block(r#"finish { child: "done", scoped: true }"#)],
         Arc::clone(&prompt_captures),
     );
     let core = explicit_ephemeral_facets(RlmCore::builder())
@@ -344,7 +344,7 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
         .expect("session-turn output should contain a turn");
     assert_eq!(
         turn.outcome,
-        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: serde_json::json!({ "child": "done", "scoped": true })
         })
     );
@@ -381,9 +381,9 @@ process request_answer(tools: Tools) {
 }
 handle = start request_answer(tools: tools)
 result = (await handle)?
-submit result.answer"#,
+finish result.answer"#,
             ),
-            lashlang_block("submit { recovered: true }"),
+            lashlang_block("finish { recovered: true }"),
         ],
         Arc::clone(&prompt_captures),
     );
@@ -453,10 +453,10 @@ submit result.answer"#,
     session.processes().await_all().await?;
     assert!(matches!(
         turn_output.outcome,
-        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { .. })
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
     ));
     assert_eq!(
-        turn_output.submitted_value(),
+        turn_output.final_value(),
         Some(&serde_json::json!("approved"))
     );
     assert_eq!(tools.step_count(), 2);

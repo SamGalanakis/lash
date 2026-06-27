@@ -238,7 +238,7 @@ pub(crate) async fn send_message(
             .turn(TurnInput::text(text))
             .turn_id(format!("agent-service-local-turn:{}", uuid::Uuid::new_v4()))
             .model(turn_model)
-            .require_submit();
+            .require_finish();
         let turn = match turn {
             Ok(turn) => turn.stream_to(&ui_events).await.map(|result| TurnOutput {
                 result,
@@ -522,7 +522,7 @@ impl ChannelTurnEvents {
         }
         if matches!(
             &event,
-            TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+            TurnEvent::FinalValue { .. } | TurnEvent::ToolValue { .. }
         ) {
             return;
         }
@@ -686,7 +686,7 @@ fn normalize_model_variant(model_variant: Option<&str>) -> Option<String> {
 }
 
 pub(crate) fn assistant_text_for_persistence(output: &TurnOutput, streamed_prose: &str) -> String {
-    if let Some(value) = output.submitted_value() {
+    if let Some(value) = output.final_value() {
         return terminal_value_text(value);
     }
     if let Some((_tool_name, value)) = output.tool_value() {
@@ -727,7 +727,7 @@ mod tests {
             .kind("agent-service-route-mock")
             .complete(|_request| async {
                 let text = r#"<lashlang>
-submit "done through route"
+finish "done through route"
 </lashlang>"#;
                 Ok(LlmResponse {
                     full_text: text.to_string(),
@@ -830,7 +830,7 @@ submit "done through route"
                     && line
                         .pointer("/event/activity/type")
                         .and_then(serde_json::Value::as_str)
-                        == Some("submitted_value")
+                        == Some("final_value")
             }),
             "stream should contain remote observation turn activity: {lines:#?}"
         );

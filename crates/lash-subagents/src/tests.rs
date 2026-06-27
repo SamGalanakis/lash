@@ -104,7 +104,7 @@ fn capability_can_build_complete_spawn_request() {
         current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
-        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue,
+        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue,
         capability_name: "custom",
         output_schema: None,
         seed: Default::default(),
@@ -323,7 +323,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
-        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue,
+        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue,
         capability_name: "explore",
         output_schema: None,
         seed: Default::default(),
@@ -355,7 +355,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
-        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue,
+        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue,
         capability_name: "explore",
         output_schema: Some(json!({
             "type": "object",
@@ -379,11 +379,11 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         .expect("rlm extras");
     assert!(matches!(
         extras.termination,
-        lash_rlm_types::RlmTermination::SubmitRequired { .. }
+        lash_rlm_types::RlmTermination::FinishRequired { .. }
     ));
     assert!(matches!(
         extras.final_answer_format,
-        Some(lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue)
+        Some(lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue)
     ));
     assert!(structured_request.tool_access.tools.is_empty());
 }
@@ -394,11 +394,11 @@ async fn rlm_spawn_seed_is_visible_to_child_executor_and_prompt() {
         r#"<lashlang>
 result = await agents.spawn({
   capability: "default",
-  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
   output: Type { len: int }
 })?
-submit result
+finish result
 </lashlang>"#,
         TurnInput::text("spawn a child with a seeded chunk"),
     )
@@ -406,7 +406,7 @@ submit result
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
@@ -417,17 +417,17 @@ submit result
 }
 
 #[tokio::test]
-async fn rlm_spawn_record_shorthand_returns_child_submitted_value() {
+async fn rlm_spawn_record_shorthand_returns_child_final_value() {
     let (outcome, _) = run_seed_probe(
         r#"<lashlang>
 @label(title: "Spawn subagent")
 direct = await agents.spawn({
   capability: "default",
-  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
   output: { len: "int" }
 })?
-submit direct
+finish direct
 </lashlang>"#,
         TurnInput::text("spawn a child with record shorthand output"),
     )
@@ -435,20 +435,20 @@ submit direct
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
 }
 
 #[tokio::test]
-async fn rlm_spawn_process_handle_returns_child_submitted_value() {
+async fn rlm_spawn_process_handle_returns_child_final_value() {
     let (outcome, prompt) = run_seed_probe(
         r#"<lashlang>
 process spawn_child(agents: Agents) {
   result = await agents.spawn({
     capability: "default",
-    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
     seed: { chunk: ["a", "b"] },
     output: Type { len: int }
   })?
@@ -456,7 +456,7 @@ process spawn_child(agents: Agents) {
 }
 handle = start spawn_child(agents: agents)
 result = (await handle)?
-submit result
+finish result
 </lashlang>"#,
         TurnInput::text("spawn a child with a seeded chunk through start/await"),
     )
@@ -464,7 +464,7 @@ submit result
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
@@ -475,14 +475,14 @@ submit result
 }
 
 #[tokio::test]
-async fn rlm_spawn_labeled_inside_process_returns_child_submitted_value() {
+async fn rlm_spawn_labeled_inside_process_returns_child_final_value() {
     let (outcome, prompt) = run_seed_probe(
         r#"<lashlang>
 process spawn_child() {
   @label(title: "Spawn subagent inside process")
   result = await agents.spawn({
     capability: "default",
-    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
     seed: { chunk: ["a", "b"] },
     output: Type { len: int }
   })?
@@ -490,7 +490,7 @@ process spawn_child() {
 }
 handle = start spawn_child()
 result = (await handle)?
-submit result
+finish result
 </lashlang>"#,
         TurnInput::text("spawn a labeled child inside a Lashlang process"),
     )
@@ -498,7 +498,7 @@ submit result
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
@@ -509,13 +509,13 @@ submit result
 }
 
 #[tokio::test]
-async fn rlm_spawn_captured_process_authority_returns_child_submitted_value() {
+async fn rlm_spawn_captured_process_authority_returns_child_final_value() {
     let (outcome, prompt) = run_seed_probe(
         r#"<lashlang>
 process spawn_child() {
   result = await agents.spawn({
     capability: "default",
-    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
     seed: { chunk: ["a", "b"] },
     output: Type { len: int }
   })?
@@ -523,7 +523,7 @@ process spawn_child() {
 }
 handle = start spawn_child()
 result = (await handle)?
-submit result
+finish result
 </lashlang>"#,
         TurnInput::text("spawn a child with captured agents authority through start/await"),
     )
@@ -531,7 +531,7 @@ submit result
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
@@ -548,11 +548,11 @@ async fn rlm_spawn_links_subagent_process_from_lashlang_graph() {
         r#"<lashlang>
 result = await agents.spawn({
   capability: "default",
-  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
   output: Type { len: int }
 })?
-submit result
+finish result
 </lashlang>"#,
         TurnInput::text("spawn a child and link its graph"),
         Some(Arc::clone(&graph_store)),
@@ -561,7 +561,7 @@ submit result
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
@@ -599,11 +599,11 @@ async fn rlm_spawn_defaults_single_capability_when_omitted() {
     let (outcome, prompt) = run_seed_probe(
         r#"<lashlang>
 result = await agents.spawn({
-  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
   output: Type { len: int }
 })?
-submit result
+finish result
 </lashlang>"#,
         TurnInput::text("spawn a child with the default capability"),
     )
@@ -611,7 +611,7 @@ submit result
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
@@ -648,11 +648,11 @@ for line in lines {
 chunk = slice(data, 0, 2)
 result = await agents.spawn({
   capability: "default",
-  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: chunk },
   output: Type { len: int }
 })?
-submit result
+finish result
 </lashlang>"#,
         input,
     )
@@ -660,7 +660,7 @@ submit result
 
     assert_eq!(
         outcome,
-        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
             value: json!({ "len": 2 })
         })
     );
@@ -693,9 +693,9 @@ async fn complete_seed_probe_request(
     if is_child {
         *state.captured_child_prompt.lock().expect("captured prompt") = Some(prompt);
         Ok(LlmResponse {
-            full_text: lashlang_block("submit { len: len(chunk) }"),
+            full_text: lashlang_block("finish { len: len(chunk) }"),
             parts: vec![LlmOutputPart::Text {
-                text: lashlang_block("submit { len: len(chunk) }"),
+                text: lashlang_block("finish { len: len(chunk) }"),
                 response_meta: None,
             }],
             ..Default::default()
@@ -933,7 +933,7 @@ fn subagents_plugin_final_answer_format_defaults_raw_and_can_be_overridden() {
     let factory = SubagentsPluginFactory::new(Arc::new(default_registry(&BTreeMap::new())));
     assert_eq!(
         factory.final_answer_format,
-        lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue
+        lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue
     );
 
     let factory = factory.with_final_answer_format(lash_rlm_types::RlmFinalAnswerFormat::Markdown);

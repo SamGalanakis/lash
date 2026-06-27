@@ -11,6 +11,27 @@ import sys
 from pathlib import Path
 
 
+def parse_size(value: str) -> int:
+    raw = value.strip().lower().replace("_", "")
+    multiplier = 1
+    for suffix, factor in (
+        ("kib", 1024),
+        ("kb", 1024),
+        ("k", 1024),
+        ("mib", 1024 * 1024),
+        ("mb", 1024 * 1024),
+        ("m", 1024 * 1024),
+    ):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)]
+            multiplier = factor
+            break
+    try:
+        return int(raw) * multiplier
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid stack size `{value}`") from exc
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -68,6 +89,11 @@ def parse_args() -> argparse.Namespace:
         help="Exit non-zero when a UI perf budget is exceeded.",
     )
     parser.add_argument(
+        "--stack-bytes",
+        type=parse_size,
+        help="Set LASH_TOKIO_STACK_BYTES for the benchmark process, e.g. 2m.",
+    )
+    parser.add_argument(
         "--dhat",
         action="store_true",
         help="Build with the dhat heap profiler and record a measured-window heap profile.",
@@ -96,7 +122,15 @@ def resolve_binary(args: argparse.Namespace, repo_root: Path) -> Path:
     if args.binary:
         return args.binary
     profile = "release" if args.release else "debug"
-    return repo_root / "target" / profile / "lash"
+    return cargo_target_dir(repo_root) / profile / "lash"
+
+
+def cargo_target_dir(repo_root: Path) -> Path:
+    value = os.environ.get("CARGO_TARGET_DIR")
+    if value:
+        path = Path(value)
+        return path if path.is_absolute() else repo_root / path
+    return repo_root / "target"
 
 
 def maybe_build(
@@ -173,7 +207,11 @@ def main() -> int:
     for compare in args.compare:
         cmd.extend(["--ui-perf-compare", str(compare)])
 
-    proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True)
+    env = dict(os.environ)
+    if args.stack_bytes is not None:
+        env["LASH_TOKIO_STACK_BYTES"] = str(args.stack_bytes)
+
+    proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, env=env)
     if proc.stdout:
         print(proc.stdout, end="")
     if proc.returncode != 0:

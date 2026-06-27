@@ -302,12 +302,9 @@ impl<'a> SourceFormatter<'a> {
             Expr::Continue => Ok("continue".to_string()),
             Expr::Cancel(expr) => Ok(format!("cancel {}", self.expr_source(expr)?)),
             Expr::Print(expr) => Ok(format!("print {}", self.expr_source(expr)?)),
-            Expr::Submit(Some(expr)) => Ok(format!("submit {}", self.expr_source(expr)?)),
-            Expr::Submit(None) => Ok("submit".to_string()),
             Expr::Yield(expr) => Ok(format!("yield {}", self.expr_source(expr)?)),
             Expr::Wake(expr) => Ok(format!("wake {}", self.expr_source(expr)?)),
-            Expr::Finish(Some(expr)) => Ok(format!("finish {}", self.expr_source(expr)?)),
-            Expr::Finish(None) => Ok("finish".to_string()),
+            Expr::Finish(expr) => Ok(format!("finish {}", self.expr_source(expr)?)),
             Expr::Fail(expr) => Ok(format!("fail {}", self.expr_source(expr)?)),
             Expr::Block(_) => {
                 Err(CanonicalSourceError::NonSourceableExpression { kind: "bare block" })
@@ -457,12 +454,9 @@ impl<'a> SourceFormatter<'a> {
             Expr::ResultUnwrap(expr) => Ok(format!("{}?", self.postfix_target_source(expr)?)),
             Expr::Cancel(expr) => Ok(format!("cancel {}", self.expr_source(expr)?)),
             Expr::Print(expr) => Ok(format!("print {}", self.expr_source(expr)?)),
-            Expr::Submit(Some(expr)) => Ok(format!("submit {}", self.expr_source(expr)?)),
-            Expr::Submit(None) => Ok("submit".to_string()),
             Expr::Yield(expr) => Ok(format!("yield {}", self.expr_source(expr)?)),
             Expr::Wake(expr) => Ok(format!("wake {}", self.expr_source(expr)?)),
-            Expr::Finish(Some(expr)) => Ok(format!("finish {}", self.expr_source(expr)?)),
-            Expr::Finish(None) => Ok("finish".to_string()),
+            Expr::Finish(expr) => Ok(format!("finish {}", self.expr_source(expr)?)),
             Expr::Fail(expr) => Ok(format!("fail {}", self.expr_source(expr)?)),
             Expr::BuiltinCall { name, args } => {
                 let args = args

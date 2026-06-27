@@ -9,7 +9,7 @@ mod view;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use lash_core::runtime::{DeliveryPolicy, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
+use lash_core::runtime::PendingTurnInput;
 use lash_core::{
     Message, MessageRole, PartKind, PluginMessage, ProcessHandleSummary, ProcessLifecycleStatus,
     PromptUsage, TokenUsage, ToolCallRecord,
@@ -562,10 +562,10 @@ pub struct Queues {
     /// images, and paste placeholders the runtime cannot reconstruct.
     pub draft_presentations: HashMap<String, PreparedTurn>,
     /// Latest durable queued-work snapshot loaded from `LashSession`.
-    pub queued_work_snapshot: Vec<QueuedWorkBatch>,
-    /// Batch ids that have already been claimed for dispatch locally but may
+    pub pending_turn_input_snapshot: Vec<PendingTurnInput>,
+    /// Input ids that have already been claimed for dispatch locally but may
     /// still appear in durable queue snapshots until the runtime commits them.
-    pub suppressed_preview_batch_ids: HashSet<String>,
+    pub suppressed_preview_input_ids: HashSet<String>,
     /// Most recent selection-style prompt response, held briefly so the next
     /// tool result can render it inline if it exposes a question-panel
     /// artifact.

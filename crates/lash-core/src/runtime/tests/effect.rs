@@ -219,7 +219,7 @@ impl RuntimeEffectController for RecordingEffectController {
                 // (`direct_llm_completion`) client methods now flow through the
                 // single `Direct` effect; they differ only in how the caller
                 // projects the resulting `LlmResponse`. The full-response tests
-                // submit a "raw prompt" message or an image attachment, so use
+                // finish with a "raw prompt" message or an image attachment, so use
                 // those to pick the response text/usage the assertions expect.
                 let prompt = format!("{:?}", request.messages);
                 let is_full = prompt.contains("raw prompt") || !request.attachments.is_empty();
@@ -2130,7 +2130,7 @@ impl lash_sansio::ProtocolDriverHandle<crate::HostTurnProtocol> for EffectContro
     ) -> Vec<crate::DriverAction> {
         match result {
             Ok(response) => vec![crate::DriverAction::Finish(TurnOutcome::Finished(
-                TurnFinish::SubmittedValue {
+                TurnFinish::FinalValue {
                     value: serde_json::json!(response.observations.join("\n")),
                 },
             ))],

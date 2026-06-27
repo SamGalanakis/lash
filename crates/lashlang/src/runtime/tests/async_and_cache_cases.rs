@@ -32,7 +32,7 @@ impl ExecutionHost for AsyncHost {
             }
             AbilityOp::Cancel(_) => Ok(AbilityResult::Value(Value::Null)),
             AbilityOp::Print(_) => Ok(AbilityResult::Unit),
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                 Ok(AbilityResult::Value(value))
             }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
@@ -56,7 +56,7 @@ async fn linked_value_constructor_wraps_host_descriptor() {
     let program = crate::parse(
         r#"
         source = timer.Schedule({ expr: "0 8 * * *" })
-        submit source
+        finish source
         "#,
     )
     .expect("program should parse");
@@ -87,7 +87,7 @@ async fn process_handles_can_be_started_awaited_and_cancelled() {
         handle = start echo(value: "done")
         result = await handle
         cancel handle
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -114,7 +114,7 @@ async fn start_process_returns_raw_handle_and_passes_explicit_input() {
           finish root
         }
         handle = start scan(root: ".")
-        submit handle
+        finish handle
         "#,
     )
     .expect("program should parse");
@@ -146,7 +146,7 @@ async fn unlinked_compiled_program_rejects_unsited_process_starts() {
     let program = crate::parse(
         r#"
         process scan() { finish 1 }
-        submit start scan()
+        finish start scan()
         "#,
     )
     .expect("program should parse");
@@ -199,7 +199,7 @@ fn compiled_process_cache_reuses_process_ref_and_host_requirements_ref() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn receiver_module_operation_unwraps_result() {
-    let value = exec(r#"submit (await tools.echo({ value: "ok" })?)"#)
+    let value = exec(r#"finish (await tools.echo({ value: "ok" })?)"#)
         .await
         .expect("module operation should run");
     assert_eq!(value, Value::String("ok".into()));
@@ -207,7 +207,7 @@ async fn receiver_module_operation_unwraps_result() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn receiver_module_operation_errors_are_sanitized() {
-    let err = exec(r#"submit (await tools.err({ value: "nope" })?)"#)
+    let err = exec(r#"finish (await tools.err({ value: "nope" })?)"#)
         .await
         .expect_err("module operation should fail");
     assert!(matches!(err, RuntimeError::ValueError { .. }));
@@ -220,7 +220,7 @@ async fn processess_emit_events_and_terminal_outcomes() {
     let program = Program::block(vec![
         Expr::Yield(Box::new(Expr::String("checkpoint".into()))),
         Expr::Wake(Box::new(Expr::String("ready".into()))),
-        Expr::Finish(Some(Box::new(Expr::String("done".into())))),
+        Expr::Finish(Box::new(Expr::String("done".into()))),
     ]);
     let mut state = State::new();
     let compiled = compile_program(&program);
@@ -268,10 +268,10 @@ async fn while_runs_inside_process_body() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn value_position_while_leaves_null() {
-    let program = Program::block(vec![Expr::Submit(Some(Box::new(Expr::While {
+    let program = Program::block(vec![Expr::Finish(Box::new(Expr::While {
         condition: Box::new(Expr::Bool(false)),
         body: Box::new(Expr::Block(Vec::new())),
-    })))]);
+    }))]);
     let mut state = State::new();
 
     let outcome = execute_program(&program, &mut state, &Host)
@@ -300,7 +300,7 @@ async fn process_lifecycle_controls_sleep_wait_and_signal() {
             name: "ready".into(),
             payload: Box::new(Expr::Variable("payload".into())),
         },
-        Expr::Finish(Some(Box::new(Expr::Variable("payload".into())))),
+        Expr::Finish(Box::new(Expr::Variable("payload".into()))),
     ]);
     let mut globals = Record::new();
     globals.insert("run".to_string(), Value::Record(Arc::new(handle)));
@@ -363,7 +363,8 @@ async fn process_mode_falling_off_end_finishes_null() {
 async fn foreground_rejects_programmatic_processess() {
     // `signal_run` (sending) is intentionally NOT in this list: it is allowed
     // from the foreground turn, like `await` / `cancel`. Only the receiving
-    // side, `wait_signal`, plus the run-completion controls, are process-only.
+    // side, `wait_signal`, plus yield/wake/fail are process-only. `finish`
+    // is valid in foreground code and process code.
     for (keyword, stmt) in [
         ("yield", Expr::Yield(Box::new(Expr::String("event".into())))),
         ("wake", Expr::Wake(Box::new(Expr::String("event".into())))),
@@ -372,10 +373,6 @@ async fn foreground_rejects_programmatic_processess() {
             Expr::WaitSignal {
                 name: "ready".into(),
             },
-        ),
-        (
-            "finish",
-            Expr::Finish(Some(Box::new(Expr::String("done".into())))),
         ),
         ("fail", Expr::Fail(Box::new(Expr::String("bad".into())))),
     ] {
@@ -429,10 +426,6 @@ async fn foreground_sleep_runs_as_regular_effect() {
 #[tokio::test(flavor = "current_thread")]
 async fn process_mode_rejects_programmatic_foreground_controls() {
     for (keyword, stmt) in [
-        (
-            "submit",
-            Expr::Submit(Some(Box::new(Expr::String("done".into())))),
-        ),
         ("print", Expr::Print(Box::new(Expr::String("debug".into())))),
     ] {
         let program = Program::block(vec![stmt]);
@@ -456,7 +449,7 @@ async fn sync_steps_resume_correctly_after_tool_effects() {
         before = 20 + 2
         echoed = await tools.echo({ value: before })?
         after = echoed + 1
-        submit [before, echoed, after]
+        finish [before, echoed, after]
         "#,
     )
     .await
@@ -480,7 +473,7 @@ async fn traced_started_tool_errors_point_at_failing_tool_expression() {
     let source = r#"
         before = 1
         value = await tools.err({})?
-        submit value
+        finish value
         "#;
     let compiled = compile_source(source).expect("program should compile");
     let mut state = State::new();
@@ -507,7 +500,7 @@ async fn profiled_tool_effect_keeps_sync_instruction_counts() {
         before = 20 + 2
         echoed = await tools.echo({ value: before })?
         after = echoed + 1
-        submit after
+        finish after
         "#;
     let compiled = compile_source(source).expect("program should compile");
     let mut state = State::new();
@@ -536,7 +529,7 @@ async fn profiled_tool_effect_keeps_sync_instruction_counts() {
 async fn profile_report_tracks_list_comprehension_append_and_iteration() {
     let source = r#"
         values = [n * 2 for n in range(0, 6) if n > 1]
-        submit values
+        finish values
         "#;
     let compiled = compile_source(source).expect("program should compile");
     assert!(
@@ -587,7 +580,7 @@ async fn await_unknown_handle_reports_runtime_error() {
     let program = crate::parse(
         r#"
         result = await 1
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -619,7 +612,7 @@ async fn await_list_of_handles_returns_results_in_order() {
           start echo(value: "third")
         ]
         results = await handles
-        submit results
+        finish results
         "#,
     )
     .expect("program should parse");
@@ -650,7 +643,7 @@ async fn await_list_preserves_per_item_errors() {
         process echo(value: str) { finish value }
         handles = [start echo(value: "done"), 1]
         results = await handles
-        submit results
+        finish results
         "#,
     )
     .expect("program should parse");
@@ -687,7 +680,7 @@ async fn await_record_of_handles_returns_record_of_wrappers() {
           second: start echo(value: "two"),
         }
         results = await handles
-        submit [results.first?, results.second?]
+        finish [results.first?, results.second?]
         "#,
     )
     .expect("program should parse");
@@ -711,7 +704,7 @@ async fn result_unwrap_extracts_awaited_handles_and_joined_results() {
         process echo(value: str) { finish value }
         handle = start echo(value: "done")
         result = (await handle)?
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -731,7 +724,7 @@ async fn result_unwrap_extracts_awaited_handles_and_joined_results() {
           start echo(value: "left"),
           start echo(value: "right")
         ]
-        submit [(results[0])?, (results[1])?]
+        finish [(results[0])?, (results[1])?]
         "#,
     )
     .expect("program should parse");
@@ -763,11 +756,11 @@ fn unwrap_schema(value: &Value) -> &Record {
 #[tokio::test(flavor = "current_thread")]
 async fn type_scalar_schemas_const_fold_to_json_schema() {
     for (src, expected) in [
-        ("submit Type { v: str }", "string"),
-        ("submit Type { v: int }", "integer"),
-        ("submit Type { v: float }", "number"),
-        ("submit Type { v: bool }", "boolean"),
-        ("submit Type { v: dict }", "object"),
+        ("finish Type { v: str }", "string"),
+        ("finish Type { v: int }", "integer"),
+        ("finish Type { v: float }", "number"),
+        ("finish Type { v: bool }", "boolean"),
+        ("finish Type { v: dict }", "object"),
     ] {
         let value = exec(src).await.expect("should succeed");
         let schema = unwrap_schema(&value);
@@ -787,7 +780,7 @@ async fn type_scalar_schemas_const_fold_to_json_schema() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn type_any_is_empty_schema() {
-    let value = exec("submit Type { v: any }")
+    let value = exec("finish Type { v: any }")
         .await
         .expect("should succeed");
     let schema = unwrap_schema(&value);
@@ -798,7 +791,7 @@ async fn type_any_is_empty_schema() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn type_enum_produces_string_with_enum_array() {
-    let value = exec(r#"submit Type { status: enum["ok", "err", "pending"] }"#)
+    let value = exec(r#"finish Type { status: enum["ok", "err", "pending"] }"#)
         .await
         .expect("should succeed");
     let schema = unwrap_schema(&value);
@@ -817,7 +810,7 @@ async fn type_enum_produces_string_with_enum_array() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn type_list_schema_wraps_inner_type_as_items() {
-    let value = exec("submit Type { tags: list[str] }")
+    let value = exec("finish Type { tags: list[str] }")
         .await
         .expect("should succeed");
     let schema = unwrap_schema(&value);
@@ -831,7 +824,7 @@ async fn type_list_schema_wraps_inner_type_as_items() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn type_list_of_enum_preserves_nested_shape() {
-    let value = exec(r#"submit Type { labels: list[enum["a", "b"]] }"#)
+    let value = exec(r#"finish Type { labels: list[enum["a", "b"]] }"#)
         .await
         .expect("should succeed");
     let schema = unwrap_schema(&value);
@@ -847,7 +840,7 @@ async fn type_list_of_enum_preserves_nested_shape() {
 async fn type_nested_object_is_full_subschema() {
     let value = exec(
         r#"
-        submit Type {
+        finish Type {
           title: str,
           meta: Type {
             pages: int,
@@ -877,7 +870,7 @@ async fn type_nested_object_is_full_subschema() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn type_optional_field_drops_from_required() {
-    let value = exec("submit Type { a: str, b: int? }")
+    let value = exec("finish Type { a: str, b: int? }")
         .await
         .expect("should succeed");
     let schema = unwrap_schema(&value);
@@ -897,7 +890,7 @@ async fn type_ref_resolves_previously_defined_type() {
     let src = r#"
         Inner = Type { count: int }
         Outer = Type { name: str, nested: Inner }
-        submit Outer
+        finish Outer
     "#;
     let value = exec(src).await.expect("should succeed");
     let schema = unwrap_schema(&value);
@@ -918,7 +911,7 @@ async fn type_ref_to_non_type_value_is_type_error() {
         r#"
         Inner = { count: 5 }
         Outer = Type { nested: Inner }
-        submit Outer
+        finish Outer
         "#,
     )
     .await
@@ -931,7 +924,7 @@ async fn type_ref_to_non_type_value_is_type_error() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn type_ref_with_undefined_name_is_undefined_variable() {
-    let err = exec("submit Type { nested: MissingType }")
+    let err = exec("finish Type { nested: MissingType }")
         .await
         .expect_err("unknown ref should fail");
     assert_eq!(
@@ -948,7 +941,7 @@ async fn compile_stats_count_const_folded_and_dynamic_literals() {
         Inner = Type { n: int }
         A = Type { x: str }
         B = Type { nested: Inner }
-        submit B
+        finish B
     "#;
     let compiled = compile_source(src).expect("should compile");
     let stats = compiled.compile_stats();
@@ -969,7 +962,7 @@ async fn profile_report_shows_resolve_type_ref_counts() {
         limit = await tools.echo({ value: 1 })?
         numbers = push(range(limit), limit)
         checked = validate({ nested: { n: numbers[0] } }, Outer)
-        submit checked
+        finish checked
     "#;
     let compiled = compile_source(src).expect("should compile");
     let mut state = State::new();
@@ -1026,7 +1019,7 @@ async fn type_literal_inside_resource_operation_args_passes_through_as_record() 
                         operation.operation
                     )))
                 }
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
@@ -1040,7 +1033,7 @@ async fn type_literal_inside_resource_operation_args_passes_through_as_record() 
         r#"
         Shape = Type { name: str, tags: list[str] }
         await tools.spawn({ output: Shape })
-        submit null
+        finish null
         "#,
     )
     .expect("should parse");
@@ -1073,16 +1066,16 @@ async fn empty_enum_is_parse_error() {
 async fn unknown_type_constructor_becomes_ref_not_error_at_parse() {
     // Unknown identifiers in type position are treated as refs; runtime
     // resolution is what errors out.
-    let program = crate::parse("submit Type { x: Unknown }").expect("should parse as ref");
+    let program = crate::parse("finish Type { x: Unknown }").expect("should parse as ref");
     let Expr::Block(expressions) = program.main else {
         panic!("program should be a block");
     };
-    assert!(matches!(expressions.last(), Some(Expr::Submit(_))));
+    assert!(matches!(expressions.last(), Some(Expr::Finish(_))));
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn lash_type_wrapper_survives_round_trip_through_json() {
-    let value = exec("submit Type { n: int }")
+    let value = exec("finish Type { n: int }")
         .await
         .expect("should succeed");
     // to_json + from_json must preserve the Type-ness.
@@ -1118,7 +1111,7 @@ async fn field_access_on_projected_record_returns_projected() {
         "input",
         serde_json::json!({ "prompt": "hello", "depth": 3 }),
     );
-    let (value, _) = exec_with_projected("submit input.prompt", &projected)
+    let (value, _) = exec_with_projected("finish input.prompt", &projected)
         .await
         .expect("projected field read");
     assert!(
@@ -1131,7 +1124,7 @@ async fn field_access_on_projected_record_returns_projected() {
 async fn nested_field_access_keeps_projection() {
     let projected =
         projected_record_bindings("cfg", serde_json::json!({ "options": { "timeout": 30 } }));
-    let (value, _) = exec_with_projected("submit cfg.options.timeout", &projected)
+    let (value, _) = exec_with_projected("finish cfg.options.timeout", &projected)
         .await
         .expect("nested projected field read");
     assert!(
@@ -1144,7 +1137,7 @@ async fn nested_field_access_keeps_projection() {
 async fn index_on_projected_list_returns_projected() {
     let projected =
         projected_record_bindings("items", serde_json::json!(["alpha", "beta", "gamma"]));
-    let (value, _) = exec_with_projected("submit items[1]", &projected)
+    let (value, _) = exec_with_projected("finish items[1]", &projected)
         .await
         .expect("projected index read");
     assert!(
@@ -1156,7 +1149,7 @@ async fn index_on_projected_list_returns_projected() {
 #[tokio::test(flavor = "current_thread")]
 async fn computation_strips_projection() {
     let projected = projected_record_bindings("input", serde_json::json!({ "n": 7 }));
-    let (value, _) = exec_with_projected("submit input.n + 1", &projected)
+    let (value, _) = exec_with_projected("finish input.n + 1", &projected)
         .await
         .expect("computed value");
     assert!(
@@ -1169,7 +1162,7 @@ async fn computation_strips_projection() {
 async fn record_literal_preserves_per_entry_projection() {
     let projected = projected_record_bindings("input", serde_json::json!({ "prompt": "hello" }));
     let (value, _) = exec_with_projected(
-        "g = 42\nsubmit { proj: input.prompt, glob: g, lit: 99 }",
+        "g = 42\nfinish { proj: input.prompt, glob: g, lit: 99 }",
         &projected,
     )
     .await
@@ -1197,7 +1190,7 @@ async fn record_literal_preserves_per_entry_projection() {
 // ---------------------------------------------------------------------------
 // Terminator-op routing through the handler.
 //
-// `submit`, `finish`, `fail` go through `host.perform` as `AbilityOp::Submit`,
+// `finish`, `finish`, `fail` go through `host.perform` as `AbilityOp::Finish`,
 // `Finish`, `Fail`. Default behavior is identity pass-through (the host returns
 // the value unchanged and the VM unwinds with that value). The handler may
 // transform the value or refuse with an `Err`; it cannot prevent unwind.
@@ -1228,10 +1221,10 @@ impl TerminatorHost {
 impl ExecutionHost for TerminatorHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                 let observed = match &value {
-                    Value::Number(n) => AbilityOp::Submit(Value::Number(*n)),
-                    other => AbilityOp::Submit(other.clone()),
+                    Value::Number(n) => AbilityOp::Finish(Value::Number(*n)),
+                    other => AbilityOp::Finish(other.clone()),
                 };
                 self.observed.lock().expect("observed").push(observed);
                 match self.mode {
@@ -1274,47 +1267,47 @@ async fn run_process_with_terminator_host(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn submit_routes_through_host() {
-    let (outcome, observed) = run_with_terminator_host("submit 7", TerminatorMode::Identity).await;
+async fn finish_routes_through_host() {
+    let (outcome, observed) = run_with_terminator_host("finish 7", TerminatorMode::Identity).await;
     assert_eq!(
-        outcome.expect("submit should succeed"),
+        outcome.expect("finish should succeed"),
         ExecutionOutcome::Finished(Value::Number(7.0))
     );
     assert_eq!(observed.len(), 1, "host should observe one terminator op");
-    assert!(matches!(observed[0], AbilityOp::Submit(Value::Number(n)) if n == 7.0));
+    assert!(matches!(observed[0], AbilityOp::Finish(Value::Number(n)) if n == 7.0));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn host_transforms_submit_value() {
-    let (outcome, _) = run_with_terminator_host("submit 7", TerminatorMode::Transform).await;
+async fn host_transforms_finish_value() {
+    let (outcome, _) = run_with_terminator_host("finish 7", TerminatorMode::Transform).await;
     assert_eq!(
-        outcome.expect("submit should succeed"),
+        outcome.expect("finish should succeed"),
         ExecutionOutcome::Finished(Value::Number(107.0)),
-        "handler should transform the submit value before the VM unwinds"
+        "handler should transform the finish value before the VM unwinds"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn host_error_during_submit_propagates_as_runtime_error() {
-    let (outcome, _) = run_with_terminator_host("submit 7", TerminatorMode::Err).await;
+async fn host_error_during_finish_propagates_as_runtime_error() {
+    let (outcome, _) = run_with_terminator_host("finish 7", TerminatorMode::Err).await;
     let err = outcome.expect_err("host error should surface");
     let message = err.to_string();
-    assert!(message.contains("submit failed"), "{message}");
+    assert!(message.contains("finish failed"), "{message}");
     assert!(message.contains("handler refused"), "{message}");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn host_returning_unit_for_submit_errors_cleanly() {
-    let (outcome, _) = run_with_terminator_host("submit 7", TerminatorMode::Unit).await;
+async fn host_returning_unit_for_finish_errors_cleanly() {
+    let (outcome, _) = run_with_terminator_host("finish 7", TerminatorMode::Unit).await;
     let err = outcome.expect_err("unit result should error");
     let message = err.to_string();
-    assert!(message.contains("submit failed"), "{message}");
+    assert!(message.contains("finish failed"), "{message}");
     assert!(message.contains("returned no value"), "{message}");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn finish_routes_through_host_in_process_mode() {
-    let program = Program::block(vec![Expr::Finish(Some(Box::new(Expr::Number(7.0))))]);
+    let program = Program::block(vec![Expr::Finish(Box::new(Expr::Number(7.0)))]);
     let (outcome, observed) =
         run_process_with_terminator_host(program, TerminatorMode::Transform).await;
     assert_eq!(

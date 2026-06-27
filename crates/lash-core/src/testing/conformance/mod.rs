@@ -45,7 +45,7 @@ use crate::{
     SessionNodeRecord, SessionObservationEvent, SessionObservationEventPayload, SessionPolicy,
     SessionProcessEventKind, SessionQueueEventKind, SessionReadScope, SessionRelation,
     SessionRevision, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnActivity,
-    TurnEvent, TurnInput,
+    TurnEvent,
 };
 use crate::{AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier};
 use crate::{

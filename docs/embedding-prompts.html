@@ -101,8 +101,8 @@ let input = TurnInput::text("Play one move.").rlm_project(
 let result = session.turn(input).run().await?;</code></pre>
           <p>The model reads these names directly inside a paired <code>&lt;lashlang&gt;</code> block:</p>
           <pre data-lang="lashlang"><code>&lt;lashlang&gt;
-let move_idx = best_move(board.cells, board.turn)
-submit({ "move": move_idx, "tenant": tenant_id })
+move_idx = best_move(board.cells, board.turn)
+finish { move: move_idx, tenant: tenant_id }
 &lt;/lashlang&gt;</code></pre>
           <p>Three bind methods, in order of growing power:</p>
           <ul class="bullets">
@@ -354,7 +354,7 @@ use lash::rlm::RlmTurnBuilderExt as _;
 let result = session
     .turn(TurnInput::text("Summarize this incident."))
     .with_tone("brief and factual")
-    .require_submit()?
+    .require_finish()?
     .stream_to(&amp;sink)
     .await?;</code></pre>
         </div>

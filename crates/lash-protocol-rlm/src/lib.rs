@@ -1,7 +1,7 @@
 //! RLM protocol plugin: a trajectory-shaped driver that uses lashlang as the
 //! persistent REPL. Provider reasoning is stored as trajectory reasoning,
 //! paired `<lashlang>` blocks are executed, `print` yields observations, and
-//! `submit` yields the final value.
+//! `finish` yields the final value.
 
 mod cell_scan;
 mod control_tools;

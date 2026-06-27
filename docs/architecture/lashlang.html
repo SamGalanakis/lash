@@ -29,13 +29,13 @@
 <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL cells. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents: <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, and Python-shaped raw strings like <code>r"""..."""</code> or <code>r'...'</code>. The parser accepts the full module grammar, but the linked host surface decides which abilities and language features exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, process signals, and optional static process-map labels are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL cells. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents: <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, and Python-shaped raw strings like <code>r"""..."""</code> or <code>r'...'</code>. The parser accepts the full module grammar, but the linked host surface decides which abilities and language features exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, process signals, and optional static process-map labels are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>finish</code> / <code>print</code> are foreground effect expressions.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
             <dd><code>null</code>, booleans, numbers, strings, lists, tuples, records, projected host descriptors, result wrappers, and immutable <code>Image</code> handles. Resource handles and process handles appear only when the linked host surface exposes those abilities. Lists and records are value-shaped and copy-on-write at mutation roots. Tuples are immutable sequence values and serialize to JSON arrays at host boundaries.</dd>
             <dt>Program form</dt>
-            <dd>A program is a module with optional <code>type</code> and <code>process</code> declarations plus a foreground main block. Removed declarative <code>trigger</code> syntax is rejected by the parser with a diagnostic that points agents at the trigger registry. Disabled abilities remain syntax-valid where applicable but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>while</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are expression nodes; assignment and loops evaluate to <code>null</code>.</dd>
+            <dd>A program is a module with optional <code>type</code> and <code>process</code> declarations plus a foreground main block. Removed declarative <code>trigger</code> syntax is rejected by the parser with a diagnostic that points agents at the trigger registry. Disabled abilities remain syntax-valid where applicable but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>while</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>finish</code> are expression nodes; assignment and loops evaluate to <code>null</code>.</dd>
             <dt>Expressions</dt>
             <dd>Literals, variables, tuple comma expressions, builtin calls, receiver operations, named process starts, <code>await</code>, field/index access, unary operators, binary operators, ternaries, list comprehensions, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
             <dt>Effects</dt>
@@ -67,7 +67,7 @@ ToolDefinition::raw("tool:play_move", "play_move", "...", input, output)
 // Lashlang authored by the model.
 board = await board.read({})?
 move = await board.play({ cell: 4 })?
-submit { board: board, move: move }</code></pre>
+finish { board: board, move: move }</code></pre>
         </div>
 
         <div class="section" id="program-form">
@@ -79,7 +79,7 @@ submit { board: board, move: move }</code></pre>
             <dt>REPL state</dt>
             <dd>Variables persist across <code>&lt;lashlang&gt;</code> blocks in the active RLM execution state. Read-only host bindings projected through RLM's projection API are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose. Lazy app projections are ref-backed and resolved before each block runs.</dd>
             <dt>Completion</dt>
-            <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await control.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another <code>&lt;lashlang&gt;</code> block.</dd>
+            <dd><code>finish</code> ends the program and turn. When the host exposes a continuation operation, <code>await control.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad final shape produces a runtime nudge asking the model to fix the value and finish again from another <code>&lt;lashlang&gt;</code> block.</dd>
           </dl>
           <p>The examples below assume the host has linked a lowercase <code>workspace.default</code> resource with the shown operations enabled.</p>
           <pre><code>&lt;lashlang&gt;
@@ -142,7 +142,7 @@ await control.continue_as({
 files = grep_results.files_with_matches
 print count, files
 pair = count, files
-submit { pair: pair, first: pair[0] }</code></pre>
+finish { pair: pair, first: pair[0] }</code></pre>
         </div>
 
         <div class="section" id="expressions">
@@ -169,7 +169,7 @@ submit { pair: pair, first: pair[0] }</code></pre>
   workspace.default.read_file({ path: "left.txt" })?,
   workspace.default.read_file({ path: "right.txt" })?
 )
-submit { left: results[0], both: results }</code></pre>
+finish { left: results[0], both: results }</code></pre>
         </div>
 
         <div class="section" id="assignment-and-mutation">
@@ -188,7 +188,7 @@ for group in groups {
   current = counts[group]
   counts[group] = (current == null ? 0 : current) + 1
 }
-submit counts</code></pre>
+finish counts</code></pre>
         </div>
 
         <div class="section" id="control-flow">
@@ -202,11 +202,11 @@ submit counts</code></pre>
             <dt><code>for</code></dt>
             <dd><code>for item in iterable { ... }</code> iterates lists and tuples. Non-sequence iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</dd>
             <dt><code>while</code></dt>
-            <dd><code>while condition { ... }</code> repeats while the condition is truthy. Prefer bounded loops where possible; <code>break</code>, <code>continue</code>, and <code>submit</code> keep their normal meanings inside the loop body.</dd>
+            <dd><code>while condition { ... }</code> repeats while the condition is truthy. Prefer bounded loops where possible; <code>break</code>, <code>continue</code>, and <code>finish</code> keep their normal meanings inside the loop body.</dd>
             <dt><code>break</code> / <code>continue</code></dt>
             <dd><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops.</dd>
-            <dt><code>submit</code></dt>
-            <dd><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control form.</dd>
+            <dt><code>finish</code></dt>
+            <dd><code>finish value</code> ends the whole program or turn. <code>finish</code> inside a loop is not a loop control form.</dd>
           </dl>
           <p>A short walkthrough that exercises iteration, <code>else if</code> chains, <code>break</code>/<code>continue</code>, and <code>format</code>. Loop variables are scoped to the loop body and the prior binding of <code>label</code> is restored on <code>break</code>.</p>
           <pre><code>nums = [1, 2, 3, 4, 5, 6]
@@ -229,7 +229,7 @@ if total > 10 {
 } else {
   label = "small"
 }
-submit format("seen={} total={} label={}", join(seen, ","), total, label)</code></pre>
+finish format("seen={} total={} label={}", join(seen, ","), total, label)</code></pre>
           <p><code>while</code> is useful for bounded retry/fill loops when the limit is computed inside the program.</p>
           <pre><code>attempts = 0
 items = []
@@ -241,7 +241,7 @@ while len(items) &lt; 3 and attempts &lt; 5 {
   }
   items = push(items, candidate)
 }
-submit { attempts: attempts, items: items }</code></pre>
+finish { attempts: attempts, items: items }</code></pre>
         </div>
   </main>
 

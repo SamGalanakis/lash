@@ -279,7 +279,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for CheckpointDriver {
         _result: Result<ExecResponse, String>,
     ) -> Vec<DriverAction> {
         vec![DriverAction::Finish(TurnOutcome::Finished(
-            TurnFinish::SubmittedValue {
+            TurnFinish::FinalValue {
                 value: serde_json::json!("runtime perf benchmark ok"),
             },
         ))]
@@ -570,7 +570,7 @@ fanout = await {{
   b: second,
   c: third
 }}
-submit fanout.a?.value"#
+finish fanout.a?.value"#
     )
 }
 

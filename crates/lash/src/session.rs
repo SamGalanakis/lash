@@ -3,7 +3,7 @@ use std::task::{Context, Poll};
 
 use crate::support::*;
 use futures_util::Stream;
-use lash_core::runtime::{DeliveryPolicy, QueuedWorkBatch, SlotPolicy};
+use lash_core::runtime::{PendingTurnInput, QueuedWorkBatch, TurnInputIngress};
 use lash_core::{LiveReplayGap, LiveReplayStoreError, SessionObservationEvent};
 use lash_remote_protocol::{
     RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
@@ -431,7 +431,7 @@ fn apply_rlm_session_options(
         if is_root_session {
             lash_rlm_types::RlmFinalAnswerFormat::Markdown
         } else {
-            lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue
+            lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue
         }
     });
     let mut extras = if state.protocol_turn_options.is_empty() {
@@ -456,7 +456,7 @@ mod tests {
     fn apply_rlm_session_options_preserves_existing_termination() -> Result<()> {
         let mut state = RuntimeSessionState {
             protocol_turn_options: ProtocolTurnOptions::typed(lash_rlm_types::RlmCreateExtras {
-                termination: lash_rlm_types::RlmTermination::ProseOrSubmit,
+                termination: lash_rlm_types::RlmTermination::Natural,
                 final_answer_format: None,
             })?,
             ..Default::default()
@@ -465,10 +465,7 @@ mod tests {
         apply_rlm_session_options(true, None, &mut state)?;
 
         let extras: lash_rlm_types::RlmCreateExtras = state.protocol_turn_options.decode()?;
-        assert_eq!(
-            extras.termination,
-            lash_rlm_types::RlmTermination::ProseOrSubmit
-        );
+        assert_eq!(extras.termination, lash_rlm_types::RlmTermination::Natural);
         assert_eq!(
             extras.final_answer_format,
             Some(lash_rlm_types::RlmFinalAnswerFormat::Markdown)
@@ -605,16 +602,16 @@ impl LashSession {
             session: self,
             input,
             id: None,
-            delivery_policy: DeliveryPolicy::AfterCurrentTurnCommit,
-            slot_policy: SlotPolicy::Exclusive,
+            ingress: TurnInputIngress::NextTurn,
         }
     }
 
     /// Return all pending durable queued-work batches for this session.
     ///
-    /// This is an admin/introspection view: it includes visible turn input,
-    /// process wakes, and session commands. UI queue previews should filter it
-    /// to visible `TurnInput` batches before rendering or selecting work.
+    /// This is an admin/introspection view for non-user queued work such as
+    /// process wakes and session commands. User-visible model input is stored
+    /// separately as pending turn input and is exposed by
+    /// [`pending_turn_inputs`](Self::pending_turn_inputs).
     pub async fn queued_work(&self) -> Result<Vec<QueuedWorkBatch>> {
         let observation = self.runtime.observe();
         let store = observation.queue_store.as_ref().ok_or_else(|| {
@@ -632,6 +629,36 @@ impl LashSession {
                     err.to_string(),
                 ))
             })
+    }
+
+    pub async fn pending_turn_inputs(&self) -> Result<Vec<PendingTurnInput>> {
+        let observation = self.runtime.observe();
+        let store = observation.queue_store.as_ref().ok_or_else(|| {
+            EmbedError::Runtime(lash_core::RuntimeError::new(
+                lash_core::RuntimeErrorCode::StoreCommitFailed,
+                "pending turn input inspection requires a persistent runtime store",
+            ))
+        })?;
+        store
+            .list_pending_turn_inputs(observation.session_id())
+            .await
+            .map_err(|err| {
+                EmbedError::Runtime(lash_core::RuntimeError::new(
+                    lash_core::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                ))
+            })
+    }
+
+    pub async fn cancel_pending_turn_input(
+        &self,
+        input_id: &str,
+    ) -> Result<Option<PendingTurnInput>> {
+        let session_id = self.session_id();
+        self.runtime
+            .cancel_pending_turn_input(&session_id, input_id)
+            .await
+            .map_err(EmbedError::Runtime)
     }
 
     pub async fn cancel_queued_work_batch(
@@ -1023,8 +1050,7 @@ pub struct EnqueueTurnBuilder<'a> {
     session: &'a LashSession,
     input: TurnInput,
     id: Option<String>,
-    delivery_policy: DeliveryPolicy,
-    slot_policy: SlotPolicy,
+    ingress: TurnInputIngress,
 }
 
 impl<'a> EnqueueTurnBuilder<'a> {
@@ -1033,35 +1059,25 @@ impl<'a> EnqueueTurnBuilder<'a> {
         self
     }
 
-    pub fn delivery_policy(mut self, policy: DeliveryPolicy) -> Self {
-        self.delivery_policy = policy;
+    pub fn ingress(mut self, ingress: TurnInputIngress) -> Self {
+        self.ingress = ingress;
         self
     }
 
-    pub fn slot_policy(mut self, policy: SlotPolicy) -> Self {
-        self.slot_policy = policy;
-        self
-    }
-
-    pub async fn send(self) -> Result<QueuedWorkBatch> {
+    pub async fn send(self) -> Result<PendingTurnInput> {
         let source_key = self.id.map(|id| format!("host:{id}"));
         self.session
             .runtime
-            .enqueue_turn_input(
-                self.input,
-                self.delivery_policy,
-                self.slot_policy,
-                source_key,
-            )
+            .enqueue_turn_input(self.input, self.ingress, source_key)
             .await
             .map_err(EmbedError::Runtime)
     }
 }
 
 impl<'a> std::future::IntoFuture for EnqueueTurnBuilder<'a> {
-    type Output = Result<QueuedWorkBatch>;
+    type Output = Result<PendingTurnInput>;
     type IntoFuture =
-        std::pin::Pin<Box<dyn std::future::Future<Output = Result<QueuedWorkBatch>> + 'a>>;
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<PendingTurnInput>> + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.send())

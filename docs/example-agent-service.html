@@ -52,7 +52,7 @@
             <article class="panel"><h3>Session per chat</h3><p>Each request opens a <code>LashSession</code> from the chat id and store. The app does not keep live runtime sessions in a process map.</p></article>
             <article class="panel"><h3>Per-chat model</h3><p>The product DB stores <code>model</code> and <code>model_variant</code>; turns apply the current selection through <code>TurnBuilder::model(...)</code>.</p></article>
             <article class="panel"><h3>App-owned board</h3><p>The board lives in the app database. Prompt hooks and tools load the canonical <code>chat_boards</code> row by session id; message payload snapshots are only for browser replay.</p></article>
-            <article class="panel"><h3>Session replay stream</h3><p>The browser renders live <code>RemoteSessionObservationEvent</code> rows from an opaque session cursor for assistant prose, reasoning deltas, code blocks, tool cards, usage, and submitted terminal values. The route emits <code>replay_cursor</code> first and <code>replay_gap</code> with <code>RemoteLiveReplayGap</code> plus <code>RemoteSessionObservation</code> when the bounded window was missed. Prose completion is settled from the returned <code>TurnOutput</code>, not from a separate final stream event.</p></article>
+            <article class="panel"><h3>Session replay stream</h3><p>The browser renders live <code>RemoteSessionObservationEvent</code> rows from an opaque session cursor for assistant prose, reasoning deltas, code blocks, tool cards, usage, and final terminal values. The route emits <code>replay_cursor</code> first and <code>replay_gap</code> with <code>RemoteLiveReplayGap</code> plus <code>RemoteSessionObservation</code> when the bounded window was missed. Prose completion is settled from the returned <code>TurnOutput</code>, not from a separate final stream event.</p></article>
             <article class="panel"><h3>Split persistence</h3><p><code>lash-sqlite-store</code> persists runtime state; the app database stores chat rows, board snapshots, model choice, titles, and rendered activity rows.</p></article>
           </div>
         </div>
@@ -127,14 +127,14 @@ let turn = session
         )
         .expect("valid model metadata"),
     )
-    .require_submit()?;
+    .require_finish()?;
 
 let output = turn.stream_to(&amp;ui_events).await?;
 let assistant_text = assistant_text_for_persistence(
     &amp;output,
     &amp;turn_state.lock().expect("turn state lock").assistant_prose,
 );</code></pre>
-          <p>The board is app-owned SQLite state. User message payloads keep board snapshots so the browser can replay the game, while the plugin prompt and <code>read_board</code> / <code>play_move</code> tools read and mutate the canonical row. <code>assistant_text_for_persistence</code> derives the product chat row from terminal semantics: submitted values render from <code>TurnFinish::SubmittedValue</code>, while prose comes from <code>TurnFinish::AssistantMessage</code> with streamed prose only as a live UI preview.</p>
+          <p>The board is app-owned SQLite state. User message payloads keep board snapshots so the browser can replay the game, while the plugin prompt and <code>read_board</code> / <code>play_move</code> tools read and mutate the canonical row. <code>assistant_text_for_persistence</code> derives the product chat row from terminal semantics: final values render from <code>TurnFinish::FinalValue</code>, while prose comes from <code>TurnFinish::AssistantMessage</code> with streamed prose only as a live UI preview.</p>
           <p>The route starts live replay from <code>replay_cursor</code> through <code>ObservableSession::subscribe_and_recover_remote(...)</code> and emits an NDJSON <code>replay_cursor</code> row followed by <code>RemoteSessionObservationEvent</code> <code>observation</code> rows. If the cursor is trimmed or unavailable, it emits <code>replay_gap</code> with <code>RemoteLiveReplayGap</code> fields for <code>session_id</code>, <code>requested_cursor</code>, <code>latest_cursor</code>, <code>latest_revision</code>, and <code>reason</code>, plus a fresh <code>RemoteSessionObservation</code> snapshot inside the helper item; the browser replaces product state from its normal endpoints and continues from the latest cursor. Restate mode reuses this observation stream for semantic progress while its app outbox persists product rows for route restart and workflow handoff.</p>
         </div>
 
@@ -143,6 +143,7 @@ let assistant_text = assistant_text_for_persistence(
             <h2>Restate Mode</h2>
             <p>Built with the <code>restate</code> feature and run with <code>--durability restate</code> (or <code>AGENT_SERVICE_DURABILITY=restate</code>; durability defaults to <code>local</code>), browser turns submit <code>AgentServiceTurnWorkflow/{turn_id}/run/send</code> through Restate ingress. The workflow request carries stable turn, chat, text, model, and model-variant data only; board state remains app-owned SQLite state.</p>
           </div>
+          <p>The workflow id is the turn id. There is no durable submitted/running work-item row in front of it: Restate owns in-flight replay and cancellation, Lash owns the effect boundary plus final turn commit, and the app outbox stores product-visible rows keyed by <code>turn_id</code>.</p>
           <pre data-lang="console"><code>just agent-service-restate-e2e</code></pre>
           <p>The one-command E2E starts <code>restatedev/restate:1.7.0</code> with host networking, binds the in-process agent-service endpoint on <code>127.0.0.1:19080</code>, registers it through Restate Admin, submits a turn through ingress, verifies app outbox/message persistence, and removes the container on exit. In app runs, <code>AGENT_SERVICE_ADDR</code> serves the Axum UI and <code>AGENT_SERVICE_RESTATE_ADDR</code> serves the Restate endpoint from the same process.</p>
         </div>

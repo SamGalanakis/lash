@@ -98,11 +98,11 @@ pub(in crate::runtime) async fn send_session_event(
                 .await;
             }
             SessionEvent::TurnOutcome {
-                outcome: TurnOutcome::Finished(TurnFinish::SubmittedValue { value }),
+                outcome: TurnOutcome::Finished(TurnFinish::FinalValue { value }),
             } => {
                 send_independent_turn_event(
                     event_tx,
-                    TurnEvent::SubmittedValue {
+                    TurnEvent::FinalValue {
                         value: value.clone(),
                     },
                 )

@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">lash<span class="slash">/</span>turns</h1>
-    <p class="opener__lede">Turn outcomes, input shape, the semantic event stream, sink semantics, usage channels, and RLM submit.</p>
+    <p class="opener__lede">Turn outcomes, input shape, the semantic event stream, sink semantics, usage channels, and RLM finish.</p>
   </section>
 
   <main class="body" id="content">
@@ -40,11 +40,11 @@
 
 pub enum TurnFinish {
     AssistantMessage { text: String },
-    SubmittedValue { value: serde_json::Value },
+    FinalValue { value: serde_json::Value },
     ToolValue { tool_name: String, value: serde_json::Value },
 }</code></pre>
           </div>
-          <p><code>Finished</code>: clean terminal value. <code>AssistantMessage</code> is the prose default for both modes; the runtime commit materializes the transcript message exactly once; there is no second "final message" stream event after <code>AssistantProseDelta</code>. <code>SubmittedValue</code> / <code>ToolValue</code> come from RLM <code>submit</code> or a tool-authored terminal; both arrive on the stream too.</p>
+          <p><code>Finished</code>: clean terminal value. <code>AssistantMessage</code> is the prose default for both modes; the runtime commit materializes the transcript message exactly once; there is no second "final message" stream event after <code>AssistantProseDelta</code>. <code>FinalValue</code> / <code>ToolValue</code> come from RLM <code>finish</code> or a tool-authored terminal; both arrive on the stream too.</p>
           <p><code>AgentFrameSwitch</code>: a protocol plugin or tool switched to a fresh AgentFrame inside the same session. Runtime callers normally use the facade, which keeps driving the same session until a terminal outcome is reached.</p>
           <p><code>Stopped</code>: turn aborted before a terminal value. Ten <code>TurnStop</code> variants:</p>
           <div class="table">
@@ -92,7 +92,7 @@ pub enum TurnFinish {
         <div class="section" id="semantic-events">
           <div class="section-header">
             <h2>Semantic Events</h2>
-            <p>Identity-bearing stream. Prose and reasoning arrive as deltas. Tool and code activity carries a <code>correlation_id</code>. <code>submit</code> or tool-authored terminals arrive as <code>SubmittedValue</code> / <code>ToolValue</code>. Normal prose completion emits no terminal stream item.</p>
+            <p>Identity-bearing stream. Prose and reasoning arrive as deltas. Tool and code activity carries a <code>correlation_id</code>. <code>finish</code> or tool-authored terminals arrive as <code>FinalValue</code> / <code>ToolValue</code>. Normal prose completion emits no terminal stream item.</p>
           </div>
           <div class="callout">
             <strong>Three event types, only one is for your app.</strong>
@@ -163,7 +163,7 @@ impl TurnActivitySink for AppEvents {
                 let row = self.turn_state.lock().unwrap().code.take();
                 update_or_insert_code_row(row, language, output, error, success).await;
             }
-            TurnEvent::SubmittedValue { value } =&gt; {
+            TurnEvent::FinalValue { value } =&gt; {
                 append_live_text(render_terminal_value(&amp;value)).await;
             }
             TurnEvent::ToolValue { tool_name, value } =&gt; {
@@ -198,7 +198,7 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
           </div>
           <div class="callout">
             <strong>Use event identity, not duplicate detection.</strong>
-            <p>Same <code>correlation_id</code> → same logical row. <code>SubmittedValue</code> / <code>ToolValue</code> signal a control-path terminal; they are not emitted for normal prose finishes, since that prose already streamed as <code>AssistantProseDelta</code> and the settled message comes from the read view.</p>
+            <p>Same <code>correlation_id</code> → same logical row. <code>FinalValue</code> / <code>ToolValue</code> signal a control-path terminal; they are not emitted for normal prose finishes, since that prose already streamed as <code>AssistantProseDelta</code> and the settled message comes from the read view.</p>
           </div>
         </div>
 
@@ -273,33 +273,33 @@ if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
           <p>Source-label constants and re-exports: <code>lash::usage</code>.</p>
         </div>
 
-        <div class="section" id="rlm-and-submit">
+        <div class="section" id="rlm-and-finish">
           <div class="section-header">
-            <h2>RLM And Submit</h2>
-            <p>Two RLM termination policies: <code>SubmitRequired</code> validates <code>submit</code> against the configured schema and finishes as <code>TurnFinish::SubmittedValue</code> (also emitted on the stream). <code>ProseOrSubmit</code> allows a no-code prose answer that finishes as <code>TurnFinish::AssistantMessage</code> with no terminal stream event. For prompt construction, history, variables, and the execution loop, see the <a href="./rlm.html">RLM protocol guide</a>.</p>
+            <h2>RLM And Finish</h2>
+            <p>Two RLM termination policies: <code>FinishRequired</code> validates <code>finish</code> against the configured schema and finishes as <code>TurnFinish::FinalValue</code> (also emitted on the stream). <code>Natural</code> allows a no-code prose answer that finishes as <code>TurnFinish::AssistantMessage</code> with no terminal stream event. For prompt construction, history, variables, and the execution loop, see the <a href="./rlm.html">RLM protocol guide</a>.</p>
           </div>
           <div class="two-col">
             <article class="panel">
               <h3>Per-turn RLM options</h3>
               <pre data-lang="rust" data-snippet="embedding_turns#rlm-terminal-contracts"><code>use lash::rlm::RlmTurnBuilderExt as _;
 
-let submitted = session
+let final_value = session
     .turn(TurnInput::text("Move on the board."))
-    .require_submit()?
+    .require_finish()?
     .stream_to(&amp;sink)
     .await?;
 
-let prose_or_submit = session
+let natural = session
     .turn(TurnInput::text("Answer directly if no code is needed."))
-    .allow_prose_or_submit()?
+    .allow_prose_or_finish()?
     .run()
     .await?;</code></pre>
             </article>
             <article class="panel">
               <h3>Outcome shape</h3>
               <pre data-lang="rust" data-snippet="embedding_turns#terminal-value-match"><code>match result.outcome {
-    TurnOutcome::Finished(TurnFinish::SubmittedValue { value }) =&gt; {
-        // Same value already arrived as TurnEvent::SubmittedValue.
+    TurnOutcome::Finished(TurnFinish::FinalValue { value }) =&gt; {
+        // Same value already arrived as TurnEvent::FinalValue.
         persist_typed_value(value)?;
     }
     TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) =&gt; persist_text(text)?,
@@ -307,18 +307,18 @@ let prose_or_submit = session
 }</code></pre>
             </article>
           </div>
-          <p>Use <code>require_submit_schema(...)</code> when the submitted value must match a JSON Schema. Use <code>RlmSessionBuilderExt::final_answer_format(...)</code> to set the session's normal submit presentation: root RLM sessions default to Markdown guidance, managed child sessions default to raw submit values, and schema-required turns ignore the presentation preference.</p>
-          <pre data-lang="rust" data-snippet="embedding_turns#submit-schema"><code>use lash::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
+          <p>Use <code>require_finish_schema(...)</code> when the final value must match a JSON Schema. Use <code>RlmSessionBuilderExt::final_answer_format(...)</code> to set the session's normal final-value presentation: root RLM sessions default to Markdown guidance, managed child sessions default to raw finish values, and schema-required turns ignore the presentation preference.</p>
+          <pre data-lang="rust" data-snippet="embedding_turns#finish-schema"><code>use lash::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
 let session = core
     .session("analysis")
-    .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
+    .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)
     .open()
     .await?;
 
 let result = session
     .turn(TurnInput::text("Return a risk rating."))
-    .require_submit_schema(serde_json::json!({
+    .require_finish_schema(serde_json::json!({
         "type": "object",
         "required": ["rating"],
         "properties": {

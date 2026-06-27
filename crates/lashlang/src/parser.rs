@@ -24,6 +24,10 @@ pub enum ParseError {
     SessionProcessAdminOutsideBlock { keyword: &'static str, span: Span },
     #[error("`{keyword}` can't be used inside a `process` body")]
     ForegroundControlInsideProcess { keyword: &'static str, span: Span },
+    #[error("`finish` requires a value; use `finish null` to finish with null")]
+    MissingFinishValue { span: Span },
+    #[error("`submit` was removed; use `finish <value>`")]
+    SubmitRemoved { span: Span },
     #[error(
         "declarative trigger syntax has been removed; construct a source value and call the trigger registry register operation"
     )]
@@ -47,6 +51,8 @@ impl ParseError {
             | Self::LoopControlOutsideLoop { span, .. }
             | Self::SessionProcessAdminOutsideBlock { span, .. }
             | Self::ForegroundControlInsideProcess { span, .. }
+            | Self::MissingFinishValue { span }
+            | Self::SubmitRemoved { span }
             | Self::DeclarativeTriggerRemoved { span }
             | Self::InvalidLabelAnnotation { span, .. }
             | Self::InvalidLabelTarget { span }
@@ -62,6 +68,8 @@ impl ParseError {
             | Self::LoopControlOutsideLoop { span, .. }
             | Self::SessionProcessAdminOutsideBlock { span, .. }
             | Self::ForegroundControlInsideProcess { span, .. }
+            | Self::MissingFinishValue { span }
+            | Self::SubmitRemoved { span }
             | Self::DeclarativeTriggerRemoved { span }
             | Self::InvalidLabelAnnotation { span, .. }
             | Self::InvalidLabelTarget { span }
@@ -361,7 +369,9 @@ impl Parser {
         match self.peek_kind() {
             TokenKind::If => self.parse_if(),
             TokenKind::For => self.parse_for(),
-            TokenKind::Submit => self.parse_submit(),
+            TokenKind::Submit => Err(ParseError::SubmitRemoved {
+                span: self.peek().span,
+            }),
             TokenKind::Cancel => self.parse_cancel(),
             TokenKind::Print => self.parse_print(),
             TokenKind::Call => Err(ParseError::Unexpected {
@@ -372,10 +382,13 @@ impl Parser {
                 self.parse_let_assign()
             }
             TokenKind::Ident(name)
-                if matches!(name.as_str(), "yield" | "wake" | "finish" | "fail")
+                if matches!(name.as_str(), "yield" | "wake" | "fail")
                     && !self.peek_assignment_target() =>
             {
                 self.parse_processes()
+            }
+            TokenKind::Ident(name) if name == "finish" && !self.peek_assignment_target() => {
+                self.parse_finish()
             }
             TokenKind::Ident(name) if name == "break" && !self.peek_assignment_target() => {
                 self.parse_loop_control("break")
@@ -546,29 +559,21 @@ impl Parser {
         Ok(ParsedExpr::leaf(expr, span))
     }
 
-    fn parse_submit(&mut self) -> Result<ParsedExpr, ParseError> {
-        let span = self.bump().span;
-        if self.process_depth > 0 {
-            return Err(ParseError::ForegroundControlInsideProcess {
-                keyword: "submit",
-                span,
-            });
+    fn parse_finish(&mut self) -> Result<ParsedExpr, ParseError> {
+        let token = self.bump().clone();
+        if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            return Err(ParseError::MissingFinishValue { span: token.span });
         }
-        let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            None
-        } else {
-            Some(self.parse_expr()?)
-        };
-        let end = expr.as_ref().map(|expr| expr.span.end).unwrap_or(span.end);
+        let expr = self.parse_expr()?;
         let span = Span {
-            start: span.start,
-            end,
+            start: token.span.start,
+            end: expr.span.end,
         };
-        let value_expr = expr.as_ref().map(|expr| Box::new(expr.expr.clone()));
-        Ok(match expr {
-            Some(expr) => ParsedExpr::node(Expr::Submit(value_expr), span, [(0, expr)]),
-            None => ParsedExpr::leaf(Expr::Submit(None), span),
-        })
+        Ok(ParsedExpr::node(
+            Expr::Finish(Box::new(expr.expr.clone())),
+            span,
+            [(0, expr)],
+        ))
     }
 
     fn parse_print(&mut self) -> Result<ParsedExpr, ParseError> {
@@ -599,7 +604,6 @@ impl Parser {
         let keyword_static = match keyword.as_str() {
             "yield" => "yield",
             "wake" => "wake",
-            "finish" => "finish",
             "fail" => "fail",
             _ => unreachable!("unknown process admin keyword"),
         };
@@ -633,26 +637,6 @@ impl Parser {
                     span,
                     [(0, expr)],
                 ))
-            }
-            "finish" => {
-                let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-                    None
-                } else {
-                    Some(self.parse_expr()?)
-                };
-                let end = expr
-                    .as_ref()
-                    .map(|expr| expr.span.end)
-                    .unwrap_or(token.span.end);
-                let span = Span {
-                    start: token.span.start,
-                    end,
-                };
-                let value_expr = expr.as_ref().map(|expr| Box::new(expr.expr.clone()));
-                Ok(match expr {
-                    Some(expr) => ParsedExpr::node(Expr::Finish(value_expr), span, [(0, expr)]),
-                    None => ParsedExpr::leaf(Expr::Finish(None), span),
-                })
             }
             "fail" => {
                 let expr = self.parse_expr()?;
@@ -1283,6 +1267,9 @@ impl Parser {
             }
             TokenKind::LBracket => self.parse_list(),
             TokenKind::LBrace => self.parse_record(),
+            TokenKind::Submit => Err(ParseError::SubmitRemoved {
+                span: self.peek().span,
+            }),
             TokenKind::Call => Err(ParseError::Unexpected {
                 found: "`call`".to_string(),
                 span: self.peek().span,

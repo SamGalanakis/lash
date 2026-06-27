@@ -251,7 +251,7 @@ impl TraceSessionEvent {
             | TurnEvent::QueuedInputAccepted { .. }
             | TurnEvent::QueuedMessagesCommitted { .. }
             | TurnEvent::CodeBlockCompleted { .. }
-            | TurnEvent::SubmittedValue { .. }
+            | TurnEvent::FinalValue { .. }
             | TurnEvent::ToolValue { .. }
             | TurnEvent::ReasoningDelta { .. } => None,
         }

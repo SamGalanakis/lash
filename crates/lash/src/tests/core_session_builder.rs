@@ -405,7 +405,7 @@ async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result
                     seen.lock()
                         .expect("seen prompts")
                         .push(system_text(&request));
-                    Ok(text_response(&lashlang_block("submit \"ok\"")))
+                    Ok(text_response(&lashlang_block("finish \"ok\"")))
                 }
             }
         })
@@ -434,7 +434,7 @@ async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result
 
     session
         .turn(TurnInput::text("hello"))
-        .require_submit()?
+        .require_finish()?
         .run()
         .await?;
 
@@ -516,7 +516,7 @@ async fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options
                 "compile-module",
                 r#"
 value = tools.lookup({})
-submit value
+finish value
 "#,
                 lash_core::ProcessExecutionEnvSpec::new(
                     plugin_options(),
@@ -554,11 +554,11 @@ async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_ra
 
     let raw = core
         .session("rlm-root-raw")
-        .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
+        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)
         .open()
         .await?;
     raw.turn(TurnInput::text("hello"))
-        .require_submit()?
+        .require_finish()?
         .run()
         .await?;
 

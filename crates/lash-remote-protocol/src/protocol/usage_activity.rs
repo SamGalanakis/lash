@@ -84,7 +84,7 @@ pub enum RemoteTurnEvent {
         output: serde_json::Value,
         duration_ms: u64,
     },
-    SubmittedValue {
+    FinalValue {
         value: serde_json::Value,
     },
     ToolValue {

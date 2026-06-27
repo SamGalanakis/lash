@@ -20,8 +20,9 @@ use crate::rlm_support::decode_rlm_termination_options;
 use super::actions::{invalid_driver_state_actions, invalid_turn_options_actions};
 use super::cell::{CellExtraction, extract_lashlang_cell};
 use super::finish::{
-    internal_assistant_prose_message, submit_required_reminder_message,
-    submit_schema_mismatch_message, turn_limit_final_message, validate_finish_value,
+    finish_required_reminder_message, finish_schema_mismatch_message,
+    internal_assistant_prose_message, invalid_lashlang_cell_message, turn_limit_final_message,
+    validate_finish_value,
 };
 use super::state::{RlmDriverState, decode_rlm_driver_state, rlm_driver_state};
 
@@ -91,9 +92,32 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
             Err(err) => return invalid_turn_options_actions(err),
         };
 
-        let extraction = extract_lashlang_cell(&assistant_text);
+        let extraction = match extract_lashlang_cell(&assistant_text) {
+            Ok(extraction) => extraction,
+            Err(err) => {
+                actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
+                    "llm_extraction",
+                    llm_extraction_payload(
+                        "invalid_lashlang_cell",
+                        &termination,
+                        LlmExtractionCounts::prose_only(&assistant_text, &reasoning_text),
+                    ),
+                )]));
+                if let Err(err) = continue_or_stop_after_nonterminal(
+                    &ctx,
+                    &mut actions,
+                    Vec::new(),
+                    vec![conversation_event(invalid_lashlang_cell_message(
+                        err.message(),
+                    ))],
+                ) {
+                    return invalid_turn_options_actions(err);
+                }
+                return actions;
+            }
+        };
         let Some(cell) = extraction else {
-            if matches!(termination, RlmTermination::ProseOrSubmit) {
+            if matches!(termination, RlmTermination::Natural) {
                 actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
                     "llm_extraction",
                     llm_extraction_payload(
@@ -112,13 +136,13 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                 });
                 return actions;
             }
-            let RlmTermination::SubmitRequired { ref schema } = termination else {
-                unreachable!("ProseOrSubmit returned above");
+            let RlmTermination::FinishRequired { ref schema } = termination else {
+                unreachable!("Natural returned above");
             };
             actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
                 "llm_extraction",
                 llm_extraction_payload(
-                    "request_submit",
+                    "request_finish",
                     &termination,
                     LlmExtractionCounts::prose_only(&assistant_text, &reasoning_text),
                 ),
@@ -129,7 +153,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                     assistant_text,
                 )));
             }
-            events.push(conversation_event(submit_required_reminder_message(
+            events.push(conversation_event(finish_required_reminder_message(
                 schema.is_some(),
             )));
             if let Err(err) =
@@ -240,7 +264,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                 Ok(termination) => termination,
                 Err(err) => return invalid_turn_options_actions(err),
             };
-            if let RlmTermination::SubmitRequired {
+            if let RlmTermination::FinishRequired {
                 schema: Some(schema),
             } = termination
                 && let Err(error_text) = validate_finish_value(finish_value, &schema)
@@ -254,7 +278,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                         Some(error_text.clone()),
                         None,
                     ),
-                    vec![conversation_event(submit_schema_mismatch_message(
+                    vec![conversation_event(finish_schema_mismatch_message(
                         &error_text,
                     ))],
                 ) {
@@ -272,7 +296,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
-                    TurnFinish::SubmittedValue {
+                    TurnFinish::FinalValue {
                         value: finish_value.clone(),
                     },
                 )),
@@ -316,13 +340,13 @@ fn continue_or_stop_after_nonterminal(
         .is_some_and(|max_turns| next_protocol_iteration >= ctx.protocol_run_offset() + max_turns);
     if reached_turn_limit {
         match decode_rlm_termination_options(ctx.termination())? {
-            RlmTermination::SubmitRequired { .. } => {
+            RlmTermination::FinishRequired { .. } => {
                 actions.push(DriverAction::Finish(TurnOutcome::Stopped(
                     TurnStop::MaxTurns,
                 )));
                 return Ok(());
             }
-            RlmTermination::ProseOrSubmit => {
+            RlmTermination::Natural => {
                 if let Some(max_turns) = ctx.max_turns() {
                     actions.push(DriverAction::ScheduleTurnLimitFinal {
                         message: turn_limit_final_message(fresh_message_id(), max_turns),
@@ -521,7 +545,7 @@ fn llm_extraction_payload(
 
 fn termination_diagnostic_name(termination: &RlmTermination) -> &'static str {
     match termination {
-        RlmTermination::SubmitRequired { .. } => "submit_required",
-        RlmTermination::ProseOrSubmit => "prose_or_submit",
+        RlmTermination::FinishRequired { .. } => "finish_required",
+        RlmTermination::Natural => "natural",
     }
 }

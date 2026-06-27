@@ -12,7 +12,7 @@ pub const TOYBENCH_MEMORY_GUIDANCE: &str = r#"Use your persistent RLM REPL as me
 - `diary: list` — persistent across iterations; each entry is `{ history_index: int, summary: str, learnings: str }`
 - `history` — auto-bound read-only projection of past turn entries; index into it via `entry.history_index`
 
-The current query and previous feedback are visible in the user turn and are also bound as `current_query` and `current_feedback` for exact access from lashlang. The shape your `submit` value must take is shown in the **Required output** block at the end of the user turn — consult it before building the action.
+The current query and previous feedback are visible in the user turn and are also bound as `current_query` and `current_feedback` for exact access from lashlang. The shape your `finish` value must take is shown in the **Required output** block at the end of the user turn — consult it before building the action.
 
 At the start of each turn:
 
@@ -20,7 +20,7 @@ At the start of each turn:
 - Pull the matching `history[entry.history_index]` when an entry's `summary` is too compressed to act on.
 - Apply prior learnings before choosing the benchmark action.
 
-Before every `submit`, append exactly one diary record and submit a value matching the **Required output** shape:
+Before every `finish`, append exactly one diary record and finish a value matching the **Required output** shape:
 
 <lashlang>
 diary = push(diary, {
@@ -28,7 +28,7 @@ diary = push(diary, {
   summary: "brief task/action summary",
   learnings: "reusable lesson from this interaction"
 })
-submit answer
+finish answer
 </lashlang>
 
 `answer` must match the **Required output** block exactly — the shape varies per task and per step, so build the value to fit the announced contract rather than assuming a fixed wrapper. Keep diary entries short, factual, and reusable; do not duplicate old lessons; incorporate feedback and revise strategy in later entries."#;
@@ -87,7 +87,7 @@ impl ToybenchProject {
                 max_chars: Some(8_000),
                 preserve_terms: vec![
                     "diary".to_string(),
-                    "submit".to_string(),
+                    "finish".to_string(),
                     "llm_query".to_string(),
                     "spawn_agent".to_string(),
                     "continue_as".to_string(),
@@ -124,7 +124,7 @@ impl ToybenchProject {
             },
             constraints: ComponentConstraints {
                 max_chars: Some(1_000),
-                preserve_terms: vec!["submit".to_string()],
+                preserve_terms: vec!["finish".to_string()],
                 ..Default::default()
             },
         })

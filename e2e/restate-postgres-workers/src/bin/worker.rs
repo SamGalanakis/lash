@@ -144,14 +144,14 @@ impl AppState {
                 .stream_to(&sink)
                 .await
                 .map_err(terminal_error)?;
-            let submitted_value = turn
+            let final_value = turn
                 .as_ref()
-                .and_then(|turn| turn.submitted_value().cloned())
+                .and_then(|turn| turn.final_value().cloned())
                 .unwrap_or(serde_json::Value::Null);
             return self
                 .finish_response(
                     &request,
-                    submitted_value,
+                    final_value,
                     sink.count().await,
                     Some(cursor_text),
                     turn.is_some(),
@@ -176,17 +176,17 @@ impl AppState {
             .stream_to(&sink)
             .await
             .map_err(terminal_error)?;
-        let submitted_value = turn
-            .submitted_value()
+        let final_value = turn
+            .final_value()
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let submitted_events = sink.submitted_values().await;
+        let submitted_events = sink.final_values().await;
         self.record(
             &request.workflow_id,
-            "main_submitted_values",
+            "main_final_values",
             json!({
-                "turn_result": submitted_value.clone(),
-                "stream_submitted_values": submitted_events,
+                "turn_result": final_value.clone(),
+                "stream_final_values": submitted_events,
             }),
         )
         .await?;
@@ -213,7 +213,7 @@ impl AppState {
 
         self.finish_response(
             &request,
-            submitted_value,
+            final_value,
             sink.count().await,
             Some(cursor_text),
             false,
@@ -225,18 +225,18 @@ impl AppState {
     async fn finish_response(
         &self,
         request: &TurnRequest,
-        submitted_value: serde_json::Value,
+        final_value: serde_json::Value,
         streamed_event_count: usize,
         replay_cursor: Option<String>,
         queued_turn_ran: bool,
     ) -> HandlerResult<TurnResponse> {
         let process_ids = self.load_session_process_ids().await?;
-        let attachment_id = submitted_value
+        let attachment_id = final_value
             .get("attachment_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let final_text = submitted_value
+        let final_text = final_value
             .get("final")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(match request.scenario {
@@ -260,7 +260,7 @@ impl AppState {
             process_ids,
             attachment_id,
             final_text,
-            submitted_value,
+            final_value,
             streamed_event_count,
             replay_cursor,
             queued_turn_ran,
@@ -438,13 +438,13 @@ impl RecordingTurnSink {
         self.activities.lock().await.len()
     }
 
-    async fn submitted_values(&self) -> Vec<serde_json::Value> {
+    async fn final_values(&self) -> Vec<serde_json::Value> {
         self.activities
             .lock()
             .await
             .iter()
             .filter_map(|activity| match &activity.event {
-                TurnEvent::SubmittedValue { value } => Some(value.clone()),
+                TurnEvent::FinalValue { value } => Some(value.clone()),
                 _ => None,
             })
             .collect()

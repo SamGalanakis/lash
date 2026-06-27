@@ -746,12 +746,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
-            Instruction::Submit => {
-                if self.mode == VmMode::Process {
-                    return Err(RuntimeError::ForegroundControlInsideProcess { keyword: "submit" });
-                }
-                return Ok(Some(VmStep::Effect(VmEffect::Submit)));
-            }
+            Instruction::Finish => return Ok(Some(VmStep::Effect(VmEffect::Finish))),
             Instruction::SleepFor => {
                 return Ok(Some(VmStep::Effect(VmEffect::Sleep(SleepKind::For))));
             }
@@ -791,14 +786,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 return Ok(Some(VmStep::Effect(VmEffect::ProcessEvent(
                     ProcessEventKind::Wake,
                 ))));
-            }
-            Instruction::ProcessFinish => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::SessionProcessAdminOutsideProcess {
-                        keyword: "finish",
-                    });
-                }
-                return Ok(Some(VmStep::Effect(VmEffect::Finish)));
             }
             Instruction::ProcessFail => {
                 if self.mode != VmMode::Process {
@@ -1302,14 +1289,13 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             | Instruction::AddAssignIndexNumber { .. }
             | Instruction::AddAssignIndexSlotNumber { .. }
             | Instruction::AppendAssign(_)
-            | Instruction::Submit
+            | Instruction::Finish
             | Instruction::SleepFor
             | Instruction::SleepUntil
             | Instruction::ProcessWaitSignal { .. }
             | Instruction::ProcessSignalRun { .. }
             | Instruction::ProcessYield
             | Instruction::ProcessWake
-            | Instruction::ProcessFinish
             | Instruction::ProcessFail
             | Instruction::ObserveStep
             | Instruction::Pop

@@ -56,9 +56,7 @@ impl ExecutionHost for Host {
                 _ => Err(ExecutionHostError::new("expected handle record")),
             },
             AbilityOp::Print(_) => Ok(AbilityResult::Unit),
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
-                Ok(AbilityResult::Value(value))
-            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -115,9 +113,7 @@ impl ExecutionHost for RecordingProcessHost {
                 self.signals.lock().expect("signals lock").push(signal);
                 Ok(AbilityResult::Value(Value::Null))
             }
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
-                Ok(AbilityResult::Value(value))
-            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -128,7 +124,7 @@ async fn exec(source: &str) -> Result<Value, RuntimeError> {
     let mut state = State::new();
     match execute_program(&program, &mut state, &Host).await? {
         ExecutionOutcome::Finished(value) => Ok(value),
-        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Continued => panic!("expected `finish` in test program"),
         ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
@@ -347,7 +343,7 @@ Payload = Type {
   matches: list[dict],
   counts: dict
 }
-submit validate(
+finish validate(
   { beta_index: beta_index, matches: matches, counts: counts },
   Payload
 )
@@ -374,7 +370,7 @@ fn golden_compiled_bytecode_contract_covers_lashlang_host_environment() {
 async fn golden_runtime_diagnostic_contract_is_exact() {
     insta::assert_snapshot!(
         "lashlang_runtime_diagnostic_contract",
-        runtime_diagnostic("x = 1\nsubmit len(true)").await
+        runtime_diagnostic("x = 1\nfinish len(true)").await
     );
 }
 
@@ -392,11 +388,11 @@ async fn golden_lashlang_diagnostic_corpus_is_exact() {
     let mut cases = Vec::new();
     cases.push(diagnostic_case(
         "parse_inline_if",
-        format_parse_diagnostic("submit if true { 1 }"),
+        format_parse_diagnostic("finish if true { 1 }"),
     ));
     cases.push(diagnostic_case(
         "parse_inline_for",
-        format_parse_diagnostic("submit [for x in [1] { x }]"),
+        format_parse_diagnostic("finish [for x in [1] { x }]"),
     ));
     cases.push(diagnostic_case(
         "parse_loop_control_outside_loop",
@@ -412,35 +408,35 @@ async fn golden_lashlang_diagnostic_corpus_is_exact() {
     ));
     cases.push(diagnostic_case(
         "runtime_bad_wrapper_unwrap",
-        runtime_diagnostic("submit ({ ok: false, error: \"boom\" })?").await,
+        runtime_diagnostic("finish ({ ok: false, error: \"boom\" })?").await,
     ));
     cases.push(diagnostic_case(
         "runtime_failed_resource_operation_unwrap",
-        runtime_diagnostic("submit (await tools.err({})?)").await,
+        runtime_diagnostic("finish (await tools.err({})?)").await,
     ));
     cases.push(diagnostic_case(
         "runtime_invalid_await_handle",
-        runtime_diagnostic("submit (await 1)?").await,
+        runtime_diagnostic("finish (await 1)?").await,
     ));
     cases.push(diagnostic_case(
         "runtime_read_only_projected_assignment",
-        runtime_diagnostic_with_projected("history = []\nsubmit history", &projected).await,
+        runtime_diagnostic_with_projected("history = []\nfinish history", &projected).await,
     ));
     cases.push(diagnostic_case(
         "runtime_invalid_validate_type_argument",
-        runtime_diagnostic("submit validate({ ok: true }, \"not a type\")").await,
+        runtime_diagnostic("finish validate({ ok: true }, \"not a type\")").await,
     ));
     cases.push(diagnostic_case(
         "runtime_validation_failure",
-        runtime_diagnostic("submit validate({ count: \"x\" }, Type { count: int })").await,
+        runtime_diagnostic("finish validate({ count: \"x\" }, Type { count: int })").await,
     ));
     cases.push(diagnostic_case(
         "runtime_unknown_name",
-        runtime_diagnostic("submit missing").await,
+        runtime_diagnostic("finish missing").await,
     ));
     cases.push(diagnostic_case(
         "runtime_unknown_builtin",
-        runtime_diagnostic("submit nope()").await,
+        runtime_diagnostic("finish nope()").await,
     ));
 
     insta::assert_snapshot!("lashlang_diagnostic_corpus", cases.join("\n\n---\n\n"));
@@ -453,7 +449,7 @@ result = await {
   ok: tools.echo({ value: "ok" })?,
   bad: tools.err({})?
 }
-submit result"#;
+finish result"#;
     let compiled = compile_labeled_source(source);
     let mut state = State::new();
     let failure = execute_compiled_traced(&compiled, &mut state, &Host)
@@ -477,7 +473,7 @@ async fn golden_serialized_state_snapshot_contract_is_exact() {
         r#"
 counter = 7
 Payload = Type { title: str, count: int }
-submit Payload
+finish Payload
 "#,
     )
     .expect("program should parse");
@@ -728,10 +724,9 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             format!("append_assign {slot}:{}", slot_name(chunk, slot))
         }
         Instruction::Print => "print".to_string(),
-        Instruction::Submit => "submit".to_string(),
+        Instruction::Finish => "finish".to_string(),
         Instruction::ProcessYield => "process_yield".to_string(),
         Instruction::ProcessWake => "process_wake".to_string(),
-        Instruction::ProcessFinish => "process_finish".to_string(),
         Instruction::ProcessFail => "process_fail".to_string(),
         Instruction::ObserveStep => "observe_step".to_string(),
         Instruction::Pop => "pop".to_string(),
@@ -901,7 +896,7 @@ async fn compiler_folds_constant_list_and_record_literals() {
     let program = crate::parse(
         r#"
         items = [{ label: "a", weight: 1 }, { label: "b", weight: 2 }]
-        submit items
+        finish items
         "#,
     )
     .expect("program should parse");
@@ -939,7 +934,7 @@ async fn compiler_propagates_safe_straight_line_constants() {
         items = [1, 2, 3]
         indexes = range(0, len(items))
         extended = push(indexes, len(items))
-        submit extended
+        finish extended
         "#,
     )
     .expect("program should parse");
@@ -980,7 +975,7 @@ async fn compiler_keeps_assignment_hot_paths_specialized() {
         items = push(items, 1)
         total = total + 2
         total = total + step
-        submit { items: items, total: total }
+        finish { items: items, total: total }
         "#;
     let compiled = compile_source(source).expect("program should compile");
 

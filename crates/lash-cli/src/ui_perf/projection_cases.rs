@@ -7,11 +7,15 @@ use lash_core::{
 };
 use serde_json::json;
 
-use crate::app::{App, UiProjectionState, UiTimeline, UiTimelineItem, timeline_from_read_view};
+use crate::app::{
+    App, PreparedTurn, UiProjectionState, UiTimeline, UiTimelineItem, timeline_from_read_view,
+};
+use crate::turn_runner::make_turn_input;
+use crate::ui_trace::render_screen_snapshot_with_perf;
 use lash_perf::perf_support::time::elapsed_ms;
 
 use super::measurement::UiPerfRunResult;
-use super::scenarios::UiPerfWorkload;
+use super::scenarios::{BENCH_HEIGHT, BENCH_WIDTH, UiPerfWorkload};
 
 pub(crate) fn run_timeline_projection_once(workload: UiPerfWorkload) -> UiPerfRunResult {
     let total_started = Instant::now();
@@ -90,6 +94,180 @@ pub(crate) fn run_activity_projection_once(workload: UiPerfWorkload) -> UiPerfRu
     result.total_content_rows = total_content_rows;
     count_timeline_items(&mut result, app.timeline.items());
     result
+}
+
+pub(crate) fn run_turn_interrupt_steer_reconciliation_once(
+    workload: UiPerfWorkload,
+) -> UiPerfRunResult {
+    let total_started = Instant::now();
+    let build_started = Instant::now();
+    let read_view = build_projection_read_view(workload.turn_count);
+    let mut app = App::new(
+        "gpt-5.4".to_string(),
+        "ui-interrupt-perf".to_string(),
+        "ui-interrupt-session".to_string(),
+    );
+    app.finish_turn_from_read_view(&read_view);
+    app.start_turn();
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::AssistantProseDelta {
+        text: "I am midway through the current answer while a steer arrives.".to_string(),
+    }));
+
+    let active = PreparedTurn::prepare_with_effective_text(
+        "Also inspect the pending interrupt reconciliation path.".to_string(),
+        "Also inspect the pending interrupt reconciliation path.".to_string(),
+        Vec::new(),
+    );
+    let deferred = PreparedTurn::prepare_with_effective_text(
+        "Carry this steer into the next turn after the interrupt.".to_string(),
+        "Carry this steer into the next turn after the interrupt.".to_string(),
+        Vec::new(),
+    );
+    let queued = PreparedTurn::prepare_with_effective_text(
+        "Then run the queued follow-up exactly once.".to_string(),
+        "Then run the queued follow-up exactly once.".to_string(),
+        Vec::new(),
+    );
+    app.cache_draft_presentation(active.clone());
+    app.cache_draft_presentation(deferred.clone());
+    app.cache_draft_presentation(queued.clone());
+
+    let active_pending = pending_turn_input_for_ui_perf(
+        1,
+        "ui-ti-active-accepted",
+        &active,
+        lash_core::TurnInputIngress::active_turn(
+            "ui-active-turn",
+            lash_core::TurnInputCheckpointBoundary::AfterWork,
+        ),
+    );
+    let mut deferred_pending = pending_turn_input_for_ui_perf(
+        2,
+        "ui-ti-active-deferred",
+        &deferred,
+        lash_core::TurnInputIngress::active_turn(
+            "ui-active-turn",
+            lash_core::TurnInputCheckpointBoundary::BeforeCompletion,
+        ),
+    );
+    let queued_pending = pending_turn_input_for_ui_perf(
+        3,
+        "ui-ti-next",
+        &queued,
+        lash_core::TurnInputIngress::NextTurn,
+    );
+    let active_input_id = active_pending.input_id.clone();
+    app.set_pending_turn_input_snapshot(vec![
+        active_pending,
+        deferred_pending.clone(),
+        queued_pending.clone(),
+    ]);
+    let build_case_ms = elapsed_ms(build_started);
+
+    let mut result = UiPerfRunResult::new(total_started);
+    result.build_case_ms = build_case_ms;
+    result.sample("build_case_ms", build_case_ms);
+
+    let initial_render_started = Instant::now();
+    let (mut snapshot, _) =
+        render_screen_snapshot_with_perf(&mut app, BENCH_WIDTH, BENCH_HEIGHT, None);
+    result.sample(
+        "queue_preview_render_ms",
+        elapsed_ms(initial_render_started),
+    );
+
+    let accept_started = Instant::now();
+    app.push_prepared_user_input(&active);
+    app.remove_pending_turn_inputs(std::slice::from_ref(&active_input_id));
+    result.sample(
+        "active_accept_reconciliation_ms",
+        elapsed_ms(accept_started),
+    );
+
+    let accepted_render_started = Instant::now();
+    let (next_snapshot, _) =
+        render_screen_snapshot_with_perf(&mut app, BENCH_WIDTH, BENCH_HEIGHT, Some(&snapshot));
+    snapshot = next_snapshot;
+    result.sample(
+        "queue_preview_render_ms",
+        elapsed_ms(accepted_render_started),
+    );
+
+    app.note_manual_interrupt_requested();
+    let ui_state = UiProjectionState::from_app(&app);
+    let interrupt_started = Instant::now();
+    app.finish_interrupted_turn_from_read_view(
+        &read_view,
+        &ui_state,
+        crate::util::manual_interrupt_message(),
+    );
+    deferred_pending.ingress = lash_core::TurnInputIngress::NextTurn;
+    deferred_pending.state = lash_core::TurnInputState::DeferredNextTurn;
+    app.set_pending_turn_input_snapshot(vec![deferred_pending.clone(), queued_pending.clone()]);
+    result.sample("interrupt_reconciliation_ms", elapsed_ms(interrupt_started));
+
+    let interrupted_render_started = Instant::now();
+    let (next_snapshot, _) =
+        render_screen_snapshot_with_perf(&mut app, BENCH_WIDTH, BENCH_HEIGHT, Some(&snapshot));
+    snapshot = next_snapshot;
+    result.sample(
+        "queue_preview_render_ms",
+        elapsed_ms(interrupted_render_started),
+    );
+
+    let idle_dispatch_started = Instant::now();
+    let ready_inputs = app.pending_turn_input_snapshot().to_vec();
+    for pending in &ready_inputs {
+        if let Some(turn) = app.take_prepared_turn_for_pending_input(pending) {
+            app.push_prepared_user_input(&turn);
+        }
+    }
+    let ready_input_ids = ready_inputs
+        .iter()
+        .map(|input| input.input_id.clone())
+        .collect::<Vec<_>>();
+    app.remove_pending_turn_inputs(&ready_input_ids);
+    result.sample(
+        "idle_dispatch_reconciliation_ms",
+        elapsed_ms(idle_dispatch_started),
+    );
+
+    let final_render_started = Instant::now();
+    let (_snapshot, _) =
+        render_screen_snapshot_with_perf(&mut app, BENCH_WIDTH, BENCH_HEIGHT, Some(&snapshot));
+    result.sample("queue_preview_render_ms", elapsed_ms(final_render_started));
+
+    result.total_ms = elapsed_ms(total_started);
+    result.total_blocks = app.timeline.len();
+    result.total_content_rows =
+        app.total_content_height(BENCH_WIDTH as usize, BENCH_HEIGHT as usize);
+    result.counter("pending_inputs_seeded", 3);
+    result.counter("pending_inputs_dispatched", ready_input_ids.len() as u64);
+    result.counter("timeline_blocks_after_reconcile", app.timeline.len() as u64);
+    count_timeline_items(&mut result, app.timeline.items());
+    result
+}
+
+fn pending_turn_input_for_ui_perf(
+    enqueue_seq: u64,
+    input_id: &str,
+    turn: &PreparedTurn,
+    ingress: lash_core::TurnInputIngress,
+) -> lash_core::PendingTurnInput {
+    let state = match ingress {
+        lash_core::TurnInputIngress::ActiveTurn { .. } => lash_core::TurnInputState::PendingActive,
+        lash_core::TurnInputIngress::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+    };
+    lash_core::PendingTurnInput {
+        input_id: input_id.to_string(),
+        session_id: "ui-interrupt-session".to_string(),
+        enqueue_seq,
+        source_key: Some(format!("host:{}", turn.draft_id)),
+        ingress,
+        state,
+        enqueued_at_ms: enqueue_seq,
+        input: make_turn_input(turn),
+    }
 }
 
 pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
@@ -233,7 +411,7 @@ fn live_activity_event(index: usize) -> TurnEvent {
             max_attempts: 3,
             reason: "provider backpressure while profiling".to_string(),
         },
-        12 => TurnEvent::SubmittedValue {
+        12 => TurnEvent::FinalValue {
             value: json!({ "status": "done", "index": index }),
         },
         _ => TurnEvent::ToolCallCompleted {

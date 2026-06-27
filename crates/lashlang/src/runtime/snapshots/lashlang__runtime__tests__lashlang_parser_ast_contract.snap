@@ -1,6 +1,6 @@
 ---
 source: crates/lashlang/src/runtime/tests.rs
-assertion_line: 359
+assertion_line: 355
 expression: "serde_json::to_string_pretty(&program).expect(\"program should serialize\")"
 ---
 {
@@ -166,7 +166,7 @@ expression: "serde_json::to_string_pretty(&program).expect(\"program should seri
         }
       },
       {
-        "Submit": {
+        "Finish": {
           "BuiltinCall": {
             "name": "validate",
             "args": [

@@ -140,13 +140,11 @@ fn collect_expr_graph(
             collect_expr_graph(then_block, &branch_id, span, nodes, edges);
             collect_expr_graph(else_block, &branch_id, span, nodes, edges);
         }
-        Expr::Finish(expr) | Expr::Submit(expr) => {
+        Expr::Finish(expr) => {
             let terminal_id = format!("{owner}:terminal:{}", nodes.len());
             nodes.push(node(&terminal_id, "terminal", "result", span));
             edges.push(edge(owner, terminal_id, "terminates", span));
-            if let Some(expr) = expr {
-                collect_expr_graph(expr, owner, span, nodes, edges);
-            }
+            collect_expr_graph(expr, owner, span, nodes, edges);
         }
         _ => {
             for child in expr.children() {
@@ -525,7 +523,7 @@ impl LashlangMapBuilder<'_> {
                 }
                 vec![site.node_id]
             }
-            Expr::Finish(value) | Expr::Submit(value) => {
+            Expr::Finish(value) => {
                 let site = site_builder.node_site(&path, "terminal", "result");
                 self.node(
                     &site.node_id,
@@ -534,14 +532,12 @@ impl LashlangMapBuilder<'_> {
                     label_metadata.cloned(),
                 );
                 self.edges_from_owners(&site_builder, &path, owners, &site.node_id, "terminates");
-                if let Some(value) = value {
-                    self.visit_expr(
-                        value,
-                        context,
-                        std::slice::from_ref(&site.node_id),
-                        path.child(0),
-                    );
-                }
+                self.visit_expr(
+                    value,
+                    context,
+                    std::slice::from_ref(&site.node_id),
+                    path.child(0),
+                );
                 vec![site.node_id]
             }
             Expr::Fail(value) => {
@@ -728,7 +724,6 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::SleepUntil(_)
         | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
-        | Expr::Submit(_)
         | Expr::Yield(_)
         | Expr::Wake(_)
         | Expr::Finish(_)
@@ -771,7 +766,6 @@ fn label_attaches_to_assignment_value(expr: &Expr) -> bool {
         | Expr::SleepUntil(_)
         | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
-        | Expr::Submit(_)
         | Expr::Yield(_)
         | Expr::Wake(_)
         | Expr::Finish(_)
@@ -910,7 +904,7 @@ mod tests {
             @label(title: "Prepare", description: "Pure setup")
             value = 1
             @label(title: "Return")
-            submit value
+            finish value
             "#,
         );
 

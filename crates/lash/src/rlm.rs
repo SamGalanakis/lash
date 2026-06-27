@@ -2,31 +2,31 @@ use crate::support::*;
 
 #[cfg(feature = "rlm")]
 pub trait RlmTurnBuilderExt: Sized {
-    fn require_submit(self) -> Result<Self>;
-    fn require_submit_schema(self, schema: serde_json::Value) -> Result<Self>;
-    fn allow_prose_or_submit(self) -> Result<Self>;
+    fn require_finish(self) -> Result<Self>;
+    fn require_finish_schema(self, schema: serde_json::Value) -> Result<Self>;
+    fn allow_prose_or_finish(self) -> Result<Self>;
 }
 
 #[cfg(feature = "rlm")]
 impl RlmTurnBuilderExt for TurnBuilder {
-    fn require_submit(self) -> Result<Self> {
+    fn require_finish(self) -> Result<Self> {
         rlm_termination(
             self,
-            lash_rlm_types::RlmTermination::SubmitRequired { schema: None },
+            lash_rlm_types::RlmTermination::FinishRequired { schema: None },
         )
     }
 
-    fn require_submit_schema(self, schema: serde_json::Value) -> Result<Self> {
+    fn require_finish_schema(self, schema: serde_json::Value) -> Result<Self> {
         rlm_termination(
             self,
-            lash_rlm_types::RlmTermination::SubmitRequired {
+            lash_rlm_types::RlmTermination::FinishRequired {
                 schema: Some(schema),
             },
         )
     }
 
-    fn allow_prose_or_submit(self) -> Result<Self> {
-        rlm_termination(self, lash_rlm_types::RlmTermination::ProseOrSubmit)
+    fn allow_prose_or_finish(self) -> Result<Self> {
+        rlm_termination(self, lash_rlm_types::RlmTermination::Natural)
     }
 }
 

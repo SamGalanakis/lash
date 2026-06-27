@@ -1216,7 +1216,7 @@ fn benchmark_stream_profile_for_request(
         RuntimePerfScenario::RlmSubagentSpawn | RuntimePerfScenario::RlmObliqueStackMix
     ) && request_text(request).contains("Subagent capability: default. Depth: 1/5.")
     {
-        return text_profile(lashlang_block("submit { len: len(chunk) }"));
+        return text_profile(lashlang_block("finish { len: len(chunk) }"));
     }
 
     if matches!(
@@ -1380,7 +1380,7 @@ fn benchmark_stream_profile_for_request(
         | RuntimePerfScenario::RlmLargeToolCatalog
         | RuntimePerfScenario::EmbedRlm
         | RuntimePerfScenario::TraceJsonlExtended => {
-            let text = lashlang_block(r#"submit "runtime perf benchmark ok""#);
+            let text = lashlang_block(r#"finish "runtime perf benchmark ok""#);
             text_profile(text)
         }
         RuntimePerfScenario::RlmStreamedPairedLashlang => {
@@ -1388,7 +1388,7 @@ fn benchmark_stream_profile_for_request(
                 "Visible preface before executable code.\n",
                 "<lashlang>\n",
                 "value = \"runtime perf benchmark ok\"\n",
-                "submit value\n",
+                "finish value\n",
                 "</lashlang>\n",
                 "This suffix must be ignored after the close tag."
             )
@@ -1398,7 +1398,7 @@ fn benchmark_stream_profile_for_request(
                 deltas: vec![
                     "Visible preface before executable code.\n<lash".to_string(),
                     "lang>\nvalue = \"runtime perf benchmark ok\"\n".to_string(),
-                    "submit value\n</lash".to_string(),
+                    "finish value\n</lash".to_string(),
                     "lang>\nThis suffix must be ignored after the close tag.".to_string(),
                 ],
                 parts: Vec::new(),
@@ -1441,7 +1441,7 @@ live_list = [
 ]
 live_message = "runtime perf benchmark ok"
 host_snapshot = { benchmark: benchmark, input: input, chat: chat }
-submit live_message"#,
+finish live_message"#,
             );
             text_profile(text)
         }
@@ -1480,7 +1480,7 @@ payload = {
 
 result = await tools.benchmark_echo({ value: payload, ordinal: 1 })?
 print result
-submit "runtime perf benchmark ok""#,
+finish "runtime perf benchmark ok""#,
             );
             text_profile(text)
         }
@@ -1491,7 +1491,7 @@ first = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal
 second = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 2 })?
 third = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 3 })?
 fourth = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 4 })?
-submit first.value"#,
+finish first.value"#,
             );
             text_profile(text)
         }
@@ -1500,7 +1500,7 @@ submit first.value"#,
                 r#"
 first = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
 second = await tools.benchmark_async({ value: "runtime perf benchmark ok", delay_ms: 0 })?
-submit first.value"#,
+finish first.value"#,
             );
             text_profile(text)
         }
@@ -1524,7 +1524,7 @@ live = await processes.list({})?
 cancel slow
 first_result = (await first)?
 second_result = (await second)?
-submit first_result.value"#,
+finish first_result.value"#,
             );
             text_profile(text)
         }
@@ -1564,7 +1564,7 @@ sent = await inbox.test.send({
   text: "This is a forwarding test for runtime perf stack profiling."
 })?
 
-submit "runtime perf benchmark ok""#,
+finish "runtime perf benchmark ok""#,
             );
             text_profile(text)
         }
@@ -1580,7 +1580,7 @@ first = start benchmark_async_process(tool: tools, value: "runtime perf benchmar
 second = start benchmark_async_process(tool: tools, value: "runtime perf benchmark ok")
 first_result = (await first)?
 second_result = (await second)?
-submit first_result.value"#,
+finish first_result.value"#,
             );
             text_profile(text)
         }
@@ -1599,7 +1599,7 @@ process spawn_child(agents: Agents) {
 
 handle = start spawn_child(agents: agents)
 result = (await handle)?
-submit "runtime perf benchmark ok""#,
+finish "runtime perf benchmark ok""#,
             );
             text_profile(text)
         }
@@ -1664,7 +1664,7 @@ print {
   subagent: subagent
 }
 
-submit "runtime perf benchmark ok""#,
+finish "runtime perf benchmark ok""#,
             );
             text_profile(text)
         }
@@ -1675,7 +1675,7 @@ result = await llm.query({
   task: "Return the exact benchmark marker.",
   inputs: { marker: "runtime perf benchmark ok" }
 })?
-submit result"#,
+finish result"#,
             );
             text_profile(text)
         }

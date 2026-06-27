@@ -189,7 +189,7 @@ mod tests {
               inputs: { tick: trigger.event },
               name: "changed"
             })?
-            submit handle
+            finish handle
             "#,
         )
         .expect("parse module");
@@ -233,7 +233,7 @@ mod tests {
             process from_tick(tick: timer.Tick) {
               finish tick.fired_at
             }
-            submit true
+            finish true
             "#,
         )
         .expect("parse direct host data ref");
@@ -265,7 +265,7 @@ mod tests {
             process from_tick(tick: foo.Tick) {
               finish true
             }
-            submit true
+            finish true
             "#,
         )
         .expect("parse unknown host type");
@@ -277,7 +277,7 @@ mod tests {
         let opaque = crate::parse(
             r#"
             source = timer.Schedule({ expr: "0 8 * * *" })
-            submit source.expr
+            finish source.expr
             "#,
         )
         .expect("parse opaque source access");
@@ -488,7 +488,7 @@ mod tests {
             })?
             registrations = await triggers.list({ target: scan })?
             cancelled = await triggers.cancel({ handle: handle })?
-            submit { handle: handle, registrations: registrations, cancelled: cancelled }
+            finish { handle: handle, registrations: registrations, cancelled: cancelled }
             "#,
         )
         .expect("parse trigger registry program");
@@ -636,7 +636,7 @@ mod tests {
               inputs: { event: trigger.event },
               name: "button watcher"
             })?
-            submit handle
+            finish handle
             "#,
         )
         .expect("parse button trigger source");
@@ -780,7 +780,7 @@ mod tests {
         let event_outside_inputs = crate::parse(
             r#"
             process scan(tick: timer.Tick) { finish true }
-            submit trigger.event
+            finish trigger.event
             "#,
         )
         .expect("parse event outside inputs");
@@ -863,7 +863,7 @@ mod tests {
         let constructor_mismatch = crate::parse(
             r#"
             source = timer.Schedule({ expr: 1 })
-            submit source
+            finish source
             "#,
         )
         .expect("parse constructor mismatch");
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn linked_module_hash_ignores_unused_host_abilities() {
-        let program = crate::parse("submit 1").expect("parse");
+        let program = crate::parse("finish 1").expect("parse");
         let minimal = LinkedModule::link(
             program.clone(),
             LashlangHostEnvironment::new(resources(), LashlangAbilities::default()),
@@ -986,7 +986,7 @@ mod tests {
     #[test]
     fn label_annotation_text_inside_strings_does_not_require_feature() {
         let linked = LinkedModule::link(
-            crate::parse(r####"submit r"""@label(title: "Plain text")""""####)
+            crate::parse(r####"finish r"""@label(title: "Plain text")""""####)
                 .expect("parse string"),
             full_host_environment(),
         )
@@ -1216,7 +1216,7 @@ mod tests {
         let program = crate::parse(
             r#"
             process scan() { finish missing_in_body }
-            submit missing_in_main
+            finish missing_in_main
             "#,
         )
         .expect("parse");
@@ -1256,11 +1256,11 @@ mod tests {
                 |err| matches!(err, LinkError::UnknownName { name, .. } if name == "missing"),
             ),
             (
-                "submit not_a_builtin(1)",
+                "finish not_a_builtin(1)",
                 |err| matches!(err, LinkError::UnknownBuiltin { name, .. } if name == "not_a_builtin"),
             ),
             (
-                "x = 1\nsubmit x.read_file({})",
+                "x = 1\nfinish x.read_file({})",
                 |err| matches!(err, LinkError::UnresolvedReceiver { operation, .. } if operation == "read_file"),
             ),
             (

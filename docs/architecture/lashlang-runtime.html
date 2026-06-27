@@ -65,7 +65,7 @@ process review_file(agent: Agents, path: str) {
 
 paths = await workspace.default.glob({ pattern: "crates/lash/src/**/*.rs" })?
 if empty(paths) {
-  submit { reviewed: 0, by_owner: {} }
+  finish { reviewed: 0, by_owner: {} }
 }
 
 // Fan out: one subagent handle per file, capped at the first eight.
@@ -93,14 +93,14 @@ for path in keys(resolved) {
   }
 }
 
-// Hand off the rest if we only got through a slice; otherwise submit.
+// Hand off the rest if we only got through a slice; otherwise finish.
 if len(paths) > len(batch) {
   await control.continue_as({
     task: "continue the review over the remaining files",
     seed: { remaining: slice(paths, 8, null), by_owner: by_owner, errors: errors }
   })?
 }
-submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
+finish { reviewed: len(batch), by_owner: by_owner, errors: errors }
 &lt;/lashlang&gt;</code></pre>
         </div>
 
@@ -151,7 +151,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
           <dl class="def-list">
             <dt><code>print(image)</code></dt>
             <dd>Collects image values recursively, registers their attachment refs, and sends provider-visible <code>LlmContentBlock::Image</code> content alongside descriptor text.</dd>
-            <dt><code>submit(image)</code></dt>
+            <dt><code>finish(image)</code></dt>
             <dd>Serializes metadata only, using a JSON-compatible descriptor with id, label, size, width, and height. It does not embed base64 data.</dd>
           </dl>
         </div>
@@ -183,7 +183,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3 id="vm">VM</h3>
-                <p>The VM walks the compiled <code>Chunk</code>, stores globals in <code>State</code>, dispatches host effects through <code>ExecutionHost</code>, recursively awaits records/lists of handles, and consults the <code>ProjectedBindings</code> for any name not present in <code>State</code>. It is split into instruction dispatch, the <code>VmEffect</code> seam that calls into <code>ExecutionHost::perform</code>, the run loop with mode entry points and the <code>VmStep</code> / <code>VmOutcome</code> step machinery, and the optimizer's loop IR. Every enabled effectful op (resource operation, start, await, cancel, print, process start, process event, and the program terminators <code>submit</code> / <code>finish</code> / <code>fail</code>) goes through <code>perform</code>; handlers may transform the value but the VM enforces divergence for the terminator ops. Separate modules own value coercions and builtin bodies, field/index reads and path assignment, the <code>format(...)</code> and <code>json_parse</code>/serialization helpers, and the public <code>compile</code> / <code>execute</code> surface re-exported from the crate root.</p>
+                <p>The VM walks the compiled <code>Chunk</code>, stores globals in <code>State</code>, dispatches host effects through <code>ExecutionHost</code>, recursively awaits records/lists of handles, and consults the <code>ProjectedBindings</code> for any name not present in <code>State</code>. It is split into instruction dispatch, the <code>VmEffect</code> seam that calls into <code>ExecutionHost::perform</code>, the run loop with mode entry points and the <code>VmStep</code> / <code>VmOutcome</code> step machinery, and the optimizer's loop IR. Every enabled effectful op (resource operation, start, await, cancel, print, process start, process event, and the program terminators <code>finish</code> / <code>finish</code> / <code>fail</code>) goes through <code>perform</code>; handlers may transform the value but the VM enforces divergence for the terminator ops. Separate modules own value coercions and builtin bodies, field/index reads and path assignment, the <code>format(...)</code> and <code>json_parse</code>/serialization helpers, and the public <code>compile</code> / <code>execute</code> surface re-exported from the crate root.</p>
               </div>
             </li>
             <li>

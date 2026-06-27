@@ -110,7 +110,7 @@ impl From<lash_core::TurnFinish> for RemoteTurnFinish {
     fn from(value: lash_core::TurnFinish) -> Self {
         match value {
             lash_core::TurnFinish::AssistantMessage { text } => Self::AssistantMessage { text },
-            lash_core::TurnFinish::SubmittedValue { value } => Self::SubmittedValue { value },
+            lash_core::TurnFinish::FinalValue { value } => Self::FinalValue { value },
             lash_core::TurnFinish::ToolValue { tool_name, value } => {
                 Self::ToolValue { tool_name, value }
             }

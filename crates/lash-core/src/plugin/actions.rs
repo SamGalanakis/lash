@@ -191,8 +191,6 @@ pub trait ProcessReadService: Send + Sync {
 pub enum PluginRuntimeDirective {
     QueueTurn {
         input: crate::TurnInput,
-        delivery_policy: crate::DeliveryPolicy,
-        slot_policy: crate::SlotPolicy,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_key: Option<String>,
     },
@@ -202,8 +200,6 @@ impl PluginRuntimeDirective {
     pub fn queue_turn(input: crate::TurnInput) -> Self {
         Self::QueueTurn {
             input,
-            delivery_policy: crate::DeliveryPolicy::AfterCurrentTurnCommit,
-            slot_policy: crate::SlotPolicy::Exclusive,
             source_key: None,
         }
     }
@@ -267,14 +263,14 @@ impl<T> PluginTaskOutcome<T> {
 pub struct PluginCommandReceipt<T> {
     pub output: T,
     pub events: Vec<PluginOwned<PluginRuntimeEvent>>,
-    pub queued_batches: Vec<crate::runtime::QueuedWorkBatch>,
+    pub pending_turn_inputs: Vec<crate::PendingTurnInput>,
 }
 
 #[derive(Clone, Debug)]
 pub struct PluginTaskReceipt<T> {
     pub output: T,
     pub events: Vec<PluginOwned<PluginRuntimeEvent>>,
-    pub queued_batches: Vec<crate::runtime::QueuedWorkBatch>,
+    pub pending_turn_inputs: Vec<crate::PendingTurnInput>,
 }
 
 #[derive(Clone, Debug)]

@@ -185,9 +185,9 @@ impl App {
                 }
                 self.scroll_to_bottom();
             }
-            TurnEvent::SubmittedValue { value } => {
+            TurnEvent::FinalValue { value } => {
                 self.finalize_live_markdown();
-                let text = lash_export::transcript::submitted_value_display_text(&value);
+                let text = lash_export::transcript::final_value_display_text(&value);
                 if push_assistant_text_block(&mut self.timeline, &text) {
                     self.mark_first_token_arrived();
                     self.usage.live_output_chars_estimate += text.chars().count() as i64;
@@ -417,10 +417,7 @@ impl App {
             TurnEvent::QueuedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            TurnEvent::QueuedWorkStarted {
-                batch_ids, causes, ..
-            } => {
-                self.remove_queued_work_batches(&batch_ids);
+            TurnEvent::QueuedWorkStarted { causes, .. } => {
                 if self.turn_active() {
                     if causes
                         .iter()

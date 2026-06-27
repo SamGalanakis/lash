@@ -128,7 +128,7 @@ for path in await workspace.default.glob({ pattern: "src/**/*.rs" })? {
   }
   items = push(items, { path: path, chars: len(hit.value) })
 }
-submit { line_count: len(lines), notes: notes, items: items }</code></pre>
+finish { line_count: len(lines), notes: notes, items: items }</code></pre>
 
           <h3 id="processes">Processes</h3>
           <dl class="def-list">
@@ -164,9 +164,9 @@ right = start audit(agent: agents.default, task: "audit module b")
 // Resolve both concurrently as a record of wrappers.
 results = await { a: left, b: right }
 if !results.a.ok {
-  submit { error: results.a.error }
+  finish { error: results.a.error }
 }
-submit {
+finish {
   a: results.a.value,
   b: results.b.ok ? results.b.value : null
 }</code></pre>
@@ -202,7 +202,7 @@ handle = await triggers.register({
 registrations = await triggers.list({ target: daily_digest })?
 broad_registrations = await triggers.list({})?
 
-submit handle</code></pre>
+finish handle</code></pre>
           <p>A trigger source uses the same registry. The workbench declares a typed UI button trigger event; the runtime exposes <code>ui.button.pressed({})</code> as a zero-config source constructor, and the selected button arrives in the matched occurrence payload:</p>
           <pre><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
@@ -215,7 +215,7 @@ handle = await triggers.register({
   inputs: { event: trigger.event },
   name: "button watcher"
 })?
-submit handle</code></pre>
+finish handle</code></pre>
           <p>The matching host contract exposes configured constructors, trigger-source relations, and typed trigger declarations. Source owners list source registrations by source type/key, keep their own source-specific schedules, and emit declared trigger occurrences that validate payloads and fan out to matching routes:</p>
           <pre><code>let cron_tick = NamedDataType::object(
     "cron.Tick",
@@ -278,17 +278,17 @@ core.triggers()
         <div class="section" id="terminator-effects">
           <div class="section-header">
             <h2>Terminator Effects</h2>
-            <p><code>submit</code>, <code>finish</code>, and <code>fail</code> are ability operations too, not VM-local short-circuits. The VM hands the terminal value to <code>ExecutionHost::perform</code> as <code>AbilityOp::Submit</code>, <code>Finish</code>, or <code>Fail</code> before unwinding. Default handlers pass the value through unchanged; custom handlers can transform it, observe it, or record it for replay. The VM still enforces divergence: the handler may change the value but cannot prevent termination.</p>
+            <p><code>finish</code>, <code>finish</code>, and <code>fail</code> are ability operations too, not VM-local short-circuits. The VM hands the terminal value to <code>ExecutionHost::perform</code> as <code>AbilityOp::Submit</code>, <code>Finish</code>, or <code>Fail</code> before unwinding. Default handlers pass the value through unchanged; custom handlers can transform it, observe it, or record it for replay. The VM still enforces divergence: the handler may change the value but cannot prevent termination.</p>
           </div>
           <dl class="def-list">
             <dt><code>AbilityOp::Submit(value)</code></dt>
-            <dd>Foreground program terminator. Runs once per paired <code>&lt;lashlang&gt;</code> block when the program reaches <code>submit value</code>; the value returned by the handler becomes <code>ExecutionOutcome::Finished</code>. RLM's host bridge passes it through unchanged.</dd>
+            <dd>Foreground program terminator. Runs once per paired <code>&lt;lashlang&gt;</code> block when the program reaches <code>finish value</code>; the value returned by the handler becomes <code>ExecutionOutcome::Finished</code>. RLM's host bridge passes it through unchanged.</dd>
             <dt><code>AbilityOp::Finish(value)</code></dt>
             <dd>Process-mode terminator emitted by <code>finish value</code> inside a named <code>process</code> body. The handler-returned value becomes the process's terminal output.</dd>
             <dt><code>AbilityOp::Fail(value)</code></dt>
             <dd>Process-mode failure path emitted by <code>fail value</code>. The handler may transform the value but the outcome stays on the failure path (<code>ExecutionOutcome::Failed</code>).</dd>
             <dt>Handler errors</dt>
-            <dd>If a handler returns <code>Err</code> for a terminator op, the VM surfaces it as a <code>RuntimeError::ValueError</code> with the op name and the host's message. Returning <code>AbilityResult::Unit</code> errors with "<code>submit returned no value</code>" via the shared <code>into_value</code> helper.</dd>
+            <dd>If a handler returns <code>Err</code> for a terminator op, the VM surfaces it as a <code>RuntimeError::ValueError</code> with the op name and the host's message. Returning <code>AbilityResult::Unit</code> errors with "<code>finish returned no value</code>" via the shared <code>into_value</code> helper.</dd>
           </dl>
         </div>
 
@@ -307,7 +307,7 @@ core.triggers()
   one: web.search({ query: "Read file A" })?,
   two: web.search({ query: "Read file B" })?
 }
-submit { a: results.one, b: results.two }</code></pre>
+finish { a: results.one, b: results.two }</code></pre>
         </div>
 
         <div class="section" id="builtins">
@@ -383,7 +383,7 @@ result = await agents.spawn({
   output: Type { headline: str, bullets: list[str] }
 })?
 
-submit { package: package, summary: result }</code></pre>
+finish { package: package, summary: result }</code></pre>
         </div>
   </main>
 

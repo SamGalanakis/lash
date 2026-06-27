@@ -161,7 +161,7 @@ mod gate4_e2e {
 
     /// Scripted RLM provider: a single Lashlang block that searches the catalog
     /// (`tools.search`), calls the deferred MCP call-path
-    /// (`appworld.venmo_send`, resolved on demand), and submits the routed
+    /// (`appworld.venmo_send`, resolved on demand), and finishs the routed
     /// result. Every model request is captured so the test can assert the
     /// catalogue-preview prompt and the `search_tools` host tool reached the
     /// model.
@@ -196,15 +196,15 @@ mod gate4_e2e {
                         "{\"tool_names\":[\"venmo_send\"]}".to_string()
                     } else {
                         // search_tools (discover) -> deferred resolve + execute of
-                        // `appworld.venmo_send` -> submit, all in one turn so the
+                        // `appworld.venmo_send` -> finish, all in one turn so the
                         // loop is deterministic and terminates immediately.
                         r#"<lashlang>
 hits = await tools.search({ query: "venmo send money", module: "appworld" })?
 if hits[0].call != "appworld.venmo_send" {
-    submit { value: "search-miss", discovered: hits }
+    finish { value: "search-miss", discovered: hits }
 }
 result = await appworld.venmo_send({ amount: 25 })?
-submit { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
+finish { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
 </lashlang>"#
                             .to_string()
                     };
@@ -264,7 +264,7 @@ submit { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
                 ModelSpec::from_token_limits("test/cli-e2e-model", None, 200_000, None)
                     .expect("model spec"),
             )
-            // Safety bound: the scripted program submits on its first turn, so a
+            // Safety bound: the scripted program finishs on its first turn, so a
             // healthy run terminates well within this; it stops a regression from
             // re-prompting forever.
             .max_turns(2)
@@ -319,16 +319,16 @@ submit { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
             "deferred-resolved venmo tool should execute exactly once; outcome: {:?}",
             output.result.outcome
         );
-        // call -> resolve -> execute -> submit closed the loop, and the routed
-        // tool's output (`sent`) made it back into the submitted value.
+        // call -> resolve -> execute -> finish closed the loop, and the routed
+        // tool's output (`sent`) made it back into the final value.
         assert_eq!(
-            output.submitted_value(),
+            output.final_value(),
             Some(&json!({
                 "value": "venmo-routed-ok",
                 "discovered": "appworld.venmo_send",
                 "sent": true
             })),
-            "turn should submit the routed value; outcome: {:?}",
+            "turn should finish the routed value; outcome: {:?}",
             output.result.outcome
         );
         assert!(

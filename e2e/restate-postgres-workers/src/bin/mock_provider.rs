@@ -283,7 +283,7 @@ parent_handle = start parent(tools: tools, workflow_id: "{workflow_id}")
 process_result = (await parent_handle)?
 waker_handle = start waker(workflow_id: "{workflow_id}")
 sleep for "0ms"
-submit {{
+finish {{
   workflow_id: "{workflow_id}",
   foreground: foreground.value,
   attachment_id: attachment.id,
@@ -312,7 +312,7 @@ handle = await triggers.register({
   inputs: { event: trigger.event },
   name: "button watcher"
 })?
-submit { registered: true, handle: handle }
+finish { registered: true, handle: handle }
 </lashlang>
 "#
     .to_string()
@@ -335,7 +335,7 @@ process waiter(workflow_id: str) signals {{ first: any, second: any }} {{
 }}
 
 handle = start waiter(workflow_id: "{workflow_id}")
-submit {{
+finish {{
   workflow_id: "{workflow_id}",
   process_id: handle.id,
   final: "signal-suspend-started"
@@ -351,7 +351,7 @@ fn queued_wake_script() -> String {
 Consume the queued wake.
 
 <lashlang>
-submit {{ wake_consumed: true, final: "{EXPECTED_WAKE_TEXT}" }}
+finish {{ wake_consumed: true, final: "{EXPECTED_WAKE_TEXT}" }}
 </lashlang>
 "#
     )
@@ -370,7 +370,7 @@ process async_child(tools: Tools, workflow_id: str) {{
 
 handle = start async_child(tools: tools, workflow_id: "{workflow_id}")
 result = (await handle)?
-submit {{
+finish {{
   workflow_id: "{workflow_id}",
   async: result,
   final: "{EXPECTED_ASYNC_TEXT}"
@@ -396,7 +396,7 @@ process durable_child(tools: Tools, workflow_id: str) {{
 
 handle = start durable_child(tools: tools, workflow_id: "{workflow_id}")
 result = (await handle)?
-submit {{
+finish {{
   workflow_id: "{workflow_id}",
   durable: result,
   final: "{EXPECTED_DURABLE_INPUT_TEXT}"
@@ -431,7 +431,7 @@ process parent(tools: Tools, workflow_id: str) {{
 
 handle = start parent(tools: tools, workflow_id: "{workflow_id}")
 result = (await handle)?
-submit {{
+finish {{
   workflow_id: "{workflow_id}",
   parent: result,
   final: "{EXPECTED_PARENT_DURABLE_INPUT_TEXT}"
@@ -470,7 +470,7 @@ batch = await {{
   }})?,
   literal: "kept"
 }}
-submit {{
+finish {{
   workflow_id: "{workflow_id}",
   batch: batch,
   final: "{EXPECTED_TOOL_BATCH_TEXT}"

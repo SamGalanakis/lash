@@ -186,7 +186,7 @@ fn assert_successful_lash_code_path(events: &[TurnActivity]) {
         .position(|activity| {
             matches!(
                 &activity.event,
-                TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+                TurnEvent::FinalValue { .. } | TurnEvent::ToolValue { .. }
             )
         })
         .unwrap_or_else(|| panic!("missing terminal output event: {events:#?}"));
@@ -219,18 +219,18 @@ pub(super) fn assert_failed_code_block_present(events: &[TurnActivity]) {
     );
 }
 
-pub(super) fn assert_no_false_submitted_success(run: &LashE2eRun) {
+pub(super) fn assert_no_false_finishted_success(run: &LashE2eRun) {
     let output = run.turn_output.as_ref().expect("turn output");
     assert!(
-        output.submitted_value().is_none(),
-        "failure scenario produced a submitted value: {:?}",
-        output.submitted_value()
+        output.final_value().is_none(),
+        "failure scenario produced a final value: {:?}",
+        output.final_value()
     );
     assert!(
         !run.streamed_events
             .iter()
-            .any(|activity| matches!(&activity.event, TurnEvent::SubmittedValue { .. })),
-        "failure scenario emitted submitted success: {:#?}",
+            .any(|activity| matches!(&activity.event, TurnEvent::FinalValue { .. })),
+        "failure scenario emitted finishted success: {:#?}",
         run.streamed_events
     );
 }

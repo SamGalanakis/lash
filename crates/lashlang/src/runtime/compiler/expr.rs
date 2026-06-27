@@ -299,14 +299,6 @@ impl Compiler {
                 self.compile_expr(expr);
                 self.code.push(Instruction::Print);
             }
-            Expr::Submit(expr) => {
-                if let Some(expr) = expr {
-                    self.compile_expr(expr);
-                } else {
-                    self.compile_expr(&Expr::Null);
-                }
-                self.code.push(Instruction::Submit);
-            }
             Expr::Yield(value) => {
                 self.compile_expr(value);
                 let instruction = self.code.len();
@@ -324,13 +316,9 @@ impl Compiler {
                 }
             }
             Expr::Finish(value) => {
-                if let Some(value) = value {
-                    self.compile_expr(value);
-                } else {
-                    self.compile_expr(&Expr::Null);
-                }
+                self.compile_expr(value);
                 let instruction = self.code.len();
-                self.code.push(Instruction::ProcessFinish);
+                self.code.push(Instruction::Finish);
                 if let Some(site) = self.lashlang_execution_site(expr, "terminal", "result") {
                     self.mark_lashlang_execution_site(instruction, site);
                 }

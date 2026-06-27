@@ -82,7 +82,7 @@ let session = core.session("chat-1").open().await?;</code></pre>
     <div class="section" id="rlm-mode">
       <div class="section-header">
         <h2>RLM Mode</h2>
-        <p>RLM (the <em>reasoning-language model</em> protocol) hands the model a typed scratchpad instead of one tool call at a time. It writes Lashlang programs that loop, branch, validate, call tools, and <code>submit</code> a structured result, all inside a single durable turn.</p>
+        <p>RLM (the <em>reasoning-language model</em> protocol) hands the model a typed scratchpad instead of one tool call at a time. It writes Lashlang programs that loop, branch, validate, call tools, and <code>finish</code> a structured result, all inside a single durable turn.</p>
       </div>
       <div class="listing">
         <div class="listing__row">
@@ -107,7 +107,7 @@ let core = lash::RlmCore::builder()
     .build()?;
 
 let session = core.session("task-1").open().await?;</code></pre>
-      <p>The <a href="./rlm.html">RLM protocol</a> page covers prompt construction, the execution loop, <code>submit</code> semantics, and failure modes; the <a href="./architecture/lashlang.html">Lashlang language</a> reference covers the syntax the model writes.</p>
+      <p>The <a href="./rlm.html">RLM protocol</a> page covers prompt construction, the execution loop, <code>finish</code> semantics, and failure modes; the <a href="./architecture/lashlang.html">Lashlang language</a> reference covers the syntax the model writes.</p>
     </div>
 
     <div class="section" id="choosing">
@@ -118,7 +118,7 @@ let session = core.session("task-1").open().await?;</code></pre>
       <div class="choice-grid">
         <aside class="use-when">
           <strong>Choose RLM</strong>
-          <p>The model needs a typed scratchpad, repeated host calls, loops or validation, structured <code>submit</code>, projected state, or Lashlang background/process abilities.</p>
+          <p>The model needs a typed scratchpad, repeated host calls, loops or validation, structured <code>finish</code>, projected state, or Lashlang background/process abilities.</p>
         </aside>
         <aside class="avoid">
           <strong>Choose standard</strong>

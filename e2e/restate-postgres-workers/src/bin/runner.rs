@@ -464,12 +464,12 @@ async fn submit_signal_workflow(
     let response = wait_for_terminal_result(pool, workflow_id).await?;
     anyhow::ensure!(
         response
-            .submitted_value
+            .final_value
             .get("signalled")
             .and_then(Value::as_bool)
             == Some(true),
         "signal workflow `{workflow_id}` did not submit signalled=true: {}",
-        response.submitted_value
+        response.final_value
     );
     Ok(response)
 }
@@ -623,7 +623,7 @@ fn response_from_row(
         process_ids: Vec::new(),
         attachment_id,
         final_text,
-        submitted_value: serde_json::from_str(&submitted_json)
+        final_value: serde_json::from_str(&submitted_json)
             .with_context(|| format!("decode submitted JSON `{submitted_json}`"))?,
         streamed_event_count: streamed_event_count as usize,
         replay_cursor,
@@ -638,7 +638,7 @@ fn assert_kitchen_sink_response(response: &TurnResponse, expect_attachment: bool
         response.workflow_id,
         response.final_text
     );
-    let submitted = &response.submitted_value;
+    let submitted = &response.final_value;
     anyhow::ensure!(
         submitted.get("foreground").and_then(Value::as_str) == Some("lookup:foreground"),
         "foreground lookup missing from `{}`: {submitted}",
@@ -698,12 +698,12 @@ fn assert_queued_wake_response(response: &TurnResponse) -> Result<()> {
     );
     anyhow::ensure!(
         response
-            .submitted_value
+            .final_value
             .get("wake_consumed")
             .and_then(Value::as_bool)
             == Some(true),
         "queued wake workflow did not submit wake_consumed=true: {}",
-        response.submitted_value
+        response.final_value
     );
     anyhow::ensure!(
         response.queued_turn_ran,
@@ -716,28 +716,24 @@ fn assert_queued_wake_response(response: &TurnResponse) -> Result<()> {
 fn assert_trigger_setup_response(response: &TurnResponse) -> Result<()> {
     anyhow::ensure!(
         response
-            .submitted_value
+            .final_value
             .get("registered")
             .and_then(Value::as_bool)
             == Some(true),
         "trigger setup did not submit registered=true: {}",
-        response.submitted_value
+        response.final_value
     );
     Ok(())
 }
 
 fn assert_signal_suspend_setup_response(response: &TurnResponse) -> Result<String> {
     anyhow::ensure!(
-        response
-            .submitted_value
-            .get("final")
-            .and_then(Value::as_str)
-            == Some("signal-suspend-started"),
+        response.final_value.get("final").and_then(Value::as_str) == Some("signal-suspend-started"),
         "signal setup did not submit signal-suspend-started: {}",
-        response.submitted_value
+        response.final_value
     );
     let process_id = response
-        .submitted_value
+        .final_value
         .get("process_id")
         .and_then(Value::as_str)
         .context("signal setup submitted no process_id")?;
@@ -752,18 +748,18 @@ fn assert_async_completion_response(response: &TurnResponse) -> Result<()> {
         response.final_text
     );
     let async_value = response
-        .submitted_value
+        .final_value
         .get("async")
         .context("async completion response missing async result")?;
     anyhow::ensure!(
         async_value.get("async").and_then(Value::as_bool) == Some(true),
         "async completion result did not mark async=true: {}",
-        response.submitted_value
+        response.final_value
     );
     anyhow::ensure!(
         async_value.get("value").and_then(Value::as_str) == Some("async:detached"),
         "async completion value mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     Ok(())
 }
@@ -776,13 +772,13 @@ fn assert_durable_input_response(response: &TurnResponse) -> Result<()> {
         response.final_text
     );
     let durable = response
-        .submitted_value
+        .final_value
         .get("durable")
         .context("durable input response missing durable result")?;
     anyhow::ensure!(
         durable.get("answer").and_then(Value::as_str) == Some("durable-approved"),
         "durable input answer mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     anyhow::ensure!(
         durable
@@ -790,7 +786,7 @@ fn assert_durable_input_response(response: &TurnResponse) -> Result<()> {
             .and_then(Value::as_str)
             .is_some_and(|request_id| request_id.ends_with(":request-1")),
         "durable input request id mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     Ok(())
 }
@@ -803,13 +799,13 @@ fn assert_parent_durable_input_response(response: &TurnResponse) -> Result<()> {
         response.final_text
     );
     let parent = response
-        .submitted_value
+        .final_value
         .get("parent")
         .context("parent durable input response missing parent result")?;
     anyhow::ensure!(
         parent.get("child").and_then(Value::as_str) == Some("ready"),
         "parent child result mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     let durable = parent
         .get("durable")
@@ -817,7 +813,7 @@ fn assert_parent_durable_input_response(response: &TurnResponse) -> Result<()> {
     anyhow::ensure!(
         durable.get("answer").and_then(Value::as_str) == Some("parent-approved"),
         "parent durable input answer mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     anyhow::ensure!(
         durable
@@ -825,7 +821,7 @@ fn assert_parent_durable_input_response(response: &TurnResponse) -> Result<()> {
             .and_then(Value::as_str)
             .is_some_and(|request_id| request_id.ends_with(":request-1")),
         "parent durable input request id mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     Ok(())
 }
@@ -838,23 +834,23 @@ fn assert_tool_batch_response(response: &TurnResponse) -> Result<()> {
         response.final_text
     );
     let batch = response
-        .submitted_value
+        .final_value
         .get("batch")
         .context("tool-batch response missing batch result")?;
     anyhow::ensure!(
         batch.pointer("/slow/value").and_then(Value::as_str) == Some("batch:slow"),
         "tool-batch slow result mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     anyhow::ensure!(
         batch.pointer("/fast/value").and_then(Value::as_str) == Some("batch:fast"),
         "tool-batch fast result mismatch: {}",
-        response.submitted_value
+        response.final_value
     );
     anyhow::ensure!(
         batch.pointer("/literal").and_then(Value::as_str) == Some("kept"),
         "tool-batch literal result missing: {}",
-        response.submitted_value
+        response.final_value
     );
     let keys = [
         batch.pointer("/slow/key").and_then(Value::as_str),
@@ -863,7 +859,7 @@ fn assert_tool_batch_response(response: &TurnResponse) -> Result<()> {
     anyhow::ensure!(
         keys == [Some("slow"), Some("fast")],
         "tool-batch result order was not source order: {}",
-        response.submitted_value
+        response.final_value
     );
     Ok(())
 }
@@ -1564,7 +1560,7 @@ async fn assert_reopened_session_agrees(
         .iter()
         .filter_map(|response| {
             response
-                .submitted_value
+                .final_value
                 .get("final")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)

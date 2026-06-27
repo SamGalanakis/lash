@@ -12,7 +12,7 @@ impl App {
         self.editor.pending_large_pastes.clear();
         self.clear_live_tool_output();
         self.queues.draft_presentations.clear();
-        self.clear_queued_work_snapshot();
+        self.clear_pending_turn_input_snapshot();
         self.overlay = None;
         self.activity_state.reset();
         self.usage.token_usage = TokenUsage::default();

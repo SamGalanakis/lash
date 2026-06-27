@@ -60,10 +60,10 @@ impl SubagentSpawnContext<'_> {
         let mut policy = self.base_policy();
         policy = spec.resolve_against(&policy);
         let termination = match self.output_schema.clone() {
-            Some(schema) => RlmTermination::SubmitRequired {
+            Some(schema) => RlmTermination::FinishRequired {
                 schema: Some(schema),
             },
-            None => RlmTermination::default(),
+            None => RlmTermination::FinishRequired { schema: None },
         };
         let plugin_options = PluginOptions::typed(
             lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID,

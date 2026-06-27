@@ -126,7 +126,7 @@ fn canonical_source_round_trips_complex_linked_module() {
       inputs: { tick: trigger.event },
       name: "daily"
     })?
-    submit { handle: handle, source: source }
+    finish { handle: handle, source: source }
     "#;
 
     assert_linked_source_round_trip(source);
@@ -144,7 +144,7 @@ fn canonical_source_round_trips_precedence_and_literals() {
     }
 
     result = await tools.echo({ value: { nested: [null, true, false, 3.5] } })?
-    submit result
+    finish result
     "#;
 
     assert_linked_source_round_trip(source);
@@ -160,7 +160,7 @@ fn canonical_process_source_returns_focused_definition() {
         }
 
         source = timer.Schedule({ expr: "0 8 * * *" })
-        submit source
+        finish source
         "#,
     );
     let process_ref = linked.artifact.process_ref("worker").expect("process ref");
@@ -188,7 +188,7 @@ process worker(tick: timer.Tick) -> str {
 
 #[test]
 fn canonical_process_source_by_name_returns_none_for_missing_process() {
-    let linked = assert_linked_source_round_trip("process worker() { finish true }\nsubmit true");
+    let linked = assert_linked_source_round_trip("process worker() { finish true }\nfinish true");
     assert!(
         linked
             .artifact
@@ -210,7 +210,7 @@ fn canonical_program_source_handles_unlinked_programs_without_requirements() {
         pair = 1, 2
         singleton = (answer,)
         empty = ()
-        submit { pair: pair, singleton: singleton, empty: empty, scalar: (answer) }
+        finish { pair: pair, singleton: singleton, empty: empty, scalar: (answer) }
         "#,
     )
     .expect("parse");
@@ -230,7 +230,7 @@ fn canonical_program_source_handles_unlinked_programs_without_requirements() {
 fn host_descriptor_constructor_requires_requirements_context() {
     let linked = assert_linked_source_round_trip(
         r#"source = timer.Schedule({ expr: "0 8 * * *" })
-submit source"#,
+finish source"#,
     );
     let err = canonical_program_source(&linked.artifact.canonical_ir)
         .expect_err("linked constructor needs requirements");
@@ -254,7 +254,7 @@ fn ambiguous_host_descriptor_constructor_is_rejected() {
         abilities: LashlangAbilities::default(),
         language_features: LashlangLanguageFeatures::default(),
     };
-    let program = Program::block(vec![Expr::Submit(Some(Box::new(
+    let program = Program::block(vec![Expr::Finish(Box::new(
         Expr::HostDescriptorConstructor {
             type_name: "timer.Schedule".into(),
             input: Box::new(Expr::Record(vec![(
@@ -262,7 +262,7 @@ fn ambiguous_host_descriptor_constructor_is_rejected() {
                 Expr::String("0 8 * * *".into()),
             )])),
         },
-    )))]);
+    ))]);
     let err = canonical_program_source_with_requirements(&program, &requirements)
         .expect_err("ambiguous constructor should fail");
     assert!(matches!(
@@ -275,7 +275,7 @@ fn ambiguous_host_descriptor_constructor_is_rejected() {
 
 #[test]
 fn unsupported_numbers_are_rejected() {
-    let program = Program::block(vec![Expr::Submit(Some(Box::new(Expr::Number(-1.0))))]);
+    let program = Program::block(vec![Expr::Finish(Box::new(Expr::Number(-1.0)))]);
     let err =
         canonical_program_source(&program).expect_err("negative raw number is not sourceable");
     assert!(matches!(
@@ -298,8 +298,8 @@ fn non_sourceable_type_shapes_are_rejected() {
         ),
         (TypeExpr::Union(vec![TypeExpr::Str]), "single-variant union"),
     ] {
-        let program = Program::block(vec![Expr::Submit(Some(Box::new(Expr::TypeLiteral(
-            Box::new(ty),
+        let program = Program::block(vec![Expr::Finish(Box::new(Expr::TypeLiteral(Box::new(
+            ty,
         ))))]);
         let err = canonical_program_source(&program).expect_err("type is not sourceable");
         assert!(matches!(

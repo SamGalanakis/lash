@@ -129,14 +129,14 @@ paths = await workspace.default.glob({ pattern: "src/**/*.rs" })?
 @label(title: "Choose path")
 if empty(paths) {
   @label(title: "Submit empty result")
-  submit { reviewed: 0 }
+  finish { reviewed: 0 }
 } else {
   @label(title: "Start child review")
   child = start review_one(path: paths[0])
 
   @label(title: "Collect child result")
   report = (await child)?
-  submit { reviewed: 1, report: report }
+  finish { reviewed: 1, report: report }
 }</code></pre>
           <div class="diagram">
             <div class="diagram-title">Static map with dynamic overlays</div>
@@ -254,7 +254,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Protocol steps</h3>
-              <p><code>ProtocolStep</code>: agentic-loop iterations (RLM execute / observe / submit).</p>
+              <p><code>ProtocolStep</code>: agentic-loop iterations (RLM execute / observe / finish).</p>
             </article>
             <article class="panel">
               <h3>Custom</h3>

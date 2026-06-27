@@ -48,6 +48,9 @@ impl AppState {
         turn_id: &str,
         invocation_id: lash_restate::RestateInvocationId,
     ) {
+        // In-memory cancellation aid only. Restate owns in-flight workflow
+        // replay, and Lash owns the turn commit; the workbench does not
+        // persist a submitted/running work-item lifecycle table.
         self.active_restate_invocations
             .insert(session_id, turn_id, invocation_id);
     }
@@ -61,7 +64,9 @@ impl AppState {
     }
 
     /// Cancel every active Restate-backed turn invocation for `session_id`;
-    /// returns how many cancellation requests were accepted.
+    /// returns how many cancellation requests were accepted. Missing entries
+    /// mean this process has no live cancellation handle, not that the turn
+    /// lifecycle is stored somewhere else.
     async fn cancel_turns_for_session(&self, session_id: &str) -> Result<usize, AppError> {
         let active = self.active_restate_invocations.for_session(session_id);
         let admin = lash_restate::RestateAdminClient::with_client(
@@ -252,7 +257,7 @@ async fn apply_model_selection_to_session(
 
 fn assistant_text_for_display(output: &TurnResult, streamed_prose: &str) -> String {
     let terminal = output
-        .submitted_value()
+        .final_value()
         .map(terminal_value_text)
         .or_else(|| {
             output

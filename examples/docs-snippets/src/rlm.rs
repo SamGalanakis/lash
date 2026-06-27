@@ -25,7 +25,7 @@ async fn rlm_core(provider: ProviderHandle, model_id: &str) -> anyhow::Result<()
     let session = core.session("task-42").open().await?;
     let output = session
         .turn(TurnInput::text(
-            "Inspect the task and submit a concise result.",
+            "Inspect the task and finish a concise result.",
         ))
         .run()
         .await?;

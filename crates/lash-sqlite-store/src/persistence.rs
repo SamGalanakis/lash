@@ -188,6 +188,30 @@ impl RuntimePersistence for Store {
                         }
                         ensure_queued_work_completion_conn(tx, completed)?;
                     }
+                    for completed in &commit.completed_turn_input_claims {
+                        if completed.session_id != commit.session_id {
+                            return Err(StoreError::TurnInputClaimExpired {
+                                session_id: completed.session_id.clone(),
+                                claim_id: completed.claim_id.clone(),
+                            });
+                        }
+                        let owned_rows: usize = tx
+                            .query_row(
+                                "SELECT COUNT(*)
+                                 FROM pending_turn_inputs
+                                 WHERE session_id = ?1
+                                   AND claim_id = ?2
+                                   AND claim_token = ?3",
+                                params![
+                                    completed.session_id,
+                                    completed.claim_id,
+                                    completed.lease_token
+                                ],
+                                |row| row.get::<_, i64>(0),
+                            )
+                            .map_err(sqlite_error)? as usize;
+                        ensure_turn_input_completion_owns_all_inputs(completed, owned_rows)?;
+                    }
 
                     let stored_checkpoint =
                         Self::put_checkpoint_conn(tx, &commit.checkpoint, blob_profile)
@@ -288,6 +312,83 @@ impl RuntimePersistence for Store {
                                     completed.lease_token
                                 ],
                             )
+                            .map_err(sqlite_error)?;
+                        }
+                    }
+                    for completed in &commit.completed_turn_input_claims {
+                        for input_id in &completed.input_ids {
+                            tx.execute(
+                                "DELETE FROM pending_turn_inputs
+                                 WHERE session_id = ?1
+                                   AND input_id = ?2
+                                   AND claim_id = ?3
+                                   AND claim_token = ?4",
+                                params![
+                                    completed.session_id,
+                                    input_id,
+                                    completed.claim_id,
+                                    completed.lease_token
+                                ],
+                            )
+                            .map_err(sqlite_error)?;
+                        }
+                    }
+                    if let Some(turn_id) = commit.interrupted_turn_input_turn_id.as_deref() {
+                        let input_ids = {
+                            let mut stmt = tx
+                                .prepare(
+                                    "SELECT input_id, ingress_json
+                                     FROM pending_turn_inputs
+                                     WHERE session_id = ?1 AND state = ?2",
+                                )
+                                .map_err(sqlite_error)?;
+                            let rows = stmt
+                                .query_map(
+                                    params![
+                                        commit.session_id,
+                                        lash_core::TurnInputState::PendingActive.as_str()
+                                    ],
+                                    |row| {
+                                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                                    },
+                                )
+                                .map_err(sqlite_error)?;
+                            let mut input_ids = Vec::new();
+                            for row in rows {
+                                let (input_id, ingress_json) = row.map_err(sqlite_error)?;
+                                let ingress = decode_turn_input_ingress(ingress_json)?;
+                                if ingress
+                                    .active_turn_id()
+                                    .is_some_and(|active| active == turn_id)
+                                {
+                                    input_ids.push(input_id);
+                                }
+                            }
+                            input_ids
+                        };
+                        let next_turn_ingress = encode_json(&lash_core::TurnInputIngress::NextTurn);
+                        let mut stmt = tx
+                            .prepare(
+                                "UPDATE pending_turn_inputs
+                                 SET state = ?3,
+                                     ingress_json = ?4,
+                                     claim_id = NULL,
+                                     claim_owner_id = NULL,
+                                     claim_owner_incarnation_id = NULL,
+                                     claim_owner_liveness_json = NULL,
+                                     claim_token = NULL,
+                                     claim_claimed_at_ms = 0,
+                                     claim_expires_at_ms = 0
+                                 WHERE session_id = ?1 AND input_id = ?2",
+                            )
+                            .map_err(sqlite_error)?;
+                        for input_id in input_ids {
+                            stmt.execute(params![
+                                commit.session_id,
+                                input_id,
+                                lash_core::TurnInputState::DeferredNextTurn.as_str(),
+                                next_turn_ingress
+                            ])
                             .map_err(sqlite_error)?;
                         }
                     }
@@ -1206,6 +1307,270 @@ impl RuntimePersistence for Store {
             .map_err(sqlite_error)?
     }
 
+    async fn enqueue_pending_turn_input(
+        &self,
+        draft: lash_core::PendingTurnInputDraft,
+    ) -> Result<lash_core::PendingTurnInput, StoreError> {
+        let nonce = self.commit_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.conn
+            .write_flow(move |tx| {
+                let outcome: Result<lash_core::PendingTurnInput, StoreError> = (|| {
+                    if let Some(source_key) = draft.source_key.as_deref() {
+                        let existing_id: Option<String> = tx
+                            .query_row(
+                                "SELECT input_id
+                                 FROM pending_turn_inputs
+                                 WHERE session_id = ?1 AND source_key = ?2",
+                                params![draft.session_id, source_key],
+                                |row| row.get(0),
+                            )
+                            .optional()
+                            .map_err(sqlite_error)?;
+                        if let Some(input_id) = existing_id {
+                            let existing = load_pending_turn_input_by_id_conn(
+                                tx,
+                                &draft.session_id,
+                                &input_id,
+                            )?
+                            .ok_or_else(|| {
+                                StoreError::Backend(
+                                    "pending turn input source row disappeared".to_string(),
+                                )
+                            })?;
+                            return Ok(existing);
+                        }
+                    }
+                    let now = current_epoch_ms();
+                    let input_id = draft.input_id.clone().unwrap_or_else(|| {
+                        derive_pending_turn_input_id(
+                            &draft.session_id,
+                            draft.source_key.as_deref(),
+                            now,
+                            nonce,
+                        )
+                    });
+                    let state = match draft.ingress {
+                        lash_core::TurnInputIngress::ActiveTurn { .. } => {
+                            lash_core::TurnInputState::PendingActive
+                        }
+                        lash_core::TurnInputIngress::NextTurn => {
+                            lash_core::TurnInputState::DeferredNextTurn
+                        }
+                    };
+                    tx.execute(
+                        "INSERT INTO pending_turn_inputs (
+                            input_id, session_id, source_key, ingress_json, state,
+                            input_json, enqueued_at_ms
+                         )
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            input_id,
+                            draft.session_id,
+                            draft.source_key.as_deref(),
+                            encode_json(&draft.ingress),
+                            state.as_str(),
+                            encode_json(&draft.input),
+                            now as i64,
+                        ],
+                    )
+                    .map_err(sqlite_error)?;
+                    load_pending_turn_input_by_id_conn(tx, &draft.session_id, &input_id)?
+                        .ok_or_else(|| {
+                            StoreError::Backend("pending turn input insert disappeared".to_string())
+                        })
+                })();
+                match outcome {
+                    Ok(value) => Ok(TxOutcome::Commit(Ok(value))),
+                    Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+                }
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
+    async fn list_pending_turn_inputs(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<lash_core::PendingTurnInput>, StoreError> {
+        let session_id = session_id.to_string();
+        self.conn
+            .call(move |conn| {
+                let outcome: Result<Vec<lash_core::PendingTurnInput>, StoreError> = (|| {
+                    let now = current_epoch_ms();
+                    let rows = {
+                        let mut stmt = conn
+                            .prepare(
+                                "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                                        state, input_json, enqueued_at_ms, claim_fencing_token,
+                                        claim_owner_id, claim_owner_incarnation_id,
+                                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                                 FROM pending_turn_inputs
+                                 WHERE session_id = ?1
+                                   AND state IN (?2, ?3)
+                                   AND (claim_token IS NULL OR claim_expires_at_ms <= ?4)
+                                 ORDER BY enqueue_seq ASC",
+                            )
+                            .map_err(sqlite_error)?;
+                        let rows = stmt
+                            .query_map(
+                                params![
+                                    session_id,
+                                    lash_core::TurnInputState::PendingActive.as_str(),
+                                    lash_core::TurnInputState::DeferredNextTurn.as_str(),
+                                    now as i64
+                                ],
+                                pending_turn_input_row_from_sql,
+                            )
+                            .map_err(sqlite_error)?;
+                        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+                    };
+                    rows.into_iter().map(pending_turn_input_from_row).collect()
+                })(
+                );
+                Ok(outcome)
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
+    async fn cancel_pending_turn_input(
+        &self,
+        session_id: &str,
+        input_id: &str,
+    ) -> Result<Option<lash_core::PendingTurnInput>, StoreError> {
+        let session_id = session_id.to_string();
+        let input_id = input_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                let outcome: Result<Option<lash_core::PendingTurnInput>, StoreError> = (|| {
+                    let now = current_epoch_ms();
+                    let row = tx
+                        .query_row(
+                            "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                                    state, input_json, enqueued_at_ms, claim_fencing_token,
+                                    claim_owner_id, claim_owner_incarnation_id,
+                                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                             FROM pending_turn_inputs
+                             WHERE session_id = ?1
+                               AND input_id = ?2
+                               AND (claim_token IS NULL OR claim_expires_at_ms <= ?3)",
+                            params![session_id, input_id, now as i64],
+                            pending_turn_input_row_from_sql,
+                        )
+                        .optional()
+                        .map_err(sqlite_error)?;
+                    let Some(row) = row else {
+                        return Ok(None);
+                    };
+                    let input = pending_turn_input_from_row(row)?;
+                    tx.execute(
+                        "DELETE FROM pending_turn_inputs
+                         WHERE session_id = ?1
+                           AND input_id = ?2
+                           AND (claim_token IS NULL OR claim_expires_at_ms <= ?3)",
+                        params![session_id, input_id, now as i64],
+                    )
+                    .map_err(sqlite_error)?;
+                    Ok(Some(input))
+                })(
+                );
+                match outcome {
+                    Ok(value) => Ok(TxOutcome::Commit(Ok(value))),
+                    Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+                }
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
+    async fn claim_active_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: lash_core::CheckpointKind,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
+        claim_pending_turn_inputs_sqlite(
+            &self.conn,
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            max_inputs,
+            lash_core::TurnInputClaimMode::ActiveTurn {
+                turn_id: turn_id.to_string(),
+                checkpoint,
+            },
+        )
+        .await
+    }
+
+    async fn claim_next_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
+        claim_pending_turn_inputs_sqlite(
+            &self.conn,
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            max_inputs,
+            lash_core::TurnInputClaimMode::NextTurn,
+        )
+        .await
+    }
+
+    async fn abandon_turn_input_claim(
+        &self,
+        claim: &lash_core::TurnInputClaim,
+    ) -> Result<(), StoreError> {
+        let session_id = claim.session_id.clone();
+        let claim_id = claim.claim_id.clone();
+        let lease_token = claim.lease_token.clone();
+        let restored_state = match claim.mode {
+            lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
+                lash_core::TurnInputState::PendingActive
+            }
+            lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+        };
+        self.conn
+            .write(move |tx| {
+                tx.execute(
+                    "UPDATE pending_turn_inputs
+                     SET state = CASE
+                             WHEN state = ?4 THEN ?5
+                             ELSE state
+                         END,
+                         claim_id = NULL,
+                         claim_owner_id = NULL,
+                         claim_owner_incarnation_id = NULL,
+                         claim_owner_liveness_json = NULL,
+                         claim_token = NULL,
+                         claim_claimed_at_ms = 0,
+                         claim_expires_at_ms = 0
+                     WHERE session_id = ?1 AND claim_id = ?2 AND claim_token = ?3",
+                    params![
+                        session_id,
+                        claim_id,
+                        lease_token,
+                        lash_core::TurnInputState::Accepted.as_str(),
+                        restored_state.as_str(),
+                    ],
+                )
+            })
+            .await
+            .map_err(sqlite_error)?;
+        Ok(())
+    }
+
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
         Store::save_session_meta(self, meta).await;
         Ok(())
@@ -1247,6 +1612,190 @@ impl RuntimePersistence for Store {
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
         Ok(Store::gc_unreachable(self).await)
     }
+}
+
+fn derive_pending_turn_input_id(
+    session_id: &str,
+    source_key: Option<&str>,
+    now_epoch_ms: u64,
+    nonce: u64,
+) -> String {
+    format!(
+        "ti:{:x}",
+        Sha256::digest(format!("{session_id}:{source_key:?}:{now_epoch_ms}:{nonce}").as_bytes())
+    )
+}
+
+async fn claim_pending_turn_inputs_sqlite(
+    conn: &SqliteConnection,
+    session_id: &str,
+    session_execution_lease: &SessionExecutionLeaseFence,
+    owner: &LeaseOwnerIdentity,
+    lease_ttl_ms: u64,
+    max_inputs: usize,
+    mode: lash_core::TurnInputClaimMode,
+) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
+    if max_inputs == 0 {
+        return Ok(None);
+    }
+    let session_id = session_id.to_string();
+    let session_execution_lease = session_execution_lease.clone();
+    let owner = owner.clone();
+    conn.write_flow(move |tx| {
+        let outcome: Result<TxOutcome<Option<lash_core::TurnInputClaim>>, StoreError> = (|| {
+            ensure_session_execution_lease_conn(tx, &session_id, &session_execution_lease)?;
+            let now = current_epoch_ms();
+            let wanted_state = match &mode {
+                lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
+                    lash_core::TurnInputState::PendingActive
+                }
+                lash_core::TurnInputClaimMode::NextTurn => {
+                    lash_core::TurnInputState::DeferredNextTurn
+                }
+            };
+            let candidate_rows = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                                state, input_json, enqueued_at_ms, claim_fencing_token,
+                                claim_owner_id, claim_owner_incarnation_id,
+                                claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                         FROM pending_turn_inputs
+                         WHERE session_id = ?1 AND state = ?2
+                         ORDER BY enqueue_seq ASC
+                         LIMIT ?3",
+                    )
+                    .map_err(sqlite_error)?;
+                let rows = stmt
+                    .query_map(
+                        params![
+                            session_id,
+                            wanted_state.as_str(),
+                            (max_inputs as i64).saturating_add(32)
+                        ],
+                        pending_turn_input_row_from_sql,
+                    )
+                    .map_err(sqlite_error)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+            };
+            let mut selected = Vec::new();
+            for row in candidate_rows {
+                let claim_available = row.claim_token.is_none()
+                    || row.claim_expires_at_ms <= now
+                    || row
+                        .claim_owner
+                        .as_ref()
+                        .is_some_and(|holder| holder.is_definitely_dead_for_claimant(&owner));
+                if !claim_available {
+                    continue;
+                }
+                let input = pending_turn_input_from_row(row.clone())?;
+                let matches_mode = match &mode {
+                    lash_core::TurnInputClaimMode::ActiveTurn {
+                        turn_id,
+                        checkpoint,
+                    } => {
+                        input
+                            .ingress
+                            .active_turn_id()
+                            .is_some_and(|active| active == turn_id)
+                            && input.ingress.admits_checkpoint(*checkpoint)
+                    }
+                    lash_core::TurnInputClaimMode::NextTurn => input.state.is_next_turn_pending(),
+                };
+                if matches_mode {
+                    selected.push((row, input));
+                    if selected.len() >= max_inputs {
+                        break;
+                    }
+                }
+            }
+            let Some((head, _)) = selected.first() else {
+                return Ok(TxOutcome::Commit(None));
+            };
+            let lease = TurnInputClaimLease::derive(head, &session_id, &owner, now, lease_ttl_ms);
+            let liveness_json = encode_liveness(&owner.liveness)?;
+            let state_after_claim = match &mode {
+                lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
+                    lash_core::TurnInputState::Accepted
+                }
+                lash_core::TurnInputClaimMode::NextTurn => {
+                    lash_core::TurnInputState::DeferredNextTurn
+                }
+            };
+            let mut inputs = Vec::new();
+            for (row, mut input) in selected {
+                let claimed = tx
+                    .execute(
+                        "UPDATE pending_turn_inputs
+                         SET state = ?3,
+                             claim_id = ?4,
+                             claim_owner_id = ?5,
+                             claim_owner_incarnation_id = ?6,
+                             claim_owner_liveness_json = ?7,
+                             claim_token = ?8,
+                             claim_fencing_token = claim_fencing_token + 1,
+                             claim_claimed_at_ms = ?9,
+                             claim_expires_at_ms = ?10
+                         WHERE session_id = ?1
+                           AND input_id = ?2
+                           AND (
+                                claim_token IS NULL
+                                OR claim_expires_at_ms <= ?9
+                                OR (
+                                    claim_token = ?11
+                                    AND claim_owner_id = ?12
+                                    AND claim_owner_incarnation_id = ?13
+                                )
+                           )",
+                        params![
+                            session_id,
+                            row.input_id,
+                            state_after_claim.as_str(),
+                            lease.claim_id,
+                            owner.owner_id.as_str(),
+                            owner.incarnation_id.as_str(),
+                            liveness_json.as_str(),
+                            lease.lease_token,
+                            now as i64,
+                            lease.expires_at_epoch_ms as i64,
+                            row.claim_token,
+                            row.claim_owner
+                                .as_ref()
+                                .map(|owner| owner.owner_id.as_str()),
+                            row.claim_owner
+                                .as_ref()
+                                .map(|owner| owner.incarnation_id.as_str())
+                        ],
+                    )
+                    .map_err(sqlite_error)?;
+                if claimed == 0 {
+                    return Ok(TxOutcome::Rollback(None));
+                }
+                input.state = state_after_claim;
+                inputs.push(input);
+            }
+            Ok(TxOutcome::Commit(Some(lash_core::TurnInputClaim {
+                session_id: session_id.clone(),
+                claim_id: lease.claim_id,
+                owner: owner.clone(),
+                lease_token: lease.lease_token,
+                fencing_token: lease.fencing_token,
+                claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
+                expires_at_epoch_ms: lease.expires_at_epoch_ms,
+                mode,
+                inputs,
+            })))
+        })(
+        );
+        match outcome {
+            Ok(TxOutcome::Commit(value)) => Ok(TxOutcome::Commit(Ok(value))),
+            Ok(TxOutcome::Rollback(value)) => Ok(TxOutcome::Rollback(Ok(value))),
+            Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+        }
+    })
+    .await
+    .map_err(sqlite_error)?
 }
 
 struct SessionExecutionLeaseRow {
