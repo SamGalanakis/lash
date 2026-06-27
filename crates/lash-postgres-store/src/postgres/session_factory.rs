@@ -62,6 +62,8 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
         for sql in [
             "DELETE FROM lash_queued_work_items WHERE batch_id IN (SELECT batch_id FROM lash_queued_work_batches WHERE session_id = $1)",
             "DELETE FROM lash_queued_work_batches WHERE session_id = $1",
+            "DELETE FROM lash_pending_turn_inputs WHERE session_id = $1",
+            "DELETE FROM lash_session_execution_leases WHERE session_id = $1",
             "DELETE FROM lash_usage_deltas WHERE session_id = $1",
             "DELETE FROM lash_graph_nodes WHERE session_id = $1",
             "DELETE FROM lash_runtime_turn_commits WHERE session_id = $1",
@@ -225,6 +227,7 @@ struct PendingTurnInputRow {
     state: lash_core::TurnInputState,
     input_json: String,
     enqueued_at_ms: u64,
+    claim_id: Option<String>,
     claim_fencing_token: u64,
     claim_owner: Option<LeaseOwnerIdentity>,
     claim_token: Option<String>,
@@ -243,6 +246,7 @@ fn pending_turn_input_row(row: PgRow) -> Result<PendingTurnInputRow, StoreError>
         state,
         input_json: row.get("input_json"),
         enqueued_at_ms: row.get::<i64, _>("enqueued_at_ms") as u64,
+        claim_id: row.get("claim_id"),
         claim_fencing_token: row.get::<i64, _>("claim_fencing_token") as u64,
         claim_owner: lease_owner_from_columns(
             row.get("claim_owner_id"),
@@ -276,7 +280,7 @@ async fn load_pending_turn_input(
 ) -> Result<Option<lash_core::PendingTurnInput>, StoreError> {
     let row = sqlx::query(
         "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                state, input_json, enqueued_at_ms, claim_fencing_token,
+                state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                 claim_owner_id, claim_owner_incarnation_id,
                 claim_owner_liveness_json, claim_token, claim_expires_at_ms
          FROM lash_pending_turn_inputs
@@ -291,6 +295,113 @@ async fn load_pending_turn_input(
         .transpose()?
         .map(pending_turn_input_from_row)
         .transpose()
+}
+
+async fn load_pending_turn_input_row_by_target_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+    target: &lash_core::PendingTurnInputCancelTarget,
+    for_update: bool,
+) -> Result<Option<PendingTurnInputRow>, StoreError> {
+    let for_update = if for_update { " FOR UPDATE" } else { "" };
+    let row = match target {
+        lash_core::PendingTurnInputCancelTarget::InputId(input_id) => {
+            sqlx::query(&format!(
+                "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                        state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                        claim_owner_id, claim_owner_incarnation_id,
+                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                 FROM lash_pending_turn_inputs
+                 WHERE session_id = $1 AND input_id = $2{for_update}"
+            ))
+            .bind(session_id)
+            .bind(input_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(store_sqlx_error)?
+        }
+        lash_core::PendingTurnInputCancelTarget::SourceKey(source_key) => {
+            sqlx::query(&format!(
+                "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                        state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                        claim_owner_id, claim_owner_incarnation_id,
+                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                 FROM lash_pending_turn_inputs
+                 WHERE session_id = $1 AND source_key = $2{for_update}"
+            ))
+            .bind(session_id)
+            .bind(source_key)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(store_sqlx_error)?
+        }
+    };
+    row.map(pending_turn_input_row).transpose()
+}
+
+fn pending_turn_input_claim_diagnostics_from_row(
+    row: &PendingTurnInputRow,
+) -> Option<lash_core::PendingTurnInputClaimDiagnostics> {
+    (row.claim_token.is_some() || matches!(row.state, lash_core::TurnInputState::Accepted)).then(
+        || lash_core::PendingTurnInputClaimDiagnostics {
+            state: row.state,
+            claim_id: row.claim_id.clone(),
+            claim_owner: row.claim_owner.clone(),
+            claim_expires_at_ms: row.claim_token.as_ref().map(|_| row.claim_expires_at_ms),
+            claim_fencing_token: row.claim_fencing_token,
+        },
+    )
+}
+
+async fn cancel_pending_turn_input_row_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    row: PendingTurnInputRow,
+    now_epoch_ms: u64,
+) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
+    let mut input = pending_turn_input_from_row(row.clone())?;
+    match input.state {
+        lash_core::TurnInputState::Cancelled => {
+            Ok(lash_core::PendingTurnInputCancelOutcome::AlreadyCancelled(input))
+        }
+        lash_core::TurnInputState::Completed => {
+            Ok(lash_core::PendingTurnInputCancelOutcome::AlreadyCompleted(input))
+        }
+        lash_core::TurnInputState::Accepted => {
+            Ok(lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                input,
+                claim: pending_turn_input_claim_diagnostics_from_row(&row),
+            })
+        }
+        lash_core::TurnInputState::PendingActive | lash_core::TurnInputState::DeferredNextTurn => {
+            let live_claim = row.claim_token.is_some() && row.claim_expires_at_ms > now_epoch_ms;
+            if live_claim {
+                return Ok(lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                    input,
+                    claim: pending_turn_input_claim_diagnostics_from_row(&row),
+                });
+            }
+            sqlx::query(
+                "UPDATE lash_pending_turn_inputs
+                 SET state = $3,
+                     claim_id = NULL,
+                     claim_owner_id = NULL,
+                     claim_owner_incarnation_id = NULL,
+                     claim_owner_liveness_json = NULL,
+                     claim_token = NULL,
+                     claim_claimed_at_ms = 0,
+                     claim_expires_at_ms = 0
+                 WHERE session_id = $1 AND input_id = $2",
+            )
+            .bind(&row.session_id)
+            .bind(&row.input_id)
+            .bind(lash_core::TurnInputState::Cancelled.as_str())
+            .execute(&mut **tx)
+            .await
+            .map_err(store_sqlx_error)?;
+            input.state = lash_core::TurnInputState::Cancelled;
+            Ok(lash_core::PendingTurnInputCancelOutcome::Cancelled(input))
+        }
+    }
 }
 
 async fn ensure_turn_input_completion_tx(

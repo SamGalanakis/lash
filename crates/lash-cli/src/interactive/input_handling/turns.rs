@@ -109,7 +109,7 @@ pub(super) async fn restore_last_durable_full_turn(app: &mut App, runtime: &Opti
         return;
     };
     match session.cancel_pending_turn_input(&pending.input_id).await {
-        Ok(Some(cancelled)) => {
+        Ok(lash::PendingTurnInputCancelOutcome::Cancelled(cancelled)) => {
             if let Some(turn) = app.take_prepared_turn_for_pending_input(&cancelled) {
                 app.restore_prepared_turn(turn);
                 app.update_suggestions();
@@ -117,11 +117,20 @@ pub(super) async fn restore_last_durable_full_turn(app: &mut App, runtime: &Opti
                 push_system_message(app, "Queued input was cancelled.".to_string());
             }
         }
-        Ok(None) => {
+        Ok(lash::PendingTurnInputCancelOutcome::AlreadyClaimed { .. }) => {
             push_system_message(
                 app,
                 "Queued input is already being processed; it was not restored.".to_string(),
             );
+        }
+        Ok(lash::PendingTurnInputCancelOutcome::AlreadyCompleted(_)) => {
+            push_system_message(app, "Queued input has already completed.".to_string());
+        }
+        Ok(lash::PendingTurnInputCancelOutcome::AlreadyCancelled(_)) => {
+            push_system_message(app, "Queued input was already cancelled.".to_string());
+        }
+        Ok(lash::PendingTurnInputCancelOutcome::NotFound) => {
+            push_system_message(app, "Queued input was no longer found.".to_string());
         }
         Err(err) => push_system_message(app, format!("Failed to edit queued input: {err}")),
     }

@@ -37,6 +37,78 @@ struct RuntimePerfPendingTurnInput {
     claim_expires_at_ms: u64,
 }
 
+impl RuntimePerfPendingTurnInput {
+    fn has_live_claim(&self, now_epoch_ms: u64) -> bool {
+        self.claim_token.is_some() && self.claim_expires_at_ms > now_epoch_ms
+    }
+
+    fn claim_diagnostics(&self) -> Option<lash_core::PendingTurnInputClaimDiagnostics> {
+        (self.claim_id.is_some() || matches!(self.input.state, lash_core::TurnInputState::Accepted))
+            .then(|| lash_core::PendingTurnInputClaimDiagnostics {
+                state: self.input.state,
+                claim_id: self.claim_id.clone(),
+                claim_owner: self.claim_owner.clone(),
+                claim_expires_at_ms: self.claim_token.as_ref().map(|_| self.claim_expires_at_ms),
+                claim_fencing_token: self.claim_fencing_token,
+            })
+    }
+
+    fn clear_claim(&mut self) {
+        self.claim_id = None;
+        self.claim_token = None;
+        self.claim_owner = None;
+        self.claim_expires_at_ms = 0;
+    }
+
+    fn cancel_outcome(&mut self, now_epoch_ms: u64) -> lash_core::PendingTurnInputCancelOutcome {
+        match self.input.state {
+            lash_core::TurnInputState::Cancelled => {
+                lash_core::PendingTurnInputCancelOutcome::AlreadyCancelled(self.input.clone())
+            }
+            lash_core::TurnInputState::Completed => {
+                lash_core::PendingTurnInputCancelOutcome::AlreadyCompleted(self.input.clone())
+            }
+            lash_core::TurnInputState::Accepted => {
+                lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                    input: self.input.clone(),
+                    claim: self.claim_diagnostics(),
+                }
+            }
+            lash_core::TurnInputState::PendingActive
+            | lash_core::TurnInputState::DeferredNextTurn => {
+                if self.has_live_claim(now_epoch_ms) {
+                    lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                        input: self.input.clone(),
+                        claim: self.claim_diagnostics(),
+                    }
+                } else {
+                    self.input.state = lash_core::TurnInputState::Cancelled;
+                    self.clear_claim();
+                    lash_core::PendingTurnInputCancelOutcome::Cancelled(self.input.clone())
+                }
+            }
+        }
+    }
+}
+
+fn find_pending_turn_input_index(
+    pending: &[RuntimePerfPendingTurnInput],
+    session_id: &str,
+    target: &lash_core::PendingTurnInputCancelTarget,
+) -> Option<usize> {
+    pending.iter().position(|entry| {
+        entry.input.session_id == session_id
+            && match target {
+                lash_core::PendingTurnInputCancelTarget::InputId(input_id) => {
+                    entry.input.input_id == *input_id
+                }
+                lash_core::PendingTurnInputCancelTarget::SourceKey(source_key) => {
+                    entry.input.source_key.as_deref() == Some(source_key.as_str())
+                }
+            }
+    })
+}
+
 #[derive(Clone, Default)]
 struct RuntimePerfSessionExecutionLease {
     owner: Option<LeaseOwnerIdentity>,
@@ -594,12 +666,16 @@ impl RuntimePersistence for RuntimePerfStore {
                 .lock()
                 .expect("lock perf pending turn inputs");
             for completed in &completed_turn_input_claims {
-                pending.retain(|entry| {
-                    !(entry.input.session_id == completed.session_id
+                for entry in pending.iter_mut() {
+                    if entry.input.session_id == completed.session_id
                         && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
                         && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
-                        && completed.input_ids.contains(&entry.input.input_id))
-                });
+                        && completed.input_ids.contains(&entry.input.input_id)
+                    {
+                        entry.input.state = lash_core::TurnInputState::Completed;
+                        entry.clear_claim();
+                    }
+                }
             }
             if let Some(turn_id) = interrupted_turn_input_turn_id.as_deref() {
                 for entry in pending.iter_mut() {
@@ -843,6 +919,20 @@ impl RuntimePersistence for RuntimePerfStore {
                     && entry.input.source_key.as_deref() == Some(source_key)
             })
         {
+            if !draft
+                .submitted_content_matches(&existing.input)
+                .map_err(|err| {
+                    StoreError::Backend(format!(
+                        "failed to compare pending turn input submission: {err}"
+                    ))
+                })?
+            {
+                return Err(StoreError::PendingTurnInputSourceKeyConflict {
+                    session_id: draft.session_id.clone(),
+                    source_key: source_key.to_string(),
+                    existing_input_id: existing.input.input_id.clone(),
+                });
+            }
             return Ok(existing.input.clone());
         }
         let enqueue_seq = self
@@ -892,9 +982,10 @@ impl RuntimePersistence for RuntimePerfStore {
             .iter()
             .filter(|entry| {
                 entry.input.session_id == session_id
-                    && !matches!(
+                    && matches!(
                         entry.input.state,
-                        lash_core::TurnInputState::Cancelled | lash_core::TurnInputState::Completed
+                        lash_core::TurnInputState::PendingActive
+                            | lash_core::TurnInputState::DeferredNextTurn
                     )
                     && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
             })
@@ -908,22 +999,72 @@ impl RuntimePersistence for RuntimePerfStore {
         &self,
         session_id: &str,
         input_id: &str,
-    ) -> Result<Option<lash_core::PendingTurnInput>, StoreError> {
+    ) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
+        let target = lash_core::PendingTurnInputCancelTarget::input_id(input_id);
+        let targets = vec![target];
+        let mut outcomes = self
+            .cancel_pending_turn_inputs(session_id, &targets)
+            .await?;
+        Ok(outcomes
+            .pop()
+            .map(|result| result.outcome)
+            .unwrap_or(lash_core::PendingTurnInputCancelOutcome::NotFound))
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        session_id: &str,
+        targets: &[lash_core::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> {
         let now = current_epoch_ms();
         let mut pending = self
             .pending_turn_inputs
             .lock()
             .expect("lock perf pending turn inputs");
-        let Some(index) = pending.iter().position(|entry| {
-            entry.input.session_id == session_id && entry.input.input_id == input_id
-        }) else {
-            return Ok(None);
-        };
-        let entry = &pending[index];
-        if entry.claim_token.is_some() && entry.claim_expires_at_ms > now {
-            return Ok(None);
+        let mut results = Vec::with_capacity(targets.len());
+        for target in targets {
+            let outcome = match find_pending_turn_input_index(&pending, session_id, target) {
+                Some(index) => pending[index].cancel_outcome(now),
+                None => lash_core::PendingTurnInputCancelOutcome::NotFound,
+            };
+            results.push(lash_core::PendingTurnInputCancelResult {
+                target: target.clone(),
+                outcome,
+            });
         }
-        Ok(Some(pending.remove(index).input))
+        Ok(results)
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        session_id: &str,
+        anchor: &lash_core::PendingTurnInputCancelTarget,
+    ) -> Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> {
+        let now = current_epoch_ms();
+        let mut pending = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock perf pending turn inputs");
+        let Some(anchor_seq) = find_pending_turn_input_index(&pending, session_id, anchor)
+            .map(|index| pending[index].input.enqueue_seq)
+        else {
+            return Ok(
+                lash_core::PendingTurnInputSuffixCancelOutcome::AnchorNotFound {
+                    anchor: anchor.clone(),
+                },
+            );
+        };
+        pending.sort_by_key(|entry| entry.input.enqueue_seq);
+        let outcomes = pending
+            .iter_mut()
+            .filter(|entry| entry.input.session_id == session_id)
+            .filter(|entry| entry.input.enqueue_seq >= anchor_seq)
+            .map(|entry| entry.cancel_outcome(now))
+            .collect::<Vec<_>>();
+        Ok(lash_core::PendingTurnInputSuffixCancelOutcome::Outcomes {
+            anchor: anchor.clone(),
+            outcomes,
+        })
     }
 
     async fn claim_active_turn_inputs(

@@ -322,13 +322,22 @@ impl RuntimePersistence for PostgresSessionStore {
         for completed in &commit.completed_turn_input_claims {
             for input_id in &completed.input_ids {
                 sqlx::query(
-                    "DELETE FROM lash_pending_turn_inputs
+                    "UPDATE lash_pending_turn_inputs
+                     SET state = $5,
+                         claim_id = NULL,
+                         claim_owner_id = NULL,
+                         claim_owner_incarnation_id = NULL,
+                         claim_owner_liveness_json = NULL,
+                         claim_token = NULL,
+                         claim_claimed_at_ms = 0,
+                         claim_expires_at_ms = 0
                      WHERE session_id = $1 AND input_id = $2 AND claim_id = $3 AND claim_token = $4",
                 )
                 .bind(&completed.session_id)
                 .bind(input_id)
                 .bind(&completed.claim_id)
                 .bind(&completed.lease_token)
+                .bind(lash_core::TurnInputState::Completed.as_str())
                 .execute(&mut *tx)
                 .await
                 .map_err(store_sqlx_error)?;
@@ -337,7 +346,7 @@ impl RuntimePersistence for PostgresSessionStore {
         if let Some(turn_id) = commit.interrupted_turn_input_turn_id.as_deref() {
             let rows = sqlx::query(
                 "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                        state, input_json, enqueued_at_ms, claim_fencing_token,
+                        state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                         claim_owner_id, claim_owner_incarnation_id,
                         claim_owner_liveness_json, claim_token, claim_expires_at_ms
                  FROM lash_pending_turn_inputs
@@ -1154,28 +1163,6 @@ impl RuntimePersistence for PostgresSessionStore {
         draft: lash_core::PendingTurnInputDraft,
     ) -> Result<lash_core::PendingTurnInput, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        if let Some(source_key) = draft.source_key.as_deref() {
-            let existing_id: Option<String> = sqlx::query_scalar(
-                "SELECT input_id FROM lash_pending_turn_inputs
-                 WHERE session_id = $1 AND source_key = $2",
-            )
-            .bind(&draft.session_id)
-            .bind(source_key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(store_sqlx_error)?;
-            if let Some(input_id) = existing_id {
-                let existing = load_pending_turn_input(&mut tx, &draft.session_id, &input_id)
-                    .await?
-                    .ok_or_else(|| {
-                        StoreError::Backend(
-                            "pending turn input source row disappeared".to_string(),
-                        )
-                    })?;
-                tx.commit().await.map_err(store_sqlx_error)?;
-                return Ok(existing);
-            }
-        }
         let now = current_epoch_ms();
         let input_id = draft.input_id.clone().unwrap_or_else(|| {
             derive_pending_turn_input_id(&draft.session_id, draft.source_key.as_deref(), now)
@@ -1186,27 +1173,67 @@ impl RuntimePersistence for PostgresSessionStore {
             }
             lash_core::TurnInputIngress::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
         };
-        sqlx::query(
-            "INSERT INTO lash_pending_turn_inputs (
-                input_id, session_id, source_key, ingress_json, state, input_json, enqueued_at_ms
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(&input_id)
-        .bind(&draft.session_id)
-        .bind(&draft.source_key)
-        .bind(encode_json(&draft.ingress))
-        .bind(state.as_str())
-        .bind(encode_json(&draft.input))
-        .bind(now as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(store_sqlx_error)?;
-        let input = load_pending_turn_input(&mut tx, &draft.session_id, &input_id)
-            .await?
-            .ok_or_else(|| {
-                StoreError::Backend("pending turn input insert disappeared".to_string())
-            })?;
+        let ingress_json = encode_json(&draft.ingress);
+        let input_json = encode_json(&draft.input);
+        let input = if let Some(source_key) = draft.source_key.as_deref() {
+            let row = sqlx::query(
+                "INSERT INTO lash_pending_turn_inputs (
+                    input_id, session_id, source_key, ingress_json, state, input_json, enqueued_at_ms
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (session_id, source_key) DO UPDATE
+                 SET source_key = lash_pending_turn_inputs.source_key
+                 RETURNING enqueue_seq, input_id, session_id, source_key, ingress_json,
+                           state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                           claim_owner_id, claim_owner_incarnation_id,
+                           claim_owner_liveness_json, claim_token, claim_expires_at_ms",
+            )
+            .bind(&input_id)
+            .bind(&draft.session_id)
+            .bind(source_key)
+            .bind(&ingress_json)
+            .bind(state.as_str())
+            .bind(&input_json)
+            .bind(now as i64)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+            let input = pending_turn_input_from_row(pending_turn_input_row(row)?)?;
+            if !draft.submitted_content_matches(&input).map_err(|err| {
+                StoreError::Backend(format!(
+                    "failed to compare pending turn input submission: {err}"
+                ))
+            })? {
+                return Err(StoreError::PendingTurnInputSourceKeyConflict {
+                    session_id: draft.session_id.clone(),
+                    source_key: source_key.to_string(),
+                    existing_input_id: input.input_id.clone(),
+                });
+            }
+            input
+        } else {
+            sqlx::query(
+                "INSERT INTO lash_pending_turn_inputs (
+                    input_id, session_id, source_key, ingress_json, state, input_json, enqueued_at_ms
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(&input_id)
+            .bind(&draft.session_id)
+            .bind(&draft.source_key)
+            .bind(&ingress_json)
+            .bind(state.as_str())
+            .bind(&input_json)
+            .bind(now as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+            load_pending_turn_input(&mut tx, &draft.session_id, &input_id)
+                .await?
+                .ok_or_else(|| {
+                    StoreError::Backend("pending turn input insert disappeared".to_string())
+                })?
+        };
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(input)
     }
@@ -1219,7 +1246,7 @@ impl RuntimePersistence for PostgresSessionStore {
         let now = current_epoch_ms();
         let rows = sqlx::query(
             "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                    state, input_json, enqueued_at_ms, claim_fencing_token,
+                    state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                     claim_owner_id, claim_owner_incarnation_id,
                     claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM lash_pending_turn_inputs
@@ -1248,45 +1275,82 @@ impl RuntimePersistence for PostgresSessionStore {
         &self,
         session_id: &str,
         input_id: &str,
-    ) -> Result<Option<lash_core::PendingTurnInput>, StoreError> {
+    ) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
+        let target = lash_core::PendingTurnInputCancelTarget::input_id(input_id);
+        let targets = vec![target];
+        let mut outcomes = self.cancel_pending_turn_inputs(session_id, &targets).await?;
+        Ok(outcomes
+            .pop()
+            .map(|result| result.outcome)
+            .unwrap_or(lash_core::PendingTurnInputCancelOutcome::NotFound))
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        session_id: &str,
+        targets: &[lash_core::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        let targets = targets.to_vec();
         let now = current_epoch_ms();
-        let row = sqlx::query(
+        let mut results = Vec::with_capacity(targets.len());
+        for target in targets {
+            let outcome =
+                match load_pending_turn_input_row_by_target_tx(&mut tx, session_id, &target, true)
+                    .await?
+                {
+                    Some(row) => cancel_pending_turn_input_row_tx(&mut tx, row, now).await?,
+                    None => lash_core::PendingTurnInputCancelOutcome::NotFound,
+                };
+            results.push(lash_core::PendingTurnInputCancelResult { target, outcome });
+        }
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(results)
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        session_id: &str,
+        anchor: &lash_core::PendingTurnInputCancelTarget,
+    ) -> Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        let anchor = anchor.clone();
+        let now = current_epoch_ms();
+        let Some(anchor_row) =
+            load_pending_turn_input_row_by_target_tx(&mut tx, session_id, &anchor, true).await?
+        else {
+            tx.commit().await.map_err(store_sqlx_error)?;
+            return Ok(
+                lash_core::PendingTurnInputSuffixCancelOutcome::AnchorNotFound { anchor },
+            );
+        };
+        let rows = sqlx::query(
             "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                    state, input_json, enqueued_at_ms, claim_fencing_token,
+                    state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                     claim_owner_id, claim_owner_incarnation_id,
                     claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM lash_pending_turn_inputs
-             WHERE session_id = $1
-               AND input_id = $2
-               AND (claim_token IS NULL OR claim_expires_at_ms <= $3)
+             WHERE session_id = $1 AND enqueue_seq >= $2
+             ORDER BY enqueue_seq ASC
              FOR UPDATE",
         )
         .bind(session_id)
-        .bind(input_id)
-        .bind(now as i64)
-        .fetch_optional(&mut *tx)
+        .bind(anchor_row.enqueue_seq as i64)
+        .fetch_all(&mut *tx)
         .await
         .map_err(store_sqlx_error)?;
-        let Some(row) = row else {
-            tx.commit().await.map_err(store_sqlx_error)?;
-            return Ok(None);
-        };
-        let input = pending_turn_input_from_row(pending_turn_input_row(row)?)?;
-        sqlx::query(
-            "DELETE FROM lash_pending_turn_inputs
-             WHERE session_id = $1
-               AND input_id = $2
-               AND (claim_token IS NULL OR claim_expires_at_ms <= $3)",
-        )
-        .bind(session_id)
-        .bind(input_id)
-        .bind(now as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(store_sqlx_error)?;
+        let mut outcomes = Vec::with_capacity(rows.len());
+        for row in rows {
+            outcomes.push(
+                cancel_pending_turn_input_row_tx(&mut tx, pending_turn_input_row(row)?, now)
+                    .await?,
+            );
+        }
         tx.commit().await.map_err(store_sqlx_error)?;
-        Ok(Some(input))
+        Ok(lash_core::PendingTurnInputSuffixCancelOutcome::Outcomes {
+            anchor,
+            outcomes,
+        })
     }
 
     async fn claim_active_turn_inputs(
@@ -1434,7 +1498,7 @@ impl RuntimePersistence for PostgresSessionStore {
     }
 
     async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
-        let removed = if let Some(session_id) = &self.session_id {
+        let removed_node_count = if let Some(session_id) = &self.session_id {
             sqlx::query("DELETE FROM lash_graph_nodes WHERE session_id = $1 AND tombstoned = TRUE")
                 .bind(session_id)
                 .execute(&self.pool)
@@ -1448,8 +1512,32 @@ impl RuntimePersistence for PostgresSessionStore {
                 .map_err(store_sqlx_error)?
                 .rows_affected()
         };
+        let removed_pending_turn_input_tombstone_count = if let Some(session_id) = &self.session_id
+        {
+            sqlx::query(
+                "DELETE FROM lash_pending_turn_inputs
+                 WHERE session_id = $1 AND state IN ($2, $3)",
+            )
+            .bind(session_id)
+            .bind(lash_core::TurnInputState::Cancelled.as_str())
+            .bind(lash_core::TurnInputState::Completed.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(store_sqlx_error)?
+            .rows_affected()
+        } else {
+            sqlx::query("DELETE FROM lash_pending_turn_inputs WHERE state IN ($1, $2)")
+                .bind(lash_core::TurnInputState::Cancelled.as_str())
+                .bind(lash_core::TurnInputState::Completed.as_str())
+                .execute(&self.pool)
+                .await
+                .map_err(store_sqlx_error)?
+                .rows_affected()
+        };
         Ok(VacuumReport {
-            removed_node_count: removed as usize,
+            removed_node_count: removed_node_count as usize,
+            removed_pending_turn_input_tombstone_count:
+                removed_pending_turn_input_tombstone_count as usize,
         })
     }
 
@@ -1496,7 +1584,7 @@ async fn claim_pending_turn_inputs_postgres(
     };
     let rows = sqlx::query(
         "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                state, input_json, enqueued_at_ms, claim_fencing_token,
+                state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                 claim_owner_id, claim_owner_incarnation_id,
                 claim_owner_liveness_json, claim_token, claim_expires_at_ms
          FROM lash_pending_turn_inputs

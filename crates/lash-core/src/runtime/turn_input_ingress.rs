@@ -130,6 +130,14 @@ impl PendingTurnInputDraft {
         self.source_key = Some(source_key.into());
         self
     }
+
+    pub fn submitted_content_matches(
+        &self,
+        existing: &PendingTurnInput,
+    ) -> Result<bool, serde_json::Error> {
+        Ok(self.ingress == existing.ingress
+            && serde_json::to_value(&self.input)? == serde_json::to_value(&existing.input)?)
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -162,6 +170,83 @@ impl PendingTurnInput {
             }
         })
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PendingTurnInputCancelTarget {
+    InputId(String),
+    SourceKey(String),
+}
+
+impl PendingTurnInputCancelTarget {
+    pub fn input_id(input_id: impl Into<String>) -> Self {
+        Self::InputId(input_id.into())
+    }
+
+    pub fn source_key(source_key: impl Into<String>) -> Self {
+        Self::SourceKey(source_key.into())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingTurnInputClaimDiagnostics {
+    pub state: TurnInputState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_owner: Option<crate::LeaseOwnerIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at_ms: Option<u64>,
+    pub claim_fencing_token: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", content = "data", rename_all = "snake_case")]
+pub enum PendingTurnInputCancelOutcome {
+    Cancelled(PendingTurnInput),
+    AlreadyClaimed {
+        input: PendingTurnInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim: Option<PendingTurnInputClaimDiagnostics>,
+    },
+    AlreadyCompleted(PendingTurnInput),
+    AlreadyCancelled(PendingTurnInput),
+    NotFound,
+}
+
+impl PendingTurnInputCancelOutcome {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled(_))
+    }
+
+    pub fn input(&self) -> Option<&PendingTurnInput> {
+        match self {
+            Self::Cancelled(input)
+            | Self::AlreadyClaimed { input, .. }
+            | Self::AlreadyCompleted(input)
+            | Self::AlreadyCancelled(input) => Some(input),
+            Self::NotFound => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PendingTurnInputCancelResult {
+    pub target: PendingTurnInputCancelTarget,
+    pub outcome: PendingTurnInputCancelOutcome,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", content = "data", rename_all = "snake_case")]
+pub enum PendingTurnInputSuffixCancelOutcome {
+    AnchorNotFound {
+        anchor: PendingTurnInputCancelTarget,
+    },
+    Outcomes {
+        anchor: PendingTurnInputCancelTarget,
+        outcomes: Vec<PendingTurnInputCancelOutcome>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

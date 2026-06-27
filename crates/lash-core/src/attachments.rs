@@ -489,9 +489,7 @@ mod tests {
             crate::RuntimePersistence::save_session_meta(&self.inner, meta).await
         }
 
-        async fn load_session_meta(
-            &self,
-        ) -> Result<Option<crate::SessionMeta>, crate::StoreError> {
+        async fn load_session_meta(&self) -> Result<Option<crate::SessionMeta>, crate::StoreError> {
             crate::RuntimePersistence::load_session_meta(&self.inner).await
         }
 

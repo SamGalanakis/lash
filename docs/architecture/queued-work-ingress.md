@@ -12,8 +12,12 @@ Lash has several sources of deferred runtime work: user turn input, early turn i
 
 Lash uses two durable ingress paths through `RuntimePersistence`:
 
-- **Pending turn input** stores model-visible user input. Each row carries a stable input id/source key and a `TurnInputIngress`: `ActiveTurn { turn_id, min_boundary }` for input typed while a turn is running, or `NextTurn` for true follow-up work. A pending input is in exactly one state at a time: pending-active, accepted/claimed, deferred-next-turn, cancelled, or completed.
+- **Pending turn input** stores runtime admission evidence for model-visible user input. Each row carries a stable input id and optional immutable `source_key`, plus a `TurnInputIngress`: `ActiveTurn { turn_id, min_boundary }` for input typed while a turn is running, or `NextTurn` for true follow-up work. A pending input is in exactly one state at a time: pending-active, accepted/claimed, deferred-next-turn, cancelled, or completed. Cancelled and completed rows remain as tombstones for idempotent admission and cancellation outcomes until host-scheduled `RuntimePersistence::vacuum()` prunes them; pending-list APIs hide terminal rows and live claims.
 - **Queued work** stores non-user background work. It contains `SessionCommand` mutations and turn-producing `ProcessWake` delivery. User `TurnInput` is not a queued-work payload.
+
+`source_key` is the idempotency key for one submitted revision. Exact replay of the same source key and submitted ingress/input content returns the existing record, even if that record is now cancelled or completed. Reusing the source key with changed ingress or input content is a store conflict. Product edits create new source keys; Lash core does not infer product edit ordering.
+
+Cancellation returns typed admission outcomes: newly cancelled, already claimed/accepted, already completed, already cancelled, or not found. Bulk cancellation and suffix cancellation are atomic store calls. Suffix cancellation uses same-session runtime admission order (`enqueue_seq`) from an input id or source-key anchor through all later pending-input records; product suffix concepts must be mapped by the host to input ids or source keys before calling core.
 
 The CLI never treats local prepared drafts as authoritative queue records. It reconciles draft presentation data with pending-turn-input receipts from core, then renders active pending steers separately from queued next-turn input.
 
@@ -39,6 +43,8 @@ Slash commands remain CLI host commands and are never queued as model work. Tool
 - `LashSession::pending_turn_inputs()` is the user-input view used for queue and active-steer previews.
 - Idle dispatch claims durable pending `NextTurn` inputs. Active checkpoints claim only pending `ActiveTurn` inputs anchored to the live turn and admitted by the checkpoint boundary.
 - Accepted active inputs stay with the interrupted turn and are never re-rendered or sent again. Unaccepted active inputs are deferred to `NextTurn` once during interrupt finalization.
+- In-flight turn recovery remains durable effect-host replay. Lash does not keep a submission journal for pending turn input; pending-input records cover admission, claim, cancellation, and terminal evidence.
+- `RuntimePersistence::vacuum()` is the retention boundary for terminal pending-input evidence and reports how many pending-input tombstones it physically removed.
 - Process wakes and session commands never appear as queued user input.
 - Triggers and timers never appear as queued work at all; a matched trigger occurrence may start a process, and only that process's wake enters queued work at a safe turn boundary.
 - Background process work does not promote the foreground footer state to `Working`.

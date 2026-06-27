@@ -321,10 +321,11 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
             .collect::<Vec<_>>(),
         vec![pending.input_id.as_str()]
     );
-    session
-        .cancel_pending_turn_input(&pending.input_id)
-        .await?
-        .expect("pending turn input");
+    let cancelled = session.cancel_pending_turn_input(&pending.input_id).await?;
+    assert!(matches!(
+        cancelled,
+        crate::PendingTurnInputCancelOutcome::Cancelled(_)
+    ));
 
     let SessionResume::Replayed { events } = session.observe().resume_from_cursor(&cursor)? else {
         panic!("recent cursor should replay queue observation events");

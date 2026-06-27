@@ -44,6 +44,7 @@ pub(crate) struct PendingTurnInputRow {
     pub(crate) state: String,
     pub(crate) input_json: String,
     pub(crate) enqueued_at_ms: u64,
+    pub(crate) claim_id: Option<String>,
     pub(crate) claim_fencing_token: u64,
     pub(crate) claim_owner: Option<LeaseOwnerIdentity>,
     pub(crate) claim_token: Option<String>,
@@ -62,10 +63,11 @@ pub(crate) fn pending_turn_input_row_from_sql(
         state: row.get(5)?,
         input_json: row.get(6)?,
         enqueued_at_ms: row.get::<_, i64>(7)? as u64,
-        claim_fencing_token: row.get::<_, i64>(8)? as u64,
-        claim_owner: lease_owner_from_columns(row.get(9)?, row.get(10)?, row.get(11)?),
-        claim_token: row.get(12)?,
-        claim_expires_at_ms: row.get::<_, i64>(13)? as u64,
+        claim_id: row.get(8)?,
+        claim_fencing_token: row.get::<_, i64>(9)? as u64,
+        claim_owner: lease_owner_from_columns(row.get(10)?, row.get(11)?, row.get(12)?),
+        claim_token: row.get(13)?,
+        claim_expires_at_ms: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -92,7 +94,7 @@ pub(crate) fn load_pending_turn_input_by_id_conn(
     let row = conn
         .query_row(
             "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                    state, input_json, enqueued_at_ms, claim_fencing_token,
+                    state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                     claim_owner_id, claim_owner_incarnation_id,
                     claim_owner_liveness_json, claim_token, claim_expires_at_ms
              FROM pending_turn_inputs
@@ -103,6 +105,56 @@ pub(crate) fn load_pending_turn_input_by_id_conn(
         .optional()
         .map_err(sqlite_error)?;
     row.map(pending_turn_input_from_row).transpose()
+}
+
+pub(crate) fn load_pending_turn_input_row_by_target_conn(
+    conn: &Connection,
+    session_id: &str,
+    target: &lash_core::PendingTurnInputCancelTarget,
+) -> Result<Option<PendingTurnInputRow>, StoreError> {
+    match target {
+        lash_core::PendingTurnInputCancelTarget::InputId(input_id) => conn
+            .query_row(
+                "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                        state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                        claim_owner_id, claim_owner_incarnation_id,
+                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                 FROM pending_turn_inputs
+                 WHERE session_id = ?1 AND input_id = ?2",
+                params![session_id, input_id],
+                pending_turn_input_row_from_sql,
+            )
+            .optional()
+            .map_err(sqlite_error),
+        lash_core::PendingTurnInputCancelTarget::SourceKey(source_key) => conn
+            .query_row(
+                "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                        state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                        claim_owner_id, claim_owner_incarnation_id,
+                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                 FROM pending_turn_inputs
+                 WHERE session_id = ?1 AND source_key = ?2",
+                params![session_id, source_key],
+                pending_turn_input_row_from_sql,
+            )
+            .optional()
+            .map_err(sqlite_error),
+    }
+}
+
+pub(crate) fn pending_turn_input_claim_diagnostics_from_row(
+    row: &PendingTurnInputRow,
+    state: lash_core::TurnInputState,
+) -> Option<lash_core::PendingTurnInputClaimDiagnostics> {
+    (row.claim_token.is_some() || matches!(state, lash_core::TurnInputState::Accepted)).then(|| {
+        lash_core::PendingTurnInputClaimDiagnostics {
+            state,
+            claim_id: row.claim_id.clone(),
+            claim_owner: row.claim_owner.clone(),
+            claim_expires_at_ms: row.claim_token.as_ref().map(|_| row.claim_expires_at_ms),
+            claim_fencing_token: row.claim_fencing_token,
+        }
+    })
 }
 
 #[derive(Clone, Debug)]

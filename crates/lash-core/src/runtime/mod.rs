@@ -156,7 +156,9 @@ use state::{
     apply_session_head, normalize_session_graph, open_agent_frame_in_state_with_clock,
 };
 pub use turn_input_ingress::{
-    PendingTurnInput, PendingTurnInputDraft, QueuedCheckpointTurnInput, TURN_INPUT_CLAIM_TTL_MS,
+    PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
+    PendingTurnInputCancelTarget, PendingTurnInputClaimDiagnostics, PendingTurnInputDraft,
+    PendingTurnInputSuffixCancelOutcome, QueuedCheckpointTurnInput, TURN_INPUT_CLAIM_TTL_MS,
     TurnInputCheckpointBoundary, TurnInputClaim, TurnInputClaimMode, TurnInputCompletion,
     TurnInputIngress, TurnInputState,
 };

@@ -445,7 +445,7 @@ impl RuntimeHandle {
         &self,
         session_id: &str,
         input_id: &str,
-    ) -> Result<Option<crate::PendingTurnInput>, crate::RuntimeError> {
+    ) -> Result<crate::PendingTurnInputCancelOutcome, crate::RuntimeError> {
         let observation = self.observe();
         let store = observation
             .queue_store
@@ -460,8 +460,8 @@ impl RuntimeHandle {
                     err.to_string(),
                 )
             })
-            .inspect(|input| {
-                if input.is_some() {
+            .inspect(|outcome| {
+                if outcome.is_cancelled() {
                     self.record_queue_changed(
                         SessionQueueEventKind::Cancelled,
                         vec![input_id.to_string()],

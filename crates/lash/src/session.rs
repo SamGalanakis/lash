@@ -3,7 +3,9 @@ use std::task::{Context, Poll};
 
 use crate::support::*;
 use futures_util::Stream;
-use lash_core::runtime::{PendingTurnInput, QueuedWorkBatch, TurnInputIngress};
+use lash_core::runtime::{
+    PendingTurnInput, PendingTurnInputCancelOutcome, QueuedWorkBatch, TurnInputIngress,
+};
 use lash_core::{LiveReplayGap, LiveReplayStoreError, SessionObservationEvent};
 use lash_remote_protocol::{
     RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
@@ -653,7 +655,7 @@ impl LashSession {
     pub async fn cancel_pending_turn_input(
         &self,
         input_id: &str,
-    ) -> Result<Option<PendingTurnInput>> {
+    ) -> Result<PendingTurnInputCancelOutcome> {
         let session_id = self.session_id();
         self.runtime
             .cancel_pending_turn_input(&session_id, input_id)

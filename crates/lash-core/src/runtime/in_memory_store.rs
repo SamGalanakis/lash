@@ -45,6 +45,77 @@ struct InMemoryPendingTurnInput {
     claim_expires_at_ms: u64,
 }
 
+impl InMemoryPendingTurnInput {
+    fn has_live_claim(&self, now_epoch_ms: u64) -> bool {
+        self.claim_token.is_some() && self.claim_expires_at_ms > now_epoch_ms
+    }
+
+    fn claim_diagnostics(&self) -> Option<crate::PendingTurnInputClaimDiagnostics> {
+        (self.claim_id.is_some() || matches!(self.input.state, crate::TurnInputState::Accepted))
+            .then(|| crate::PendingTurnInputClaimDiagnostics {
+                state: self.input.state,
+                claim_id: self.claim_id.clone(),
+                claim_owner: self.claim_owner.clone(),
+                claim_expires_at_ms: self.claim_token.as_ref().map(|_| self.claim_expires_at_ms),
+                claim_fencing_token: self.claim_fencing_token,
+            })
+    }
+
+    fn clear_claim(&mut self) {
+        self.claim_id = None;
+        self.claim_token = None;
+        self.claim_owner = None;
+        self.claim_expires_at_ms = 0;
+    }
+
+    fn cancel_outcome(&mut self, now_epoch_ms: u64) -> crate::PendingTurnInputCancelOutcome {
+        match self.input.state {
+            crate::TurnInputState::Cancelled => {
+                crate::PendingTurnInputCancelOutcome::AlreadyCancelled(self.input.clone())
+            }
+            crate::TurnInputState::Completed => {
+                crate::PendingTurnInputCancelOutcome::AlreadyCompleted(self.input.clone())
+            }
+            crate::TurnInputState::Accepted => {
+                crate::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                    input: self.input.clone(),
+                    claim: self.claim_diagnostics(),
+                }
+            }
+            crate::TurnInputState::PendingActive | crate::TurnInputState::DeferredNextTurn => {
+                if self.has_live_claim(now_epoch_ms) {
+                    crate::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                        input: self.input.clone(),
+                        claim: self.claim_diagnostics(),
+                    }
+                } else {
+                    self.input.state = crate::TurnInputState::Cancelled;
+                    self.clear_claim();
+                    crate::PendingTurnInputCancelOutcome::Cancelled(self.input.clone())
+                }
+            }
+        }
+    }
+}
+
+fn find_pending_turn_input_index(
+    pending: &[InMemoryPendingTurnInput],
+    session_id: &str,
+    target: &crate::PendingTurnInputCancelTarget,
+) -> Option<usize> {
+    pending.iter().position(|entry| {
+        entry.input.session_id == session_id
+            && match target {
+                crate::PendingTurnInputCancelTarget::InputId(input_id) => {
+                    entry.input.input_id == *input_id
+                }
+                crate::PendingTurnInputCancelTarget::SourceKey(source_key) => {
+                    entry.input.source_key.as_deref() == Some(source_key.as_str())
+                }
+            }
+    })
+}
+
 impl InMemorySessionExecutionLease {
     fn is_live(&self, now: u64) -> bool {
         self.lease_token.is_some() && self.expires_at_epoch_ms > now
@@ -577,12 +648,16 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                     claim_id: completed.claim_id.clone(),
                 });
             }
-            pending.retain(|entry| {
-                !(entry.input.session_id == completed.session_id
+            for entry in pending.iter_mut() {
+                if entry.input.session_id == completed.session_id
                     && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
                     && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
-                    && completed.input_ids.contains(&entry.input.input_id))
-            });
+                    && completed.input_ids.contains(&entry.input.input_id)
+                {
+                    entry.input.state = crate::TurnInputState::Completed;
+                    entry.clear_claim();
+                }
+            }
         }
         if let Some(turn_id) = commit.interrupted_turn_input_turn_id.as_deref() {
             let mut pending = self
@@ -824,12 +899,24 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             && let Some(existing) = pending.iter().find(|entry| {
                 entry.input.session_id == draft.session_id
                     && entry.input.source_key.as_deref() == Some(source_key)
-                    && !matches!(
-                        entry.input.state,
-                        crate::TurnInputState::Cancelled | crate::TurnInputState::Completed
-                    )
             })
         {
+            if !draft
+                .submitted_content_matches(&existing.input)
+                .map_err(|err| {
+                    crate::store::StoreError::Backend(format!(
+                        "failed to compare pending turn input submission: {err}"
+                    ))
+                })?
+            {
+                return Err(
+                    crate::store::StoreError::PendingTurnInputSourceKeyConflict {
+                        session_id: draft.session_id.clone(),
+                        source_key: source_key.to_string(),
+                        existing_input_id: existing.input.input_id.clone(),
+                    },
+                );
+            }
             return Ok(existing.input.clone());
         }
         let mut next_seq = self
@@ -879,9 +966,10 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             .iter()
             .filter(|entry| {
                 entry.input.session_id == session_id
-                    && !matches!(
+                    && matches!(
                         entry.input.state,
-                        crate::TurnInputState::Cancelled | crate::TurnInputState::Completed
+                        crate::TurnInputState::PendingActive
+                            | crate::TurnInputState::DeferredNextTurn
                     )
                     && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
             })
@@ -895,22 +983,70 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         &self,
         session_id: &str,
         input_id: &str,
-    ) -> Result<Option<crate::PendingTurnInput>, crate::store::StoreError> {
+    ) -> Result<crate::PendingTurnInputCancelOutcome, crate::store::StoreError> {
+        let target = crate::PendingTurnInputCancelTarget::input_id(input_id);
+        let targets = vec![target];
+        let mut outcomes = self
+            .cancel_pending_turn_inputs(session_id, &targets)
+            .await?;
+        Ok(outcomes
+            .pop()
+            .map(|result| result.outcome)
+            .unwrap_or(crate::PendingTurnInputCancelOutcome::NotFound))
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        session_id: &str,
+        targets: &[crate::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<crate::PendingTurnInputCancelResult>, crate::store::StoreError> {
         let now = self.clock.timestamp_ms();
         let mut pending = self
             .pending_turn_inputs
             .lock()
             .expect("lock pending turn input");
-        let Some(index) = pending.iter().position(|entry| {
-            entry.input.session_id == session_id && entry.input.input_id == input_id
-        }) else {
-            return Ok(None);
-        };
-        let entry = &pending[index];
-        if entry.claim_token.is_some() && entry.claim_expires_at_ms > now {
-            return Ok(None);
+        let mut results = Vec::with_capacity(targets.len());
+        for target in targets {
+            let outcome = match find_pending_turn_input_index(&pending, session_id, target) {
+                Some(index) => pending[index].cancel_outcome(now),
+                None => crate::PendingTurnInputCancelOutcome::NotFound,
+            };
+            results.push(crate::PendingTurnInputCancelResult {
+                target: target.clone(),
+                outcome,
+            });
         }
-        Ok(Some(pending.remove(index).input))
+        Ok(results)
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        session_id: &str,
+        anchor: &crate::PendingTurnInputCancelTarget,
+    ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, crate::store::StoreError> {
+        let now = self.clock.timestamp_ms();
+        let mut pending = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock pending turn input");
+        let Some(anchor_seq) = find_pending_turn_input_index(&pending, session_id, anchor)
+            .map(|index| pending[index].input.enqueue_seq)
+        else {
+            return Ok(crate::PendingTurnInputSuffixCancelOutcome::AnchorNotFound {
+                anchor: anchor.clone(),
+            });
+        };
+        pending.sort_by_key(|entry| entry.input.enqueue_seq);
+        let outcomes = pending
+            .iter_mut()
+            .filter(|entry| entry.input.session_id == session_id)
+            .filter(|entry| entry.input.enqueue_seq >= anchor_seq)
+            .map(|entry| entry.cancel_outcome(now))
+            .collect::<Vec<_>>();
+        Ok(crate::PendingTurnInputSuffixCancelOutcome::Outcomes {
+            anchor: anchor.clone(),
+            outcomes,
+        })
     }
 
     async fn claim_active_turn_inputs(
@@ -1206,26 +1342,42 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 .tombstoned_node_ids
                 .lock()
                 .expect("lock tombstoned nodes");
-            if tombstoned.is_empty() {
-                return Ok(crate::store::VacuumReport::default());
-            }
             std::mem::take(&mut *tombstoned)
         };
-        let mut graph = self.session_graph.lock().expect("lock graph");
-        let before = graph.nodes.len();
-        let leaf_node_id = graph
-            .leaf_node_id
-            .clone()
-            .filter(|leaf| !ids.contains(leaf));
-        let nodes = graph
-            .nodes
-            .iter()
-            .filter(|node| !ids.contains(&node.node_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let removed_node_count = before.saturating_sub(nodes.len());
-        *graph = crate::SessionGraph::from_nodes(nodes, leaf_node_id);
-        Ok(crate::store::VacuumReport { removed_node_count })
+        let removed_node_count = if ids.is_empty() {
+            0
+        } else {
+            let mut graph = self.session_graph.lock().expect("lock graph");
+            let before = graph.nodes.len();
+            let leaf_node_id = graph
+                .leaf_node_id
+                .clone()
+                .filter(|leaf| !ids.contains(leaf));
+            let nodes = graph
+                .nodes
+                .iter()
+                .filter(|node| !ids.contains(&node.node_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let removed_node_count = before.saturating_sub(nodes.len());
+            *graph = crate::SessionGraph::from_nodes(nodes, leaf_node_id);
+            removed_node_count
+        };
+        let mut pending = self
+            .pending_turn_inputs
+            .lock()
+            .expect("lock pending turn input");
+        let before = pending.len();
+        pending.retain(|entry| {
+            !matches!(
+                entry.input.state,
+                crate::TurnInputState::Cancelled | crate::TurnInputState::Completed
+            )
+        });
+        Ok(crate::store::VacuumReport {
+            removed_node_count,
+            removed_pending_turn_input_tombstone_count: before.saturating_sub(pending.len()),
+        })
     }
 
     async fn gc_unreachable(&self) -> Result<crate::store::GcReport, crate::store::StoreError> {
