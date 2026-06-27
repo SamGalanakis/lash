@@ -1248,6 +1248,239 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
 }
 
 #[tokio::test]
+async fn active_steer_interrupt_defers_once_and_skips_cancelled_queued_turn() -> Result<()> {
+    let (started_tx, started_rx) = oneshot::channel::<()>();
+    let started_tx = Arc::new(StdMutex::new(Some(started_tx)));
+    let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let captured_requests = Arc::clone(&requests);
+    let provider = crate::testing::TestProvider::builder()
+        .kind("embed-test")
+        .complete(move |request| {
+            let started_tx = Arc::clone(&started_tx);
+            let captured_requests = Arc::clone(&captured_requests);
+            async move {
+                let user_text = last_user_text(&request);
+                captured_requests
+                    .lock()
+                    .expect("request log")
+                    .push(user_text.clone());
+                if user_text == "primary hangs" {
+                    if let Some(tx) = started_tx.lock().expect("started signal").take() {
+                        let _ = tx.send(());
+                    }
+                    std::future::pending::<()>().await;
+                    unreachable!("provider future should be dropped by cancellation")
+                }
+                Ok(text_response(&format!("echo: {user_text}")))
+            }
+        })
+        .build()
+        .into_handle();
+    let core = explicit_ephemeral_facets(StandardCore::builder())
+        .provider(provider)
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
+        .build()?;
+    let session = core.session("active-steer-interrupt-cancel").open().await?;
+    let active_turn_id = "active-steer-interrupt-turn";
+    let turn_session = session.clone();
+    let turn = tokio::spawn(async move {
+        let stream = turn_session
+            .turn(TurnInput::text("primary hangs"))
+            .turn_id(active_turn_id)
+            .stream()?;
+        stream.finish().await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+        .await
+        .expect("primary turn should reach provider")
+        .expect("provider started signal");
+    let active = session
+        .enqueue(TurnInput::text("deferred active steer"))
+        .id("active-steer")
+        .ingress(lash_core::TurnInputIngress::active_turn(
+            active_turn_id,
+            lash_core::TurnInputCheckpointBoundary::AfterWork,
+        ))
+        .send()
+        .await?;
+    let queued = session
+        .enqueue(TurnInput::text("cancelled next turn"))
+        .id("cancelled-next")
+        .send()
+        .await?;
+    let cancelled = session
+        .cancel_pending_turn_input(&queued.input_id)
+        .await?
+        .expect("queued input should be cancellable before it is claimed");
+    assert_eq!(cancelled.input_id, queued.input_id);
+
+    assert_eq!(session.cancel_running_turns(), 1);
+    let interrupted = turn.await.expect("turn task")?;
+    assert!(matches!(
+        interrupted.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+
+    let pending = session.pending_turn_inputs().await?;
+    assert_eq!(
+        pending.len(),
+        1,
+        "only the unaccepted active steer should remain"
+    );
+    assert_eq!(pending[0].input_id, active.input_id);
+    assert!(matches!(
+        pending[0].ingress,
+        lash_core::TurnInputIngress::NextTurn
+    ));
+    assert_eq!(
+        pending[0].state,
+        lash_core::TurnInputState::DeferredNextTurn
+    );
+
+    let drained = session
+        .queued_turn()
+        .run()
+        .await?
+        .expect("deferred active steer should run as the next turn");
+    assert_eq!(
+        drained.assistant_message(),
+        Some("echo: deferred active steer")
+    );
+    assert!(session.pending_turn_inputs().await?.is_empty());
+    let requests = requests.lock().expect("request log").clone();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|text| text.as_str() == "deferred active steer")
+            .count(),
+        1,
+        "deferred active steer must be sent exactly once"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|text| text.as_str() == "cancelled next turn"),
+        "cancelled queued turn must not reach the provider"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_active_steer_interrupt_is_not_requeued() -> Result<()> {
+    let (first_started_tx, first_started_rx) = oneshot::channel::<()>();
+    let (release_first_tx, release_first_rx) = oneshot::channel::<()>();
+    let (second_started_tx, second_started_rx) = oneshot::channel::<()>();
+    let first_started_tx = Arc::new(StdMutex::new(Some(first_started_tx)));
+    let release_first_rx = Arc::new(TokioMutex::new(Some(release_first_rx)));
+    let second_started_tx = Arc::new(StdMutex::new(Some(second_started_tx)));
+    let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let captured_requests = Arc::clone(&requests);
+    let provider = crate::testing::TestProvider::builder()
+        .kind("embed-test")
+        .complete(move |request| {
+            let first_started_tx = Arc::clone(&first_started_tx);
+            let release_first_rx = Arc::clone(&release_first_rx);
+            let second_started_tx = Arc::clone(&second_started_tx);
+            let captured_requests = Arc::clone(&captured_requests);
+            async move {
+                let user_text = last_user_text(&request);
+                captured_requests
+                    .lock()
+                    .expect("request log")
+                    .push(user_text.clone());
+                if user_text == "primary waits for active steer" {
+                    if let Some(tx) = first_started_tx.lock().expect("first signal").take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = release_first_rx.lock().await.take() {
+                        let _ = rx.await;
+                    }
+                    return Ok(text_response("first response"));
+                }
+                if user_text == "accepted active steer" {
+                    if let Some(tx) = second_started_tx.lock().expect("second signal").take() {
+                        let _ = tx.send(());
+                    }
+                    std::future::pending::<()>().await;
+                    unreachable!("accepted steer provider call should be dropped by cancellation")
+                }
+                Ok(text_response(&format!("echo: {user_text}")))
+            }
+        })
+        .build()
+        .into_handle();
+    let core = explicit_ephemeral_facets(StandardCore::builder())
+        .provider(provider)
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
+        .build()?;
+    let session = core
+        .session("accepted-active-steer-interrupt")
+        .open()
+        .await?;
+    let active_turn_id = "accepted-active-steer-turn";
+    let turn_session = session.clone();
+    let turn = tokio::spawn(async move {
+        let stream = turn_session
+            .turn(TurnInput::text("primary waits for active steer"))
+            .turn_id(active_turn_id)
+            .stream()?;
+        stream.finish().await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), first_started_rx)
+        .await
+        .expect("first provider call should start")
+        .expect("first provider signal");
+    let active = session
+        .enqueue(TurnInput::text("accepted active steer"))
+        .id("accepted-active-steer")
+        .ingress(lash_core::TurnInputIngress::active_turn(
+            active_turn_id,
+            lash_core::TurnInputCheckpointBoundary::AfterWork,
+        ))
+        .send()
+        .await?;
+    release_first_tx
+        .send(())
+        .expect("release first provider response");
+    tokio::time::timeout(std::time::Duration::from_secs(2), second_started_rx)
+        .await
+        .expect("accepted active steer should start the follow-up provider call")
+        .expect("second provider signal");
+
+    assert_eq!(session.cancel_running_turns(), 1);
+    let interrupted = turn.await.expect("turn task")?;
+    assert!(matches!(
+        interrupted.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    assert!(
+        session.pending_turn_inputs().await?.is_empty(),
+        "accepted active steer `{}` must be completed, not deferred after interrupt",
+        active.input_id
+    );
+    assert!(
+        session.queued_turn().run().await?.is_none(),
+        "accepted active steer must not replay as a later queued turn"
+    );
+    let requests = requests.lock().expect("request log").clone();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|text| text.as_str() == "accepted active steer")
+            .count(),
+        1,
+        "accepted active steer should reach the provider once before cancellation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
     let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(mock_provider())

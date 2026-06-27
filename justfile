@@ -217,6 +217,15 @@ stack-budget:
 push-gate:
   bash "{{repo}}/scripts/push-gate.sh"
 
+confidence lane='default':
+  bash "{{repo}}/scripts/confidence-gate.sh" "{{lane}}"
+
+confidence-fast:
+  bash "{{repo}}/scripts/confidence-gate.sh" fast
+
+confidence-full:
+  bash "{{repo}}/scripts/confidence-gate.sh" full
+
 perf-guard:
   python3 "{{repo}}/scripts/profile_guard.py" --profile quick --release --cli-cargo-feature fff-zlob --skip-dhat --enforce --out "{{repo}}/.benchmarks/perf-guard/local.json"
 

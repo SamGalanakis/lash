@@ -139,6 +139,61 @@ fn selected_process_row_is_focusable_and_renders_definition() {
 }
 
 #[test]
+fn process_cancel_observation_updates_visible_dock_before_snapshot() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.update_processes(vec![
+        lash_core::ProcessHandleSummary::new(
+            "old-port",
+            lash_core::ProcessHandleDescriptor::new(Some("shell"), Some("0.0.0.0:345")),
+            lash_core::ProcessLifecycleStatus::Running,
+        ),
+        lash_core::ProcessHandleSummary::new(
+            "new-port",
+            lash_core::ProcessHandleDescriptor::new(Some("shell"), Some("0.0.0.0:3048")),
+            lash_core::ProcessLifecycleStatus::Running,
+        ),
+    ]);
+    app.processes[0].first_seen = std::time::Instant::now() - std::time::Duration::from_secs(61);
+
+    app.apply_process_changed(
+        lash_core::SessionProcessEventKind::Cancelled,
+        &[String::from("old-port")],
+    );
+
+    let lines = crate::render::process_lines_snapshot(&app, 80).expect("process lines");
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    assert!(text.iter().any(|line| {
+        line.contains("cancelled") && line.contains("shell") && line.contains("0.0.0.0:345")
+    }));
+    assert!(
+        !text.iter().any(|line| {
+            line.contains("running") && line.contains("shell") && line.contains("0.0.0.0:345")
+        }),
+        "cancelled process must not keep rendering as running"
+    );
+    assert!(text.iter().any(|line| {
+        line.contains("running") && line.contains("shell") && line.contains("0.0.0.0:3048")
+    }));
+    assert!(
+        app.processes
+            .iter()
+            .find(|process| process.process_id == "old-port")
+            .expect("old process")
+            .status_duration
+            .is_some_and(|duration| duration.as_secs() >= 61)
+    );
+}
+
+#[test]
 fn process_rows_are_input_chrome_not_history_content() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let baseline_height = app.total_content_height(80, 20);

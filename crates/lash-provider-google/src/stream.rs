@@ -34,7 +34,7 @@ impl GoogleOAuthProvider {
         }
     }
 
-    fn text_parts_from_event(event: &Value) -> Vec<String> {
+    fn text_parts_from_event(event: &Value) -> Vec<(String, Option<String>)> {
         let mut out = Vec::new();
         let Some(candidates) = event
             .get("response")
@@ -63,7 +63,12 @@ impl GoogleOAuthProvider {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str())
                     && !text.is_empty()
                 {
-                    out.push(text.to_string());
+                    let signature = part
+                        .get("thoughtSignature")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    out.push((text.to_string(), signature));
                 }
             }
         }
@@ -124,28 +129,57 @@ impl GoogleOAuthProvider {
         out
     }
 
-    fn apply_stream_piece(full: &mut String, text_deltas: &mut Vec<String>, piece: &str) {
+    fn apply_stream_piece(
+        full: &mut String,
+        text_deltas: &mut Vec<String>,
+        piece: &str,
+    ) -> Option<String> {
         if piece.is_empty() {
-            return;
+            return None;
         }
         if piece.starts_with(full.as_str()) {
             let delta = &piece[full.len()..];
             if !delta.is_empty() {
                 full.push_str(delta);
                 text_deltas.push(delta.to_string());
+                return Some(delta.to_string());
             }
-            return;
+            return None;
         }
         full.push_str(piece);
         text_deltas.push(piece.to_string());
+        Some(piece.to_string())
     }
 
+    #[cfg(test)]
     pub(crate) fn process_sse_event(
         raw: &str,
         full: &mut String,
         text_deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
         tool_call_parts: Option<&mut Vec<LlmOutputPart>>,
+        finish_event: &mut Option<Value>,
+    ) -> Result<(), LlmTransportError> {
+        Self::process_sse_event_with_text_parts(
+            raw,
+            full,
+            text_deltas,
+            usage,
+            tool_call_parts,
+            None,
+            None,
+            finish_event,
+        )
+    }
+
+    pub(crate) fn process_sse_event_with_text_parts(
+        raw: &str,
+        full: &mut String,
+        text_deltas: &mut Vec<String>,
+        usage: &mut LlmUsage,
+        tool_call_parts: Option<&mut Vec<LlmOutputPart>>,
+        text_parts: Option<&mut Vec<LlmOutputPart>>,
+        origin_model: Option<&str>,
         finish_event: &mut Option<Value>,
     ) -> Result<(), LlmTransportError> {
         if raw.trim().is_empty() || raw.trim() == "[DONE]" {
@@ -161,8 +195,22 @@ impl GoogleOAuthProvider {
         {
             *usage = new_usage;
         }
-        for piece in Self::text_parts_from_event(&event) {
-            Self::apply_stream_piece(full, text_deltas, &piece);
+        let mut text_parts = text_parts;
+        for (piece, signature) in Self::text_parts_from_event(&event) {
+            let Some(delta) = Self::apply_stream_piece(full, text_deltas, &piece) else {
+                continue;
+            };
+            if let Some(parts) = text_parts.as_deref_mut() {
+                parts.push(LlmOutputPart::Text {
+                    text: delta,
+                    response_meta: signature.map(|signature| ResponseTextMeta {
+                        provider_payload: Some(signature),
+                        origin_provider: Some(Self::PROVIDER_KIND.to_string()),
+                        origin_model: origin_model.map(str::to_string),
+                        ..ResponseTextMeta::default()
+                    }),
+                });
+            }
         }
         if let Some(parts) = tool_call_parts {
             parts.extend(Self::tool_call_parts_from_event(&event));
@@ -197,7 +245,10 @@ impl GoogleOAuthProvider {
             .filter(|reason| !reason.is_empty())
     }
 
-    pub(crate) fn response_parts_from_value(value: &Value) -> Vec<LlmOutputPart> {
+    pub(crate) fn response_parts_from_value(
+        value: &Value,
+        origin_model: Option<&str>,
+    ) -> Vec<LlmOutputPart> {
         let mut parts = Vec::new();
         let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) else {
             return parts;
@@ -242,7 +293,12 @@ impl GoogleOAuthProvider {
                     } else {
                         parts.push(LlmOutputPart::Text {
                             text: text.to_string(),
-                            response_meta: None,
+                            response_meta: signature.clone().map(|signature| ResponseTextMeta {
+                                provider_payload: Some(signature),
+                                origin_provider: Some(Self::PROVIDER_KIND.to_string()),
+                                origin_model: origin_model.map(str::to_string),
+                                ..ResponseTextMeta::default()
+                            }),
                         });
                     }
                 }

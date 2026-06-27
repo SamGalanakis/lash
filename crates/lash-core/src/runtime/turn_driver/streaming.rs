@@ -809,17 +809,9 @@ impl RuntimeTurnDriver<'_> {
                     )
                     .await;
                 }
-                state.stream_accumulator.push_reasoning(
-                    text,
-                    replay.as_ref().and_then(|meta| meta.item_id.clone()),
-                    replay
-                        .as_ref()
-                        .map(|meta| meta.summary.clone())
-                        .unwrap_or_default(),
-                    replay
-                        .as_ref()
-                        .and_then(|meta| meta.encrypted_content.clone()),
-                );
+                state
+                    .stream_accumulator
+                    .push_reasoning_with_replay(text, replay);
             }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(

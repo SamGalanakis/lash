@@ -1,4 +1,4 @@
-use lash_tui::{Line, Span, Style};
+use lash_tui::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme;
@@ -63,7 +63,7 @@ fn render_inline_diff_row<'a>(
 ) {
     let segments = wrap_segments(&row.text, content_width);
     let empty_number = " ".repeat(number_width);
-    let (gutter_style, body_style) = inline_diff_styles(row.kind);
+    let styles = inline_diff_styles(row.kind);
 
     for (idx, segment) in segments.iter().enumerate() {
         let (number, sign) = if idx == 0 {
@@ -79,12 +79,21 @@ fn render_inline_diff_row<'a>(
             (empty_number.clone(), "  ".to_string())
         };
 
+        // Pad the body to the full content width so the row's tint reads as a
+        // clean horizontal band instead of a ragged block that stops at the end
+        // of the text.
+        let used = UnicodeWidthStr::width(segment.as_str());
+        let body = match content_width.checked_sub(used) {
+            Some(pad) if pad > 0 => format!("{segment}{}", " ".repeat(pad)),
+            _ => segment.clone(),
+        };
+
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), theme::patch_frame()),
-            Span::styled(number, gutter_style),
-            Span::styled(" ".to_string(), gutter_style),
-            Span::styled(sign, gutter_style),
-            Span::styled(segment.clone(), body_style),
+            Span::styled(number, styles.number),
+            Span::styled(" ".to_string(), styles.number),
+            Span::styled(sign, styles.sign),
+            Span::styled(body, styles.body),
         ]));
     }
 }
@@ -97,25 +106,13 @@ fn diff_line_number_width(rows: &[InlineDiffRow]) -> usize {
         .unwrap_or(1)
 }
 
-fn inline_diff_styles(kind: InlineDiffKind) -> (Style, Style) {
+fn inline_diff_styles(kind: InlineDiffKind) -> theme::PatchRowStyles {
     match kind {
-        InlineDiffKind::Add => (theme::patch_diff_add_gutter(), theme::patch_diff_add_line()),
-        InlineDiffKind::Remove => (
-            theme::patch_diff_remove_gutter(),
-            theme::patch_diff_remove_line(),
-        ),
-        InlineDiffKind::Context => (
-            theme::patch_diff_context_gutter(),
-            theme::patch_diff_context_line(),
-        ),
-        InlineDiffKind::Hunk => (
-            theme::patch_diff_hunk_gutter(),
-            theme::patch_diff_hunk_line(),
-        ),
-        InlineDiffKind::Meta => (
-            theme::patch_diff_context_gutter(),
-            theme::patch_diff_meta_line(),
-        ),
+        InlineDiffKind::Add => theme::patch_diff_add(),
+        InlineDiffKind::Remove => theme::patch_diff_remove(),
+        InlineDiffKind::Context => theme::patch_diff_context(),
+        InlineDiffKind::Hunk => theme::patch_diff_hunk(),
+        InlineDiffKind::Meta => theme::patch_diff_meta(),
     }
 }
 

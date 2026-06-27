@@ -13,6 +13,8 @@ use crate::support::*;
 const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 
 impl GoogleOAuthProvider {
+    pub(crate) const PROVIDER_KIND: &'static str = "google_oauth";
+
     pub(crate) fn inline_attachment_part(att: &LlmAttachment) -> Value {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
         json!({
@@ -28,6 +30,26 @@ impl GoogleOAuthProvider {
             .get(idx)
             .cloned()
             .unwrap_or_else(|| json!({ "text": "[Image attached]" }))
+    }
+
+    fn valid_same_origin_text_signature(
+        req: &LlmRequest,
+        meta: &ResponseTextMeta,
+    ) -> Option<String> {
+        if meta.origin_provider.as_deref() != Some(Self::PROVIDER_KIND)
+            || meta.origin_model.as_deref() != Some(req.model.as_str())
+        {
+            return None;
+        }
+        let signature = meta.provider_payload.as_deref()?.trim();
+        if signature.is_empty() {
+            return None;
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())?;
+        Some(signature.to_string())
     }
 
     pub(crate) fn build_contents_with_attachment_parts(
@@ -51,11 +73,23 @@ impl GoogleOAuthProvider {
             let mut parts: Vec<Value> = Vec::new();
             for block in msg.blocks.iter() {
                 match block {
-                    LlmContentBlock::Text { text, .. } => {
+                    LlmContentBlock::Text {
+                        text,
+                        response_meta,
+                        ..
+                    } => {
                         if text.is_empty() {
                             continue;
                         }
-                        parts.push(json!({ "text": text }));
+                        let mut part = json!({ "text": text });
+                        if matches!(msg.role, LlmRole::Assistant)
+                            && let Some(signature) = response_meta
+                                .as_ref()
+                                .and_then(|meta| Self::valid_same_origin_text_signature(req, meta))
+                        {
+                            part["thoughtSignature"] = Value::String(signature);
+                        }
+                        parts.push(part);
                     }
                     LlmContentBlock::Image { attachment_idx } => {
                         if matches!(msg.role, LlmRole::User) {
@@ -152,6 +186,28 @@ impl GoogleOAuthProvider {
         model.starts_with("claude-")
     }
 
+    fn sanitized_legacy_schema(schema: &Value) -> Value {
+        match schema {
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (key, value) in map {
+                    if matches!(key.as_str(), "$schema" | "$defs" | "$id" | "definitions") {
+                        continue;
+                    }
+                    out.insert(key.clone(), Self::sanitized_legacy_schema(value));
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(Self::sanitized_legacy_schema)
+                    .collect::<Vec<_>>(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     fn google_tool_choice(choice: &LlmToolChoice) -> &'static str {
         match choice {
             LlmToolChoice::Auto => "AUTO",
@@ -246,7 +302,8 @@ impl GoogleOAuthProvider {
                             "description": tool.description.clone(),
                         });
                         if use_legacy_parameters {
-                            declaration["parameters"] = tool.input_schema.clone();
+                            declaration["parameters"] =
+                                Self::sanitized_legacy_schema(&tool.input_schema);
                         } else {
                             declaration["parametersJsonSchema"] = tool.input_schema.clone();
                         }

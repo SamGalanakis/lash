@@ -139,14 +139,21 @@ impl OpenAiCompatibleProvider {
         messages
     }
 
-    fn build_chat_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
+    fn build_chat_tools(
+        req: &LlmRequest,
+        strict_tools: bool,
+    ) -> Result<Vec<Value>, LlmTransportError> {
         req.tools
             .iter()
             .map(|tool| {
                 let parameters = Self::projected_schema(
                     &tool.input_schema,
                     &tool.input_schema_projections,
-                    OpenAiSchemaProfile::ToolParameters,
+                    if strict_tools {
+                        OpenAiSchemaProfile::StrictToolParameters
+                    } else {
+                        OpenAiSchemaProfile::ToolParameters
+                    },
                 )?;
                 Ok(json!({
                     "type": "function",
@@ -154,7 +161,7 @@ impl OpenAiCompatibleProvider {
                         "name": tool.name,
                         "description": tool.description,
                         "parameters": parameters,
-                        "strict": false,
+                        "strict": strict_tools,
                     },
                 }))
             })
@@ -280,8 +287,9 @@ impl OpenAiCompatibleProvider {
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI")?;
+        let compat = self.resolved_compat(CompletionEndpoint::ChatCompletions);
         let mut messages = Self::build_chat_messages(req);
-        let mut tools = Self::build_chat_tools(req)?;
+        let mut tools = Self::build_chat_tools(req, compat.strict_tools)?;
         let policy = resolve_generation_policy(
             &req.generation,
             &self.options,
@@ -293,20 +301,23 @@ impl OpenAiCompatibleProvider {
             "model": req.model,
             "messages": messages,
             "stream": stream,
-            "max_tokens": policy.max_output_tokens,
         });
+        apply_max_tokens_field(&mut body, compat.max_tokens_field, policy.max_output_tokens);
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
             body["tool_choice"] = json!(tool_choice_value(&req.tool_choice));
-            body["parallel_tool_calls"] = json!(true);
+            if compat.request_fields {
+                body["parallel_tool_calls"] = json!(true);
+            }
         }
-        if stream {
+        if stream && compat.streaming_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(effort) =
                 OpenAiModelPolicy::new(self.base_url.clone()).reasoning_effort(&req.model, variant)
             && effort != "none"
+            && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {
             body["reasoning"] = json!({
                 "effort": clamp_reasoning_effort(&req.model, &effort),

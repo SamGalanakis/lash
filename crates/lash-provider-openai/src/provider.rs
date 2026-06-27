@@ -6,12 +6,18 @@ impl OpenAiCompatibleProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             options: ProviderOptions::default(),
+            compat: OpenAiCompat::default(),
             client: DEFAULT_HTTP_CLIENT.clone(),
         }
     }
 
     pub fn with_options(mut self, options: ProviderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    pub fn with_compat(mut self, compat: OpenAiCompat) -> Self {
+        self.compat = compat;
         self
     }
 
@@ -85,6 +91,12 @@ impl Provider for OpenAiCompatibleProvider {
             map.insert(
                 "options".to_string(),
                 serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if self.compat != OpenAiCompat::default() {
+            map.insert(
+                "compat".to_string(),
+                serde_json::to_value(&self.compat).unwrap_or(serde_json::Value::Null),
             );
         }
         serde_json::Value::Object(map)

@@ -61,7 +61,9 @@ impl RuntimePersistence for Store {
                     let checkpoint = meta
                         .checkpoint_ref
                         .as_ref()
-                        .and_then(|blob_ref| Self::get_checkpoint_conn(conn, blob_ref));
+                        .map(|blob_ref| Self::get_checkpoint_conn(conn, blob_ref))
+                        .transpose()?
+                        .flatten();
                     Ok(Some(PersistedSessionRead {
                         session_id: meta.session_id,
                         head_revision: meta.head_revision,
@@ -277,6 +279,7 @@ impl RuntimePersistence for Store {
                         .map_err(sqlite_error)? as usize;
                     let next_revision = actual_revision + 1;
                     let meta = SessionHeadMeta {
+                        schema_version: lash_core::store::SESSION_HEAD_META_SCHEMA_VERSION,
                         session_id: commit.session_id.clone(),
                         head_revision: next_revision,
                         config: commit.config.clone(),

@@ -15,9 +15,9 @@ fn turn_input_round_trips_remote_safe_fields() {
         lash_core::InputItem::image_ref("img"),
     ])
     .with_image_blob("img", vec![1, 2, 3])
-    .with_protocol_turn_options(lash_core::ProtocolTurnOptions {
-        payload: serde_json::json!({ "mode": "remote" }),
-    })
+    .with_protocol_turn_options(lash_core::ProtocolTurnOptions::from_payload(
+        serde_json::json!({ "mode": "remote" }),
+    ))
     .with_trace_turn_id("trace-1");
     input.turn_context.set_prompt_layer(prompt.clone());
 

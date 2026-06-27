@@ -599,7 +599,12 @@ class ProfileGuardCoverageTests(unittest.TestCase):
             / "runtime_perf"
             / "scenarios.rs"
         ).read_text()
-        rust_scenarios = re.findall(r'"([a-z0-9_]+)" => Some\(Self::', scenarios_rs)
+        rust_scenarios = re.findall(
+            r"runtime_perf_metadata!\(\s*[A-Za-z0-9_]+,\s*\"([a-z0-9_]+)\"",
+            scenarios_rs,
+        )
+        if not rust_scenarios:
+            rust_scenarios = re.findall(r'"([a-z0-9_]+)" => Some\(Self::', scenarios_rs)
 
         self.assertEqual(profile_runtime_stack.KNOWN_RUNTIME_SCENARIOS, rust_scenarios)
         self.assertIn(

@@ -7,6 +7,8 @@ struct OpenAiCompatibleProviderConfig {
     base_url: String,
     #[serde(default)]
     options: ProviderOptions,
+    #[serde(default)]
+    compat: OpenAiCompat,
 }
 
 #[derive(Deserialize)]
@@ -33,6 +35,7 @@ impl ProviderFactory for OpenAiProviderFactory {
                 api_key: cfg.api_key,
                 base_url: OPENAI_BASE_URL.to_string(),
                 options: cfg.options,
+                compat: OpenAiCompat::default(),
                 client: build_http_client(),
             },
         }
@@ -52,6 +55,7 @@ impl ProviderFactory for OpenAiCompatibleProviderFactory {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
+            compat: cfg.compat,
             client: build_http_client(),
         }
         .into_components())

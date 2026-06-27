@@ -63,26 +63,38 @@ pub const ASH_LIGHT: Color = Color::rgb(58, 58, 52);
 pub const ASH_MID: Color = Color::rgb(74, 74, 68);
 pub const ASH_TEXT: Color = Color::rgb(90, 90, 80);
 
-pub const CHALK_DIM: Color = Color::rgb(122, 122, 112);
+pub const CHALK_DIM: Color = Color::rgb(160, 158, 145);
 pub const CHALK_MID: Color = Color::rgb(200, 196, 184);
 pub const CHALK: Color = Color::rgb(232, 228, 208);
+
+// Code ink reads brighter than tertiary prose: a fenced block is a focal
+// surface, so its body sits near chalk (docs `--code-ink`) on the faint code
+// surface rather than receding into the muted-gray tier.
+pub const CODE_INK: Color = Color::rgb(216, 211, 189);
+pub const CODE_COMMENT: Color = Color::rgb(140, 138, 126);
+// Inline-code chip: one perceptible step above the code surface so it actually
+// reads as a chip against the body background, without becoming a loud fill.
+pub const INLINE_CHIP: Color = Color::rgb(33, 29, 24);
 
 pub const SODIUM: Color = Color::rgb(232, 163, 60);
 pub const LICHEN: Color = Color::rgb(138, 158, 108);
 pub const ERROR: Color = Color::rgb(204, 68, 68);
 pub const SELECTION_BG: Color = Color::rgb(54, 44, 23);
 
-pub const PATCH_FRAME: Color = Color::rgb(128, 94, 38);
-pub const PATCH_ADD: Color = Color::rgb(126, 164, 92);
-pub const PATCH_HUNK: Color = Color::rgb(154, 142, 106);
-pub const PATCH_ADD_GUTTER_BG: Color = Color::rgb(39, 55, 31);
-pub const PATCH_ADD_LINE_BG: Color = Color::rgb(25, 37, 23);
-pub const PATCH_REMOVE_GUTTER_BG: Color = Color::rgb(78, 36, 32);
-pub const PATCH_REMOVE_LINE_BG: Color = Color::rgb(46, 24, 21);
-pub const PATCH_CONTEXT_GUTTER_BG: Color = Color::rgb(26, 25, 22);
-pub const PATCH_CONTEXT_LINE_BG: Color = Color::rgb(19, 18, 16);
-pub const PATCH_HUNK_GUTTER_BG: Color = Color::rgb(41, 34, 22);
-pub const PATCH_HUNK_LINE_BG: Color = Color::rgb(28, 24, 18);
+// Diff / patch surfaces. The whole hunk sits on one faint code surface so it
+// reads as a single editorial block; changed lines lift off it with a clean,
+// low-chroma tint that fills the row edge-to-edge (never a ragged block). The
+// +/- signs carry the brand's diff accents — the same reds and sages the docs
+// use for `--tok-deleted` / `--tok-inserted` — while line numbers stay quiet.
+pub const CODE_SURFACE: Color = Color::rgb(27, 24, 20); // docs --code-bg #1b1814
+pub const PATCH_RAIL: Color = Color::rgb(95, 94, 84); // calm but perceptible left rail (~3:1)
+pub const PATCH_DELETED: Color = Color::rgb(215, 114, 114); // docs --tok-deleted #d77272
+pub const PATCH_INSERTED: Color = Color::rgb(182, 199, 154); // docs --tok-inserted #b6c79a
+// Tuned for equal *perceived* weight: the deletion red is eased off its earlier
+// saturation while the insertion green gains chroma, so a symmetric edit reads
+// balanced instead of biasing the eye toward the deletion.
+pub const PATCH_ADD_LINE_BG: Color = Color::rgb(26, 46, 31);
+pub const PATCH_REMOVE_LINE_BG: Color = Color::rgb(56, 27, 27);
 
 pub const PROMPT_CHAR: &str = "❯";
 
@@ -300,25 +312,36 @@ pub fn error() -> Style {
 }
 
 pub fn code_content() -> Style {
-    Style::default().fg(text_subtle())
+    Style::default().fg(themed(CODE_INK, Color::ansi(7)))
 }
 
 pub fn code_keyword() -> Style {
-    Style::default().fg(brand()).add_modifier(Modifier::Bold)
+    // Calm, sodium-free syntax emphasis: keywords earn hierarchy from weight, not
+    // the reserved accent. Splashing sodium across every `fn`/`let` would break
+    // the "accent means action" discipline the rest of the palette keeps.
+    Style::default()
+        .fg(text_primary())
+        .add_modifier(Modifier::Bold)
 }
 
 pub fn code_string() -> Style {
-    Style::default().fg(state_ok())
+    Style::default().fg(themed(PATCH_INSERTED, Color::ansi(2)))
 }
 
 pub fn code_comment() -> Style {
     Style::default()
-        .fg(text_faint())
+        .fg(themed(CODE_COMMENT, Color::ansi(8)))
         .add_modifier(Modifier::Italic)
 }
 
 pub fn code_chrome() -> Style {
-    chrome_rule()
+    // The fenced-code rail and rules need to actually declare "this is code" in a
+    // dim room, so Lash lifts them off the near-invisible ash to the perceptible
+    // rail tone. System keeps the dim terminal chrome.
+    match active_theme() {
+        ThemeName::Lash => Style::default().fg(PATCH_RAIL),
+        ThemeName::System => chrome_rule(),
+    }
 }
 
 pub fn chrome_rule() -> Style {
@@ -385,11 +408,17 @@ pub fn subheading() -> Style {
 }
 
 pub fn inline_code() -> Style {
-    Style::default().fg(text_subtle())
+    // Inline code is the load-bearing noun in a sentence, so it must not be the
+    // faintest thing on the line. It recedes by *hue* (neutral, never the sodium
+    // accent) and is marked as literal by a faint code-surface chip — not by
+    // dimming below the surrounding prose.
+    Style::default()
+        .fg(themed(CHALK_MID, Color::ansi(7)))
+        .bg(themed(INLINE_CHIP, Color::default_background()))
 }
 
 pub fn patch_frame() -> Style {
-    Style::default().fg(themed(PATCH_FRAME, Color::ansi(3)))
+    Style::default().fg(themed(PATCH_RAIL, Color::ansi(8)))
 }
 
 pub fn patch_label() -> Style {
@@ -397,68 +426,89 @@ pub fn patch_label() -> Style {
 }
 
 pub fn patch_add() -> Style {
-    Style::default().fg(themed(PATCH_ADD, Color::ansi(2)))
+    Style::default().fg(themed(PATCH_INSERTED, Color::ansi(2)))
 }
 
 pub fn patch_remove() -> Style {
-    Style::default().fg(state_error())
+    Style::default().fg(themed(PATCH_DELETED, Color::ansi(1)))
 }
 
-pub fn patch_diff_add_gutter() -> Style {
-    Style::default()
-        .fg(state_ok())
-        .bg(themed(PATCH_ADD_GUTTER_BG, Color::ansi(2)))
-        .add_modifier(Modifier::Bold)
+// Per-row diff styles. Each changed row is painted from three slots — line
+// number, +/- sign, and body — that share one row-wide background. The System
+// theme keeps the terminal's own background (no tint blocks) and signals the
+// change with ANSI accents on the sign instead, per the System-theme contract.
+#[derive(Clone, Copy, Debug)]
+pub struct PatchRowStyles {
+    pub number: Style,
+    pub sign: Style,
+    pub body: Style,
 }
 
-pub fn patch_diff_add_line() -> Style {
-    Style::default()
-        .fg(text_primary())
-        .bg(themed(PATCH_ADD_LINE_BG, Color::default_background()))
+fn patch_row(
+    bg: Color,
+    number: Color,
+    sign: Color,
+    body: Color,
+    sign_bold: bool,
+) -> PatchRowStyles {
+    let mut sign_style = Style::default().fg(sign).bg(bg);
+    if sign_bold {
+        sign_style = sign_style.add_modifier(Modifier::Bold);
+    }
+    PatchRowStyles {
+        number: Style::default().fg(number).bg(bg),
+        sign: sign_style,
+        body: Style::default().fg(body).bg(bg),
+    }
 }
 
-pub fn patch_diff_remove_gutter() -> Style {
-    Style::default()
-        .fg(state_error())
-        .bg(themed(PATCH_REMOVE_GUTTER_BG, Color::ansi(1)))
-        .add_modifier(Modifier::Bold)
+pub fn patch_diff_add() -> PatchRowStyles {
+    patch_row(
+        themed(PATCH_ADD_LINE_BG, Color::default_background()),
+        text_subtle(),
+        themed(PATCH_INSERTED, Color::ansi(2)),
+        text_primary(),
+        true,
+    )
 }
 
-pub fn patch_diff_remove_line() -> Style {
-    Style::default()
-        .fg(text_primary())
-        .bg(themed(PATCH_REMOVE_LINE_BG, Color::default_background()))
+pub fn patch_diff_remove() -> PatchRowStyles {
+    patch_row(
+        themed(PATCH_REMOVE_LINE_BG, Color::default_background()),
+        text_subtle(),
+        themed(PATCH_DELETED, Color::ansi(1)),
+        text_muted(),
+        true,
+    )
 }
 
-pub fn patch_diff_context_gutter() -> Style {
-    Style::default()
+pub fn patch_diff_context() -> PatchRowStyles {
+    let bg = themed(CODE_SURFACE, Color::default_background());
+    // Context line numbers are navigational text you read to orient inside a
+    // hunk, so they clear ~4:1 — quiet, but never the faint chatter tier. They
+    // still sit a notch below the changed-row numbers so the changes lead.
+    let number = themed(Color::rgb(118, 116, 106), Color::ansi(8));
+    patch_row(bg, number, text_faint(), text_subtle(), false)
+}
+
+pub fn patch_diff_hunk() -> PatchRowStyles {
+    let bg = themed(CODE_SURFACE, Color::default_background());
+    let mut styles = patch_row(bg, text_faint(), text_faint(), text_subtle(), false);
+    styles.body = styles.body.add_modifier(Modifier::Bold);
+    styles
+}
+
+pub fn patch_diff_meta() -> PatchRowStyles {
+    let bg = themed(CODE_SURFACE, Color::default_background());
+    let faint = Style::default()
         .fg(text_faint())
-        .bg(themed(PATCH_CONTEXT_GUTTER_BG, Color::default_background()))
-}
-
-pub fn patch_diff_context_line() -> Style {
-    Style::default()
-        .fg(text_subtle())
-        .bg(themed(PATCH_CONTEXT_LINE_BG, Color::default_background()))
-}
-
-pub fn patch_diff_hunk_gutter() -> Style {
-    Style::default()
-        .fg(themed(PATCH_HUNK, Color::ansi(3)))
-        .bg(themed(PATCH_HUNK_GUTTER_BG, Color::default_background()))
-}
-
-pub fn patch_diff_hunk_line() -> Style {
-    Style::default()
-        .fg(themed(PATCH_HUNK, Color::ansi(3)))
-        .bg(themed(PATCH_HUNK_LINE_BG, Color::default_background()))
-        .add_modifier(Modifier::Bold)
-}
-
-pub fn patch_diff_meta_line() -> Style {
-    Style::default()
-        .fg(text_faint())
-        .add_modifier(Modifier::Dim)
+        .bg(bg)
+        .add_modifier(Modifier::Dim);
+    PatchRowStyles {
+        number: faint,
+        sign: faint,
+        body: faint,
+    }
 }
 
 pub fn subagent_marker() -> Style {

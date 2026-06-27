@@ -314,15 +314,43 @@ impl From<RemoteLlmContentBlock> for core_llm::LlmContentBlock {
 
 impl From<core_llm::ResponseTextMeta> for RemoteResponseTextMeta {
     fn from(value: core_llm::ResponseTextMeta) -> Self {
-        let core_llm::ResponseTextMeta { id, status, phase } = value;
-        Self { id, status, phase }
+        let core_llm::ResponseTextMeta {
+            id,
+            status,
+            phase,
+            provider_payload,
+            origin_provider,
+            origin_model,
+        } = value;
+        Self {
+            id,
+            status,
+            phase,
+            provider_payload,
+            origin_provider,
+            origin_model,
+        }
     }
 }
 
 impl From<RemoteResponseTextMeta> for core_llm::ResponseTextMeta {
     fn from(value: RemoteResponseTextMeta) -> Self {
-        let RemoteResponseTextMeta { id, status, phase } = value;
-        Self { id, status, phase }
+        let RemoteResponseTextMeta {
+            id,
+            status,
+            phase,
+            provider_payload,
+            origin_provider,
+            origin_model,
+        } = value;
+        Self {
+            id,
+            status,
+            phase,
+            provider_payload,
+            origin_provider,
+            origin_model,
+        }
     }
 }
 

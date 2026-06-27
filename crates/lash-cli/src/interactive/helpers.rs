@@ -58,8 +58,16 @@ impl SessionObservationBridge {
                                     coalescer.flush().await;
                                     let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
                                 }
-                                SessionObservationEventPayload::ProcessChanged { .. } => {
+                                SessionObservationEventPayload::ProcessChanged {
+                                    kind,
+                                    process_ids,
+                                } => {
                                     coalescer.flush().await;
+                                    let _ = app_tx.send(AppEvent::ProcessChanged {
+                                        stream_id,
+                                        kind,
+                                        process_ids,
+                                    });
                                     let _ = app_tx.send(AppEvent::RequestUiSnapshot);
                                 }
                                 SessionObservationEventPayload::AgentFrameSwitched { .. } => {

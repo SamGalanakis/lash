@@ -91,13 +91,21 @@ pub(crate) async fn complete(
         provider.base_url.trim_end_matches('/'),
         endpoint.path()
     );
-    let request = provider
+    let compat = provider.resolved_compat(endpoint);
+    let mut request = provider
         .client
         .post(&url)
         .header("Authorization", format!("Bearer {}", provider.api_key))
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream")
         .body(request_body.clone());
+    if compat.cache_session_affinity
+        && let Some(session_id) = req.session_id.as_deref()
+    {
+        request = request
+            .header("session_id", session_id)
+            .header("x-client-request-id", session_id);
+    }
     let resp = send_request(
         request,
         Some(request_body.clone()),

@@ -149,7 +149,8 @@ pub(in crate::runtime) async fn emit_semantic_response_parts(
     response: &LlmResponse,
     prose_projector: Option<&dyn crate::plugin::AssistantProseProjectorPlugin>,
 ) {
-    let has_text_correlation_ids = response.parts.iter().any(|part| {
+    let visible_parts = crate::visible_response_parts(response.parts.clone());
+    let has_text_correlation_ids = visible_parts.iter().any(|part| {
         matches!(
             part,
             LlmOutputPart::Text {
@@ -159,7 +160,7 @@ pub(in crate::runtime) async fn emit_semantic_response_parts(
         )
     });
     let mut emitted_text = false;
-    for part in &response.parts {
+    for part in &visible_parts {
         match part {
             LlmOutputPart::Text {
                 text,
@@ -202,7 +203,7 @@ pub(in crate::runtime) async fn emit_semantic_response_parts(
     let parts_text;
     let full_text = if full_text.is_empty() && !has_text_correlation_ids {
         parts_text =
-            project_assistant_prose(&response_text_from_parts(&response.parts), prose_projector);
+            project_assistant_prose(&response_text_from_parts(&visible_parts), prose_projector);
         parts_text.as_str()
     } else {
         full_text.as_str()
@@ -228,11 +229,5 @@ fn project_assistant_prose(
 }
 
 fn response_text_from_parts(parts: &[LlmOutputPart]) -> String {
-    parts
-        .iter()
-        .filter_map(|part| match part {
-            LlmOutputPart::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect()
+    crate::visible_response_text_from_parts(parts)
 }

@@ -68,13 +68,13 @@ impl Store {
             )?),
             None => checkpoint.execution_state_ref.clone(),
         };
-        let manifest = SessionCheckpoint {
-            turn_state: checkpoint.turn_state.clone(),
+        let manifest = SessionCheckpoint::new(
+            checkpoint.turn_state.clone(),
             tool_state_ref,
             plugin_snapshot_ref,
-            plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+            checkpoint.plugin_snapshot_revision,
             execution_state_ref,
-        };
+        );
         let checkpoint_ref = Self::put_typed_artifact_blob_conn(
             conn,
             BlobArtifactDescriptor::checkpoint_manifest(),
@@ -111,9 +111,12 @@ impl Store {
     pub(crate) fn get_checkpoint_conn(
         conn: &Connection,
         blob_ref: &BlobRef,
-    ) -> Option<HydratedSessionCheckpoint> {
-        let record: SessionCheckpoint = Self::get_typed_blob_conn(conn, blob_ref)?;
-        Some(HydratedSessionCheckpoint {
+    ) -> Result<Option<HydratedSessionCheckpoint>, StoreError> {
+        let Some(bytes) = Self::get_blob_conn(conn, blob_ref) else {
+            return Ok(None);
+        };
+        let record = decode_checkpoint(&bytes)?;
+        Ok(Some(HydratedSessionCheckpoint {
             turn_state: record.turn_state,
             tool_state_ref: record.tool_state_ref.clone(),
             tool_state: record
@@ -131,7 +134,7 @@ impl Store {
                 .execution_state_ref
                 .as_ref()
                 .and_then(|blob_ref| Self::get_typed_blob_conn(conn, blob_ref)),
-        })
+        }))
     }
 
     pub(crate) fn load_usage_deltas_conn(conn: &Connection) -> Vec<lash_core::TokenLedgerEntry> {
@@ -251,6 +254,7 @@ impl Store {
             .call(move |conn| Ok(Self::get_checkpoint_conn(conn, &blob_ref)))
             .await
             .ok()
+            .and_then(Result::ok)
             .flatten()
     }
 

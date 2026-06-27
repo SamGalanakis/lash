@@ -140,6 +140,10 @@ async fn run_once_turn_checkpoint(chat_turns: usize) -> anyhow::Result<RuntimePe
 
     Ok(RuntimePerfRunResult {
         scenario: RuntimePerfScenario::TurnCheckpoint.name().to_string(),
+        scenario_harness: RuntimePerfScenario::TurnCheckpoint
+            .scenario_harness()
+            .name()
+            .to_string(),
         chat_turns,
         stack_profile: None,
         build_runtime_ms,
@@ -749,6 +753,7 @@ pub(crate) async fn run_once_embed(
 
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
+        scenario_harness: scenario.scenario_harness().name().to_string(),
         chat_turns,
         stack_profile: None,
         build_runtime_ms,

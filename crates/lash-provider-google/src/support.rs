@@ -11,6 +11,7 @@ pub(crate) use lash_core::llm::transport::{LlmTransportError, validate_image_att
 pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
     LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
+    ResponseTextMeta,
 };
 pub(crate) use lash_core::provider::{
     Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,

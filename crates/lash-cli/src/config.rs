@@ -274,6 +274,7 @@ fn materialize_test_provider_spec(spec: &ProviderSpec) -> Result<ProviderHandle,
     match scenario {
         "standard-echo" => Ok(standard_echo_provider().into_handle()),
         "standard-slow-echo" => Ok(standard_slow_echo_provider().into_handle()),
+        "standard-gated-escape" => Ok(standard_gated_escape_provider().into_handle()),
         "rlm-subagent-smoke" => Ok(rlm_subagent_smoke_provider().into_handle()),
         "rlm-workspace-smoke" => Ok(rlm_workspace_smoke_provider().into_handle()),
         "rlm-nonzero-exit-smoke" => Ok(rlm_nonzero_exit_smoke_provider().into_handle()),
@@ -291,6 +292,7 @@ fn standard_echo_provider() -> lash_core::testing::TestProvider {
             })
         })
         .complete(|request| async move {
+            record_test_provider_request("standard-echo", &request);
             let prompt = if request_contains_text(&request, "hello from pty") {
                 "hello from pty"
             } else {
@@ -319,11 +321,44 @@ fn standard_slow_echo_provider() -> lash_core::testing::TestProvider {
             })
         })
         .complete(|request| async move {
+            record_test_provider_request("standard-slow-echo", &request);
             let response = if request_contains_text(&request, "queued after escape") {
                 "test-provider echo: queued after escape"
             } else if request_contains_text(&request, "slow initial prompt") {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 "test-provider echo: slow initial prompt"
+            } else {
+                "test-provider echo: interactive prompt"
+            };
+            Ok(lash_core::LlmResponse {
+                full_text: response.to_string(),
+                parts: vec![lash_core::llm::types::LlmOutputPart::Text {
+                    text: response.to_string(),
+                    response_meta: None,
+                }],
+                ..Default::default()
+            })
+        })
+        .build()
+}
+
+#[cfg(feature = "test-provider")]
+fn standard_gated_escape_provider() -> lash_core::testing::TestProvider {
+    lash_core::testing::TestProvider::builder()
+        .kind("test")
+        .serialize_config(|| {
+            serde_json::json!({
+                "scenario": "standard-gated-escape",
+            })
+        })
+        .complete(|request| async move {
+            record_test_provider_request("standard-gated-escape", &request);
+            let response = if request_contains_text(&request, "queued after escape") {
+                "test-provider echo: queued after escape"
+            } else if request_contains_text(&request, "gated initial prompt") {
+                write_test_provider_marker("gated-initial-started");
+                wait_for_test_provider_marker("gated-initial-release").await;
+                "test-provider echo: gated initial prompt"
             } else {
                 "test-provider echo: interactive prompt"
             };
@@ -430,6 +465,75 @@ finish format("nonzero-smoke-ok exit={}", result.exit_code)
             })
         })
         .build()
+}
+
+#[cfg(feature = "test-provider")]
+fn record_test_provider_request(scenario: &str, request: &lash_core::LlmRequest) {
+    let Some(lash_home) = std::env::var_os("LASH_HOME") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(lash_home).join("test-provider-requests.jsonl");
+    let user_texts = request_visible_user_texts(request);
+    let payload = serde_json::json!({
+        "scenario": scenario,
+        "last_user_text": user_texts.last().cloned().unwrap_or_default(),
+        "user_texts": user_texts,
+    });
+    let Ok(line) = serde_json::to_string(&payload) else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+#[cfg(feature = "test-provider")]
+fn request_visible_user_texts(request: &lash_core::LlmRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .filter(|message| message.role == lash_core::llm::types::LlmRole::User)
+        .filter_map(|message| {
+            let text = message
+                .blocks
+                .iter()
+                .filter_map(|part| match part {
+                    lash_core::llm::types::LlmContentBlock::Text { text, .. } => {
+                        Some(text.as_ref())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim_start().starts_with("<system-reminder>")).then_some(text)
+        })
+        .collect()
+}
+
+#[cfg(feature = "test-provider")]
+fn write_test_provider_marker(name: &str) {
+    if let Some(lash_home) = std::env::var_os("LASH_HOME") {
+        let path = std::path::PathBuf::from(lash_home).join(name);
+        let _ = std::fs::write(path, b"ready\n");
+    }
+}
+
+#[cfg(feature = "test-provider")]
+async fn wait_for_test_provider_marker(name: &str) {
+    loop {
+        let Some(lash_home) = std::env::var_os("LASH_HOME") else {
+            return;
+        };
+        if std::path::PathBuf::from(lash_home).join(name).exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 #[cfg(feature = "test-provider")]

@@ -66,6 +66,8 @@ pub enum EmbedError {
     RemoteProtocol(#[from] lash_remote_protocol::RemoteProtocolError),
     #[error("failed to encode protocol turn options: {0}")]
     ProtocolTurnOptions(#[from] serde_json::Error),
+    #[error("failed to decode protocol turn options: {0}")]
+    DecodeProtocolTurnOptions(#[from] lash_core::ProtocolTurnOptionsError),
     #[error("runtime control unavailable: {0}")]
     Control(#[from] lash_core::PluginOperationInvokeError),
 }

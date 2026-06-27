@@ -325,9 +325,9 @@ impl AnthropicProvider {
             };
         }
 
-        // Extended thinking. Temperature is incompatible with thinking; omit
-        // it whenever thinking is enabled (matches Anthropic API rules).
-        let mut thinking_enabled = false;
+        // Extended thinking. Temperature is intentionally omitted. Lash does
+        // not currently expose an explicit temperature option, and Anthropic
+        // rejects temperature on thinking requests.
         if let Some(cfg) = policy.thinking {
             let display = if policy.expose_thinking {
                 "summarized"
@@ -342,7 +342,6 @@ impl AnthropicProvider {
                         "display": display,
                     });
                     body["output_config"] = json!({ "effort": clamped });
-                    thinking_enabled = true;
                 }
                 AnthropicThinkingConfig::Budget { budget_tokens } => {
                     body["thinking"] = json!({
@@ -350,12 +349,8 @@ impl AnthropicProvider {
                         "budget_tokens": budget_tokens,
                         "display": display,
                     });
-                    thinking_enabled = true;
                 }
             }
-        }
-        if !thinking_enabled {
-            body["temperature"] = json!(0);
         }
 
         if let Some(output_spec) = &req.output_spec {

@@ -1,5 +1,5 @@
 use super::super::*;
-use super::harness::LashE2eRun;
+use super::harness::AgentScenarioRun;
 use std::collections::BTreeSet;
 
 #[derive(Debug)]
@@ -117,7 +117,7 @@ impl GraphContract {
     }
 }
 
-pub(super) fn assert_successful_turn_case(run: &LashE2eRun) {
+pub(super) fn assert_successful_agent_scenario(run: &AgentScenarioRun) {
     assert_no_unexpected_turn_errors(&run.streamed_events);
     assert_successful_lash_code_path(&run.streamed_events);
     assert_all_processes_terminal(&run.final_process_list);
@@ -219,7 +219,7 @@ pub(super) fn assert_failed_code_block_present(events: &[TurnActivity]) {
     );
 }
 
-pub(super) fn assert_no_false_finishted_success(run: &LashE2eRun) {
+pub(super) fn assert_no_false_finishted_success(run: &AgentScenarioRun) {
     let output = run.turn_output.as_ref().expect("turn output");
     assert!(
         output.final_value().is_none(),
@@ -242,7 +242,7 @@ pub(super) fn assert_all_processes_terminal(processes: &[lash_core::ProcessHandl
     );
 }
 
-fn assert_foreground_exec_graph_completed(run: &LashE2eRun) {
+fn assert_foreground_exec_graph_completed(run: &AgentScenarioRun) {
     let output = run.turn_output.as_ref().expect("turn output");
     let session_id = &output.state.session_id;
     let graph = run
@@ -377,7 +377,7 @@ pub(super) fn assert_min_completed_process_graphs(contract: &GraphContract, expe
 }
 
 pub(super) fn assert_min_completed_child_session_exec_graphs(
-    run: &LashE2eRun,
+    run: &AgentScenarioRun,
     root_session_id: &str,
     expected_min: usize,
 ) {
@@ -404,7 +404,7 @@ pub(super) fn assert_min_completed_child_session_exec_graphs(
 }
 
 pub(super) fn assert_subagent_bridge_exec_graphs(
-    run: &LashE2eRun,
+    run: &AgentScenarioRun,
     expected_status: crate::tracing::TraceLashlangStatus,
 ) {
     let subagent_process_ids = run
@@ -436,7 +436,7 @@ pub(super) fn assert_subagent_bridge_exec_graphs(
 }
 
 pub(super) fn assert_session_turn_child_graph(
-    run: &LashE2eRun,
+    run: &AgentScenarioRun,
     child_session_id: &str,
     process_id: &str,
 ) {

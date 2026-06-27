@@ -171,6 +171,79 @@ async fn session_observation_bridge_surfaces_gap_and_requests_refresh() {
     assert!(saw_ui_refresh, "expected UI snapshot refresh request");
 }
 
+#[tokio::test]
+async fn session_observation_bridge_surfaces_process_changes() {
+    let session = observation_test_session("cli-process-observation", Some("unused"), None).await;
+    let mut pump = crate::event::AppEventPump::new();
+    let stream_id = 91;
+    let process_id = "bridge-process";
+
+    super::helpers::SessionObservationBridge::spawn(&session, stream_id, pump.sender());
+    session
+        .processes()
+        .start(
+            lash_core::ProcessStartRequest::external(
+                process_id,
+                lash_core::ProcessOriginator::host(),
+                serde_json::Value::Null,
+            )
+            .with_grant(Some(lash_core::ProcessStartGrant {
+                session_scope: lash_core::SessionScope::new("bridge-process-descriptor"),
+                descriptor: lash_core::ProcessHandleDescriptor::new(
+                    Some("test"),
+                    Some("bridge process"),
+                ),
+            })),
+            inline_scope(lash_core::ExecutionScope::process(process_id)),
+        )
+        .await
+        .expect("start process");
+    session
+        .processes()
+        .cancel(
+            process_id,
+            inline_scope(lash_core::ExecutionScope::process(process_id)),
+        )
+        .await
+        .expect("cancel process");
+
+    let mut saw_started = false;
+    let mut saw_cancelled = false;
+    let mut ui_refreshes = 0;
+    for _ in 0..12 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), pump.recv())
+            .await
+            .expect("process bridge event")
+            .expect("app event")
+            .event;
+        match event {
+            AppEvent::ProcessChanged {
+                stream_id: observed,
+                kind,
+                process_ids,
+            } => {
+                assert_eq!(observed, stream_id);
+                assert_eq!(process_ids, vec![process_id.to_string()]);
+                match kind {
+                    lash_core::SessionProcessEventKind::Started => saw_started = true,
+                    lash_core::SessionProcessEventKind::Cancelled => saw_cancelled = true,
+                }
+            }
+            AppEvent::RequestUiSnapshot => ui_refreshes += 1,
+            _ => {}
+        }
+        if saw_started && saw_cancelled && ui_refreshes >= 2 {
+            break;
+        }
+    }
+    assert!(saw_started, "expected process start event");
+    assert!(saw_cancelled, "expected process cancellation event");
+    assert!(
+        ui_refreshes >= 2,
+        "expected snapshot reconciliation requests for process changes"
+    );
+}
+
 async fn observation_test_session(
     session_id: &str,
     response: Option<&'static str>,
@@ -200,6 +273,7 @@ async fn observation_test_session(
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
         ))
@@ -215,6 +289,14 @@ async fn observation_test_session(
     }
     let core = builder.build().expect("core");
     core.session(session_id).open().await.expect("session")
+}
+
+fn inline_scope(scope: lash_core::ExecutionScope) -> lash_core::ScopedEffectController<'static> {
+    lash_core::ScopedEffectController::shared(
+        Arc::new(lash_core::InlineRuntimeEffectController),
+        scope,
+    )
+    .expect("inline execution scope")
 }
 
 #[test]

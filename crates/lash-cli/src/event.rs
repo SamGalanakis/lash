@@ -1,5 +1,5 @@
 use crossterm::event::Event as TermEvent;
-use lash_core::{ProcessHandleSummary, TurnActivity};
+use lash_core::{ProcessHandleSummary, SessionProcessEventKind, TurnActivity};
 use lash_tui_extensions::TuiHostEffect;
 use tokio::sync::mpsc;
 
@@ -26,6 +26,11 @@ pub enum AppEvent {
     UiSnapshot {
         generation: u64,
         result: UiSnapshotResult,
+    },
+    ProcessChanged {
+        stream_id: u64,
+        kind: SessionProcessEventKind,
+        process_ids: Vec<String>,
     },
     RequestUiSnapshot,
     RequestQueuedWorkSnapshot,
@@ -170,6 +175,7 @@ fn lane_for_event(event: &AppEvent) -> EventLane {
             EventLane::High
         }
         AppEvent::Session { .. }
+        | AppEvent::ProcessChanged { .. }
         | AppEvent::Prompt { .. }
         | AppEvent::SystemMessage { .. }
         | AppEvent::SessionObservationFinished { .. } => EventLane::Normal,

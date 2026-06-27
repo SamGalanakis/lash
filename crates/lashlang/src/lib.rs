@@ -267,6 +267,31 @@ mod tests {
         assert!(matches!(err, RuntimeError::UndefinedVariable { .. }));
     }
 
+    #[test]
+    fn message_hint_format_preserves_message_and_appends_hint() {
+        assert_eq!(
+            format_message_with_hint("plain failure", None),
+            "plain failure"
+        );
+        assert_eq!(
+            format_message_with_hint("tool failed", Some("inspect `.error`")),
+            "tool failed\nhint: inspect `.error`"
+        );
+    }
+
+    #[test]
+    fn removed_declarative_trigger_parse_hint_is_stable() {
+        let error = ParseError::DeclarativeTriggerRemoved {
+            span: Span { start: 0, end: 8 },
+        };
+        assert_eq!(
+            parse_hint(&error),
+            Some(
+                "construct a host-provided trigger source value and call the trigger registry register operation"
+            )
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn traced_environment_records_source_location() {
         let source = "x = 1\nfinish missing";

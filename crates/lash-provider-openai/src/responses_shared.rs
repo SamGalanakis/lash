@@ -116,6 +116,14 @@ pub fn build_tools(
     provider: &str,
     req: &lash_core::llm::types::LlmRequest,
 ) -> Result<Vec<Value>, LlmTransportError> {
+    build_tools_with_strict(provider, req, false)
+}
+
+pub fn build_tools_with_strict(
+    provider: &str,
+    req: &lash_core::llm::types::LlmRequest,
+    strict_tools: bool,
+) -> Result<Vec<Value>, LlmTransportError> {
     req.tools
         .iter()
         .map(|tool| {
@@ -123,14 +131,18 @@ pub fn build_tools(
                 provider,
                 &tool.input_schema,
                 &tool.input_schema_projections,
-                OpenAiSchemaProfile::ToolParameters,
+                if strict_tools {
+                    OpenAiSchemaProfile::StrictToolParameters
+                } else {
+                    OpenAiSchemaProfile::ToolParameters
+                },
             )?;
             Ok(json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": parameters,
-                "strict": false,
+                "strict": strict_tools,
             }))
         })
         .collect()
@@ -146,10 +158,9 @@ pub fn build_tools(
 /// emission, the `system → instructions` hoist — is identical.
 #[derive(Clone, Copy, Debug)]
 pub struct ResponsesInputOptions {
-    /// OpenAI assigns each assistant `message` item a stable id
-    /// (`msg_lash_{message}_{part}` when the request carries none), tracks
-    /// `status`/`phase` from [`ResponseTextMeta`], and tags `output_text`
-    /// parts with an empty `annotations` array. Codex emits none of this.
+    /// Responses assistant history is emitted as `message` items with stable
+    /// ids (`msg_lash_{message}_{part}` when the request carries none),
+    /// status/phase from [`ResponseTextMeta`], and `output_text` annotations.
     pub assistant_message_metadata: bool,
     /// Codex folds sibling user `input_image` parts that follow a
     /// `function_call_output` into that output's `output` array so the image
@@ -165,10 +176,10 @@ impl ResponsesInputOptions {
         fold_tool_result_images: false,
     };
 
-    /// Codex Responses: no synthetic ids/phase/annotations, fold tool-result
-    /// images into the preceding `function_call_output`.
+    /// Codex Responses: same assistant message metadata as OpenAI, with
+    /// tool-result images folded into the preceding `function_call_output`.
     pub const CODEX: Self = Self {
-        assistant_message_metadata: false,
+        assistant_message_metadata: true,
         fold_tool_result_images: true,
     };
 }
@@ -193,6 +204,7 @@ fn flush_pending_content(
             id: Some(format!("msg_lash_{message_index}_{part_index}")),
             status: Some("completed".to_string()),
             phase: None,
+            ..ResponseTextMeta::default()
         });
         let mut item = json!({
             "type": "message",
@@ -563,13 +575,7 @@ pub fn response_from_stream_state(
     let full_text = if !state.full_text.is_empty() {
         state.full_text.clone()
     } else {
-        parts
-            .iter()
-            .filter_map(|part| match part {
-                LlmOutputPart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>()
+        lash_core::visible_response_text_from_parts(&parts)
     };
     LlmResponse {
         full_text,
@@ -599,6 +605,7 @@ pub fn response_text_meta_from_message_item(item: &Value) -> ResponseTextMeta {
             .get("phase")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        ..ResponseTextMeta::default()
     }
 }
 
@@ -619,6 +626,18 @@ pub fn message_text_from_item(item: &Value) -> String {
 }
 
 pub fn extract_text(value: &Value) -> String {
+    if let Some(output) = value.get("output").and_then(|v| v.as_array())
+        && output.iter().any(|item| {
+            item.get("type").and_then(|v| v.as_str()) == Some("message")
+                && item
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|phase| phase.eq_ignore_ascii_case("final_answer"))
+                && !message_text_from_item(item).is_empty()
+        })
+    {
+        return lash_core::visible_response_text_from_parts(&response_parts_from_value(value));
+    }
     if let Some(s) = value.get("output_text").and_then(|v| v.as_str()) {
         return s.to_string();
     }
@@ -757,49 +776,63 @@ pub struct ResponsesStreamState {
     pub provider_usage: Option<Value>,
     pub final_response: Option<Value>,
     pub current_text_part: Option<usize>,
+    pub current_text_output_index: Option<usize>,
     pub current_message_item_id: Option<String>,
-    /// Maps a server message item-id to the index of its `Text` part so that
-    /// repeated `output_item.added`/`.done` for the same id reconcile into one
-    /// part instead of duplicating.
+    /// Maps a server output slot to the index of its `Text` part. Responses
+    /// streams are ordered by `output_index`; ids may be absent or change
+    /// across terminal snapshots.
+    pub message_parts_by_output: HashMap<usize, usize>,
+    /// Secondary id lookup for older fixtures and providers that still send
+    /// stable message ids. Slot semantics take precedence.
     pub message_parts: HashMap<String, usize>,
     /// Index of the reasoning-summary part currently receiving deltas. The
     /// server groups reasoning output into multiple "parts" (paragraphs); we
     /// keep one slot per part instead of merging into a single blob.
     pub current_reasoning_part: Option<usize>,
+    pub current_reasoning_output_index: Option<usize>,
+    pub reasoning_parts_by_output: HashMap<usize, usize>,
     pub reasoning_deltas: Vec<String>,
-    pub tool_calls: HashMap<String, ResponsesStreamingToolCall>,
+    pub tool_calls: HashMap<usize, ResponsesStreamingToolCall>,
+    pub tool_call_output_by_id: HashMap<String, usize>,
+    /// Set once streamed output content has arrived. The terminal
+    /// `response.completed.response.output` is authoritative for status/usage
+    /// but is only parsed into parts when the stream did not deliver items.
+    pub streamed_item_content_received: bool,
 }
 
 impl ResponsesStreamState {
-    pub fn begin_message(&mut self, item: Option<&Value>) {
+    pub fn begin_message(&mut self, item: Option<&Value>, output_index: Option<usize>) {
         let item_id = item
             .and_then(|item| item.get("id").and_then(|v| v.as_str()))
             .map(str::to_string);
         let meta = item.map(response_text_meta_from_message_item);
-        let index = self.message_part_index(item_id.as_deref(), meta);
+        let index = self.message_part_index(output_index, item_id.as_deref(), meta);
         self.current_text_part = Some(index);
+        self.current_text_output_index = output_index;
         self.current_message_item_id = item_id;
     }
 
-    pub fn finish_message(&mut self, item: Option<&Value>) {
+    pub fn finish_message(&mut self, item: Option<&Value>, output_index: Option<usize>) {
         if let Some(item) = item {
             let text = message_text_from_item(item);
             let meta = response_text_meta_from_message_item(item);
             let item_id = meta.id.clone();
-            let index = self.message_part_index(item_id.as_deref(), Some(meta));
+            let index = self.message_part_index(output_index, item_id.as_deref(), Some(meta));
             if !text.is_empty() {
                 self.reconcile_text_part(index, &text);
+                self.streamed_item_content_received = true;
             }
         }
         self.current_text_part = None;
+        self.current_text_output_index = None;
         self.current_message_item_id = None;
     }
 
-    pub fn push_text_delta(&mut self, piece: &str) {
+    pub fn push_text_delta(&mut self, piece: &str, output_index: Option<usize>) {
         if piece.is_empty() {
             return;
         }
-        let part_index = self.ensure_text_part_index();
+        let part_index = self.ensure_text_part_index(output_index);
         self.append_text_delta_to_part(part_index, piece);
     }
 
@@ -826,6 +859,10 @@ impl ResponsesStreamState {
     }
 
     pub fn merge_final_response(&mut self, response: &Value) {
+        if self.streamed_item_content_received {
+            self.recompute_full_text();
+            return;
+        }
         let structured_message_text = has_structured_message_text(response);
         for part in response_parts_from_value(response) {
             match part {
@@ -842,7 +879,7 @@ impl ResponsesStreamState {
                     {
                         continue;
                     }
-                    let index = self.message_part_index(item_id.as_deref(), response_meta);
+                    let index = self.message_part_index(None, item_id.as_deref(), response_meta);
                     self.reconcile_text_part(index, &text);
                 }
                 part @ LlmOutputPart::Reasoning { .. } => {
@@ -900,7 +937,14 @@ impl ResponsesStreamState {
         self.recompute_full_text();
     }
 
-    pub fn ensure_text_part_index(&mut self) -> usize {
+    pub fn ensure_text_part_index(&mut self, output_index: Option<usize>) -> usize {
+        if let Some(output_index) = output_index
+            && let Some(index) = self.message_parts_by_output.get(&output_index).copied()
+        {
+            self.current_text_part = Some(index);
+            self.current_text_output_index = Some(output_index);
+            return index;
+        }
         if let Some(index) = self.current_text_part {
             return index;
         }
@@ -921,10 +965,26 @@ impl ResponsesStreamState {
 
     fn message_part_index(
         &mut self,
+        output_index: Option<usize>,
         item_id: Option<&str>,
         response_meta: Option<ResponseTextMeta>,
     ) -> usize {
-        let index = if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+        let index = if let Some(output_index) = output_index {
+            if let Some(index) = self.message_parts_by_output.get(&output_index).copied() {
+                index
+            } else {
+                let index = self.parts.len();
+                self.parts.push(LlmOutputPart::Text {
+                    text: String::new(),
+                    response_meta: response_meta.clone(),
+                });
+                self.message_parts_by_output.insert(output_index, index);
+                if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+                    self.message_parts.insert(item_id.to_string(), index);
+                }
+                index
+            }
+        } else if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
             if let Some(index) = self.message_parts.get(item_id).copied() {
                 index
             } else {
@@ -972,45 +1032,66 @@ impl ResponsesStreamState {
         if let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(part_index) {
             text.push_str(piece);
         }
+        self.streamed_item_content_received = true;
         self.pending_text_deltas.push(piece.to_string());
         self.recompute_full_text();
     }
 
     pub fn recompute_full_text(&mut self) {
-        self.full_text.clear();
-        for part in &self.parts {
-            if let LlmOutputPart::Text { text, .. } = part {
-                self.full_text.push_str(text);
+        self.full_text = lash_core::visible_response_text_from_parts(&self.parts);
+    }
+
+    pub fn begin_reasoning_part(&mut self, output_index: Option<usize>) {
+        let index = if let Some(output_index) = output_index {
+            if let Some(index) = self.reasoning_parts_by_output.get(&output_index).copied() {
+                index
+            } else {
+                let index = self.parts.len();
+                self.parts.push(LlmOutputPart::Reasoning {
+                    text: String::new(),
+                    replay: None,
+                });
+                self.reasoning_parts_by_output.insert(output_index, index);
+                index
             }
-        }
-    }
-
-    pub fn begin_reasoning_part(&mut self) {
-        let index = self.parts.len();
-        self.parts.push(LlmOutputPart::Reasoning {
-            text: String::new(),
-            replay: None,
-        });
+        } else {
+            let index = self.parts.len();
+            self.parts.push(LlmOutputPart::Reasoning {
+                text: String::new(),
+                replay: None,
+            });
+            index
+        };
         self.current_reasoning_part = Some(index);
+        self.current_reasoning_output_index = output_index;
     }
 
-    pub fn push_reasoning_delta(&mut self, delta: &str) {
+    pub fn push_reasoning_delta(&mut self, delta: &str, output_index: Option<usize>) {
         if delta.is_empty() {
             return;
         }
-        let index = match self.current_reasoning_part {
-            Some(index) => index,
-            None => {
-                // Some providers send a delta before the `part.added` event.
-                // Open an implicit part so we don't drop text.
-                self.begin_reasoning_part();
-                self.current_reasoning_part
-                    .expect("reasoning part just pushed")
+        let index = if let Some(output_index) = output_index
+            && let Some(index) = self.reasoning_parts_by_output.get(&output_index).copied()
+        {
+            self.current_reasoning_part = Some(index);
+            self.current_reasoning_output_index = Some(output_index);
+            index
+        } else {
+            match self.current_reasoning_part {
+                Some(index) => index,
+                None => {
+                    // Some providers send a delta before the `part.added` event.
+                    // Open an implicit part so we don't drop text.
+                    self.begin_reasoning_part(output_index);
+                    self.current_reasoning_part
+                        .expect("reasoning part just pushed")
+                }
             }
         };
         if let Some(LlmOutputPart::Reasoning { text, .. }) = self.parts.get_mut(index) {
             text.push_str(delta);
         }
+        self.streamed_item_content_received = true;
         self.reasoning_deltas.push(delta.to_string());
     }
 
@@ -1025,19 +1106,29 @@ impl ResponsesStreamState {
                 *text = trimmed.to_string();
             }
         }
+        self.current_reasoning_output_index = None;
     }
 
     /// Populate the most recent reasoning part with the authoritative payload
     /// from `response.output_item.done`: the `rs_...` id, the `summary[*].text`
     /// entries, and the `encrypted_content` blob replayed on the next turn.
-    pub fn finalize_reasoning_item(&mut self, item: &Value) {
-        let Some((_, part)) = self
-            .parts
-            .iter_mut()
-            .enumerate()
-            .rev()
-            .find(|(_, p)| matches!(p, LlmOutputPart::Reasoning { .. }))
-        else {
+    pub fn finalize_reasoning_item(&mut self, item: &Value, output_index: Option<usize>) {
+        self.streamed_item_content_received = true;
+        let target_index = output_index
+            .and_then(|output_index| self.reasoning_parts_by_output.get(&output_index).copied())
+            .or_else(|| self.current_reasoning_part)
+            .or_else(|| {
+                self.parts
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, p)| matches!(p, LlmOutputPart::Reasoning { .. }))
+                    .map(|(index, _)| index)
+            });
+        let Some(index) = target_index else {
+            return;
+        };
+        let Some(part) = self.parts.get_mut(index) else {
             return;
         };
         let LlmOutputPart::Reasoning { replay, .. } = part else {
@@ -1069,11 +1160,48 @@ impl ResponsesStreamState {
         std::mem::take(&mut self.pending_text_deltas)
     }
 
-    pub fn update_tool_call_from_item(&mut self, item: &Value) -> Option<String> {
-        let item_id = item.get("id").and_then(|v| v.as_str())?.to_string();
-        let tool_call = self.tool_calls.entry(item_id.clone()).or_default();
+    fn tool_call_slot(
+        &mut self,
+        output_index: Option<usize>,
+        item_id: Option<&str>,
+    ) -> Option<usize> {
+        if let Some(output_index) = output_index {
+            if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+                self.tool_call_output_by_id
+                    .insert(item_id.to_string(), output_index);
+            }
+            return Some(output_index);
+        }
+        if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+            if let Some(slot) = self.tool_call_output_by_id.get(item_id).copied() {
+                return Some(slot);
+            }
+            let slot = self
+                .tool_calls
+                .keys()
+                .copied()
+                .max()
+                .map(|value| value.saturating_add(1))
+                .unwrap_or(0);
+            self.tool_call_output_by_id
+                .insert(item_id.to_string(), slot);
+            return Some(slot);
+        }
+        None
+    }
+
+    pub fn update_tool_call_from_item(
+        &mut self,
+        item: &Value,
+        output_index: Option<usize>,
+    ) -> Option<usize> {
+        let item_id = item.get("id").and_then(|v| v.as_str());
+        let slot = self.tool_call_slot(output_index, item_id)?;
+        let tool_call = self.tool_calls.entry(slot).or_default();
         if tool_call.item_id.is_empty() {
-            tool_call.item_id = item_id.clone();
+            if let Some(item_id) = item_id {
+                tool_call.item_id = item_id.to_string();
+            }
         }
         if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
             tool_call.call_id = call_id.to_string();
@@ -1086,33 +1214,53 @@ impl ResponsesStreamState {
         {
             tool_call.input_json = arguments.to_string();
         }
-        Some(item_id)
+        Some(slot)
     }
 
-    pub fn push_tool_call_delta(&mut self, item_id: &str, delta: &str) {
-        if item_id.is_empty() || delta.is_empty() {
+    pub fn push_tool_call_delta(
+        &mut self,
+        output_index: Option<usize>,
+        item_id: Option<&str>,
+        delta: &str,
+    ) {
+        if delta.is_empty() {
             return;
         }
+        let Some(slot) = self.tool_call_slot(output_index, item_id) else {
+            return;
+        };
+        self.streamed_item_content_received = true;
         self.tool_calls
-            .entry(item_id.to_string())
+            .entry(slot)
             .or_default()
             .input_json
             .push_str(delta);
     }
 
-    pub fn set_tool_call_arguments(&mut self, item_id: &str, arguments: &str) {
-        if item_id.is_empty() {
+    pub fn set_tool_call_arguments(
+        &mut self,
+        output_index: Option<usize>,
+        item_id: Option<&str>,
+        arguments: &str,
+    ) {
+        let Some(slot) = self.tool_call_slot(output_index, item_id) else {
             return;
-        }
-        self.tool_calls
-            .entry(item_id.to_string())
-            .or_default()
-            .input_json = arguments.to_string();
+        };
+        self.streamed_item_content_received = true;
+        self.tool_calls.entry(slot).or_default().input_json = arguments.to_string();
     }
 
-    pub fn finish_tool_call(&mut self, item: &Value) -> Option<LlmOutputPart> {
-        let item_id = self.update_tool_call_from_item(item)?;
-        let mut tool_call = self.tool_calls.remove(&item_id).unwrap_or_default();
+    pub fn finish_tool_call(
+        &mut self,
+        item: &Value,
+        output_index: Option<usize>,
+    ) -> Option<LlmOutputPart> {
+        self.streamed_item_content_received = true;
+        let slot = self.update_tool_call_from_item(item, output_index)?;
+        let mut tool_call = self.tool_calls.remove(&slot).unwrap_or_default();
+        if !tool_call.item_id.is_empty() {
+            self.tool_call_output_by_id.remove(&tool_call.item_id);
+        }
         if tool_call.call_id.is_empty() {
             tool_call.call_id = uuid::Uuid::new_v4().to_string();
         }
@@ -1233,6 +1381,11 @@ pub fn process_sse_event(
             .with_raw(event.to_string()));
     }
 
+    let output_index = event
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+
     if let Some(resp) = event.get("response") {
         state.final_response = Some(resp.clone());
         state.provider_usage = resp.get("usage").cloned();
@@ -1245,19 +1398,19 @@ pub fn process_sse_event(
         "response.output_item.added" => {
             if let Some(item) = event.get("item") {
                 match item.get("type").and_then(|v| v.as_str()) {
-                    Some("message") => state.begin_message(Some(item)),
+                    Some("message") => state.begin_message(Some(item), output_index),
                     Some("function_call") => {
-                        let _ = state.update_tool_call_from_item(item);
+                        let _ = state.update_tool_call_from_item(item, output_index);
                     }
-                    Some("reasoning") => state.begin_reasoning_part(),
+                    Some("reasoning") => state.begin_reasoning_part(output_index),
                     _ => {}
                 }
             }
         }
-        "response.reasoning_summary_part.added" => state.begin_reasoning_part(),
+        "response.reasoning_summary_part.added" => state.begin_reasoning_part(output_index),
         "response.reasoning_summary_text.delta" => {
             if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
-                state.push_reasoning_delta(delta);
+                state.push_reasoning_delta(delta, output_index);
             }
         }
         "response.reasoning_summary_text.done" => {
@@ -1272,41 +1425,45 @@ pub fn process_sse_event(
                 if text != existing
                     && let Some(suffix) = text.strip_prefix(existing.as_str())
                 {
-                    state.push_reasoning_delta(suffix);
+                    state.push_reasoning_delta(suffix, output_index);
                 }
             }
         }
         "response.reasoning_summary_part.done" => state.finish_reasoning_part(),
         "response.output_text.delta" => {
             if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
-                state.push_text_delta(delta);
+                state.push_text_delta(delta, output_index);
             }
         }
         "response.output_text.done" => {}
         "response.function_call_arguments.delta" => {
-            if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
-                && let Some(delta) = event.get("delta").and_then(|v| v.as_str())
-            {
-                state.push_tool_call_delta(item_id, delta);
+            if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                state.push_tool_call_delta(
+                    output_index,
+                    event.get("item_id").and_then(|v| v.as_str()),
+                    delta,
+                );
             }
         }
         "response.function_call_arguments.done" => {
-            if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
-                && let Some(arguments) = event.get("arguments").and_then(|v| v.as_str())
-            {
-                state.set_tool_call_arguments(item_id, arguments);
+            if let Some(arguments) = event.get("arguments").and_then(|v| v.as_str()) {
+                state.set_tool_call_arguments(
+                    output_index,
+                    event.get("item_id").and_then(|v| v.as_str()),
+                    arguments,
+                );
             }
         }
         "response.output_item.done" => {
             if let Some(item) = event.get("item") {
                 match item.get("type").and_then(|v| v.as_str()) {
-                    Some("message") => state.finish_message(Some(item)),
+                    Some("message") => state.finish_message(Some(item), output_index),
                     Some("reasoning") => {
                         state.finish_reasoning_part();
-                        state.finalize_reasoning_item(item);
+                        state.finalize_reasoning_item(item, output_index);
                     }
                     Some("function_call") => {
-                        let part = state.finish_tool_call(item);
+                        let part = state.finish_tool_call(item, output_index);
                         if let (Some(parts), Some(part)) = (emitted_parts, part) {
                             parts.push(part);
                         }

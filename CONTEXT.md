@@ -2,6 +2,18 @@
 
 ## Interaction Glossary
 
+- **Runtime Scenario**: Deterministic description of one core runtime trajectory, expressed as named ingress, checkpoint, claim, lease, fault, and commit phases with declarative expectations. It belongs to `lash-core` and is protocol-agnostic.
+- **Standard Protocol Scenario**: Deterministic protocol-level scenario for the Standard protocol's model-request projection, native tool loop, streamed text handling, and termination behavior. It belongs to `lash-protocol-standard`.
+- **RLM Protocol Scenario**: Deterministic protocol-level scenario for RLM response classification, Lashlang cell handling, stream masking, repair loops, history rendering, and final values. It belongs to `lash-protocol-rlm`.
+- **Agent Scenario**: Deterministic facade-level scenario that exercises agent behavior through configured protocols, tools, plugins, and subagents. It belongs to `lash` and may use RLM, Lashlang, and app-facing contracts.
+
+`lash-perf` reports use the same four scenario concepts as their `scenario_harness` taxonomy; performance measurements may cover selected cases, but they should not introduce a parallel scenario model.
+- **Confidence Gate**: The executable Lash correctness contract in `scripts/confidence-gate.sh`. Its lanes are explicit: `fast` proves deterministic scenario/property/fault-matrix wiring, `default` adds local backend conformance plus coverage and mutation smoke, and `full` adds Postgres conformance plus full mutation for critical crates. Coverage is a blind-spot artifact, not a percentage target.
+- **Durable Fault Matrix**: Code-owned runtime metadata tying crash/reopen, duplicate input, provider failure/retry, cancellation, lease loss, and backend permutation risks to executable scenario/conformance tests or a blocked row with rationale. It lives with Runtime Scenarios so changes to the matrix are reviewed with the state-machine harness.
+- **Deterministic Simulation Harness**: Replayable generated execution harness that composes Lash's scenario, conformance, provider, tool, process, and persistence contracts inside a deterministic simulated world. It is not a separate scenario family; it is the generated execution mode that runs existing contracts under varied schedules and faults. _Avoid_: Scenario, e2e fuzz test, live provider test.
+- **Provider Wire Script**: Deterministic provider-native HTTP or SSE response fixture consumed by a simulated LLM Provider transport. It exercises real LLM Provider request and response code without live network calls. _Avoid_: Mock provider, fake LLM, live provider fixture.
+- **Simulation Replay Script**: Deterministic event trace for a failed or interesting Deterministic Simulation run, including the seed, generator version, boundary events, and observed outcomes needed to reproduce it exactly. A minimized replay script becomes a regression fixture. _Avoid_: Log, snapshot, flaky reproduction.
+- **Simulated Worker Topology**: Deterministic set of worker identities, lease owners, incarnations, and crash/restart events used by the Deterministic Simulation Harness to model multi-worker durable execution inside one process. It models Lash ownership and failover semantics, not physical machines or container networking. _Avoid_: Multi-host, cluster, Docker simulation.
 - **Trigger Source**: Host-owned source instance of Trigger Occurrences, such as a UI control, webhook, schedule, or host-authorized tool catalog.
 - **Trigger Source Key**: Stable routing identity for one configured Trigger Source.
 - **Trigger Event Type**: Declared event kind that may occur on a Trigger Source, with a named payload shape. Examples include a button press, schedule tick, or webhook delivery.
@@ -16,7 +28,7 @@
 - **Session Observation Event**: Observer-visible session activity that advances a Session Cursor. It may include preview activity before it is durable and committed activity that settles the session view; it is not scoped to a single turn.
 - **Turn Activity**: App-facing live stream item for one active turn.
 - **Turn Event**: Semantic payload carried by Turn Activity.
-- **Submitted Value**: Terminal value produced by an RLM foreground `submit`; it ends the turn as durable runtime output. Hosts decide whether and how to render that value as user-facing transcript text.
+- **Final Value**: Terminal value produced by an RLM foreground `finish <value>`; it ends the turn as durable runtime output. Hosts decide whether and how to render that value as user-facing transcript text. _Avoid_: Submitted Value.
 - **Suspended Turn**: Active session turn parked on a Durable Wait before it commits. It remains session-owned and observable, is not durable session history, and ends if the session is deleted. Avoid: Background Process, Degenerate Process.
 - **Session Event**: Runtime-internal turn/protocol machinery tolerated inside implementation boundaries. Avoid using Session Event as app-facing vocabulary.
 - **Session Revision**: Durable point in the committed session graph as observed through a session read view.
