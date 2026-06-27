@@ -200,7 +200,7 @@ async fn rlm_terminal_contracts(
     // docs:start:rlm-terminal-contracts
     use lash::rlm::RlmTurnBuilderExt as _;
 
-    let finishted = session
+    let finished = session
         .turn(TurnInput::text("Move on the board."))
         .require_finish()?
         .stream_to(&sink)

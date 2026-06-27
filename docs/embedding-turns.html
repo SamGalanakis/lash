@@ -283,7 +283,7 @@ if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
               <h3>Per-turn RLM options</h3>
               <pre data-lang="rust" data-snippet="embedding_turns#rlm-terminal-contracts"><code>use lash::rlm::RlmTurnBuilderExt as _;
 
-let final_value = session
+let finished = session
     .turn(TurnInput::text("Move on the board."))
     .require_finish()?
     .stream_to(&amp;sink)
