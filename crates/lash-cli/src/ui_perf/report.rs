@@ -83,6 +83,7 @@ pub(crate) fn run_cli(
     profile: String,
     compare_inputs: Vec<PathBuf>,
     enforce_budgets: bool,
+    worker_stack_bytes: Option<usize>,
     version: &str,
     git_sha: &str,
 ) -> anyhow::Result<()> {
@@ -95,7 +96,7 @@ pub(crate) fn run_cli(
     let workload = profile.workload();
     let scenarios = resolve_scenarios(&scenario_filters)?;
     let runs = runs.max(1);
-    let stack_profile = StackProfile::capture(None, Some(DEFAULT_STACK_BUDGET_BYTES));
+    let stack_profile = StackProfile::capture(worker_stack_bytes, Some(DEFAULT_STACK_BUDGET_BYTES));
 
     for _ in 0..warmups {
         for scenario in &scenarios {
@@ -336,6 +337,22 @@ fn evaluate_budgets(
         }
         UiPerfScenario::HtmlExport => {
             push_budget(&mut budgets, summary, "html_export_render_ms", "p95", 250.0);
+        }
+        UiPerfScenario::TurnInterruptSteerReconciliation => {
+            push_budget(
+                &mut budgets,
+                summary,
+                "interrupt_reconciliation_ms",
+                "p95",
+                50.0,
+            );
+            push_budget(
+                &mut budgets,
+                summary,
+                "queue_preview_render_ms",
+                "p95",
+                16.0,
+            );
         }
     }
     budgets

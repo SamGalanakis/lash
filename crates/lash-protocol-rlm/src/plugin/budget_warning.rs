@@ -87,7 +87,7 @@ mod tests {
         assert!(content.contains("Tokens: 120292 · frame switch threshold: 100000 (120%)"));
         assert!(content.contains("Past the frame switch threshold"));
         assert!(content.contains("End this block with `control.continue_as(...)` now"));
-        assert!(content.contains("do not call `submit`"));
+        assert!(content.contains("do not call `finish`"));
         assert!(content.contains("`task` + `seed`"));
     }
 

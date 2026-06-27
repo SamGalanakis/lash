@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use crate::ToolCallRecord;
 use crate::llm::types::{
     LlmOutputPart, LlmResponse, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
+    ResponseTextMeta,
 };
 use crate::session_model::{MessageRole, PartKind, SessionEvent, TokenUsage};
 use crate::{TurnFinish, TurnOutcome, TurnStop};
@@ -166,6 +167,64 @@ impl LlmStreamAccumulator {
                 text: piece.to_string(),
                 response_meta: None,
             }),
+        }
+    }
+
+    pub(super) fn push_text_part(&mut self, text: String, response_meta: Option<ResponseTextMeta>) {
+        if text.is_empty() && response_meta.is_none() {
+            return;
+        }
+
+        let incoming_id = response_meta
+            .as_ref()
+            .and_then(|meta| meta.id.as_deref())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let incoming_has_id = incoming_id.is_some();
+        let target_index = incoming_id
+            .as_deref()
+            .and_then(|id| {
+                self.parts.iter().position(|part| {
+                    matches!(
+                        part,
+                        LlmOutputPart::Text {
+                            response_meta: Some(meta),
+                            ..
+                        } if meta.id.as_deref() == Some(id)
+                    )
+                })
+            })
+            .or_else(|| {
+                self.parts.iter().rposition(|part| match part {
+                    LlmOutputPart::Text { response_meta, .. } if incoming_has_id => {
+                        response_meta.is_none()
+                    }
+                    LlmOutputPart::Text { .. } => true,
+                    _ => false,
+                })
+            });
+
+        let Some(index) = target_index else {
+            self.parts.push(LlmOutputPart::Text {
+                text,
+                response_meta,
+            });
+            return;
+        };
+
+        if let Some(LlmOutputPart::Text {
+            text: existing,
+            response_meta: existing_meta,
+        }) = self.parts.get_mut(index)
+        {
+            if incoming_has_id {
+                reconcile_text_snapshot(existing, &text);
+            } else {
+                append_stream_piece(existing, &text);
+            }
+            if response_meta.is_some() {
+                *existing_meta = response_meta;
+            }
         }
     }
 
@@ -479,6 +538,17 @@ fn append_stream_piece(full: &mut String, piece: &str) {
     }
 }
 
+fn reconcile_text_snapshot(existing: &mut String, snapshot: &str) {
+    if snapshot.is_empty() || snapshot == existing {
+        return;
+    }
+    if let Some(suffix) = snapshot.strip_prefix(existing.as_str()) {
+        existing.push_str(suffix);
+    } else {
+        *existing = snapshot.to_string();
+    }
+}
+
 pub(super) struct TurnAssembler {
     pub(super) current_assistant_prose_id: Option<TurnActivityId>,
     pub(super) current_assistant_prose: Option<String>,
@@ -620,10 +690,10 @@ impl TurnAssembler {
                     .any(|part| part.content.contains("Turn limit reached ("))
         });
 
-        let raw_output = if let Some(TurnOutcome::Finished(TurnFinish::SubmittedValue { value })) =
+        let raw_output = if let Some(TurnOutcome::Finished(TurnFinish::FinalValue { value })) =
             self.outcome.as_ref()
         {
-            render_submitted_value_for_output(value)
+            render_final_value_for_output(value)
         } else if let Some(assistant_prose) = self.current_assistant_prose {
             assistant_prose
         } else if let Some(TurnOutcome::Finished(TurnFinish::AssistantMessage { text })) =
@@ -728,7 +798,7 @@ fn aggregate_child_cumulatives(
         .collect()
 }
 
-fn render_submitted_value_for_output(value: &serde_json::Value) -> String {
+fn render_final_value_for_output(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => String::new(),
         serde_json::Value::String(text) => text.clone(),

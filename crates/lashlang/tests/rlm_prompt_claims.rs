@@ -78,9 +78,7 @@ impl ExecutionHost for MockHost {
                 self.record_observation(value);
                 Ok(AbilityResult::Unit)
             }
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
-                Ok(AbilityResult::Value(value))
-            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -360,20 +358,20 @@ fn run_continued(host: &MockHost, source: &str) -> (ExecutionOutcome, State) {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_value_literals_parse_and_evaluate() {
     let host = MockHost::default();
-    assert_eq!(run(&host, "submit null"), Value::Null);
-    assert_eq!(run(&host, "submit true"), Value::Bool(true));
-    assert_eq!(run(&host, "submit 42"), Value::Number(42.0));
+    assert_eq!(run(&host, "finish null"), Value::Null);
+    assert_eq!(run(&host, "finish true"), Value::Bool(true));
+    assert_eq!(run(&host, "finish 42"), Value::Number(42.0));
     assert_eq!(
-        run(&host, r#"submit "hi""#),
+        run(&host, r#"finish "hi""#),
         Value::String("hi".to_string().into())
     );
     // list literal
-    let Value::List(items) = run(&host, "submit [1, 2, 3]") else {
+    let Value::List(items) = run(&host, "finish [1, 2, 3]") else {
         panic!("expected list");
     };
     assert_eq!(items.len(), 3);
     // record literal
-    let Value::Record(rec) = run(&host, "submit { a: 1, b: 2 }") else {
+    let Value::Record(rec) = run(&host, "finish { a: 1, b: 2 }") else {
         panic!("expected record");
     };
     assert_eq!(rec["a"], Value::Number(1.0));
@@ -386,7 +384,7 @@ async fn prompt_claim_raw_triple_strings_parse_and_evaluate() {
     assert_eq!(
         run(
             &host,
-            r#####"submit r'''python3 - <<'PY'
+            r#####"finish r'''python3 - <<'PY'
 print("""hello""")
 \n { braces stay raw }
 PY'''"#####
@@ -408,7 +406,7 @@ PY'''"#####
 async fn prompt_claim_assignment_persists_within_program() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, "x = 7\ny = x + 3\nsubmit y"),
+        run(&host, "x = 7\ny = x + 3\nfinish y"),
         Value::Number(10.0)
     );
 }
@@ -425,7 +423,7 @@ counts[g] = counts[g] + 1
 counts.total = 1
 items = [0, 0]
 items[1] = counts[g]
-submit { counts: counts, items: items }
+finish { counts: counts, items: items }
 "#,
     ) else {
         panic!("expected record");
@@ -448,7 +446,7 @@ submit { counts: counts, items: items }
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
     let host = MockHost::default().with_file("a.txt", "hello world");
-    let Value::Record(r) = run(&host, r#"submit await files.read({ path: "a.txt" })"#) else {
+    let Value::Record(r) = run(&host, r#"finish await files.read({ path: "a.txt" })"#) else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(true));
@@ -458,7 +456,7 @@ async fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
     let host = MockHost::default();
-    let Value::Record(r) = run(&host, "submit await tools.boom({})") else {
+    let Value::Record(r) = run(&host, "finish await tools.boom({})") else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(false));
@@ -475,7 +473,7 @@ async fn prompt_claim_value_field_reaches_the_underlying_tool_output() {
         run(
             &host,
             r#"r = await files.read({ path: "a.txt" })
-submit r.value"#,
+finish r.value"#,
         ),
         Value::String("file text".to_string().into())
     );
@@ -488,7 +486,7 @@ async fn prompt_claim_question_unwraps_successful_tool_results() {
         run(
             &host,
             r#"text = await files.read({ path: "a.txt" })?
-submit text"#,
+finish text"#,
         ),
         Value::String("file text".to_string().into())
     );
@@ -498,7 +496,7 @@ submit text"#,
 async fn prompt_claim_question_aborts_failed_tool_results_with_error() {
     let host = MockHost::default();
     let mut state = State::new();
-    let err = execute("submit await tools.boom({})?", &mut state, &host)
+    let err = execute("finish await tools.boom({})?", &mut state, &host)
         .await
         .expect_err("failed result unwrap should abort");
     let ExecuteError::Runtime(err) = err else {
@@ -523,7 +521,7 @@ async fn prompt_claim_start_returns_unwrapped_handle() {
         &host,
         r#"process read_file(path: str) { finish path }
 h = start read_file(path: "a.txt")
-submit h"#,
+finish h"#,
     ) else {
         panic!("expected handle record");
     };
@@ -545,7 +543,7 @@ process scan(root: str) {
   finish root
 }
 h = start scan(root: root)
-submit h"#,
+finish h"#,
     ) else {
         panic!("expected handle record");
     };
@@ -564,7 +562,7 @@ async fn prompt_claim_await_handle_wraps_result_with_ok_value() {
         &host,
         r#"process read_file(path: str) { finish path }
 h = start read_file(path: "a.txt")
-submit await h"#,
+finish await h"#,
     ) else {
         panic!("expected wrapped record");
     };
@@ -580,7 +578,7 @@ async fn prompt_claim_question_unwraps_awaited_handle_results() {
             &host,
             r#"process read_file(path: str) { finish path }
 h = start read_file(path: "a.txt")
-submit (await h)?"#,
+finish (await h)?"#,
         ),
         Value::String("body".to_string().into())
     );
@@ -598,7 +596,7 @@ results = await [
   start read_file(path: "a.txt"),
   start read_file(path: "b.txt"),
 ]
-submit results"#,
+finish results"#,
     ) else {
         panic!("expected list");
     };
@@ -623,7 +621,7 @@ results = await {
   a: start read_file(path: "a.txt"),
   b: start read_file(path: "b.txt"),
 }
-submit results"#,
+finish results"#,
     ) else {
         panic!("expected record");
     };
@@ -649,7 +647,7 @@ async fn prompt_claim_cancel_handle_runs_without_error() {
         r#"process read_file(path: str) { finish path }
 h = start read_file(path: "a.txt")
 cancel h
-submit "done""#,
+finish "done""#,
     );
 }
 
@@ -673,25 +671,30 @@ print v"#,
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt claim: "`submit <expr>` ends the turn with the given value..."
+// Prompt claim: "`finish <expr>` ends the turn with the given value..."
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_submit_terminates_program_with_value() {
+async fn prompt_claim_finish_terminates_program_with_value() {
     let host = MockHost::default();
     let mut state = State::new();
-    let outcome = execute("x = 3\nsubmit x * 2", &mut state, &host)
+    let outcome = execute("x = 3\nfinish x * 2", &mut state, &host)
         .await
         .expect("runs");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(6.0)));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_bare_submit_terminates_with_null() {
+async fn prompt_claim_bare_finish_requires_value() {
     let host = MockHost::default();
     let mut state = State::new();
-    let outcome = execute("submit", &mut state, &host).await.expect("runs");
-    assert_eq!(outcome, ExecutionOutcome::Finished(Value::Null));
+    let err = execute("finish", &mut state, &host)
+        .await
+        .expect_err("bare finish should be rejected");
+    assert_eq!(
+        err.to_string(),
+        "`finish` requires a value; use `finish null` to finish with null"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -701,7 +704,7 @@ async fn prompt_claim_bare_submit_terminates_with_null() {
 // boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops
 // where possible and bounded `for` loops over ranges/lists for fill or retry
 // logic.
-// `submit` is different from `break`: it ends the whole program/turn."
+// `finish` is different from `break`: it ends the whole program/turn."
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
@@ -714,16 +717,16 @@ async fn prompt_claim_if_for_while_and_ternary_work() {
 for n in [1, 2, 3] {
   total = total + n
 }
-submit total"#,
+finish total"#,
         ),
         Value::Number(6.0)
     );
     assert_eq!(
-        run(&host, r#"submit true ? "a" : "b""#),
+        run(&host, r#"finish true ? "a" : "b""#),
         Value::String("a".to_string().into())
     );
     assert_eq!(
-        run(&host, "if 1 < 2 { submit 7 } else { submit 9 }"),
+        run(&host, "if 1 < 2 { finish 7 } else { finish 9 }"),
         Value::Number(7.0)
     );
     assert_eq!(
@@ -733,7 +736,7 @@ submit total"#,
 while len(items) < 3 {
   items = items + [len(items)]
 }
-submit items"#,
+finish items"#,
         ),
         Value::List(vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)].into())
     );
@@ -757,7 +760,7 @@ for outer in [1, 2] {
     seen = seen + [format("{}:{}", outer, inner)]
   }
 }
-submit seen"#,
+finish seen"#,
         ),
         Value::List(
             vec![
@@ -770,15 +773,15 @@ submit seen"#,
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_submit_exits_whole_program_not_loop() {
+async fn prompt_claim_finish_exits_whole_program_not_loop() {
     let host = MockHost::default();
     assert_eq!(
         run(
             &host,
             r#"for n in [1, 2, 3] {
-  submit n
+  finish n
 }
-submit 99"#,
+finish 99"#,
         ),
         Value::Number(1.0)
     );
@@ -801,10 +804,10 @@ async fn prompt_claim_loop_control_requires_loop() {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_both_negation_forms_work() {
     let host = MockHost::default();
-    assert_eq!(run(&host, "submit !true"), Value::Bool(false));
-    assert_eq!(run(&host, "submit not true"), Value::Bool(false));
-    assert_eq!(run(&host, "submit !false"), Value::Bool(true));
-    assert_eq!(run(&host, "submit not false"), Value::Bool(true));
+    assert_eq!(run(&host, "finish !true"), Value::Bool(false));
+    assert_eq!(run(&host, "finish not true"), Value::Bool(false));
+    assert_eq!(run(&host, "finish !false"), Value::Bool(true));
+    assert_eq!(run(&host, "finish not false"), Value::Bool(true));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -814,19 +817,19 @@ async fn prompt_claim_both_negation_forms_work() {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_builtin_len_returns_length() {
     let host = MockHost::default();
-    assert_eq!(run(&host, r#"submit len("hi")"#), Value::Number(2.0));
-    assert_eq!(run(&host, "submit len([1,2,3])"), Value::Number(3.0));
-    assert_eq!(run(&host, "submit len({a: 1, b: 2})"), Value::Number(2.0));
-    assert_eq!(run(&host, "submit len(null)"), Value::Number(0.0));
+    assert_eq!(run(&host, r#"finish len("hi")"#), Value::Number(2.0));
+    assert_eq!(run(&host, "finish len([1,2,3])"), Value::Number(3.0));
+    assert_eq!(run(&host, "finish len({a: 1, b: 2})"), Value::Number(2.0));
+    assert_eq!(run(&host, "finish len(null)"), Value::Number(0.0));
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_builtin_empty_checks_zero_length() {
     let host = MockHost::default();
-    assert_eq!(run(&host, r#"submit empty("")"#), Value::Bool(true));
-    assert_eq!(run(&host, r#"submit empty("x")"#), Value::Bool(false));
-    assert_eq!(run(&host, "submit empty([])"), Value::Bool(true));
-    assert_eq!(run(&host, "submit empty([1])"), Value::Bool(false));
+    assert_eq!(run(&host, r#"finish empty("")"#), Value::Bool(true));
+    assert_eq!(run(&host, r#"finish empty("x")"#), Value::Bool(false));
+    assert_eq!(run(&host, "finish empty([])"), Value::Bool(true));
+    assert_eq!(run(&host, "finish empty([1])"), Value::Bool(false));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -834,20 +837,20 @@ async fn prompt_claim_builtin_slice_supports_null_bounds_and_negative_bounds() {
     let host = MockHost::default();
     // null = from start / to end
     assert_eq!(
-        run(&host, r#"submit slice("abcdef", null, 3)"#),
+        run(&host, r#"finish slice("abcdef", null, 3)"#),
         Value::String("abc".to_string().into())
     );
     assert_eq!(
-        run(&host, r#"submit slice("abcdef", 3, null)"#),
+        run(&host, r#"finish slice("abcdef", 3, null)"#),
         Value::String("def".to_string().into())
     );
     // negative bound counts from the end
     assert_eq!(
-        run(&host, r#"submit slice("abcdef", 0, -2)"#),
+        run(&host, r#"finish slice("abcdef", 0, -2)"#),
         Value::String("abcd".to_string().into())
     );
     // works on lists too
-    let Value::List(items) = run(&host, "submit slice([1,2,3,4], 1, 3)") else {
+    let Value::List(items) = run(&host, "finish slice([1,2,3,4], 1, 3)") else {
         panic!("list");
     };
     assert_eq!(items.len(), 2);
@@ -858,23 +861,23 @@ async fn prompt_claim_builtin_slice_supports_null_bounds_and_negative_bounds() {
 async fn prompt_claim_builtin_range_and_push_build_lists() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, "submit range(3)"),
+        run(&host, "finish range(3)"),
         Value::List(vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)].into())
     );
     assert_eq!(
-        run(&host, "submit range(-2, 1)"),
+        run(&host, "finish range(-2, 1)"),
         Value::List(vec![Value::Number(-2.0), Value::Number(-1.0), Value::Number(0.0)].into())
     );
     assert_eq!(
-        run(&host, "submit range(3, 3)"),
+        run(&host, "finish range(3, 3)"),
         Value::List(Vec::new().into())
     );
     assert_eq!(
-        run(&host, "submit range(0, 5, 2)"),
+        run(&host, "finish range(0, 5, 2)"),
         Value::List(vec![Value::Number(0.0), Value::Number(2.0), Value::Number(4.0)].into())
     );
     assert_eq!(
-        run(&host, "submit range(5, 0, -2)"),
+        run(&host, "finish range(5, 0, -2)"),
         Value::List(vec![Value::Number(5.0), Value::Number(3.0), Value::Number(1.0)].into())
     );
 
@@ -883,7 +886,7 @@ async fn prompt_claim_builtin_range_and_push_build_lists() {
         r#"
         base = ["a"]
         extended = push(base, "b")
-        submit { base: base, extended: extended }
+        finish { base: base, extended: extended }
         "#,
     );
     let record = value.as_record().expect("record");
@@ -914,7 +917,7 @@ async fn prompt_claim_start_is_contextual() {
             for start in range(3) {
               last = start
             }
-            submit { value: start, field: { start: last }.start }
+            finish { value: start, field: { start: last }.start }
             "#,
         ),
         {
@@ -938,7 +941,7 @@ async fn prompt_claim_integer_division_helpers_support_chunk_math() {
         for i in range(0, len(items), step) {
           starts = push(starts, i)
         }
-        submit {
+        finish {
           ceil_pos: ceil_div(10, 3),
           floor_pos: floor_div(10, 3),
           ceil_neg: ceil_div(-10, 3),
@@ -961,14 +964,14 @@ async fn prompt_claim_integer_division_helpers_support_chunk_math() {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_builtin_split_and_join() {
     let host = MockHost::default();
-    let Value::List(parts) = run(&host, r#"submit split("a,b,c", ",")"#) else {
+    let Value::List(parts) = run(&host, r#"finish split("a,b,c", ",")"#) else {
         panic!("list");
     };
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0], Value::String("a".to_string().into()));
 
     assert_eq!(
-        run(&host, r#"submit join(["a", "b", "c"], "-")"#),
+        run(&host, r#"finish join(["a", "b", "c"], "-")"#),
         Value::String("a-b-c".to_string().into())
     );
 }
@@ -977,7 +980,7 @@ async fn prompt_claim_builtin_split_and_join() {
 async fn prompt_claim_builtin_trim_strips_whitespace() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, r#"submit trim("  hi  ")"#),
+        run(&host, r#"finish trim("  hi  ")"#),
         Value::String("hi".to_string().into())
     );
 }
@@ -986,19 +989,19 @@ async fn prompt_claim_builtin_trim_strips_whitespace() {
 async fn prompt_claim_builtin_starts_ends_contains() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, r#"submit starts_with("foobar", "foo")"#),
+        run(&host, r#"finish starts_with("foobar", "foo")"#),
         Value::Bool(true)
     );
     assert_eq!(
-        run(&host, r#"submit ends_with("foobar", "bar")"#),
+        run(&host, r#"finish ends_with("foobar", "bar")"#),
         Value::Bool(true)
     );
     assert_eq!(
-        run(&host, r#"submit contains("foobar", "oob")"#),
+        run(&host, r#"finish contains("foobar", "oob")"#),
         Value::Bool(true)
     );
     assert_eq!(
-        run(&host, r#"submit contains([1,2,3], 2)"#),
+        run(&host, r#"finish contains([1,2,3], 2)"#),
         Value::Bool(true)
     );
 }
@@ -1007,14 +1010,14 @@ async fn prompt_claim_builtin_starts_ends_contains() {
 async fn prompt_claim_builtin_find_and_grep_text() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, r#"submit find("alpha beta", "beta")"#),
+        run(&host, r#"finish find("alpha beta", "beta")"#),
         Value::Number(6.0)
     );
-    assert_eq!(run(&host, r#"submit find("alpha", "z")"#), Value::Null);
+    assert_eq!(run(&host, r#"finish find("alpha", "z")"#), Value::Null);
 
     let Value::List(matches) = run(
         &host,
-        r#"submit grep_text("one\nmatch here\r\nmatch again\n", "match")"#,
+        r#"finish grep_text("one\nmatch here\r\nmatch again\n", "match")"#,
     ) else {
         panic!("list");
     };
@@ -1033,7 +1036,7 @@ async fn prompt_claim_builtin_find_and_grep_text() {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_builtin_keys_and_values() {
     let host = MockHost::default();
-    let Value::List(keys) = run(&host, "submit keys({a: 1, b: 2})") else {
+    let Value::List(keys) = run(&host, "finish keys({a: 1, b: 2})") else {
         panic!("list");
     };
     assert_eq!(keys.len(), 2);
@@ -1041,7 +1044,7 @@ async fn prompt_claim_builtin_keys_and_values() {
     assert_eq!(keys[0], Value::String("a".to_string().into()));
     assert_eq!(keys[1], Value::String("b".to_string().into()));
 
-    let Value::List(vals) = run(&host, "submit values({a: 1, b: 2})") else {
+    let Value::List(vals) = run(&host, "finish values({a: 1, b: 2})") else {
         panic!("list");
     };
     assert_eq!(vals.len(), 2);
@@ -1053,17 +1056,17 @@ async fn prompt_claim_builtin_keys_and_values() {
 async fn prompt_claim_builtin_to_string_to_int_to_float() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, "submit to_string(42)"),
+        run(&host, "finish to_string(42)"),
         Value::String("42".to_string().into())
     );
-    assert_eq!(run(&host, r#"submit to_int("7")"#), Value::Number(7.0));
-    assert_eq!(run(&host, r#"submit to_float("3.5")"#), Value::Number(3.5));
+    assert_eq!(run(&host, r#"finish to_int("7")"#), Value::Number(7.0));
+    assert_eq!(run(&host, r#"finish to_float("3.5")"#), Value::Number(3.5));
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_builtin_json_parse_parses_strings_to_values() {
     let host = MockHost::default();
-    let Value::Record(r) = run(&host, r#"submit json_parse("{\"a\": 1}")"#) else {
+    let Value::Record(r) = run(&host, r#"finish json_parse("{\"a\": 1}")"#) else {
         panic!("record");
     };
     assert_eq!(r["a"], Value::Number(1.0));
@@ -1074,17 +1077,17 @@ async fn prompt_claim_builtin_format_positional_placeholders() {
     let host = MockHost::default();
     // Auto-numbered `{}` placeholders.
     assert_eq!(
-        run(&host, r#"submit format("hi {} you are {}", "sam", 3)"#),
+        run(&host, r#"finish format("hi {} you are {}", "sam", 3)"#),
         Value::String("hi sam you are 3".to_string().into())
     );
     // Explicit indices `{0}`, `{1}`.
     assert_eq!(
-        run(&host, r#"submit format("{1} {0}", "world", "hello")"#),
+        run(&host, r#"finish format("{1} {0}", "world", "hello")"#),
         Value::String("hello world".to_string().into())
     );
     // Literal braces via doubling.
     assert_eq!(
-        run(&host, r#"submit format("{{ {} }}", "x")"#),
+        run(&host, r#"finish format("{{ {} }}", "x")"#),
         Value::String("{ x }".to_string().into())
     );
 }
@@ -1096,7 +1099,7 @@ async fn prompt_claim_builtin_format_handles_markdown_raw_templates() {
         run(
             &host,
             r####"
-        submit format(r"""## {0}
+        finish format(r"""## {0}
 
 ```json
 {{"status":"{1}","exit_code":{2}}}
@@ -1120,7 +1123,7 @@ async fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
         &host,
         r#"
         raw = { name: "lashlang", labels: ["agent", "runtime"] }
-        submit validate(raw, Type { name: str, labels: list[str] })
+        finish validate(raw, Type { name: str, labels: list[str] })
         "#,
     );
     let record = value.as_record().expect("validated record");
@@ -1128,7 +1131,7 @@ async fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
 
     let mut state = State::new();
     let err = execute(
-        r#"submit validate({ labels: ["agent", 42] }, Type { labels: list[str] })"#,
+        r#"finish validate({ labels: ["agent", 42] }, Type { labels: list[str] })"#,
         &mut state,
         &host,
     )
@@ -1147,7 +1150,7 @@ async fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
 // ─────────────────────────────────────────────────────────────────────
 // Simple worked example from the prompt's "Example format" block:
 //   r = await files.read({ path: "Cargo.toml" })
-//   submit split(r.value, "\n")[2]
+//   finish split(r.value, "\n")[2]
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
@@ -1157,7 +1160,7 @@ async fn prompt_example_format_block_executes_as_shown() {
         run(
             &host,
             r#"r = await files.read({ path: "Cargo.toml" })
-submit split(r.value, "\n")[2]"#,
+finish split(r.value, "\n")[2]"#,
         ),
         Value::String("line2".to_string().into())
     );
@@ -1178,7 +1181,7 @@ b = start inspect_chunk(task: "chunk_2", capability: "explore")
 results = await { a: a, b: b }
 a_result = results.a?
 b_result = results.b?
-submit [a_result.claim, b_result.claim]"#,
+finish [a_result.claim, b_result.claim]"#,
     ) else {
         panic!("expected list");
     };
@@ -1194,7 +1197,7 @@ async fn prompt_example_shell_nonzero_exit_is_result_data() {
         run(
             &host,
             r#"probe = await shell.exec({ cmd: "test -f Cargo.lock" })?
-submit probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing""#,
+finish (probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing")"#,
         ),
         Value::String("Cargo.lock is missing".into())
     );
@@ -1206,7 +1209,7 @@ async fn prompt_example_tool_output_stays_full_in_variables() {
     let Value::Record(record) = run(
         &host,
         r#"check = await shell.exec({ cmd: "large-output" })?
-submit { chars: len(check.output), tail: slice(check.output, 4096, null) }"#,
+finish { chars: len(check.output), tail: slice(check.output, 4096, null) }"#,
     ) else {
         panic!("expected record");
     };
@@ -1226,7 +1229,7 @@ async fn prompt_claim_list_comprehensions_build_collections() {
   { path: path, chars: len(await files.read({ path: path })?) }
   for path in ["Cargo.toml", "README.md"]
 ]
-submit items"#,
+finish items"#,
     ) else {
         panic!("expected list");
     };
@@ -1256,7 +1259,7 @@ print { chars: len(text), head: slice(text, 0, 3) }"#,
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_example_validates_nontrivial_edit_before_submit() {
+async fn prompt_example_validates_nontrivial_edit_before_finish() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -1272,7 +1275,7 @@ check = await shell.exec({ cmd: "cargo check --workspace --all-targets" })?
 if check.exit_code != 0 {
   print slice(check.output, 0, 4000)
 } else {
-  submit "Edit applied and validation passed."
+  finish "Edit applied and validation passed."
 }"##,
         ),
         Value::String("Edit applied and validation passed.".into())
@@ -1320,32 +1323,32 @@ async fn prompt_mentions_every_builtin_we_document() {
     // that the runtime recognises the name.
     let host = MockHost::default();
     let smoke = [
-        (r#"submit len("a")"#, "len"),
-        (r#"submit empty("")"#, "empty"),
-        (r#"submit slice("abc", 0, 1)"#, "slice"),
-        (r#"submit split("a,b", ",")"#, "split"),
-        (r#"submit join(["a","b"], ",")"#, "join"),
-        (r#"submit trim(" a ")"#, "trim"),
-        (r#"submit find("abc", "b")"#, "find"),
-        (r#"submit grep_text("abc", "b")"#, "grep_text"),
-        (r#"submit starts_with("abc", "a")"#, "starts_with"),
-        (r#"submit ends_with("abc", "c")"#, "ends_with"),
-        (r#"submit contains("abc", "b")"#, "contains"),
-        (r#"submit keys({a: 1})"#, "keys"),
-        (r#"submit values({a: 1})"#, "values"),
-        (r#"submit to_string(1)"#, "to_string"),
-        (r#"submit to_int("1")"#, "to_int"),
-        (r#"submit to_float("1.5")"#, "to_float"),
-        (r#"submit json_parse("1")"#, "json_parse"),
-        (r#"submit format("x")"#, "format"),
+        (r#"finish len("a")"#, "len"),
+        (r#"finish empty("")"#, "empty"),
+        (r#"finish slice("abc", 0, 1)"#, "slice"),
+        (r#"finish split("a,b", ",")"#, "split"),
+        (r#"finish join(["a","b"], ",")"#, "join"),
+        (r#"finish trim(" a ")"#, "trim"),
+        (r#"finish find("abc", "b")"#, "find"),
+        (r#"finish grep_text("abc", "b")"#, "grep_text"),
+        (r#"finish starts_with("abc", "a")"#, "starts_with"),
+        (r#"finish ends_with("abc", "c")"#, "ends_with"),
+        (r#"finish contains("abc", "b")"#, "contains"),
+        (r#"finish keys({a: 1})"#, "keys"),
+        (r#"finish values({a: 1})"#, "values"),
+        (r#"finish to_string(1)"#, "to_string"),
+        (r#"finish to_int("1")"#, "to_int"),
+        (r#"finish to_float("1.5")"#, "to_float"),
+        (r#"finish json_parse("1")"#, "json_parse"),
+        (r#"finish format("x")"#, "format"),
         (
-            r#"submit validate({ value: "x" }, Type { value: str })"#,
+            r#"finish validate({ value: "x" }, Type { value: str })"#,
             "validate",
         ),
-        (r#"submit range(1)"#, "range"),
-        (r#"submit ceil_div(3, 2)"#, "ceil_div"),
-        (r#"submit floor_div(3, 2)"#, "floor_div"),
-        (r#"submit push([], "x")"#, "push"),
+        (r#"finish range(1)"#, "range"),
+        (r#"finish ceil_div(3, 2)"#, "ceil_div"),
+        (r#"finish floor_div(3, 2)"#, "floor_div"),
+        (r#"finish push([], "x")"#, "push"),
     ];
     assert_eq!(smoke.len(), DOCUMENTED.len());
     for (code, name) in smoke {

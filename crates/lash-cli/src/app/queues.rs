@@ -7,28 +7,25 @@ fn source_key_draft_id(source_key: &str) -> &str {
         .unwrap_or(source_key)
 }
 
-fn queued_work_signature(batches: &[QueuedWorkBatch]) -> Vec<(String, Option<String>, usize)> {
-    batches
+fn pending_turn_input_signature(
+    inputs: &[lash_core::PendingTurnInput],
+) -> Vec<(String, Option<String>, lash_core::TurnInputState)> {
+    inputs
         .iter()
-        .map(|batch| {
+        .map(|input| {
             (
-                batch.batch_id.clone(),
-                batch.source_key.clone(),
-                batch.items.len(),
+                input.input_id.clone(),
+                input.source_key.clone(),
+                input.state,
             )
         })
         .collect()
 }
 
-fn queued_work_batch_ids(batches: &[QueuedWorkBatch]) -> std::collections::HashSet<String> {
-    batches.iter().map(|batch| batch.batch_id.clone()).collect()
-}
-
-fn batch_has_turn_input(batch: &QueuedWorkBatch) -> bool {
-    batch
-        .items
-        .iter()
-        .any(|item| matches!(item.payload, QueuedWorkPayload::TurnInput { .. }))
+fn pending_turn_input_ids(
+    inputs: &[lash_core::PendingTurnInput],
+) -> std::collections::HashSet<String> {
+    inputs.iter().map(|input| input.input_id.clone()).collect()
 }
 
 pub(crate) fn turn_input_display_text(input: &lash_core::TurnInput) -> String {
@@ -136,136 +133,123 @@ impl App {
         self.take_matching_draft_presentation(content)
     }
 
-    pub fn set_queued_work_snapshot(&mut self, batches: Vec<QueuedWorkBatch>) {
-        let batches = batches
-            .into_iter()
-            .filter(batch_has_turn_input)
-            .collect::<Vec<_>>();
-        let visible_batch_ids = queued_work_batch_ids(&batches);
-        let suppressed_before = self.queues.suppressed_preview_batch_ids.len();
+    pub fn set_pending_turn_input_snapshot(&mut self, inputs: Vec<lash_core::PendingTurnInput>) {
+        let visible_input_ids = pending_turn_input_ids(&inputs);
+        let suppressed_before = self.queues.suppressed_preview_input_ids.len();
         self.queues
-            .suppressed_preview_batch_ids
-            .retain(|batch_id| visible_batch_ids.contains(batch_id));
+            .suppressed_preview_input_ids
+            .retain(|input_id| visible_input_ids.contains(input_id));
         let suppressed_changed =
-            self.queues.suppressed_preview_batch_ids.len() != suppressed_before;
-        if queued_work_signature(&self.queues.queued_work_snapshot)
-            == queued_work_signature(&batches)
+            self.queues.suppressed_preview_input_ids.len() != suppressed_before;
+        if pending_turn_input_signature(&self.queues.pending_turn_input_snapshot)
+            == pending_turn_input_signature(&inputs)
         {
             if suppressed_changed {
                 self.dirty = true;
             }
             return;
         }
-        self.queues.queued_work_snapshot = batches;
+        self.queues.pending_turn_input_snapshot = inputs;
         self.dirty = true;
     }
 
-    pub fn clear_queued_work_snapshot(&mut self) {
-        if self.queues.queued_work_snapshot.is_empty() {
+    pub fn clear_pending_turn_input_snapshot(&mut self) {
+        if self.queues.pending_turn_input_snapshot.is_empty() {
             return;
         }
-        self.queues.queued_work_snapshot.clear();
-        self.queues.suppressed_preview_batch_ids.clear();
+        self.queues.pending_turn_input_snapshot.clear();
+        self.queues.suppressed_preview_input_ids.clear();
         self.dirty = true;
     }
 
-    pub fn remove_queued_work_batches(&mut self, batch_ids: &[String]) {
-        if batch_ids.is_empty() || self.queues.queued_work_snapshot.is_empty() {
+    pub fn remove_pending_turn_inputs(&mut self, input_ids: &[String]) {
+        if input_ids.is_empty() || self.queues.pending_turn_input_snapshot.is_empty() {
             return;
         }
-        let before = self.queues.queued_work_snapshot.len();
+        let before = self.queues.pending_turn_input_snapshot.len();
         self.queues
-            .queued_work_snapshot
-            .retain(|batch| !batch_ids.iter().any(|id| id == &batch.batch_id));
-        if self.queues.queued_work_snapshot.len() != before {
+            .pending_turn_input_snapshot
+            .retain(|input| !input_ids.iter().any(|id| id == &input.input_id));
+        if self.queues.pending_turn_input_snapshot.len() != before {
             self.dirty = true;
         }
     }
 
-    pub fn queued_work_snapshot(&self) -> &[QueuedWorkBatch] {
-        &self.queues.queued_work_snapshot
+    pub fn pending_turn_input_snapshot(&self) -> &[lash_core::PendingTurnInput] {
+        &self.queues.pending_turn_input_snapshot
     }
 
-    pub fn suppress_queue_preview_batches<'a>(
+    pub fn suppress_queue_preview_inputs<'a>(
         &mut self,
-        batch_ids: impl IntoIterator<Item = &'a str>,
+        input_ids: impl IntoIterator<Item = &'a str>,
     ) {
         let mut changed = false;
-        for batch_id in batch_ids {
+        for input_id in input_ids {
             changed |= self
                 .queues
-                .suppressed_preview_batch_ids
-                .insert(batch_id.to_string());
+                .suppressed_preview_input_ids
+                .insert(input_id.to_string());
         }
         if changed {
             self.dirty = true;
         }
     }
 
-    pub fn queued_batch_preview_suppressed(&self, batch: &QueuedWorkBatch) -> bool {
+    pub fn queued_input_preview_suppressed(&self, input: &lash_core::PendingTurnInput) -> bool {
         self.queues
-            .suppressed_preview_batch_ids
-            .contains(&batch.batch_id)
+            .suppressed_preview_input_ids
+            .contains(&input.input_id)
     }
 
     pub fn has_queued_messages(&self) -> bool {
-        self.queues.queued_work_snapshot.iter().any(|batch| {
-            if self.queued_batch_preview_suppressed(batch) {
+        self.queues.pending_turn_input_snapshot.iter().any(|input| {
+            if self.queued_input_preview_suppressed(input) {
                 return false;
             }
-            batch
-                .items
-                .iter()
-                .any(|item| matches!(item.payload, QueuedWorkPayload::TurnInput { .. }))
+            !matches!(
+                input.state,
+                lash_core::TurnInputState::Cancelled | lash_core::TurnInputState::Completed
+            )
         })
     }
 
-    pub fn visible_turn_batches_for_editing(&self) -> impl Iterator<Item = &QueuedWorkBatch> {
-        self.queues.queued_work_snapshot.iter().filter(|batch| {
-            !self.queued_batch_preview_suppressed(batch)
-                && batch.slot_policy == SlotPolicy::Exclusive
-                && matches!(
-                    batch.delivery_policy,
-                    DeliveryPolicy::EarliestSafeBoundary | DeliveryPolicy::AfterCurrentTurnCommit
-                )
-                && batch
-                    .items
-                    .iter()
-                    .any(|item| matches!(item.payload, QueuedWorkPayload::TurnInput { .. }))
-        })
+    pub fn visible_turn_inputs_for_editing(
+        &self,
+    ) -> impl Iterator<Item = &lash_core::PendingTurnInput> {
+        self.queues
+            .pending_turn_input_snapshot
+            .iter()
+            .filter(|input| {
+                !self.queued_input_preview_suppressed(input)
+                    && input.state.is_next_turn_pending()
+                    && matches!(input.ingress, lash_core::TurnInputIngress::NextTurn)
+            })
     }
 
-    pub fn prepared_turn_for_queued_batch(&self, batch: &QueuedWorkBatch) -> Option<PreparedTurn> {
-        let draft_id = batch.source_key.as_deref().map(source_key_draft_id);
-        batch.items.iter().find_map(|item| {
-            let QueuedWorkPayload::TurnInput { input } = &item.payload else {
-                return None;
-            };
-            self.queues.presentation_for_input(draft_id, input)
-        })
-    }
-
-    pub fn take_prepared_turn_for_queued_batch(
-        &mut self,
-        batch: &QueuedWorkBatch,
+    pub fn prepared_turn_for_pending_input(
+        &self,
+        pending: &lash_core::PendingTurnInput,
     ) -> Option<PreparedTurn> {
-        let draft_id = batch.source_key.as_deref().map(source_key_draft_id);
-        for item in &batch.items {
-            let QueuedWorkPayload::TurnInput { input } = &item.payload else {
-                continue;
-            };
-            if let Some(draft_id) = draft_id
-                && let Some(turn) = self.take_draft_presentation_by_id(draft_id)
-            {
-                return Some(turn);
-            }
-            let content = turn_input_display_text(input);
-            if let Some(turn) = self.take_matching_draft_presentation(&content) {
-                return Some(turn);
-            }
-            if let Some(turn) = prepared_turn_from_queued_input(input) {
-                return Some(turn);
-            }
+        let draft_id = pending.source_key.as_deref().map(source_key_draft_id);
+        self.queues.presentation_for_input(draft_id, &pending.input)
+    }
+
+    pub fn take_prepared_turn_for_pending_input(
+        &mut self,
+        pending: &lash_core::PendingTurnInput,
+    ) -> Option<PreparedTurn> {
+        let draft_id = pending.source_key.as_deref().map(source_key_draft_id);
+        if let Some(draft_id) = draft_id
+            && let Some(turn) = self.take_draft_presentation_by_id(draft_id)
+        {
+            return Some(turn);
+        }
+        let content = turn_input_display_text(&pending.input);
+        if let Some(turn) = self.take_matching_draft_presentation(&content) {
+            return Some(turn);
+        }
+        if let Some(turn) = prepared_turn_from_queued_input(&pending.input) {
+            return Some(turn);
         }
         None
     }
@@ -274,28 +258,32 @@ impl App {
     pub(crate) fn test_seed_queued_turn_snapshot(
         &mut self,
         turn: PreparedTurn,
-        delivery_policy: DeliveryPolicy,
-        slot_policy: SlotPolicy,
+        ingress: lash_core::TurnInputIngress,
     ) -> String {
-        let batch_id = format!("test-qwb-{}", self.queues.queued_work_snapshot.len() + 1);
-        let item_id = format!("{batch_id}:item:0");
+        let input_id = format!(
+            "test-ti-{}",
+            self.queues.pending_turn_input_snapshot.len() + 1
+        );
         let source_key = format!("host:{}", turn.draft_id);
         self.cache_draft_presentation(turn.clone());
-        self.queues.queued_work_snapshot.push(QueuedWorkBatch {
-            batch_id: batch_id.clone(),
-            session_id: self.session_id.clone(),
-            enqueue_seq: self.queues.queued_work_snapshot.len() as u64 + 1,
-            source_key: Some(source_key),
-            delivery_policy,
-            slot_policy,
-            merge_key: lash_core::runtime::MergeKey::Never,
-            available_at_ms: 0,
-            enqueued_at_ms: 0,
-            items: vec![lash_core::runtime::QueuedWorkItem {
-                item_id,
-                payload: QueuedWorkPayload::turn_input(crate::turn_runner::make_turn_input(&turn)),
-            }],
-        });
-        batch_id
+        let state = match ingress {
+            lash_core::TurnInputIngress::ActiveTurn { .. } => {
+                lash_core::TurnInputState::PendingActive
+            }
+            lash_core::TurnInputIngress::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+        };
+        self.queues
+            .pending_turn_input_snapshot
+            .push(lash_core::PendingTurnInput {
+                input_id: input_id.clone(),
+                session_id: self.session_id.clone(),
+                enqueue_seq: self.queues.pending_turn_input_snapshot.len() as u64 + 1,
+                source_key: Some(source_key),
+                ingress,
+                state,
+                enqueued_at_ms: 0,
+                input: crate::turn_runner::make_turn_input(&turn),
+            });
+        input_id
     }
 }

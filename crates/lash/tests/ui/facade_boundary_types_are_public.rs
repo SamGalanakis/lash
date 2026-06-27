@@ -162,6 +162,8 @@ fn persistence_types_are_nameable(
             "sha256:facade",
         )),
         completed_queue_claims: Vec::new(),
+        completed_turn_input_claims: Vec::new(),
+        interrupted_turn_input_turn_id: None,
         committed_attachment_ids: Vec::new(),
     }
 }

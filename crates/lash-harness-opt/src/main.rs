@@ -464,7 +464,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .cancel(cancellation)
             .protocol_turn_options(
                 ProtocolTurnOptions::typed(RlmCreateExtras {
-                    termination: RlmTermination::SubmitRequired {
+                    termination: RlmTermination::FinishRequired {
                         schema: Some(request.output_schema.clone()),
                     },
                     final_answer_format: None,
@@ -478,7 +478,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
 
         let assistant_prose = assistant_prose(&turn.activities);
         match turn.result.outcome {
-            lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { value })
+            lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { value })
             | lash_core::TurnOutcome::Finished(lash_core::TurnFinish::ToolValue {
                 value, ..
             }) => {
@@ -501,7 +501,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
                 ))
             }
             other => Err(lash_harness_opt::HarnessOptError::Strategy(format!(
-                "GEPA RLM proposer did not submit a proposal: outcome={other:?} errors={:?} output={}",
+                "GEPA RLM proposer did not finish a proposal: outcome={other:?} errors={:?} output={}",
                 turn.result.errors, assistant_prose
             ))),
         }
@@ -610,7 +610,7 @@ Rules:
 - Prefer small, testable changes over broad rewrites.
 - Do not claim benchmark improvements that are not present in the evidence.
 
-Return only by calling `submit <object>` from a single paired `<lashlang>` block closed with `</lashlang>`. The submitted object must match the required output schema."#
+Return only by calling `finish <object>` from a single paired `<lashlang>` block closed with `</lashlang>`. The final object must match the required output schema."#
 }
 
 fn resolve_provider(provider_id: Option<&str>) -> Result<lash_core::ProviderHandle> {

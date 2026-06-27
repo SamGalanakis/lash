@@ -122,6 +122,33 @@ CREATE INDEX IF NOT EXISTS idx_queued_work_ready
 CREATE INDEX IF NOT EXISTS idx_queued_work_claim
     ON queued_work_batches(session_id, claim_id, claim_token);
 
+CREATE TABLE IF NOT EXISTS pending_turn_inputs (
+    enqueue_seq       INTEGER PRIMARY KEY,
+    input_id          TEXT NOT NULL UNIQUE,
+    session_id        TEXT NOT NULL,
+    source_key        TEXT,
+    ingress_json      TEXT NOT NULL,
+    state             TEXT NOT NULL,
+    input_json        TEXT NOT NULL,
+    enqueued_at_ms    INTEGER NOT NULL,
+    claim_id          TEXT,
+    claim_owner_id    TEXT,
+    claim_owner_incarnation_id TEXT,
+    claim_owner_liveness_json TEXT,
+    claim_token       TEXT,
+    claim_fencing_token INTEGER NOT NULL DEFAULT 0,
+    claim_claimed_at_ms INTEGER NOT NULL DEFAULT 0,
+    claim_expires_at_ms INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (session_id, source_key)
+        ON CONFLICT IGNORE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_turn_inputs_session
+    ON pending_turn_inputs(session_id, state, enqueue_seq);
+
+CREATE INDEX IF NOT EXISTS idx_pending_turn_inputs_claim
+    ON pending_turn_inputs(session_id, claim_id, claim_token);
+
 CREATE TABLE IF NOT EXISTS attachment_manifest (
     attachment_id    TEXT PRIMARY KEY,
     session_id       TEXT NOT NULL,
@@ -145,7 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 5;
+pub(crate) const SCHEMA_VERSION: i32 = 6;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

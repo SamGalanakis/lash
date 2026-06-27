@@ -14,7 +14,7 @@ process child(tools: Tools, value: str) {
 left = start child(tools: tools, value: "left")
 right = start child(tools: tools, value: "right")
 joined = await { left: left, right: right }
-submit {
+finish {
   left: joined.left.value,
   right: joined.right.value,
   ok: joined.left.ok && joined.right.ok
@@ -35,7 +35,7 @@ submit {
         session.processes().await_all().await?;
 
         assert_eq!(
-            turn.submitted_value(),
+            turn.final_value(),
             Some(&serde_json::json!({
                 "left": {
                     "ok": true,
@@ -53,7 +53,7 @@ submit {
                 .snapshot()
                 .await
                 .iter()
-                .any(|activity| matches!(activity.event, TurnEvent::SubmittedValue { .. }))
+                .any(|activity| matches!(activity.event, TurnEvent::FinalValue { .. }))
         );
         Ok(())
     })

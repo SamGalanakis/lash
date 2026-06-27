@@ -2,7 +2,7 @@ use super::super::*;
 use super::contracts::{
     GraphContract, assert_all_processes_terminal, assert_failed_code_block_present,
     assert_graph_lineage_connected, assert_labeled_resource_operation,
-    assert_no_duplicate_label_step, assert_no_false_submitted_success,
+    assert_no_duplicate_label_step, assert_no_false_finishted_success,
     assert_no_forbidden_error_text, assert_subagent_bridge_exec_graphs,
 };
 use super::harness::{
@@ -21,10 +21,10 @@ fn lash_e2e_foreground_labeled_tool_call() -> Result<()> {
                 r#"
 @label(title: "Lookup app state")
 value = await tools.app_lookup({})?
-submit value"#,
+finish value"#,
             )],
-            root_prompt: "Call the app lookup tool and submit its value.",
-            expected_submitted_value: Some(serde_json::json!({ "ok": true })),
+            root_prompt: "Call the app lookup tool and finish its value.",
+            expected_final_value: Some(serde_json::json!({ "ok": true })),
             tool_provider: Some(Arc::new(AppTools)),
             install_subagents: false,
             max_turns: None,
@@ -55,10 +55,10 @@ process lookup(tools: Tools) {
 }
 handle = start lookup(tools: tools)
 result = (await handle)?
-submit result"#,
+finish result"#,
             )],
             root_prompt: "Start a process that calls the app lookup tool.",
-            expected_submitted_value: Some(serde_json::json!({ "ok": true })),
+            expected_final_value: Some(serde_json::json!({ "ok": true })),
             tool_provider: Some(Arc::new(AppTools)),
             install_subagents: false,
             max_turns: None,
@@ -91,7 +91,7 @@ fn lash_e2e_shell_nonzero_and_pipeline_results_are_data() -> Result<()> {
                 r#"
 pipe = await shell.exec({ cmd: "yes line | head -n 3", login: false })?
 missing = await shell.exec({ cmd: "test -f /tmp/lash-e2e-definitely-missing-file", login: false })?
-submit {
+finish {
   pipe_exit: pipe.exit_code,
   pipe_output: pipe.output,
   missing_exit: missing.exit_code,
@@ -99,7 +99,7 @@ submit {
 }"#,
             )],
             root_prompt: "Run shell commands and report their result metadata.",
-            expected_submitted_value: Some(serde_json::json!({
+            expected_final_value: Some(serde_json::json!({
                 "pipe_exit": 0,
                 "pipe_output": "line\nline\nline\n",
                 "missing_exit": 1,
@@ -131,7 +131,7 @@ print big.output"#,
                 ),
                 lashlang_block(
                     r#"
-submit {
+finish {
   chars: len(big.output),
   tail: slice(big.output, 59996, null),
   has_full_output_path: big.full_output_path == null ? false : len(big.full_output_path) > 0
@@ -139,7 +139,7 @@ submit {
                 ),
             ],
             root_prompt: "Run a large shell command, inspect it, then report retained metadata.",
-            expected_submitted_value: Some(serde_json::json!({
+            expected_final_value: Some(serde_json::json!({
                 "chars": 60000,
                 "tail": "x\nx\n",
                 "has_full_output_path": true
@@ -169,7 +169,7 @@ process spawn_child() {
   @label(title: "Spawn subagent with web search")
   result = await agents.spawn({
     capability: "default",
-    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
     seed: { chunk: ["a", "b"] },
     output: Type { len: int }
   })?
@@ -177,12 +177,12 @@ process spawn_child() {
 }
 handle = start spawn_child()
 result = (await handle)?
-submit result"#,
+finish result"#,
                 ),
-                lashlang_block("submit { len: len(chunk) }"),
+                lashlang_block("finish { len: len(chunk) }"),
             ],
             root_prompt: "Run a Lashlang process that spawns a subagent and returns its value.",
-            expected_submitted_value: Some(serde_json::json!({ "len": 2 })),
+            expected_final_value: Some(serde_json::json!({ "len": 2 })),
             tool_provider: None,
             install_subagents: true,
             max_turns: None,
@@ -218,10 +218,10 @@ process parent() {
 }
 handle = start parent()
 result = (await handle)?
-submit result"#,
+finish result"#,
             )],
             root_prompt: "Start a parent process that starts and awaits a child process.",
-            expected_submitted_value: Some(serde_json::json!({ "parent": "done" })),
+            expected_final_value: Some(serde_json::json!({ "parent": "done" })),
             tool_provider: None,
             install_subagents: false,
             max_turns: None,
@@ -261,12 +261,12 @@ result = await agents.spawn({
   seed: {},
   output: Type { reason: str }
 })?
-submit result"#,
+finish result"#,
                 ),
                 lashlang_block(r#"await task.fail({ reason: "child boom" })?"#),
             ],
             root_prompt: "Spawn a child that fails and preserve its execution graph.",
-            expected_submitted_value: None,
+            expected_final_value: None,
             tool_provider: None,
             install_subagents: true,
             max_turns: Some(1),
@@ -276,7 +276,7 @@ submit result"#,
 
         assert_failed_code_block_present(&run.streamed_events);
         assert_no_forbidden_error_text(&run.streamed_events);
-        assert_no_false_submitted_success(&run);
+        assert_no_false_finishted_success(&run);
         assert_all_processes_terminal(&run.final_process_list);
         let contract = GraphContract::from_graphs(&run.graph_snapshots);
         assert_labeled_resource_operation(
@@ -308,10 +308,10 @@ left = start child(value: "left")
 right = start child(value: "right")
 left_value = (await left)?
 right_value = (await right)?
-submit { joined: [left_value, right_value] }"#,
+finish { joined: [left_value, right_value] }"#,
             )],
-            root_prompt: "Start two processes, await both, and submit their joined result.",
-            expected_submitted_value: Some(serde_json::json!({ "joined": ["left", "right"] })),
+            root_prompt: "Start two processes, await both, and finish their joined result.",
+            expected_final_value: Some(serde_json::json!({ "joined": ["left", "right"] })),
             tool_provider: None,
             install_subagents: false,
             max_turns: None,
@@ -329,10 +329,10 @@ submit { joined: [left_value, right_value] }"#,
 }
 
 #[test]
-fn lash_e2e_tuple_values_submit_as_json_arrays() -> Result<()> {
+fn lash_e2e_tuple_values_finish_as_json_arrays() -> Result<()> {
     run_async_test_on_stack_budget("lash-e2e-tuple-values", || async {
         run_turn_case(LashE2eCase {
-            name: "tuple values submit as json arrays",
+            name: "tuple values finish as json arrays",
             session_id: "lash-e2e-tuple-values",
             scripted_provider_responses: vec![lashlang_block(
                 r#"
@@ -342,7 +342,7 @@ seen = []
 for item in pair {
   seen = push(seen, item)
 }
-submit {
+finish {
   first: pair[0],
   tail: tail,
   seen: seen,
@@ -350,8 +350,8 @@ submit {
   nested: { pair: pair }
 }"#,
             )],
-            root_prompt: "Use tuple values and submit the derived result.",
-            expected_submitted_value: Some(serde_json::json!({
+            root_prompt: "Use tuple values and finish the derived result.",
+            expected_final_value: Some(serde_json::json!({
                 "first": "left",
                 "tail": ["right"],
                 "seen": ["left", "right"],

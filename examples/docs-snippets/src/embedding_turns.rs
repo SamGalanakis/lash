@@ -142,7 +142,7 @@ impl TurnActivitySink for AppEvents {
                 let row = self.turn_state.lock().unwrap().code.take();
                 update_or_insert_code_row(row, language, output, error, success).await;
             }
-            TurnEvent::SubmittedValue { value } => {
+            TurnEvent::FinalValue { value } => {
                 append_live_text(render_terminal_value(&value)).await;
             }
             TurnEvent::ToolValue { tool_name, value } => {
@@ -200,15 +200,15 @@ async fn rlm_terminal_contracts(
     // docs:start:rlm-terminal-contracts
     use lash::rlm::RlmTurnBuilderExt as _;
 
-    let submitted = session
+    let finishted = session
         .turn(TurnInput::text("Move on the board."))
-        .require_submit()?
+        .require_finish()?
         .stream_to(&sink)
         .await?;
 
-    let prose_or_submit = session
+    let natural = session
         .turn(TurnInput::text("Answer directly if no code is needed."))
-        .allow_prose_or_submit()?
+        .allow_prose_or_finish()?
         .run()
         .await?;
     // docs:end:rlm-terminal-contracts
@@ -258,8 +258,8 @@ fn handle_other_outcome(_outcome: TurnOutcome) -> anyhow::Result<()> {
 fn terminal_value_match(result: TurnResult) -> anyhow::Result<()> {
     // docs:start:terminal-value-match
     match result.outcome {
-        TurnOutcome::Finished(TurnFinish::SubmittedValue { value }) => {
-            // Same value already arrived as TurnEvent::SubmittedValue.
+        TurnOutcome::Finished(TurnFinish::FinalValue { value }) => {
+            // Same value already arrived as TurnEvent::FinalValue.
             persist_typed_value(value)?;
         }
         TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) => persist_text(text)?,
@@ -269,19 +269,19 @@ fn terminal_value_match(result: TurnResult) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn submit_schema(core: &lash::RlmCore) -> anyhow::Result<()> {
-    // docs:start:submit-schema
+async fn finish_schema(core: &lash::RlmCore) -> anyhow::Result<()> {
+    // docs:start:finish-schema
     use lash::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
     let session = core
         .session("analysis")
-        .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
+        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)
         .open()
         .await?;
 
     let result = session
         .turn(TurnInput::text("Return a risk rating."))
-        .require_submit_schema(serde_json::json!({
+        .require_finish_schema(serde_json::json!({
             "type": "object",
             "required": ["rating"],
             "properties": {
@@ -291,6 +291,6 @@ async fn submit_schema(core: &lash::RlmCore) -> anyhow::Result<()> {
         }))?
         .run()
         .await?;
-    // docs:end:submit-schema
+    // docs:end:finish-schema
     Ok(())
 }

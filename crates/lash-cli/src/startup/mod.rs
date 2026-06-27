@@ -682,30 +682,30 @@ mod tests {
     }
 
     #[test]
-    fn rlm_termination_defaults_to_prose_or_submit_in_rlm_mode() {
+    fn rlm_termination_defaults_to_natural_in_rlm_mode() {
         let args =
             crate::Args::try_parse_from(["lash", "--execution-mode", "rlm"]).expect("parse args");
 
         assert_eq!(
             resolve_rlm_termination(&args, ExecutionMode::Rlm, None).expect("termination"),
-            Some(RlmTerminationMode::ProseOrSubmit)
+            Some(RlmTerminationMode::Natural)
         );
     }
 
     #[test]
-    fn rlm_termination_honors_explicit_submit_required() {
+    fn rlm_termination_honors_explicit_finish_required() {
         let args = crate::Args::try_parse_from([
             "lash",
             "--execution-mode",
             "rlm",
             "--rlm-termination",
-            "submit-required",
+            "finish-required",
         ])
         .expect("parse args");
 
         assert_eq!(
             resolve_rlm_termination(&args, ExecutionMode::Rlm, None).expect("termination"),
-            Some(RlmTerminationMode::SubmitRequired)
+            Some(RlmTerminationMode::FinishRequired)
         );
     }
 
@@ -716,19 +716,19 @@ mod tests {
         let persisted = session::CliSessionHostConfig::new(
             ExecutionMode::Rlm,
             None,
-            Some(RlmTerminationMode::SubmitRequired),
+            Some(RlmTerminationMode::FinishRequired),
         );
 
         assert_eq!(
             resolve_rlm_termination(&args, ExecutionMode::Rlm, Some(&persisted))
                 .expect("termination"),
-            Some(RlmTerminationMode::SubmitRequired)
+            Some(RlmTerminationMode::FinishRequired)
         );
     }
 
     #[test]
     fn rlm_termination_flag_requires_rlm_mode() {
-        let args = crate::Args::try_parse_from(["lash", "--rlm-termination", "prose-or-submit"])
+        let args = crate::Args::try_parse_from(["lash", "--rlm-termination", "natural"])
             .expect("parse args");
 
         let err = resolve_rlm_termination(&args, ExecutionMode::Standard, None)

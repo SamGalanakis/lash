@@ -330,13 +330,13 @@ impl LashRuntime {
                 manager.process_service(),
             )
             .await?;
-        let (events, queued_batches) = self
+        let (events, pending_turn_inputs) = self
             .apply_plugin_operation_effects(&plugin_id, outcome.events, outcome.directives)
             .await?;
         Ok(crate::PluginCommandReceipt {
             output: outcome.output,
             events,
-            queued_batches,
+            pending_turn_inputs,
         })
     }
 
@@ -369,13 +369,13 @@ impl LashRuntime {
                 cancellation_token,
             )
             .await?;
-        let (events, queued_batches) = self
+        let (events, pending_turn_inputs) = self
             .apply_plugin_operation_effects(&plugin_id, outcome.events, outcome.directives)
             .await?;
         Ok(crate::PluginTaskReceipt {
             output: outcome.output,
             events,
-            queued_batches,
+            pending_turn_inputs,
         })
     }
 
@@ -387,7 +387,7 @@ impl LashRuntime {
     ) -> Result<
         (
             Vec<crate::PluginOwned<crate::PluginRuntimeEvent>>,
-            Vec<crate::runtime::QueuedWorkBatch>,
+            Vec<crate::PendingTurnInput>,
         ),
         PluginOperationInvokeError,
     > {
@@ -416,29 +416,24 @@ impl LashRuntime {
         self.stamp_live_plugin_state();
         self.persist_plugin_operation_state_if_needed().await?;
 
-        let mut queued_batches = Vec::new();
+        let mut pending_turn_inputs = Vec::new();
         for directive in directives {
             match directive {
-                crate::PluginRuntimeDirective::QueueTurn {
-                    input,
-                    delivery_policy,
-                    slot_policy,
-                    source_key,
-                } => {
-                    let batch = self
-                        .enqueue_turn_input(input, delivery_policy, slot_policy, source_key)
+                crate::PluginRuntimeDirective::QueueTurn { input, source_key } => {
+                    let pending = self
+                        .enqueue_turn_input(input, crate::TurnInputIngress::NextTurn, source_key)
                         .await
                         .map_err(|err| {
                             PluginOperationInvokeError::Failed(format!(
                                 "failed to queue plugin turn request: {err}"
                             ))
                         })?;
-                    queued_batches.push(batch);
+                    pending_turn_inputs.push(pending);
                 }
             }
         }
 
-        Ok((owned_events, queued_batches))
+        Ok((owned_events, pending_turn_inputs))
     }
 
     async fn append_plugin_runtime_event_nodes(

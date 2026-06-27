@@ -533,7 +533,7 @@ mod tests {
                     "unknown module operation: {}",
                     operation.operation
                 ))),
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
@@ -689,7 +689,7 @@ mod tests {
             let state = RlmExecutionState::new().expect("state");
             let request = || ExecRequest {
                 language: "lashlang".to_string(),
-                code: "submit 1".to_string(),
+                code: "finish 1".to_string(),
                 accept_finish: true,
             };
             let resolver = || Arc::new(ProjectionRegistry::new());
@@ -955,7 +955,7 @@ mod tests {
                     language: "lashlang".to_string(),
                     code: r#"
                         result = await web.fetch({ url: "https://example.test" })?
-                        submit result
+                        finish result
                     "#
                     .to_string(),
                     accept_finish: true,
@@ -995,7 +995,7 @@ mod tests {
             let state = RlmExecutionState::new().expect("state");
             let request = || ExecRequest {
                 language: "lashlang".to_string(),
-                code: "process later() { finish 1 }\nsubmit 1".to_string(),
+                code: "process later() { finish 1 }\nfinish 1".to_string(),
                 accept_finish: true,
             };
             let resolver = || Arc::new(ProjectionRegistry::new());
@@ -1106,7 +1106,7 @@ mod tests {
                 })?
                 registrations = await triggers.list({ target: remember })?
 
-                submit { answer: "foreground ran", handle: handle, registrations: registrations }
+                finish { answer: "foreground ran", handle: handle, registrations: registrations }
                 "#,
             )
             .await;
@@ -1152,7 +1152,7 @@ mod tests {
                 })?
                 cancelled = await triggers.cancel({ handle: handle })?
                 registrations = await triggers.list({ target: remember })?
-                submit { cancelled: cancelled, enabled: registrations[0].enabled }
+                finish { cancelled: cancelled, enabled: registrations[0].enabled }
                 "#,
             )
             .await;
@@ -1181,7 +1181,7 @@ mod tests {
                   inputs: { tick: trigger.event }
                 })?
 
-                submit "should not run"
+                finish "should not run"
                 "#,
             )
             .await;
@@ -1202,7 +1202,7 @@ mod tests {
             let response = execute_with_lashlang_abilities(
                 r#"
                 sleep for "0ms"
-                submit "awake"
+                finish "awake"
                 "#,
                 lashlang::LashlangAbilities::default().with_sleep(),
             )
@@ -1259,7 +1259,7 @@ mod tests {
 
         block_on(async {
             let response = execute_with_lashlang_host_environment(
-                r#"submit read_file({ path: "Cargo.toml" })"#,
+                r#"finish read_file({ path: "Cargo.toml" })"#,
                 lashlang::LashlangAbilities::default(),
                 resources,
             )
@@ -1401,13 +1401,13 @@ mod tests {
 
             let projected = projected_history(vec![FlowValue::String("hello".into())]);
             let compiled =
-                lashlang::compile("submit { history_len: len(history), diary_len: len(diary) }")
+                lashlang::compile("finish { history_len: len(history), diary_len: len(diary) }")
                     .expect("compile");
             let outcome = execute_with_projected(&compiled, &mut state.rlm, &projected)
                 .await
                 .expect("execute");
             let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
-                panic!("expected submitted record");
+                panic!("expected finishted record");
             };
             assert_eq!(record["history_len"], FlowValue::Number(1.0));
             assert_eq!(record["diary_len"], FlowValue::Number(1.0));
@@ -1422,12 +1422,12 @@ mod tests {
 
             let projected = projected_history(Vec::new());
             let compiled =
-                lashlang::compile("submit { history_len: len(history) }").expect("compile");
+                lashlang::compile("finish { history_len: len(history) }").expect("compile");
             let outcome = execute_with_projected(&compiled, &mut state.rlm, &projected)
                 .await
                 .expect("execute");
             let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
-                panic!("expected submitted record");
+                panic!("expected finishted record");
             };
             assert_eq!(record["history_len"], FlowValue::Number(0.0));
         });
@@ -1519,13 +1519,13 @@ mod tests {
             );
 
             let compiled =
-                lashlang::compile("submit { chars: len(current_query), value: current_query }")
+                lashlang::compile("finish { chars: len(current_query), value: current_query }")
                     .expect("compile read");
             let outcome = execute_with_projected(&compiled, &mut state.rlm, &projected)
                 .await
                 .expect("execute read");
             let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
-                panic!("expected submitted record");
+                panic!("expected finishted record");
             };
             assert_eq!(record["chars"], FlowValue::Number(4.0));
             assert_eq!(record["value"], FlowValue::String("host".into()));
@@ -1972,7 +1972,7 @@ while len(final_ids) < 2 && pool_i < len(candidate_pools) {
   }
   pool_i = pool_i + 1
 }
-submit final_ids"#;
+finish final_ids"#;
 
         lashlang::compile(source).expect("while should compile");
     }

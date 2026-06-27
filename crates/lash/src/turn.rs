@@ -943,9 +943,9 @@ impl TurnResult {
         }
     }
 
-    pub fn submitted_value(&self) -> Option<&serde_json::Value> {
+    pub fn final_value(&self) -> Option<&serde_json::Value> {
         match &self.outcome {
-            TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { value }) => Some(value),
+            TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { value }) => Some(value),
             _ => None,
         }
     }
@@ -978,8 +978,8 @@ impl TurnOutput {
         self.result.assistant_message()
     }
 
-    pub fn submitted_value(&self) -> Option<&serde_json::Value> {
-        self.result.submitted_value()
+    pub fn final_value(&self) -> Option<&serde_json::Value> {
+        self.result.final_value()
     }
 
     pub fn tool_value(&self) -> Option<(&str, &serde_json::Value)> {
@@ -1017,7 +1017,7 @@ impl RunActivityCollector {
             .clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rlm"))]
     pub(crate) fn snapshot(&self) -> Vec<TurnActivity> {
         self.activities
             .lock()

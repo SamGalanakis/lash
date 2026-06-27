@@ -56,9 +56,7 @@ impl ExecutionHost for TestHost {
                     .push(value);
                 Ok(AbilityResult::Unit)
             }
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
-                Ok(AbilityResult::Value(value))
-            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -151,7 +149,7 @@ fn test_host_operation(
 fn finished(outcome: ExecutionOutcome) -> Value {
     match outcome {
         ExecutionOutcome::Finished(value) => value,
-        ExecutionOutcome::Continued => panic!("expected `submit`"),
+        ExecutionOutcome::Continued => panic!("expected `finish`"),
         ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
@@ -276,7 +274,7 @@ async fn parser_handles_precedence_and_await_record() {
           left: start read(pattern: "src/*.rs", path: ""),
           right: start read(pattern: "", path: "src/lib.rs")
         }
-        submit total
+        finish total
         "#,
     )
     .expect("program should parse");
@@ -290,8 +288,8 @@ async fn parser_accepts_double_slash_comments() {
         r#"
         // setup
         total = 1 + 2
-        // submit
-        submit total
+        // finish
+        finish total
         "#,
     )
     .expect("program should parse");
@@ -307,7 +305,7 @@ async fn parser_accepts_semicolons_as_statement_separators() {
     let program = parse(
         r#"
         x = 1; y = 2;
-        submit x;
+        finish x;
         "#,
     )
     .expect("program should parse");
@@ -329,7 +327,7 @@ async fn start_is_contextual_not_reserved() {
             }
             rec = { start: last }
             h = start read_file(path: "a.txt")
-            submit { value: start, field: rec.start, awaited: (await h)? }
+            finish { value: start, field: rec.start, awaited: (await h)? }
             "#,
             &mut state,
             &host,
@@ -343,7 +341,7 @@ async fn start_is_contextual_not_reserved() {
     assert_eq!(record["field"], Value::Number(2.0));
     assert_eq!(record["awaited"], Value::String("async".to_string().into()));
 
-    let err = runtime_error("submit start()").await;
+    let err = runtime_error("finish start()").await;
     assert!(matches!(err, RuntimeError::UnknownBuiltin { name } if name == "start"));
 }
 
@@ -358,7 +356,7 @@ async fn range_supports_python_style_steps() {
             for i in range(5, 0, -2) {
               stepped = push(stepped, i)
             }
-            submit {
+            finish {
               up: range(0, 5, 2),
               down: range(5, 0, -2),
               empty_up: range(5, 0, 2),
@@ -400,7 +398,7 @@ async fn integer_division_helpers_use_mathematical_rounding() {
             for i in range(0, len(items), stride) {
               starts = push(starts, i)
             }
-            submit {
+            finish {
               ceil_pos: ceil_div(10, 3),
               floor_pos: floor_div(10, 3),
               ceil_neg: ceil_div(-10, 3),
@@ -429,12 +427,12 @@ async fn integer_division_helpers_use_mathematical_rounding() {
 #[tokio::test(flavor = "current_thread")]
 async fn numeric_helper_errors_are_rejected() {
     for source in [
-        "submit range(0, 5, 0)",
-        "submit range(0, 5, 1.5)",
-        "submit range(1000001, 0, -1)",
-        "submit ceil_div(1.5, 1)",
-        "submit floor_div(1, 0)",
-        "submit ceil_div(\"1\", 1)",
+        "finish range(0, 5, 0)",
+        "finish range(0, 5, 1.5)",
+        "finish range(1000001, 0, -1)",
+        "finish ceil_div(1.5, 1)",
+        "finish floor_div(1, 0)",
+        "finish ceil_div(\"1\", 1)",
     ] {
         let err = runtime_error(source).await;
         assert!(matches!(
@@ -449,7 +447,7 @@ async fn parser_accepts_trailing_semicolon_after_raw_string() {
     let program = parse(
         r#"
         msg = r"hello";
-        submit msg
+        finish msg
         "#,
     )
     .expect("program should parse");
@@ -481,7 +479,7 @@ async fn tuple_comma_expressions_are_first_class_sequence_values() {
               seen = push(seen, to_string(item))
             }
             print pair
-            submit {
+            finish {
               first: pair[0],
               second: pair[1],
               len_pair: len(pair),
@@ -540,20 +538,20 @@ async fn tuples_are_immutable_and_do_not_mixed_concat_with_lists() {
         r#"
         pair = (1, 2)
         pair[0] = 9
-        submit pair
+        finish pair
         "#,
     )
     .await;
     assert!(err.to_string().contains("tuples are immutable"), "{err:?}");
 
-    let err = runtime_error("submit push((1, 2), 3)").await;
+    let err = runtime_error("finish push((1, 2), 3)").await;
     assert!(
         err.to_string()
             .contains("`push` requires a list as the first argument"),
         "{err:?}"
     );
 
-    let err = runtime_error("submit (1,) + [2]").await;
+    let err = runtime_error("finish (1,) + [2]").await;
     assert!(
         err.to_string().contains("can't concatenate list and tuple"),
         "{err:?}"
@@ -583,7 +581,7 @@ async fn multiline_strings_are_expression_values() {
     let value = finished(
         execute(
             r####"
-            submit """first\n"quoted"
+            finish """first\n"quoted"
 second"""
             "####,
             &mut state,
@@ -603,7 +601,7 @@ async fn single_quoted_strings_are_expression_values() {
     let value = finished(
         execute(
             r#"
-            submit 'it\'s ready\n'
+            finish 'it\'s ready\n'
             "#,
             &mut state,
             &host,
@@ -622,7 +620,7 @@ async fn triple_single_strings_are_expression_values() {
     let value = finished(
         execute(
             r#"
-            submit '''first\n'second'
+            finish '''first\n'second'
 third'''
             "#,
             &mut state,
@@ -642,7 +640,7 @@ async fn raw_single_and_double_strings_preserve_backslashes() {
     let value = finished(
         execute(
             r#"
-            submit [r"path\to\file", R'\n stays raw']
+            finish [r"path\to\file", R'\n stays raw']
             "#,
             &mut state,
             &host,
@@ -668,7 +666,7 @@ async fn parser_accepts_exact_shell_exec_date_command_string() {
     let program = parse(
         r#"
         now = await shell.exec({ cmd: "date '+%Y-%m-%d %H:%M:%S %Z (%z)'" })?
-        submit now
+        finish now
         "#,
     )
     .expect("program should parse");
@@ -683,7 +681,7 @@ async fn record_strings_preserve_shell_date_command_text() {
     let value = finished(
         execute(
             r#"
-            submit { cmd: "date '+%Y-%m-%d %H:%M:%S %Z (%z)'" }
+            finish { cmd: "date '+%Y-%m-%d %H:%M:%S %Z (%z)'" }
             "#,
             &mut state,
             &host,
@@ -708,7 +706,7 @@ async fn string_literals_cover_shell_quotes_formats_and_raw_forms() {
     let value = finished(
         execute(
             r#####"
-            submit [
+            finish [
               "date '+%Y-%m-%d %H:%M:%S %Z (%z)'",
               'printf "%s\\n" "$value"',
               "json: {\"cmd\":\"echo 'ok'\"}",
@@ -759,7 +757,7 @@ async fn strings_preserve_utf8_content() {
     let value = finished(
         execute(
             r#"
-            submit "Grüße 東京"
+            finish "Grüße 東京"
             "#,
             &mut state,
             &host,
@@ -785,7 +783,7 @@ async fn raw_triple_strings_preserve_patch_text() {
 +new
 \n { braces stay raw }
 *** End Patch"""
-            submit patch
+            finish patch
             "####,
             &mut state,
             &host,
@@ -814,7 +812,7 @@ async fn raw_triple_strings_preserve_script_text() {
 print("""hello""")
 \n { braces stay raw }
 PY'''
-            submit script
+            finish script
             "#####,
             &mut state,
             &host,
@@ -833,7 +831,7 @@ PY'''
 
 #[tokio::test(flavor = "current_thread")]
 async fn rust_style_raw_strings_are_not_valid_lashlang_strings() {
-    let err = runtime_error(r####"submit r#"hello"#"####).await;
+    let err = runtime_error(r####"finish r#"hello"#"####).await;
     assert!(
         format!("{err}").contains("unknown name `r`"),
         "old raw syntax should not lex as a string, got {err}"
@@ -862,7 +860,7 @@ async fn parser_accepts_inline_trailing_comments_in_blocks() {
         } else { // fallback
           value = 2
         }
-        submit value // done
+        finish value // done
         "#,
     )
     .expect("program should parse");
@@ -881,7 +879,7 @@ async fn parser_accepts_else_if_chains() {
         } else {
           answer = 3
         }
-        submit answer
+        finish answer
         "#,
     )
     .expect("program should parse");
@@ -897,7 +895,7 @@ async fn parser_allows_await_record_in_expression_position() {
           left: start glob(pattern: "src/*.rs"),
           right: start read_file(path: "src/lib.rs")
         }
-        submit results
+        finish results
         "#,
     )
     .expect("program should parse");
@@ -910,7 +908,7 @@ async fn parser_allows_bare_expression_statements() {
     let program = parse(
         r#"
         "branch_a"
-        submit "done"
+        finish "done"
         "#,
     )
     .expect("program should parse");
@@ -923,13 +921,13 @@ async fn parser_allows_bare_expression_statements() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
+async fn parser_allows_finish_null_at_the_end_of_a_block_or_program() {
     let program = parse(
         r#"
         if true {
-          submit
+          finish null
         }
-        submit
+        finish null
         "#,
     )
     .expect("program should parse");
@@ -941,8 +939,8 @@ async fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
         expressions.as_slice(),
         [
             lashlang::Expr::If { then_block, .. },
-            lashlang::Expr::Submit(None)
-        ] if matches!(then_block.as_ref(), lashlang::Expr::Block(items) if matches!(items.as_slice(), [lashlang::Expr::Submit(None)]))
+            lashlang::Expr::Finish(_)
+        ] if matches!(then_block.as_ref(), lashlang::Expr::Block(items) if matches!(items.as_slice(), [lashlang::Expr::Finish(_)]))
     ));
 }
 
@@ -957,7 +955,7 @@ async fn executes_programs_with_double_slash_comments() {
         // Create some values first
         total = 6 / 2
         // Return the result
-        submit total
+        finish total
         "#,
             &mut state,
             &host,
@@ -970,17 +968,17 @@ async fn executes_programs_with_double_slash_comments() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn bare_finish_returns_null() {
+async fn bare_finish_requires_value() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = finished(
-        execute("submit", &mut state, &host)
-            .await
-            .expect("execution should succeed"),
+    let err = execute("finish", &mut state, &host)
+        .await
+        .expect_err("bare finish should be rejected");
+    assert_eq!(
+        err.to_string(),
+        "`finish` requires a value; use `finish null` to finish with null"
     );
-
-    assert_eq!(value, Value::Null);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -996,7 +994,7 @@ async fn executes_inline_trailing_comments_inside_blocks() {
         } else {
           total = 0
         }
-        submit total // final answer
+        finish total // final answer
         "#,
             &mut state,
             &host,
@@ -1017,7 +1015,7 @@ async fn double_slash_inside_strings_is_not_a_comment() {
         execute(
             r#"
         url = "https://example.com/a//b"
-        submit url
+        finish url
         "#,
             &mut state,
             &host,
@@ -1037,7 +1035,7 @@ async fn parser_accepts_ternary_in_call_arguments() {
     let program = parse(
         r#"
         result = format("{}", true ? "yes" : "no")
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -1055,7 +1053,7 @@ async fn executes_arithmetic_strings_and_finish() {
             r#"
         total = 1 + 2 * 3
         msg = format("total={}", total)
-        submit msg
+        finish msg
         "#,
             &mut state,
             &host,
@@ -1088,7 +1086,7 @@ async fn executes_if_for_and_list_concat() {
         } else {
           result = "bad"
         }
-        submit result
+        finish result
         "#,
             &mut state,
             &host,
@@ -1110,7 +1108,7 @@ async fn list_comprehension_builds_filtered_lists_without_clobbering_outer_bindi
             r#"
         n = "outer"
         doubled = [n * 2 for n in [1, 2, 3, 4] if n % 2 == 0]
-        submit { doubled: doubled, n: n }
+        finish { doubled: doubled, n: n }
         "#,
             &mut state,
             &host,
@@ -1136,7 +1134,7 @@ async fn list_comprehension_nested_clauses_preserve_python_ordering() {
         execute(
             r#"
         pairs = [format("{}:{}", a, b) for a in ["x", "y"] for b in range(0, 3) if b != 1]
-        submit pairs
+        finish pairs
         "#,
             &mut state,
             &host,
@@ -1175,7 +1173,7 @@ async fn list_comprehension_allows_effectful_iterables_filters_and_elements() {
           for path in paths
           if len(await files.read({ path: path })?) > 0
         ]
-        submit sizes
+        finish sizes
         "#,
             &mut state,
             &host,
@@ -1203,7 +1201,7 @@ async fn break_exits_loop_and_restores_loop_binding() {
           }
           seen = seen + [item]
         }
-        submit { seen: seen, item: item }
+        finish { seen: seen, item: item }
         "#,
             &mut state,
             &host,
@@ -1232,7 +1230,7 @@ async fn continue_skips_to_next_iteration() {
           }
           seen = seen + [n]
         }
-        submit seen
+        finish seen
         "#,
             &mut state,
             &host,
@@ -1261,7 +1259,7 @@ async fn while_loop_runs_until_condition_is_false() {
           seen = seen + [n]
           n = n + 1
         }
-        submit { n: n, seen: seen }
+        finish { n: n, seen: seen }
         "#,
             &mut state,
             &host,
@@ -1301,7 +1299,7 @@ async fn break_exits_while_loop() {
             break
           }
         }
-        submit n
+        finish n
         "#,
             &mut state,
             &host,
@@ -1333,7 +1331,7 @@ async fn continue_skips_to_next_while_condition() {
           }
           seen = seen + [n]
         }
-        submit seen
+        finish seen
         "#,
             &mut state,
             &host,
@@ -1369,7 +1367,7 @@ async fn nested_loop_control_targets_nearest_loop() {
           }
           seen = seen + [format("outer={}", outer)]
         }
-        submit seen
+        finish seen
         "#,
             &mut state,
             &host,
@@ -1415,7 +1413,7 @@ async fn nested_for_and_while_loop_control_targets_nearest_loop() {
           }
           seen = seen + [format("outer={}", outer)]
         }
-        submit seen
+        finish seen
         "#,
             &mut state,
             &host,
@@ -1439,7 +1437,7 @@ async fn nested_for_and_while_loop_control_targets_nearest_loop() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn submit_inside_loop_still_terminates_program() {
+async fn finish_inside_loop_still_terminates_program() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1447,9 +1445,9 @@ async fn submit_inside_loop_still_terminates_program() {
         execute(
             r#"
         for n in [1, 2, 3] {
-          submit n
+          finish n
         }
-        submit 99
+        finish 99
         "#,
             &mut state,
             &host,
@@ -1471,7 +1469,7 @@ async fn ternary_selects_the_correct_branch() {
             r#"
         truthy = true ? "left" : "right"
         falsy = false ? "left" : "right"
-        submit format("{}:{}", truthy, falsy)
+        finish format("{}:{}", truthy, falsy)
         "#,
             &mut state,
             &host,
@@ -1492,7 +1490,7 @@ async fn ternary_is_right_associative() {
         execute(
             r#"
         result = false ? 1 : true ? 2 : 3
-        submit result
+        finish result
         "#,
             &mut state,
             &host,
@@ -1513,7 +1511,7 @@ async fn ternary_has_lower_precedence_than_boolean_ops() {
         execute(
             r#"
         result = false or true ? "yes" : "no"
-        submit result
+        finish result
         "#,
             &mut state,
             &host,
@@ -1535,7 +1533,7 @@ async fn ternary_short_circuits_unselected_branch() {
             r#"
         yes = true ? "ok" : missing_name
         no = false ? missing_name : "ok"
-        submit format("{}:{}", yes, no)
+        finish format("{}:{}", yes, no)
         "#,
             &mut state,
             &host,
@@ -1557,7 +1555,7 @@ async fn unary_bang_aliases_not() {
             r#"
         a = !false
         b = !true
-        submit [a, b]
+        finish [a, b]
         "#,
             &mut state,
             &host,
@@ -1583,7 +1581,7 @@ async fn symbolic_boolean_aliases_match_word_operators() {
         a = true && false
         b = false || true
         c = !false && (false || true)
-        submit [a, b, c]
+        finish [a, b, c]
         "#,
             &mut state,
             &host,
@@ -1610,7 +1608,7 @@ async fn conditions_and_ternary_use_bounded_truthiness() {
         b = "" ? "yes" : "no"
         c = !0
         d = ![]
-        submit [a, b, c, d]
+        finish [a, b, c, d]
         "#,
             &mut state,
             &host,
@@ -1642,7 +1640,7 @@ async fn string_concatenation_stringifies_non_string_side() {
         execute(
             r#"
         found = await files.read({ path: "src/lib.rs" })
-        submit "status=" + found.ok + " value=" + found.value
+        finish "status=" + found.ok + " value=" + found.value
         "#,
             &mut state,
             &host,
@@ -1670,7 +1668,7 @@ async fn arithmetic_and_string_builtins_coerce_scalars() {
         joined = join(["a", 2, true], "-")
         split_num = split(101, 0)
         prefix = starts_with(123, 12)
-        submit {
+        finish {
           total: total,
           scaled: scaled,
           joined: joined,
@@ -1713,7 +1711,7 @@ async fn to_string_stringifies_records() {
     let value = finished(
         execute(
             r#"
-        submit to_string({ ok: true, count: 2 })
+        finish to_string({ ok: true, count: 2 })
         "#,
             &mut state,
             &host,
@@ -1739,7 +1737,7 @@ async fn observe_captures_intermediate_values_without_ending_execution() {
         item = { ok: true, count: 2 }
         print item
         print "step done"
-        submit "final"
+        finish "final"
         "#,
             &mut state,
             &host,
@@ -1800,7 +1798,7 @@ async fn ternary_fixes_tool_result_formatting_pattern() {
           found.ok ? "ok" : format("failed: {}", found.error),
           missing.ok ? "ok" : format("failed: {}", missing.error)
         )
-        submit summary
+        finish summary
         "#,
             &mut state,
             &host,
@@ -1824,7 +1822,7 @@ async fn format_supports_indexed_reordering() {
     let value = finished(
         execute(
             r#"
-        submit format("b={1} a={0}", "x", "y")
+        finish format("b={1} a={0}", "x", "y")
         "#,
             &mut state,
             &host,
@@ -1844,7 +1842,7 @@ async fn format_without_placeholders_returns_literal_string() {
     let value = finished(
         execute(
             r#"
-        submit format("plain")
+        finish format("plain")
         "#,
             &mut state,
             &host,
@@ -1864,7 +1862,7 @@ async fn format_supports_escaped_braces() {
     let value = finished(
         execute(
             r#"
-        submit format("{{{}}}", 1)
+        finish format("{{{}}}", 1)
         "#,
             &mut state,
             &host,
@@ -1884,7 +1882,7 @@ async fn format_accepts_multiline_markdown_string_templates() {
     let value = finished(
         execute(
             r####"
-        submit format("""## Installed {0}
+        finish format("""## Installed {0}
 
 `{1}` is installed and available.
 
@@ -1916,7 +1914,7 @@ async fn format_accepts_raw_markdown_templates_with_literal_braces() {
     let value = finished(
         execute(
             r####"
-        submit format(r"""## {0}
+        finish format(r"""## {0}
 
 ```json
 {{"status":"{1}","ok":true}}
@@ -1946,7 +1944,7 @@ Output:
 async fn format_rejects_mixed_placeholder_styles_end_to_end() {
     let error = runtime_error(
         r#"
-        submit format("{} {1}", "x", "y")
+        finish format("{} {1}", "x", "y")
         "#,
     )
     .await;
@@ -1963,7 +1961,7 @@ async fn format_rejects_mixed_placeholder_styles_end_to_end() {
 async fn format_rejects_unused_args_end_to_end() {
     let error = runtime_error(
         r#"
-        submit format("plain", 1)
+        finish format("plain", 1)
         "#,
     )
     .await;
@@ -1980,7 +1978,7 @@ async fn format_rejects_unused_args_end_to_end() {
 async fn format_rejects_unmatched_braces_end_to_end() {
     let open_error = runtime_error(
         r#"
-        submit format("{")
+        finish format("{")
         "#,
     )
     .await;
@@ -1993,7 +1991,7 @@ async fn format_rejects_unmatched_braces_end_to_end() {
 
     let close_error = runtime_error(
         r#"
-        submit format("}")
+        finish format("}")
         "#,
     )
     .await;
@@ -2015,7 +2013,7 @@ async fn tool_calls_return_result_records() {
             r#"
         found = await files.read({ path: "src/lib.rs" })
         missing = await files.read({ path: "src/missing.rs" })
-        submit { found: found, missing: missing }
+        finish { found: found, missing: missing }
         "#,
             &mut state,
             &host,
@@ -2049,7 +2047,7 @@ async fn aggregate_await_resource_calls_run_concurrently_and_preserve_record_sha
           left: tools.sleep_echo({ value: "a" })?,
           right: tools.sleep_echo({ value: "b" })?
         }
-        submit results
+        finish results
         "#,
             &mut state,
             &host,
@@ -2082,7 +2080,7 @@ async fn explicit_start_and_await_merges_distinct_results() {
         left = start sleep_echo(value: "a")
         right = start sleep_echo(value: "b")
         results = await { left: left, right: right }
-        submit { left: results.left?, right: results.right? }
+        finish { left: results.left?, right: results.right? }
         "#,
             &mut state,
             &host,
@@ -2111,7 +2109,7 @@ async fn await_list_returns_branch_results_in_order() {
           start sleep_echo(value: "a"),
           start sleep_echo(value: "b")
         ]
-        submit results
+        finish results
         "#,
             &mut state,
             &host,
@@ -2147,7 +2145,7 @@ async fn await_record_returns_record_results() {
           first: start sleep_echo(value: "a"),
           second: start sleep_echo(value: "b")
         }
-        submit {
+        finish {
           first: results.first?,
           second: results.second?
         }
@@ -2188,7 +2186,7 @@ async fn slice_null_bounds_default_to_start_or_end() {
         execute(
             r#"
         values = [10, 20, 30, 40, 50]
-        submit {
+        finish {
           list_tail: slice(values, 3, null),
           list_head: slice(values, null, 2),
           string_tail: slice("abcdef", 4, null),
@@ -2233,7 +2231,7 @@ async fn negative_indices_and_record_contains_are_supported() {
             r#"
         values = [10, 20, 30]
         text = "abc"
-        submit {
+        finish {
           tail: values[-1],
           before_tail: values[-2],
           oob: values[-4],
@@ -2270,7 +2268,7 @@ async fn dynamic_record_indexing_reads_fields() {
             r#"
         key = "foo"
         record = { foo: 42 }
-        submit { found: record[key], missing: record["missing"] }
+        finish { found: record[key], missing: record["missing"] }
         "#,
             &mut state,
             &host,
@@ -2302,7 +2300,7 @@ async fn indexed_and_field_assignment_update_collections() {
         items = [1, 2, 3]
         items[1] = 20
         items[-1] = 30
-        submit { record: record, items: items }
+        finish { record: record, items: items }
         "#,
             &mut state,
             &host,
@@ -2341,7 +2339,7 @@ async fn nested_path_assignment_and_histogram_loops_work() {
         for label in labels {
           counts[label] = counts[label] + 1
         }
-        submit { state: state, counts: counts }
+        finish { state: state, counts: counts }
         "#,
             &mut state,
             &host,
@@ -2381,7 +2379,7 @@ async fn path_assignment_preserves_alias_isolation() {
         record.x = 2
         record.nested.y = 3
         record.items[0] = 9
-        submit { record: record, alias: alias }
+        finish { record: record, alias: alias }
         "#,
             &mut state,
             &host,
@@ -2461,7 +2459,7 @@ async fn else_if_chains_execute_without_extra_braces() {
         } else {
           label = "small"
         }
-        submit label
+        finish label
         "#,
             &mut state,
             &host,
@@ -2482,7 +2480,7 @@ async fn slice_supports_negative_bounds() {
         execute(
             r#"
         values = [10, 20, 30, 40, 50]
-        submit {
+        finish {
           list_tail: slice(values, -2, null),
           list_without_last: slice(values, null, -1),
           list_middle: slice(values, -4, -1),
@@ -2556,7 +2554,7 @@ async fn range_and_push_cover_common_collection_building() {
         for n in range(0, 4) {
           loop_total = loop_total + n
         }
-        submit {
+        finish {
           indexes: indexes,
           extended: extended,
           from_zero: range(3),
@@ -2620,7 +2618,7 @@ async fn for_loop_assignments_carry_across_iterations() {
           count = count + 1
           snapshots = push(snapshots, { part: trim(part), parts: parts, count: count })
         }
-        submit { parts: parts, count: count, snapshots: snapshots }
+        finish { parts: parts, count: count, snapshots: snapshots }
         "#,
             &mut state,
             &host,
@@ -2663,7 +2661,7 @@ async fn await_record_accepts_commas_and_keyword_record_keys_execute() {
           fanout: start sleep_echo(value: "ok"),
           "with space": start sleep_echo(value: "quoted"),
         }
-        submit {
+        finish {
           branch: result.fanout?,
           quoted_value: result["with space"]?
         }
@@ -2690,7 +2688,7 @@ async fn string_comparisons_are_lexicographic() {
     let value = finished(
         execute(
             r#"
-        submit {
+        finish {
           lt: "abc" < "def",
           gt: "xyz" > "abc",
           le: "abc" <= "abc",
@@ -2721,7 +2719,7 @@ async fn stringification_preserves_integer_format_inside_containers() {
     let value = finished(
         execute(
             r#"
-        submit {
+        finish {
           list_text: to_string([1, 2]),
           record_text: to_string({ a: 1, b: 2.5 })
         }
@@ -2755,7 +2753,7 @@ async fn snapshot_round_trip_preserves_repl_like_state() {
         execute(
             r#"
         counter = 1
-        submit counter
+        finish counter
         "#,
             &mut state,
             &host,
@@ -2773,7 +2771,7 @@ async fn snapshot_round_trip_preserves_repl_like_state() {
         execute(
             r#"
         counter = counter + 1
-        submit counter
+        finish counter
         "#,
             &mut restored,
             &host,
@@ -2794,7 +2792,7 @@ async fn json_and_record_helpers_work() {
         execute(
             r#"
         obj = json_parse("{\"path\":\"src/lib.rs\",\"line\":7}")
-        submit format("{}:{}", obj.path, obj.line)
+        finish format("{}:{}", obj.path, obj.line)
         "#,
             &mut state,
             &host,

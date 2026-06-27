@@ -28,7 +28,7 @@ pub(crate) fn build_session_policy(
         current_snapshot,
         session_spec: &session_spec,
         tool_access: &tool_access,
-        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue,
+        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue,
         capability_name,
         output_schema: None,
         seed: Default::default(),
@@ -108,7 +108,7 @@ pub(crate) fn render_task_prompt(task: &str, output_schema: Option<&Value>) -> S
         let schema_pretty =
             serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
         sections.push(format!(
-            "## Required output\n\nWhen done, end the task with `submit <expr>`. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```"
+            "## Required output\n\nWhen done, end the task with `finish <value>`. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```"
         ));
     }
     sections.join("\n\n")
@@ -268,7 +268,7 @@ pub(crate) fn subagent_capability_note(authority: &SubagentSessionContext) -> St
 
 pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
     match &turn.outcome {
-        TurnOutcome::Finished(TurnFinish::SubmittedValue { value }) => return value.clone(),
+        TurnOutcome::Finished(TurnFinish::FinalValue { value }) => return value.clone(),
         TurnOutcome::Finished(TurnFinish::ToolValue { value, .. }) => return value.clone(),
         TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) => {
             if !text.trim().is_empty() {

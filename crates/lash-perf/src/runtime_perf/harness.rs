@@ -199,25 +199,6 @@ impl BenchmarkRuntime {
             .await;
     }
 
-    pub(crate) async fn enqueue_turn_input(
-        &self,
-        input: lash::TurnInput,
-        delivery_policy: lash::persistence::DeliveryPolicy,
-        slot_policy: lash::persistence::SlotPolicy,
-        id: impl Into<String>,
-    ) -> anyhow::Result<()> {
-        self.session
-            .as_ref()
-            .expect("benchmark session")
-            .enqueue(input)
-            .delivery_policy(delivery_policy)
-            .slot_policy(slot_policy)
-            .id(id)
-            .send()
-            .await?;
-        Ok(())
-    }
-
     pub(crate) async fn run_turn(
         &self,
         input: lash::TurnInput,
@@ -311,7 +292,7 @@ pub(crate) fn validate_runtime_perf_turn(
         )
     {
         anyhow::bail!(
-            "runtime perf scenario {} turn {} finished through assistant prose; RLM perf scenarios must complete through submit so fixture errors cannot be hidden.\n{}",
+            "runtime perf scenario {} turn {} finished through assistant prose; RLM perf scenarios must complete through finish so fixture errors cannot be hidden.\n{}",
             scenario.name(),
             turn_index + 1,
             diagnostics
@@ -334,7 +315,7 @@ pub(crate) fn validate_runtime_perf_turn(
                 text
             );
         }
-        TurnOutcome::Finished(lash::runtime::TurnFinish::SubmittedValue { value }) => {
+        TurnOutcome::Finished(lash::runtime::TurnFinish::FinalValue { value }) => {
             if value.as_str() == Some(expected) {
                 return Ok(());
             }
@@ -900,7 +881,7 @@ pub(crate) async fn seed_runtime_state(
 
 async fn seed_rlm_live_globals(runtime: &mut BenchmarkRuntime) -> anyhow::Result<()> {
     let turn_input =
-        lash::TurnInput::text("Seed current working variables, then submit the benchmark marker.")
+        lash::TurnInput::text("Seed current working variables, then finish the benchmark marker.")
             .rlm_project(rlm_perf_projected_bindings(
                 RuntimePerfScenario::RlmGlobals,
                 0,
@@ -984,7 +965,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmObliqueStackMix => format!(
-            "Turn {} in RLM mode. Exercise the OBLIQ-style search, subagent, live-handle, direct judge, trace, and large print paths, then submit exactly: {}",
+            "Turn {} in RLM mode. Exercise the OBLIQ-style search, subagent, live-handle, direct judge, trace, and large print paths, then finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1000,7 +981,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmAsyncToolCompletion => format!(
-            "Turn {} in RLM mode. Exercise the pending benchmark_async tool completion path, then submit exactly: {}",
+            "Turn {} in RLM mode. Exercise the pending benchmark_async tool completion path, then finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1044,7 +1025,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
             turn_index + 1
         ),
         RuntimePerfScenario::RlmProcessHandles => format!(
-            "Turn {} in RLM mode. Exercise start/await/cancel process handles, then submit exactly: {}",
+            "Turn {} in RLM mode. Exercise start/await/cancel process handles, then finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1052,7 +1033,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmTriggerMailPipeline => format!(
-            "Turn {} in RLM mode. Ensure a mail trigger is registered, send through inbox.test, let the forwarder process run, and submit exactly: {}",
+            "Turn {} in RLM mode. Ensure a mail trigger is registered, send through inbox.test, let the forwarder process run, and finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1060,7 +1041,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => format!(
-            "Turn {} in RLM mode. Exercise pending benchmark_async completion inside a started process, then submit exactly: {}",
+            "Turn {} in RLM mode. Exercise pending benchmark_async completion inside a started process, then finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1068,7 +1049,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmSubagentSpawn => format!(
-            "Turn {} in RLM mode. Start a process that spawns a default subagent with seeded input, await it, then submit exactly: {}",
+            "Turn {} in RLM mode. Start a process that spawns a default subagent with seeded input, await it, then finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1076,7 +1057,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmLlmQuery => format!(
-            "Turn {} in RLM mode. Exercise llm_query direct completion, then submit exactly: {}",
+            "Turn {} in RLM mode. Exercise llm_query direct completion, then finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1092,7 +1073,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmLargePrint => format!(
-            "Turn {} in RLM mode. Print a large structured tool result to exercise host-owned print projection, then submit exactly: {}",
+            "Turn {} in RLM mode. Print a large structured tool result to exercise host-owned print projection, then finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1100,7 +1081,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .unwrap_or("runtime perf benchmark ok")
         ),
         RuntimePerfScenario::RlmStreamedPairedLashlang => format!(
-            "Turn {} in RLM mode. Stream visible prose before a paired <lashlang> block, close it, ignore any suffix after the close tag, and submit exactly: {}",
+            "Turn {} in RLM mode. Stream visible prose before a paired <lashlang> block, close it, ignore any suffix after the close tag, and finish exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")
@@ -1144,11 +1125,15 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
             turn_index + 1
         ),
         RuntimePerfScenario::TraceJsonlExtended => format!(
-            "Turn {} in extended JSONL trace benchmark mode. Run the Lashlang block and submit exactly: runtime perf benchmark ok",
+            "Turn {} in extended JSONL trace benchmark mode. Run the Lashlang block and finish exactly: runtime perf benchmark ok",
             turn_index + 1
         ),
         RuntimePerfScenario::QueuedWorkClaimStress => format!(
             "Turn {} in queued-work claim stress benchmark mode. Claim, renew, complete, and verify queued work.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::TurnInputIngressInterrupt => format!(
+            "Turn {} in turn-input ingress interrupt benchmark mode. Claim, defer, reclaim, complete, and verify pending turn input.",
             turn_index + 1
         ),
     }

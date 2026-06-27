@@ -21,7 +21,7 @@ left = start child(value: "left")
 right = start child(value: "right")
 joined = await { left: left, right: right }
 sleep for "0ms"
-submit {
+finish {
   left: joined.left.lookup,
   right: joined.right.lookup,
   final: "stack-budget"
@@ -41,7 +41,7 @@ submit {
                 .await
                 .expect("program executes");
             let ExecutionOutcome::Finished(value) = outcome else {
-                panic!("expected submitted value");
+                panic!("expected final value");
             };
 
             assert_eq!(
@@ -102,9 +102,7 @@ impl ExecutionHost for StackBudgetHost {
             }
             AbilityOp::Await(value) => Ok(AbilityResult::Value(value)),
             AbilityOp::Sleep(_) => Ok(AbilityResult::Value(Value::Null)),
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
-                Ok(AbilityResult::Value(value))
-            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
             _ => Err(ExecutionHostError::new(
                 "unsupported stack-budget host ability",
             )),

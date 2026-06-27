@@ -527,18 +527,6 @@ impl<'module> Linker<'module> {
                 Expr::Print(Box::new(self.lower_expr(inner, scope)?.0)),
                 Some(Binding::Value(TypeExpr::Null)),
             ),
-            Expr::Submit(inner) => (
-                Expr::Submit(
-                    inner
-                        .as_deref()
-                        .map(|inner| {
-                            self.lower_expr(inner, scope)
-                                .map(|(expr, _)| Box::new(expr))
-                        })
-                        .transpose()?,
-                ),
-                Some(Binding::Value(TypeExpr::Null)),
-            ),
             Expr::Yield(inner) => (
                 Expr::Yield(Box::new(self.lower_expr(inner, scope)?.0)),
                 Some(Binding::Value(TypeExpr::Null)),
@@ -548,16 +536,9 @@ impl<'module> Linker<'module> {
                 Some(Binding::Value(TypeExpr::Null)),
             ),
             Expr::Finish(inner) => {
-                let mut finish_ty = TypeExpr::Null;
-                let inner = inner
-                    .as_deref()
-                    .map(|inner| {
-                        let (expr, binding) = self.lower_expr(inner, scope)?;
-                        finish_ty = binding_type(binding.as_ref());
-                        Ok(Box::new(expr))
-                    })
-                    .transpose()?;
-                (Expr::Finish(inner), Some(Binding::Value(finish_ty)))
+                let (inner, binding) = self.lower_expr(inner, scope)?;
+                let finish_ty = binding_type(binding.as_ref());
+                (Expr::Finish(Box::new(inner)), Some(Binding::Value(finish_ty)))
             }
             Expr::Fail(inner) => (
                 Expr::Fail(Box::new(self.lower_expr(inner, scope)?.0)),

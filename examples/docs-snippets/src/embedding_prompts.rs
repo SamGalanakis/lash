@@ -340,7 +340,7 @@ async fn tone_session(
     let result = session
         .turn(TurnInput::text("Summarize this incident."))
         .with_tone("brief and factual")
-        .require_submit()?
+        .require_finish()?
         .stream_to(&sink)
         .await?;
     // docs:end:tone-session

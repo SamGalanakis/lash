@@ -315,6 +315,41 @@ def summarize_profile_guard(report: dict[str, Any]) -> str:
             lines.append(f"  unaccounted_stack_samples={len(unaccounted)}")
         lines.append("")
 
+    cli_stack = report.get("cli_stack", {})
+    cli_first_success = cli_stack.get("first_success_stack_bytes", {})
+    if cli_first_success:
+        lines.append("## cli stack")
+        budget = cli_stack.get("stack_budget_bytes")
+        if isinstance(budget, int | float):
+            lines.append(f"  budget={fmt_bytes(budget)}")
+        for scenario, stack_bytes in sorted(cli_first_success.items()):
+            label = fmt_bytes(stack_bytes) if isinstance(stack_bytes, int | float) else "n/a"
+            lines.append(f"  {scenario:28s} first_success={label}")
+        unaccounted = [
+            sample
+            for sample in cli_stack.get("samples", [])
+            if sample.get("status") == "ok" and not sample.get("stack_accounted", False)
+        ]
+        if unaccounted:
+            lines.append(f"  unaccounted_stack_samples={len(unaccounted)}")
+        lines.append("")
+
+    cli_release_stack = report.get("cli_release_stack", {})
+    cli_release_first_success = cli_release_stack.get("first_success_stack_bytes", {})
+    if cli_release_first_success:
+        lines.append("## release cli stack")
+        budget = cli_release_stack.get("stack_budget_bytes")
+        if isinstance(budget, int | float):
+            lines.append(f"  budget={fmt_bytes(budget)}")
+        binary_metadata = cli_release_stack.get("report", {}).get("binary_metadata", {})
+        binary_sha = binary_metadata.get("sha256") if isinstance(binary_metadata, dict) else None
+        if isinstance(binary_sha, str):
+            lines.append(f"  binary_sha256={binary_sha[:12]}")
+        for scenario, stack_bytes in sorted(cli_release_first_success.items()):
+            label = fmt_bytes(stack_bytes) if isinstance(stack_bytes, int | float) else "n/a"
+            lines.append(f"  {scenario:28s} first_success={label}")
+        lines.append("")
+
     ui_report = report.get("ui", {}).get("report", {})
     ui_scenarios = ui_report.get("scenarios", [])
     if ui_scenarios:

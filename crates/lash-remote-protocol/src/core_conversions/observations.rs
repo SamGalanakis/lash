@@ -222,7 +222,7 @@ impl From<lash_core::TurnEvent> for RemoteTurnEvent {
                 output: serde_json::to_value(output).unwrap_or(serde_json::Value::Null),
                 duration_ms,
             },
-            lash_core::TurnEvent::SubmittedValue { value } => Self::SubmittedValue { value },
+            lash_core::TurnEvent::FinalValue { value } => Self::FinalValue { value },
             lash_core::TurnEvent::ToolValue { tool_name, value } => {
                 Self::ToolValue { tool_name, value }
             }

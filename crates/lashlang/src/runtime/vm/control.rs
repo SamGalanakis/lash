@@ -60,9 +60,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
             VmOutcome::Continued => Ok(ExecutionOutcome::Finished(Value::Null)),
             VmOutcome::ProcessFinished(value) => Ok(ExecutionOutcome::Finished(value)),
             VmOutcome::ProcessFailed(value) => Ok(ExecutionOutcome::Failed(value)),
-            VmOutcome::Finished(_) => {
-                Err(RuntimeError::ForegroundControlInsideProcess { keyword: "submit" })
-            }
+            VmOutcome::Finished(value) => Ok(ExecutionOutcome::Finished(value)),
         }
     }
 
@@ -95,10 +93,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
             VmOutcome::Continued => Ok(ExecutionOutcome::Finished(Value::Null)),
             VmOutcome::ProcessFinished(value) => Ok(ExecutionOutcome::Finished(value)),
             VmOutcome::ProcessFailed(value) => Ok(ExecutionOutcome::Failed(value)),
-            VmOutcome::Finished(_) => Err(RuntimeFailure {
-                error: RuntimeError::ForegroundControlInsideProcess { keyword: "submit" },
-                span: None,
-            }),
+            VmOutcome::Finished(value) => Ok(ExecutionOutcome::Finished(value)),
         }
     }
 

@@ -2195,7 +2195,7 @@
       tool_call_completed: "tool finished",
       code_block_started: "code started",
       code_block_completed: "code finished",
-      submitted_value: "result submitted",
+      final_value: "final value",
       tool_value: "tool result",
       child_usage: "sub-agent usage",
       retry_status: "retrying",
@@ -2462,7 +2462,7 @@
       if (event.type === "code_block_started") startCodeBlock(event);
       if (event.type === "code_block_completed") completeCodeBlock(event);
       if (event.type === "tool_call_completed") appendCompletedTool(event);
-      if (event.type === "submitted_value") appendAssistantText(renderTerminalValue(event.value));
+      if (event.type === "final_value") appendAssistantText(renderTerminalValue(event.value));
       if (event.type === "tool_value") appendAssistantText(renderTerminalValue(event.value));
       if (event.type === "error") renderError(event.message, { retry: true });
     }

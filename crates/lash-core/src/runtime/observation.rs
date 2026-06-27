@@ -413,31 +413,61 @@ impl RuntimeHandle {
     pub async fn enqueue_turn_input(
         &self,
         input: crate::TurnInput,
-        delivery_policy: crate::DeliveryPolicy,
-        slot_policy: crate::SlotPolicy,
+        ingress: crate::TurnInputIngress,
         source_key: Option<String>,
-    ) -> Result<crate::QueuedWorkBatch, crate::RuntimeError> {
+    ) -> Result<crate::PendingTurnInput, crate::RuntimeError> {
         let observation = self.observe();
         let store = observation
             .queue_store
             .clone()
             .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        let is_next_turn = matches!(ingress, crate::TurnInputIngress::NextTurn);
         super::session_api::enqueue_turn_input_to_store(
             observation.session_id.as_ref().to_string(),
             store,
             observation.queued_work_driver.clone(),
             input,
-            delivery_policy,
-            slot_policy,
+            ingress,
             source_key,
         )
         .await
-        .inspect(|batch| {
+        .inspect(|input| {
             self.record_queue_changed(
                 SessionQueueEventKind::Enqueued,
-                vec![batch.batch_id.clone()],
+                is_next_turn
+                    .then(|| vec![input.input_id.clone()])
+                    .unwrap_or_default(),
             );
         })
+    }
+
+    pub async fn cancel_pending_turn_input(
+        &self,
+        session_id: &str,
+        input_id: &str,
+    ) -> Result<Option<crate::PendingTurnInput>, crate::RuntimeError> {
+        let observation = self.observe();
+        let store = observation
+            .queue_store
+            .clone()
+            .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        store
+            .cancel_pending_turn_input(session_id, input_id)
+            .await
+            .map_err(|err| {
+                crate::RuntimeError::new(
+                    crate::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                )
+            })
+            .inspect(|input| {
+                if input.is_some() {
+                    self.record_queue_changed(
+                        SessionQueueEventKind::Cancelled,
+                        vec![input_id.to_string()],
+                    );
+                }
+            })
     }
 
     pub async fn cancel_queued_work_batch(

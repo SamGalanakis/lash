@@ -5,8 +5,9 @@ async fn standard_runtime_trace_records_stream_event_entries() {
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("Hello ".to_string()),
+            LlmStreamEvent::Delta("world".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
-                text: "world".to_string(),
+                text: "Hello world".to_string(),
                 response_meta: None,
             }),
             LlmStreamEvent::Usage(LlmUsage {
@@ -99,7 +100,11 @@ async fn standard_runtime_trace_records_stream_event_entries() {
                     .get("event")
                     .and_then(|payload| payload.get("raw_text"))
                     .and_then(|v| v.as_str())
-                    == Some("world")),
+                    == Some("Hello world")
+                && entry
+                    .get("event")
+                    .and_then(|payload| payload.get("visible_text"))
+                    .is_none_or(|v| v.is_null())),
         "expected text_part stream event in trace: {entries:?}"
     );
     assert!(
@@ -263,10 +268,7 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("Hello ".to_string()),
-            LlmStreamEvent::Part(LlmOutputPart::Text {
-                text: "world".to_string(),
-                response_meta: None,
-            }),
+            LlmStreamEvent::Delta("world".to_string()),
         ],
         response: Ok(LlmResponse {
             full_text: "Hello world".to_string(),

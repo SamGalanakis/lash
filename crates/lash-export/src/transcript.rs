@@ -157,7 +157,7 @@ pub fn suppressed_rlm_final_output_message_ids(
             ChronologicalPayload::ProtocolEvent(event) => {
                 last_final_output = lashlang_transcript_step_from_event(event)
                     .and_then(|step| step.final_output)
-                    .map(|value| submitted_value_match_text(&value));
+                    .map(|value| final_value_match_text(&value));
             }
             ChronologicalPayload::Message(message) => {
                 if matches!(message.role, MessageRole::Assistant)
@@ -188,7 +188,7 @@ pub fn message_matches_text(message: &Message, expected: &str) -> bool {
     collected.trim() == expected
 }
 
-pub fn submitted_value_display_text(value: &serde_json::Value) -> String {
+pub fn final_value_display_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => String::new(),
         serde_json::Value::String(text) => text.clone(),
@@ -196,7 +196,7 @@ pub fn submitted_value_display_text(value: &serde_json::Value) -> String {
     }
 }
 
-pub fn submitted_value_match_text(value: &serde_json::Value) -> String {
+pub fn final_value_match_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(text) => text.clone(),
         other => other.to_string(),

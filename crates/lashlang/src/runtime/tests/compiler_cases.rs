@@ -4,7 +4,7 @@ fn label_on_await_assignment_attaches_to_await_instruction() {
         r#"
         @label(title: "Wait for child")
         result = await handle
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -47,7 +47,7 @@ fn aggregate_await_record_of_resource_calls_emits_batch_instruction() {
           first: tools.echo({ value: "a" }),
           second: tools.echo({ value: "b" })
         }
-        submit results
+        finish results
         "#,
     )
     .expect("program should compile");
@@ -79,7 +79,7 @@ async fn aggregate_await_nested_resource_calls_reconstructs_shape() {
             { inner: tools.echo({ value: "b" })? }
           ]
         }
-        submit result
+        finish result
         "#,
     )
     .await
@@ -102,7 +102,7 @@ async fn aggregate_await_nested_resource_calls_reconstructs_shape() {
 async fn aggregate_await_tuple_of_resource_calls_batches_and_reconstructs_tuple() {
     let source = r#"
         result = await (tools.echo({ value: "left" })?, tools.echo({ value: "right" })?)
-        submit result
+        finish result
         "#;
     let compiled = compile_source(source).expect("program should compile");
     let listing = compiled_instruction_listing(&compiled);
@@ -163,7 +163,7 @@ async fn aggregate_await_mixed_pure_values_batch_resource_leaves_and_reconstruct
                 AbilityOp::ResourceOperation(_) => Err(ExecutionHostError::new(
                     "mixed aggregate should use the batch host ability",
                 )),
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
@@ -186,7 +186,7 @@ async fn aggregate_await_mixed_pure_values_batch_resource_leaves_and_reconstruct
             { ok: true, total: len([1, 2, 3]) }
           ]
         }
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -224,7 +224,7 @@ fn aggregate_await_effectful_non_tool_leaf_keeps_existing_path() {
           child: start child(),
           tool: tools.echo({ value: "x" })?
         }
-        submit result
+        finish result
         "#,
     )
     .expect("program should compile");
@@ -300,7 +300,7 @@ async fn aggregate_await_evaluates_arguments_once_in_source_order_before_batch()
                         },
                     ))
                 }
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
@@ -315,7 +315,7 @@ async fn aggregate_await_evaluates_arguments_once_in_source_order_before_batch()
           first: tools.echo({ value: tools.echo({ value: "arg-a" })? })?,
           second: tools.echo({ value: tools.echo({ value: "arg-b" })? })?
         }
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -360,7 +360,7 @@ async fn aggregate_await_leaf_unwrap_waits_for_all_siblings_then_reports_first_e
                         },
                     ))
                 }
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unexpected non-batch host ability")),
@@ -377,7 +377,7 @@ async fn aggregate_await_leaf_unwrap_waits_for_all_siblings_then_reports_first_e
           bad: tools.err()?,
           good: tools.echo({ value: "ok" })?
         }
-        submit result
+        finish result
         "#,
     )
     .expect("program should parse");
@@ -491,7 +491,7 @@ async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutatio
             pairs = pairs + [format("{}{}", key, n)]
           }
         }
-        submit { total: total, counts: counts, seen: seen, pairs: pairs }
+        finish { total: total, counts: counts, seen: seen, pairs: pairs }
     "#;
     let compiled = compile_source(source).expect("program should compile");
     let begin_iterators = compiled
@@ -535,7 +535,7 @@ async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutatio
 fn list_comprehension_compiles_to_iterator_and_append_bytecode() {
     let compiled = compile_source(
         r#"
-        submit [n * 2 for n in range(0, 4) if n % 2 == 0]
+        finish [n * 2 for n in range(0, 4) if n % 2 == 0]
         "#,
     )
     .expect("program should compile");
@@ -567,7 +567,7 @@ fn effectful_loop_bodies_compile_to_generic_iterator_bytecode() {
         for item in items {
           print item
         }
-        submit null
+        finish null
         "#,
     )
     .expect("program should parse");
@@ -591,7 +591,7 @@ async fn constant_propagation_does_not_cross_control_flow_boundaries() {
           x = 2
         }
         y = x + 1
-        submit y
+        finish y
         "#,
     )
     .await
@@ -609,7 +609,7 @@ async fn reusable_execution_scratch_preserves_results_across_runs() {
         for item in items {
           total = total + item
         }
-        submit total
+        finish total
         "#,
     )
     .expect("program should parse");
@@ -629,13 +629,13 @@ async fn reusable_execution_scratch_preserves_results_across_runs() {
 async fn continuation_and_undefined_variable_are_reported() {
     let outcome = exec_outcome("x = 1")
         .await
-        .expect("missing submit should continue");
+        .expect("missing finish should continue");
     assert_eq!(outcome, ExecutionOutcome::Continued);
 
-    let value = exec("submit").await.expect("bare submit should succeed");
-    assert_eq!(value, Value::Null);
+    let err = crate::parse("finish").expect_err("bare finish should fail");
+    assert!(matches!(err, crate::ParseError::MissingFinishValue { .. }));
 
-    let err = exec("submit x")
+    let err = exec("finish x")
         .await
         .expect_err("undefined variable should fail");
     assert_eq!(
@@ -648,17 +648,17 @@ async fn continuation_and_undefined_variable_are_reported() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn condition_and_iteration_errors_are_reported() {
-    let value = exec("if 1 { submit 1 } else { submit 2 }")
+    let value = exec("if 1 { finish 1 } else { finish 2 }")
         .await
         .expect("numeric truthiness should be accepted");
     assert_eq!(value, Value::Number(1.0));
 
-    let value = exec("if \"\" { submit 1 } else { submit 2 }")
+    let value = exec("if \"\" { finish 1 } else { finish 2 }")
         .await
         .expect("empty string should be falsy");
     assert_eq!(value, Value::Number(2.0));
 
-    let err = exec("for x in 1 { submit x }")
+    let err = exec("for x in 1 { finish x }")
         .await
         .expect_err("non-list iteration should fail");
     assert_eq!(err, RuntimeError::NonListIteration);
@@ -666,10 +666,10 @@ async fn condition_and_iteration_errors_are_reported() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn stmt_call_and_tool_results_cover_success_and_error() {
-    exec("await tools.echo({ value: 1 }) submit 1")
+    exec("await tools.echo({ value: 1 }) finish 1")
         .await
         .expect("statement module operation should succeed");
-    let missing = exec("bad = await tools.missing({}) submit bad")
+    let missing = exec("bad = await tools.missing({}) finish bad")
         .await
         .expect("missing module operation should be wrapped");
     assert_eq!(
@@ -678,7 +678,7 @@ async fn stmt_call_and_tool_results_cover_success_and_error() {
     );
 
     let value = exec(
-        "ok = await tools.echo({ value: 7 }) bad = await tools.err({}) submit { ok: ok, bad: bad }",
+        "ok = await tools.echo({ value: 7 }) bad = await tools.err({}) finish { ok: ok, bad: bad }",
     )
     .await
     .expect("module operation program should succeed");
@@ -689,7 +689,7 @@ async fn stmt_call_and_tool_results_cover_success_and_error() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn result_unwrap_extracts_success_and_preserves_manual_handling() {
-    let value = exec("submit (await tools.echo({ value: 7 })?)")
+    let value = exec("finish (await tools.echo({ value: 7 })?)")
         .await
         .expect("unwrap should succeed");
     assert_eq!(value, Value::Number(7.0));
@@ -697,7 +697,7 @@ async fn result_unwrap_extracts_success_and_preserves_manual_handling() {
     let value = exec(
         r#"
         result = await tools.err({})
-        submit result.ok ? result.error : "unexpected"
+        finish result.ok ? result.error : "unexpected"
         "#,
     )
     .await
@@ -707,7 +707,7 @@ async fn result_unwrap_extracts_success_and_preserves_manual_handling() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn unparenthesized_await_module_operation_unwrap_skips_handle_await() {
-    let compiled = compile_source("value = await tools.echo({ value: 7 })?\nsubmit value")
+    let compiled = compile_source("value = await tools.echo({ value: 7 })?\nfinish value")
         .expect("program should compile");
     assert_resource_call_unwrap_without_handle_await(&compiled);
 
@@ -720,7 +720,7 @@ async fn unparenthesized_await_module_operation_unwrap_skips_handle_await() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn parenthesized_await_module_operation_unwrap_skips_handle_await() {
-    let compiled = compile_source("value = (await tools.echo({ value: 7 }))?\nsubmit value")
+    let compiled = compile_source("value = (await tools.echo({ value: 7 }))?\nfinish value")
         .expect("program should compile");
     assert_resource_call_unwrap_without_handle_await(&compiled);
 
@@ -736,7 +736,7 @@ async fn labeled_await_module_operation_unwrap_skips_handle_await() {
     let compiled = compile_labeled_source(
         r#"@label(title: "Echo")
 value = await tools.echo({ value: { answer: "ok" } })?
-submit value"#,
+finish value"#,
     );
     assert_resource_call_unwrap_without_handle_await(&compiled);
 
@@ -758,7 +758,7 @@ async fn labeled_parenthesized_await_module_operation_unwrap_skips_handle_await(
     let compiled = compile_labeled_source(
         r#"@label(title: "Echo")
 value = (await tools.echo({ value: { answer: "ok" } }))?
-submit value"#,
+finish value"#,
     );
     assert_resource_call_unwrap_without_handle_await(&compiled);
 
@@ -805,7 +805,7 @@ process echo_from_process() {
 #[tokio::test(flavor = "current_thread")]
 async fn direct_module_operation_unwrap_skips_observable_wrapper() {
     let compiled =
-        compile_source("submit (await tools.echo({ value: 7 })?)").expect("program should compile");
+        compile_source("finish (await tools.echo({ value: 7 })?)").expect("program should compile");
     assert_resource_call_unwrap_without_handle_await(&compiled);
     assert!(
         !compiled
@@ -821,7 +821,7 @@ async fn direct_module_operation_unwrap_skips_observable_wrapper() {
         .expect("program should run");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
 
-    let err = exec("submit (await tools.err({})?)")
+    let err = exec("finish (await tools.err({})?)")
         .await
         .expect_err("failed unwrap should abort");
     assert_eq!(
@@ -834,7 +834,7 @@ async fn direct_module_operation_unwrap_skips_observable_wrapper() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn result_unwrap_reports_failed_and_malformed_wrappers() {
-    let err = exec("submit (await tools.err({})?)")
+    let err = exec("finish (await tools.err({})?)")
         .await
         .expect_err("failed module operation unwrap should abort");
     assert_eq!(
@@ -844,7 +844,7 @@ async fn result_unwrap_reports_failed_and_malformed_wrappers() {
         }
     );
 
-    let err = exec("submit 1?")
+    let err = exec("finish 1?")
         .await
         .expect_err("non-wrapper should fail");
     assert_eq!(
@@ -854,7 +854,7 @@ async fn result_unwrap_reports_failed_and_malformed_wrappers() {
         }
     );
 
-    let err = exec("submit { ok: true }?")
+    let err = exec("finish { ok: true }?")
         .await
         .expect_err("missing value should fail");
     assert_eq!(
@@ -873,7 +873,7 @@ async fn field_index_unary_and_boolean_paths_are_covered() {
         xs = ["a", "b"]
         ok = false and missing
         alt = true or missing
-        submit [rec.nested.name, xs[1], "abc"[2], -1, not false, !false, ok, alt]
+        finish [rec.nested.name, xs[1], "abc"[2], -1, not false, !false, ok, alt]
         "#,
     )
     .await
@@ -896,12 +896,12 @@ async fn field_index_unary_and_boolean_paths_are_covered() {
         )
     );
 
-    let value = exec("submit true and false")
+    let value = exec("finish true and false")
         .await
         .expect("and path should succeed");
     assert_eq!(value, Value::Bool(false));
 
-    let value = exec("submit false or true")
+    let value = exec("finish false or true")
         .await
         .expect("or path should succeed");
     assert_eq!(value, Value::Bool(true));
@@ -909,50 +909,50 @@ async fn field_index_unary_and_boolean_paths_are_covered() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn field_index_and_type_errors_are_covered() {
-    let err = exec("n = 1 submit n.name")
+    let err = exec("n = 1 finish n.name")
         .await
         .expect_err("field access should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("rec = {} submit rec.name")
+    let value = exec("rec = {} finish rec.name")
         .await
         .expect("missing field should yield null");
     assert_eq!(value, Value::Null);
 
-    let err = exec("submit 1[0]")
+    let err = exec("finish 1[0]")
         .await
         .expect_err("bad index target should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("submit [1][2]")
+    let value = exec("finish [1][2]")
         .await
         .expect("list oob should yield null");
     assert_eq!(value, Value::Null);
 
-    let value = exec("submit \"a\"[2]")
+    let value = exec("finish \"a\"[2]")
         .await
         .expect("string oob should yield null");
     assert_eq!(value, Value::Null);
 
-    let err = exec("submit [1][1.5]")
+    let err = exec("finish [1][1.5]")
         .await
         .expect_err("fractional index should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("submit [1][-1]")
+    let value = exec("finish [1][-1]")
         .await
         .expect("negative index should resolve from the end");
     assert_eq!(value, Value::Number(1.0));
 
-    let value = exec("submit not 1")
+    let value = exec("finish not 1")
         .await
         .expect("not should use truthiness");
     assert_eq!(value, Value::Bool(false));
 
-    let value = exec("submit not 0").await.expect("zero should be falsy");
+    let value = exec("finish not 0").await.expect("zero should be falsy");
     assert_eq!(value, Value::Bool(true));
 
-    let value = exec("rec = { ok: false } submit len(rec.value.items)")
+    let value = exec("rec = { ok: false } finish len(rec.value.items)")
         .await
         .expect("null chain should work");
     assert_eq!(value, Value::Number(0.0));
@@ -961,45 +961,45 @@ async fn field_index_and_type_errors_are_covered() {
 #[tokio::test(flavor = "current_thread")]
 async fn arithmetic_and_compare_errors_are_covered() {
     assert_eq!(
-        exec("submit 7 - 2").await.expect("subtract should succeed"),
+        exec("finish 7 - 2").await.expect("subtract should succeed"),
         Value::Number(5.0)
     );
     assert_eq!(
-        exec("submit 3 * 4").await.expect("multiply should succeed"),
+        exec("finish 3 * 4").await.expect("multiply should succeed"),
         Value::Number(12.0)
     );
     assert_eq!(
-        exec("submit 8 / 2").await.expect("divide should succeed"),
+        exec("finish 8 / 2").await.expect("divide should succeed"),
         Value::Number(4.0)
     );
     assert_eq!(
-        exec("submit 8 % 3").await.expect("modulo should succeed"),
+        exec("finish 8 % 3").await.expect("modulo should succeed"),
         Value::Number(2.0)
     );
     assert_eq!(
-        exec("submit 1 != 2")
+        exec("finish 1 != 2")
             .await
             .expect("not equal should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("submit 1 <= 2")
+        exec("finish 1 <= 2")
             .await
             .expect("less-equal should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("submit 2 > 1").await.expect("greater should succeed"),
+        exec("finish 2 > 1").await.expect("greater should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("submit 2 >= 1")
+        exec("finish 2 >= 1")
             .await
             .expect("greater-equal should succeed"),
         Value::Bool(true)
     );
 
-    let value = exec("submit [1,2] + [3]")
+    let value = exec("finish [1,2] + [3]")
         .await
         .expect("list concat should succeed");
     assert_eq!(
@@ -1007,42 +1007,42 @@ async fn arithmetic_and_compare_errors_are_covered() {
         Value::List(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)].into())
     );
 
-    let value = exec("submit \"a\" + \"b\"")
+    let value = exec("finish \"a\" + \"b\"")
         .await
         .expect("string add should succeed");
     assert_eq!(value, Value::String("ab".to_string().into()));
 
-    let value = exec("submit \"a\" + 1")
+    let value = exec("finish \"a\" + 1")
         .await
         .expect("string coercion should succeed");
     assert_eq!(value, Value::String("a1".to_string().into()));
 
-    let value = exec("submit 1 + \"b\"")
+    let value = exec("finish 1 + \"b\"")
         .await
         .expect("string coercion should succeed");
     assert_eq!(value, Value::String("1b".to_string().into()));
 
-    let value = exec("submit 1 + true")
+    let value = exec("finish 1 + true")
         .await
         .expect("bool should coerce for addition");
     assert_eq!(value, Value::Number(2.0));
 
-    let value = exec("submit null + 2")
+    let value = exec("finish null + 2")
         .await
         .expect("null should coerce for addition");
     assert_eq!(value, Value::Number(2.0));
 
-    let value = exec("submit \"2\" * 3")
+    let value = exec("finish \"2\" * 3")
         .await
         .expect("numeric strings should coerce");
     assert_eq!(value, Value::Number(6.0));
 
-    let value = exec("submit \"2\" < 10")
+    let value = exec("finish \"2\" < 10")
         .await
         .expect("numeric strings should compare");
     assert_eq!(value, Value::Bool(true));
 
-    let err = exec("submit {} + 1")
+    let err = exec("finish {} + 1")
         .await
         .expect_err("records should still fail arithmetic");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
@@ -1054,7 +1054,7 @@ async fn builtin_success_matrix_is_covered() {
         r#"
         rec = { a: 1, b: 2 }
         base = [1, 2]
-        submit {
+        finish {
           len_s: len("ab"),
           len_l: len([1,2,3]),
           len_r: len(rec),
@@ -1225,7 +1225,7 @@ async fn grep_text_returns_documented_line_records() {
     let value = exec(
         r#"
         matches = grep_text("alpha\nbeta match\r\ngamma match\n", "match")
-        submit matches
+        finish matches
         "#,
     )
     .await
@@ -1247,7 +1247,7 @@ async fn grep_text_returns_documented_line_records() {
 async fn find_uses_character_offsets() {
     let value = exec(
         r#"
-        submit {
+        finish {
           first: find("éclair café", "café"),
           from_end: find("abc", "", 3),
           beyond_end: find("abc", "a", 4)
@@ -1266,52 +1266,52 @@ async fn find_uses_character_offsets() {
 #[tokio::test(flavor = "current_thread")]
 async fn builtin_error_matrix_is_covered() {
     let cases = [
-        ("submit len(true)", "len"),
-        ("submit empty(true)", "empty"),
-        ("submit keys([])", "keys"),
-        ("submit values([])", "values"),
-        ("submit contains(1, 2)", "contains"),
-        ("submit find(\"a\")", "find"),
-        ("submit find(\"a\", \"a\", -1)", "find"),
-        ("submit grep_text({}, \"a\")", "grep_text"),
-        ("submit grep_text(\"a\", \"\")", "grep_text"),
-        ("submit starts_with({}, \"a\")", "starts_with"),
-        ("submit ends_with({}, \"a\")", "ends_with"),
-        ("submit split({}, \",\")", "split"),
-        ("submit join(1, \",\")", "join"),
-        ("submit trim({})", "trim"),
-        ("submit slice(1, 0, 1)", "slice"),
-        ("submit to_int({})", "to_int"),
-        ("submit to_int(\"x\")", "to_int"),
-        ("submit to_float({})", "to_float"),
-        ("submit to_float(\"x\")", "to_float"),
-        ("submit json_parse(\"{\")", "json_parse"),
-        ("submit format()", "format"),
-        ("submit format({})", "format"),
-        ("submit format(\"{1}\", \"x\")", "format"),
-        ("submit format(\"{}\", \"x\", \"y\")", "format"),
-        ("submit format(\"{} {1}\", \"x\", \"y\")", "format"),
-        ("submit format(\"{x}\")", "format"),
-        ("submit format(\"{\")", "format"),
-        ("submit format(\"}\")", "format"),
+        ("finish len(true)", "len"),
+        ("finish empty(true)", "empty"),
+        ("finish keys([])", "keys"),
+        ("finish values([])", "values"),
+        ("finish contains(1, 2)", "contains"),
+        ("finish find(\"a\")", "find"),
+        ("finish find(\"a\", \"a\", -1)", "find"),
+        ("finish grep_text({}, \"a\")", "grep_text"),
+        ("finish grep_text(\"a\", \"\")", "grep_text"),
+        ("finish starts_with({}, \"a\")", "starts_with"),
+        ("finish ends_with({}, \"a\")", "ends_with"),
+        ("finish split({}, \",\")", "split"),
+        ("finish join(1, \",\")", "join"),
+        ("finish trim({})", "trim"),
+        ("finish slice(1, 0, 1)", "slice"),
+        ("finish to_int({})", "to_int"),
+        ("finish to_int(\"x\")", "to_int"),
+        ("finish to_float({})", "to_float"),
+        ("finish to_float(\"x\")", "to_float"),
+        ("finish json_parse(\"{\")", "json_parse"),
+        ("finish format()", "format"),
+        ("finish format({})", "format"),
+        ("finish format(\"{1}\", \"x\")", "format"),
+        ("finish format(\"{}\", \"x\", \"y\")", "format"),
+        ("finish format(\"{} {1}\", \"x\", \"y\")", "format"),
+        ("finish format(\"{x}\")", "format"),
+        ("finish format(\"{\")", "format"),
+        ("finish format(\"}\")", "format"),
         (
-            "submit validate({ name: \"pkg\" }, { type: \"object\" })",
+            "finish validate({ name: \"pkg\" }, { type: \"object\" })",
             "validate",
         ),
-        ("submit range()", "range"),
-        ("submit range(1, 2, 3, 4)", "range"),
-        ("submit range(\"3\")", "range"),
-        ("submit range(1.5)", "range"),
-        ("submit range(0, 5, 0)", "range"),
-        ("submit range(0, 1000001)", "range"),
-        ("submit range(1000001, 0, -1)", "range"),
-        ("submit ceil_div()", "ceil_div"),
-        ("submit ceil_div(1.5, 1)", "ceil_div"),
-        ("submit ceil_div(1, 0)", "ceil_div"),
-        ("submit floor_div(\"1\", 1)", "floor_div"),
-        ("submit push(1, 2)", "push"),
-        ("submit push([1])", "push"),
-        ("submit no_such_builtin()", "no_such_builtin"),
+        ("finish range()", "range"),
+        ("finish range(1, 2, 3, 4)", "range"),
+        ("finish range(\"3\")", "range"),
+        ("finish range(1.5)", "range"),
+        ("finish range(0, 5, 0)", "range"),
+        ("finish range(0, 1000001)", "range"),
+        ("finish range(1000001, 0, -1)", "range"),
+        ("finish ceil_div()", "ceil_div"),
+        ("finish ceil_div(1.5, 1)", "ceil_div"),
+        ("finish ceil_div(1, 0)", "ceil_div"),
+        ("finish floor_div(\"1\", 1)", "floor_div"),
+        ("finish push(1, 2)", "push"),
+        ("finish push([1])", "push"),
+        ("finish no_such_builtin()", "no_such_builtin"),
     ];
 
     for (source, _) in cases {
@@ -1324,7 +1324,7 @@ async fn builtin_error_matrix_is_covered() {
         ));
     }
 
-    let err = exec("submit len()")
+    let err = exec("finish len()")
         .await
         .expect_err("arity error should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
@@ -1334,19 +1334,19 @@ async fn builtin_error_matrix_is_covered() {
 async fn validate_reports_precise_shape_errors() {
     let cases = [
         (
-            "submit validate({ name: \"pkg\" }, Type { name: str, version: str })",
+            "finish validate({ name: \"pkg\" }, Type { name: str, version: str })",
             "validation failed: $: missing required field `version`",
         ),
         (
-            r#"submit validate({ packages: [{ name: "pkg", version: 1 }] }, Type { packages: list[Type { name: str, version: str }] })"#,
+            r#"finish validate({ packages: [{ name: "pkg", version: 1 }] }, Type { packages: list[Type { name: str, version: str }] })"#,
             "validation failed: $.packages[0].version: expected string, got number",
         ),
         (
-            r#"submit validate({ status: "maybe" }, Type { status: enum["ok", "err"] })"#,
+            r#"finish validate({ status: "maybe" }, Type { status: enum["ok", "err"] })"#,
             "validation failed: $.status: expected one of [ok, err], got maybe",
         ),
         (
-            r#"submit validate({ count: 1.5 }, Type { count: int })"#,
+            r#"finish validate({ count: 1.5 }, Type { count: int })"#,
             "validation failed: $.count: expected integer, got number",
         ),
     ];
@@ -1363,7 +1363,7 @@ async fn validate_reports_precise_shape_errors() {
         );
     }
 
-    let err = exec("submit validate({ name: \"pkg\" }, { type: \"object\" })")
+    let err = exec("finish validate({ name: \"pkg\" }, { type: \"object\" })")
         .await
         .expect_err("raw schema records should be rejected");
     assert_eq!(
@@ -1377,7 +1377,7 @@ async fn validate_reports_precise_shape_errors() {
 #[tokio::test(flavor = "current_thread")]
 async fn validate_union_accepts_any_variant() {
     // `str | null` must accept both a string and a null.
-    let out = exec(r#"submit validate({ email: "a@b" }, Type { email: str | null })"#)
+    let out = exec(r#"finish validate({ email: "a@b" }, Type { email: str | null })"#)
         .await
         .expect("string-branch validate should succeed");
     assert_eq!(
@@ -1389,7 +1389,7 @@ async fn validate_union_accepts_any_variant() {
         }))
     );
 
-    let out = exec(r#"submit validate({ email: null }, Type { email: str | null })"#)
+    let out = exec(r#"finish validate({ email: null }, Type { email: str | null })"#)
         .await
         .expect("null-branch validate should succeed");
     let Value::Record(rec) = &out else {
@@ -1400,7 +1400,7 @@ async fn validate_union_accepts_any_variant() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn validate_union_rejects_value_matching_no_variant() {
-    let err = exec(r#"submit validate({ email: 42 }, Type { email: str | null })"#)
+    let err = exec(r#"finish validate({ email: 42 }, Type { email: str | null })"#)
         .await
         .expect_err("number should not match str | null");
     let RuntimeError::ValueError { message } = err else {
@@ -1414,13 +1414,13 @@ async fn validate_union_rejects_value_matching_no_variant() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn validate_static_and_dynamic_type_paths_share_error_text() {
-    let static_err = exec(r#"submit validate({ email: 42 }, Type { email: str | null })"#)
+    let static_err = exec(r#"finish validate({ email: 42 }, Type { email: str | null })"#)
         .await
         .expect_err("static Type literal should reject number");
     let dynamic_err = exec(
         r#"
 Schema = await tools.echo({ value: Type { email: str | null } })?
-submit validate({ email: 42 }, Schema)
+finish validate({ email: 42 }, Schema)
 "#,
     )
     .await
@@ -1440,7 +1440,7 @@ submit validate({ email: 42 }, Schema)
 async fn validate_object_type_accepts_image_descriptors() {
     let program = crate::parse(
         r#"
-submit validate(img, Type {
+finish validate(img, Type {
   type: str,
   id: str,
   label: str,

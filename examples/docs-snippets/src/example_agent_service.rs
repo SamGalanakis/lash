@@ -113,7 +113,7 @@ async fn service_turn(
             )
             .expect("valid model metadata"),
         )
-        .require_submit()?;
+        .require_finish()?;
 
     let output = turn.stream_to(&ui_events).await?;
     let assistant_text = assistant_text_for_persistence(

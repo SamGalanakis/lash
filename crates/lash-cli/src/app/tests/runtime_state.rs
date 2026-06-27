@@ -88,7 +88,7 @@ fn plan_exit_tool_does_not_create_local_shadow_queue() {
         }),
     );
 
-    assert!(app.queued_work_snapshot().is_empty());
+    assert!(app.pending_turn_input_snapshot().is_empty());
     assert!(
         app.timeline
             .iter()
@@ -164,7 +164,7 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
         }),
     );
 
-    assert!(app.queued_work_snapshot().is_empty());
+    assert!(app.pending_turn_input_snapshot().is_empty());
     assert!(
         app.timeline
             .iter()
@@ -279,21 +279,13 @@ fn durable_queue_snapshot_preserves_order_and_cache_is_display_only() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let first = PreparedTurn::new("queued-1".into(), Vec::new());
     let second = PreparedTurn::new("queued-2".into(), Vec::new());
-    app.test_seed_queued_turn_snapshot(
-        first.clone(),
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
-    );
-    app.test_seed_queued_turn_snapshot(
-        second.clone(),
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
-    );
+    app.test_seed_queued_turn_snapshot(first.clone(), lash_core::TurnInputIngress::NextTurn);
+    app.test_seed_queued_turn_snapshot(second.clone(), lash_core::TurnInputIngress::NextTurn);
 
     let previews = app
-        .queued_work_snapshot()
+        .pending_turn_input_snapshot()
         .iter()
-        .filter_map(|batch| app.prepared_turn_for_queued_batch(batch))
+        .filter_map(|input| app.prepared_turn_for_pending_input(input))
         .map(|turn| turn.display_text)
         .collect::<Vec<_>>();
 
@@ -302,103 +294,65 @@ fn durable_queue_snapshot_preserves_order_and_cache_is_display_only() {
 }
 
 #[test]
-fn durable_queue_snapshot_filters_session_commands_from_preview_state() {
-    fn batch(
-        batch_id: &str,
-        enqueue_seq: u64,
-        payload: lash_core::runtime::QueuedWorkPayload,
-    ) -> lash_core::runtime::QueuedWorkBatch {
-        lash_core::runtime::QueuedWorkBatch {
-            batch_id: batch_id.to_string(),
-            session_id: "test-session-id".to_string(),
-            enqueue_seq,
-            source_key: Some(format!("source:{batch_id}")),
-            delivery_policy: lash_core::DeliveryPolicy::EarliestSafeBoundary,
-            slot_policy: lash_core::SlotPolicy::Exclusive,
-            merge_key: lash_core::runtime::MergeKey::Never,
-            available_at_ms: 0,
-            enqueued_at_ms: 0,
-            items: vec![lash_core::runtime::QueuedWorkItem {
-                item_id: format!("{batch_id}:item:0"),
-                payload,
-            }],
+fn durable_queue_snapshot_filters_completed_inputs_from_preview_state() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let visible = PreparedTurn::new("visible turn".into(), Vec::new());
+    let hidden = PreparedTurn::new("already completed".into(), Vec::new());
+    let visible_id =
+        app.test_seed_queued_turn_snapshot(visible, lash_core::TurnInputIngress::NextTurn);
+    let hidden_id =
+        app.test_seed_queued_turn_snapshot(hidden, lash_core::TurnInputIngress::NextTurn);
+    let mut snapshot = app.pending_turn_input_snapshot().to_vec();
+    for input in &mut snapshot {
+        if input.input_id == hidden_id {
+            input.state = lash_core::TurnInputState::Completed;
         }
     }
-
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.set_queued_work_snapshot(vec![
-        batch(
-            "command",
-            1,
-            lash_core::runtime::QueuedWorkPayload::session_command(
-                lash_core::SessionCommand::RefreshToolCatalog {
-                    reason: "interactive-sync-runtime-tools".to_string(),
-                },
-            ),
-        ),
-        batch(
-            "turn",
-            2,
-            lash_core::runtime::QueuedWorkPayload::turn_input(lash_core::TurnInput::text(
-                "visible turn",
-            )),
-        ),
-    ]);
+    app.set_pending_turn_input_snapshot(snapshot);
 
     assert_eq!(
-        app.queued_work_snapshot()
+        app.pending_turn_input_snapshot()
             .iter()
-            .map(|batch| batch.batch_id.as_str())
+            .filter(|input| !matches!(input.state, lash_core::TurnInputState::Completed))
+            .map(|input| input.input_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["turn"]
+        vec![visible_id.as_str()]
     );
     assert!(app.has_queued_messages());
 }
 
 #[test]
-fn queued_work_started_removes_claimed_batch_from_preview() {
+fn pending_turn_input_removal_drops_claimed_input_from_preview() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let first_id = app.test_seed_queued_turn_snapshot(
         PreparedTurn::new("processing now".into(), Vec::new()),
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
+        lash_core::TurnInputIngress::NextTurn,
     );
     let second_id = app.test_seed_queued_turn_snapshot(
         PreparedTurn::new("still pending".into(), Vec::new()),
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
+        lash_core::TurnInputIngress::NextTurn,
     );
 
-    app.handle_turn_activity(lash_core::TurnActivity::independent(
-        TurnEvent::QueuedWorkStarted {
-            boundary: lash_core::runtime::QueuedWorkClaimBoundary::Idle,
-            batch_ids: vec![first_id],
-            causes: Vec::new(),
-        },
-    ));
+    app.remove_pending_turn_inputs(std::slice::from_ref(&first_id));
 
     assert_eq!(
-        app.queued_work_snapshot()
+        app.pending_turn_input_snapshot()
             .iter()
-            .map(|batch| batch.batch_id.as_str())
+            .map(|input| input.input_id.as_str())
             .collect::<Vec<_>>(),
         vec![second_id.as_str()]
     );
 }
 
 #[test]
-fn take_prepared_turn_for_queued_batch_restores_cached_images() {
+fn take_prepared_turn_for_pending_input_restores_cached_images() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("queued".into(), vec![vec![1, 2, 3]]);
-    app.test_seed_queued_turn_snapshot(
-        turn,
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
-    );
+    app.test_seed_queued_turn_snapshot(turn, lash_core::TurnInputIngress::NextTurn);
 
-    let batch = app.queued_work_snapshot()[0].clone();
+    let pending = app.pending_turn_input_snapshot()[0].clone();
     let restored = app
-        .take_prepared_turn_for_queued_batch(&batch)
+        .take_prepared_turn_for_pending_input(&pending)
         .expect("queued presentation");
 
     assert_eq!(restored.display_text, "queued");
@@ -682,13 +636,9 @@ fn queued_injection_stays_out_of_history_until_committed() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("follow up now".into(), Vec::new());
 
-    app.test_seed_queued_turn_snapshot(
-        turn,
-        lash_core::DeliveryPolicy::EarliestSafeBoundary,
-        lash_core::SlotPolicy::Join,
-    );
+    app.test_seed_queued_turn_snapshot(turn, lash_core::TurnInputIngress::NextTurn);
 
-    assert_eq!(app.queued_work_snapshot().len(), 1);
+    assert_eq!(app.pending_turn_input_snapshot().len(), 1);
     assert!(!matches!(
         app.timeline.last(),
         Some(UiTimelineItem::UserInput(_))
@@ -700,8 +650,7 @@ fn idle_earliest_boundary_preview_is_next_full_turn_not_this_turn() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.test_seed_queued_turn_snapshot(
         PreparedTurn::new("follow up now".into(), Vec::new()),
-        lash_core::DeliveryPolicy::EarliestSafeBoundary,
-        lash_core::SlotPolicy::Join,
+        lash_core::TurnInputIngress::NextTurn,
     );
 
     let preview = crate::render::queue_preview_lines_snapshot(&app, 80)
@@ -724,13 +673,9 @@ fn idle_earliest_boundary_preview_is_next_full_turn_not_this_turn() {
 fn regular_queued_turn_stays_out_of_history_until_dispatched() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("queued text".into(), Vec::new());
-    app.test_seed_queued_turn_snapshot(
-        turn,
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
-    );
+    app.test_seed_queued_turn_snapshot(turn, lash_core::TurnInputIngress::NextTurn);
 
-    assert_eq!(app.queued_work_snapshot().len(), 1);
+    assert_eq!(app.pending_turn_input_snapshot().len(), 1);
     assert!(!matches!(
         app.timeline.last(),
         Some(UiTimelineItem::UserInput(_))
@@ -742,8 +687,7 @@ fn suppressed_ready_batch_does_not_render_queue_preview() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let batch_id = app.test_seed_queued_turn_snapshot(
         PreparedTurn::new("send immediately".into(), Vec::new()),
-        lash_core::DeliveryPolicy::EarliestSafeBoundary,
-        lash_core::SlotPolicy::Join,
+        lash_core::TurnInputIngress::NextTurn,
     );
 
     assert!(
@@ -755,7 +699,7 @@ fn suppressed_ready_batch_does_not_render_queue_preview() {
                 .any(|span| span.content.contains("send immediately")))
     );
 
-    app.suppress_queue_preview_batches([batch_id.as_str()]);
+    app.suppress_queue_preview_inputs([batch_id.as_str()]);
 
     assert!(crate::render::queue_preview_lines_snapshot(&app, 80).is_empty());
     assert!(!app.has_queued_messages());

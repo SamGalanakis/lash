@@ -297,11 +297,15 @@ pub struct LlmUsage {
 
 #[derive(Clone, Debug)]
 pub enum LlmStreamEvent {
+    /// Append-only visible assistant text. Providers must send only the new
+    /// suffix here; completed/cumulative message text belongs in `Part(Text)`.
     Delta(String),
     /// Incremental reasoning-summary text. Kept separate from `Delta` so
     /// the UI can render it in a distinct muted/italic style rather than
     /// mixing it into the assistant's final text.
     ReasoningDelta(String),
+    /// Structured provider output state. Text parts reconcile final response
+    /// state and replay metadata; they are not live-visible text deltas.
     Part(LlmOutputPart),
     Usage(LlmUsage),
     RetryStatus {

@@ -88,6 +88,55 @@ impl RuntimeTurnDriver<'_> {
         })?;
         let mut transient_messages = Vec::new();
         let mut turn_causes = Vec::new();
+        let turn_input_claim = if let Some(store) = self.session.history_store() {
+            let Some(session_execution_lease) = self.session_execution_lease.as_ref() else {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::StoreCommitFailed,
+                    "active checkpoint turn-input claim requires a session execution lease",
+                ));
+            };
+            store
+                .claim_active_turn_inputs(
+                    &self.session_id,
+                    session_execution_lease,
+                    &self.runtime_lease_owner,
+                    &self.turn_id,
+                    checkpoint,
+                    crate::TURN_INPUT_CLAIM_TTL_MS,
+                    64,
+                )
+                .await
+                .map_err(crate::runtime::runtime_error_from_store_commit)?
+        } else {
+            None
+        };
+        if let Some(claim) = turn_input_claim {
+            let accepted_turn_inputs = claim.accepted_turn_inputs();
+            let materialized = claim
+                .materialize_for_checkpoint(self.host.core.durability.attachment_store.as_ref())
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::DurableStoreRequired {
+                            facet: crate::DurableStoreFacet::AttachmentStore,
+                        },
+                        err,
+                    )
+                })?;
+            transient_messages.extend(materialized.transient_messages);
+            turn_causes.extend(materialized.turn_causes);
+            if !accepted_turn_inputs.is_empty() {
+                send_session_event(
+                    event_tx,
+                    SessionEvent::InjectedTurnInputAccepted {
+                        inputs: accepted_turn_inputs,
+                        checkpoint,
+                    },
+                )
+                .await;
+            }
+            self.pending_turn_input_claims.push(claim);
+        }
         let queue_claim = if let Some(store) = self.session.history_store() {
             let Some(session_execution_lease) = self.session_execution_lease.as_ref() else {
                 return Err(RuntimeError::new(
@@ -110,7 +159,6 @@ impl RuntimeTurnDriver<'_> {
             None
         };
         if let Some(claim) = queue_claim {
-            let accepted_turn_inputs = claim.accepted_turn_inputs();
             let materialized = claim
                 .materialize_for_checkpoint_with_attachments(
                     self.host.core.durability.attachment_store.as_ref(),
@@ -145,16 +193,6 @@ impl RuntimeTurnDriver<'_> {
             committed.extend(materialized.messages);
             transient_messages.extend(materialized.transient_messages);
             turn_causes.extend(materialized.turn_causes);
-            if !accepted_turn_inputs.is_empty() {
-                send_session_event(
-                    event_tx,
-                    SessionEvent::InjectedTurnInputAccepted {
-                        inputs: accepted_turn_inputs,
-                        checkpoint,
-                    },
-                )
-                .await;
-            }
             self.pending_queue_claims.push(claim);
         }
         let plugins = Arc::clone(self.session.plugins());

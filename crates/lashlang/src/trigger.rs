@@ -1150,7 +1150,7 @@ mod tests {
 
     fn linked_artifact(source: &str, resources: LashlangHostCatalog) -> ModuleArtifact {
         let source =
-            format!("{source}\nsource = cron.Schedule({{ expr: \"*\" }})\nsubmit source\n");
+            format!("{source}\nsource = cron.Schedule({{ expr: \"*\" }})\nfinish source\n");
         crate::LinkedModule::link(
             crate::parse(&source).expect("parse trigger target module"),
             process_environment(resources),

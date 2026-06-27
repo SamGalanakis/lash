@@ -26,6 +26,7 @@ mod turn_boundary;
 mod turn_commit_draft;
 mod turn_driver;
 mod turn_graph_editor;
+mod turn_input_ingress;
 mod turn_loop;
 mod turn_queue;
 mod usage;
@@ -153,6 +154,11 @@ pub use state::RuntimeSessionState;
 use state::{
     append_session_nodes_to_state_with_clock, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph, open_agent_frame_in_state_with_clock,
+};
+pub use turn_input_ingress::{
+    PendingTurnInput, PendingTurnInputDraft, QueuedCheckpointTurnInput, TURN_INPUT_CLAIM_TTL_MS,
+    TurnInputCheckpointBoundary, TurnInputClaim, TurnInputClaimMode, TurnInputCompletion,
+    TurnInputIngress, TurnInputState,
 };
 pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{
@@ -794,7 +800,7 @@ pub enum TurnEvent {
         output: crate::ToolCallOutput,
         duration_ms: u64,
     },
-    SubmittedValue {
+    FinalValue {
         value: serde_json::Value,
     },
     ToolValue {

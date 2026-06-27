@@ -35,7 +35,7 @@
           <p>Durable truth lives behind a single trait, <code>RuntimePersistence</code> (<code>crates/lash-core/src/store/mod.rs</code>), whose surface is exactly a durable-object store:</p>
           <ul class="bullets">
             <li><code>load_session</code>, <code>load_node</code>: rehydrate working state.</li>
-            <li><code>try_claim_session_execution_lease</code>, <code>renew_session_execution_lease</code>, <code>release_session_execution_lease</code>: the durable single-writer execution lane for a session. Foreground turns, queued turns, wake delivery, and mutating session commands must hold this lease before touching session work.</li>
+            <li><code>try_claim_session_execution_lease</code>, <code>renew_session_execution_lease</code>, <code>release_session_execution_lease</code>: the durable single-writer execution lane for a session. Foreground turns, pending user input dispatch, wake delivery, and mutating session commands must hold this lease before touching session work.</li>
             <li><code>commit_runtime_state</code>: fenced session-head commit. The live session execution lease is verified in the same transaction as the head revision CAS; CAS is the backstop, not the normal concurrency mechanism.</li>
             <li><code>enqueue_queued_work</code>, <code>claim_ready_queued_work</code>, <code>renew_/abandon_/cancel_*</code>: a durable work queue with <code>claim_id</code>, owner identity plus incarnation, <code>claim_token</code>, and <code>claim_fencing_token</code>. Claims are also fenced by the current session execution lease.</li>
             <li><code>save_/load_session_meta</code>, <code>tombstone_nodes</code>, <code>vacuum</code>, <code>gc_unreachable</code>.</li>
@@ -116,7 +116,7 @@ flowchart LR
             <table>
               <thead><tr><th>Choice</th><th>What it needs</th></tr></thead>
               <tbody>
-                <tr><td><strong>Networked store</strong></td><td>Use <code>PostgresStorage</code> for sessions, queued work, process registry, triggers, and Lashlang artifacts; use <code>S3AttachmentStore</code> for attachment bytes. The backend-agnostic conformance suites run against Postgres.</td></tr>
+                <tr><td><strong>Networked store</strong></td><td>Use <code>PostgresStorage</code> for sessions, pending turn inputs, queued work, process registry, triggers, and Lashlang artifacts; use <code>S3AttachmentStore</code> for attachment bytes. The backend-agnostic conformance suites run against Postgres.</td></tr>
                 <tr><td><strong>Turn durability across workers</strong></td><td>Deploy turns under <strong>Restate</strong> with <code>RestateRuntimeEffectController</code>; a crash reruns the handler and replays effect outcomes before the final session commit.</td></tr>
                 <tr><td><strong>Fleet work dispatch</strong></td><td>Restate can push handlers for turn and process workflows, while shared queue and process rows retain claim/fencing semantics for recoverable work. The distributed worker E2E exercises two workers behind an h2c proxy.</td></tr>
                 <tr><td><strong>Session-agnostic ingress</strong></td><td>External signals must route to whichever worker holds the session, so ingress must not be bolted to one session. See Triggers below.</td></tr>
@@ -165,14 +165,14 @@ flowchart LR
   Emit --> Match["reserve_matching_deliveries<br/>match by source_type + source_key"]
   Match --> Deliver["idempotent effect delivery<br/>deterministic occurrence / delivery id"]
   Deliver --> Proc["start trigger process<br/>with stored registrant + env_ref"]
-  Proc --> Wake["wake → target session input queue<br/>EarliestSafeBoundary"]
+  Proc --> Wake["wake → queued work<br/>EarliestSafeBoundary"]
             </div>
           </div>
           <ul class="bullets">
             <li><strong>A second store seam.</strong> Subscriptions, occurrences, and delivery reservations live behind a <code>TriggerStore</code> trait, parallel to <code>RuntimePersistence</code>. The first-party shared-worker implementation is <code>PostgresTriggerStore</code>; another fleet can use a different backend with the same matching and reservation semantics.</li>
             <li><strong>The event carries no session; the subscription carries process edges.</strong> An emitted event is matched by <code>source_type</code> and <code>source_key</code> against registered subscriptions. Each subscription stores the registrant, captured execution environment, and optional wake target for the process it will start (a wake target also earns that session a handle grant at delivery). A single event fans out to 0..N subscribers, including subscriptions with no session edges. Session identity enters only through those optional edges, never through the event.</li>
             <li><strong>Delivery is an idempotent effect.</strong> Each matched delivery runs through the effect controller with a deterministic id (<code>occurrence_id</code> from <code>source_type</code> + source key + idempotency key; delivery process id from <code>occurrence_id</code> + <code>subscription_id</code>). Delivery is <strong>exactly-once</strong> and replay-safe: any worker can run it, and replay under a durable effect host cannot double-start a trigger process.</li>
-            <li><strong>Only a wake target is session-coupled.</strong> When a delivered process wakes an agent and has a live wake target, that wake lands on the target session's input queue at <code>EarliestSafeBoundary</code>: the sole point where session identity and turn-ordering apply.</li>
+            <li><strong>Only a wake target is session-coupled.</strong> When a delivered process wakes an agent and has a live wake target, that wake lands in the target session's queued work at <code>EarliestSafeBoundary</code>: the sole point where session identity and turn-ordering apply to trigger delivery.</li>
           </ul>
           <p>Net for the fleet: route external signals to a runtime-level emit → match → idempotent effect-delivery → wake. Trigger delivery reuses the existing claim and replay machinery; wake processing then enters the target session through the session execution lease. The Postgres-backed implementation is exercised by the distributed Restate/Postgres/MinIO E2E, but the contract is the <code>TriggerStore</code>, session-store, and effect-host boundary.</p>
         </div>

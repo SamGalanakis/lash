@@ -54,10 +54,11 @@ pub(crate) enum RuntimePerfScenario {
     TraceJsonlStandard,
     TraceJsonlExtended,
     QueuedWorkClaimStress,
+    TurnInputIngressInterrupt,
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 34] = [
+    pub(crate) const DEFAULTS: [Self; 35] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -92,8 +93,9 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
         Self::QueuedWorkClaimStress,
+        Self::TurnInputIngressInterrupt,
     ];
-    pub(crate) const KNOWN: [Self; 34] = [
+    pub(crate) const KNOWN: [Self; 35] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -128,6 +130,7 @@ impl RuntimePerfScenario {
         Self::TraceJsonlStandard,
         Self::TraceJsonlExtended,
         Self::QueuedWorkClaimStress,
+        Self::TurnInputIngressInterrupt,
     ];
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -166,6 +169,7 @@ impl RuntimePerfScenario {
             "trace_jsonl_standard" => Some(Self::TraceJsonlStandard),
             "trace_jsonl_extended" => Some(Self::TraceJsonlExtended),
             "queued_work_claim_stress" => Some(Self::QueuedWorkClaimStress),
+            "turn_input_ingress_interrupt" => Some(Self::TurnInputIngressInterrupt),
             _ => None,
         }
     }
@@ -206,6 +210,7 @@ impl RuntimePerfScenario {
             Self::TraceJsonlStandard => "trace_jsonl_standard",
             Self::TraceJsonlExtended => "trace_jsonl_extended",
             Self::QueuedWorkClaimStress => "queued_work_claim_stress",
+            Self::TurnInputIngressInterrupt => "turn_input_ingress_interrupt",
         }
     }
 
@@ -229,7 +234,8 @@ impl RuntimePerfScenario {
             | Self::TurnCheckpoint
             | Self::LiveReplayPressure
             | Self::TraceJsonlStandard
-            | Self::QueuedWorkClaimStress => ExecutionMode::Standard,
+            | Self::QueuedWorkClaimStress
+            | Self::TurnInputIngressInterrupt => ExecutionMode::Standard,
             Self::Rlm
             | Self::RlmToolCalls
             | Self::RlmAsyncToolCompletion

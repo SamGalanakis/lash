@@ -537,7 +537,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!doctype html>
       if (event.type === 'code_block_started') pendingCodeBlock = event;
       if (event.type === 'code_block_completed') completeCodeBlock(event);
       if (event.type === 'tool_call_completed') appendCompletedTool({ ...event, phase:'completed' });
-      if (event.type === 'submitted_value') appendStreamText(renderTerminalValue(event.value));
+      if (event.type === 'final_value') appendStreamText(renderTerminalValue(event.value));
       if (event.type === 'tool_value') appendStreamText(renderTerminalValue(event.value));
     }
     function handleObservation(event) {

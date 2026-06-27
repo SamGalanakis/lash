@@ -22,10 +22,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("What time ".to_string()),
-            LlmStreamEvent::Part(LlmOutputPart::Text {
-                text: "is it?".to_string(),
-                response_meta: None,
-            }),
+            LlmStreamEvent::Delta("is it?".to_string()),
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 11,
                 output_tokens: 4,
@@ -100,10 +97,7 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("I’m continuing with a type-safety cleanup now: ".to_string()),
-            LlmStreamEvent::Part(LlmOutputPart::Text {
-                text: "replace the remaining raw JSON paths.".to_string(),
-                response_meta: None,
-            }),
+            LlmStreamEvent::Delta("replace the remaining raw JSON paths.".to_string()),
         ],
         response: Ok(LlmResponse::default()),
     }]);
@@ -157,6 +151,54 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
         })
         .collect();
     assert_eq!(streamed_text, expected);
+}
+
+#[tokio::test]
+async fn standard_runtime_text_part_reconciles_without_streaming_duplicate() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: vec![
+            LlmStreamEvent::Delta("The sentence.".to_string()),
+            LlmStreamEvent::Part(LlmOutputPart::Text {
+                text: "The sentence.".to_string(),
+                response_meta: None,
+            }),
+        ],
+        response: Ok(LlmResponse::default()),
+    }]);
+    let mut runtime = standard_runtime_with_transport(transport).await;
+    let sink = RecordingSink::default();
+
+    let turn = runtime
+        .stream_turn(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "continue".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "text-part-no-duplicate-turn"),
+            )
+            .with_events(&sink),
+        )
+        .await
+        .expect("turn");
+
+    assert_eq!(turn.assistant_output.safe_text, "The sentence.");
+    let streamed_text: String = sink
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionEvent::TextDelta { content } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(streamed_text, "The sentence.");
 }
 
 #[tokio::test]
@@ -424,7 +466,7 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
     );
     assert!(!turn_events.snapshot().iter().any(|event| matches!(
         &event.event,
-        TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+        TurnEvent::FinalValue { .. } | TurnEvent::ToolValue { .. }
     )));
 }
 

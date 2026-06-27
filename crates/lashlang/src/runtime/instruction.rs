@@ -248,10 +248,9 @@ pub(crate) enum Instruction {
     },
     AppendAssign(usize),
     Print,
-    Submit,
     ProcessYield,
     ProcessWake,
-    ProcessFinish,
+    Finish,
     ProcessFail,
     ObserveStep,
     Pop,
@@ -372,11 +371,10 @@ impl Instruction {
             | Instruction::AddAssignIndexSlotNumber { .. } => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
             Instruction::Print => InstructionProfileTag::Print,
-            Instruction::Submit => InstructionProfileTag::Submit,
-            Instruction::ProcessYield
-            | Instruction::ProcessWake
-            | Instruction::ProcessFinish
-            | Instruction::ProcessFail => InstructionProfileTag::SessionProcessAdmin,
+            Instruction::Finish => InstructionProfileTag::Finish,
+            Instruction::ProcessYield | Instruction::ProcessWake | Instruction::ProcessFail => {
+                InstructionProfileTag::SessionProcessAdmin
+            }
             Instruction::ObserveStep => InstructionProfileTag::ObserveStep,
             Instruction::Pop => InstructionProfileTag::Pop,
             Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. } => {
@@ -489,7 +487,7 @@ pub(crate) enum InstructionProfileTag {
     AddAssign,
     AppendAssign,
     Print,
-    Submit,
+    Finish,
     Sleep,
     SessionProcessAdmin,
     ObserveStep,
@@ -594,7 +592,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "add_assign",
     "append_assign",
     "print",
-    "submit",
+    "finish",
     "sleep",
     "processes",
     "observe_step",

@@ -13,10 +13,13 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use lash_core::runtime::{QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload};
+use lash_core::runtime::{
+    ProcessWakeDelivery, QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload,
+    RuntimeScope, RuntimeSubject, SessionScopeId,
+};
 use lash_core::{
-    DeliveryPolicy, LeaseOwnerIdentity, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence,
-    RuntimeSessionState, SlotPolicy, StoreError, ToolState, TurnInput,
+    DeliveryPolicy, LeaseOwnerIdentity, PluginSessionSnapshot, RuntimeCommit, RuntimeInvocation,
+    RuntimePersistence, RuntimeSessionState, SlotPolicy, StoreError, ToolState,
 };
 use lash_sqlite_store::Store;
 
@@ -203,11 +206,35 @@ async fn gc_keeps_live_committed_checkpoint_blobs() {
 }
 
 fn exclusive_draft(session_id: &str, text: &str) -> QueuedWorkBatchDraft {
+    let process_id = format!("process:{text}");
+    let sequence = 1;
+    let wake = ProcessWakeDelivery {
+        wake_id: format!("wake:{text}"),
+        target_session_id: session_id.to_string(),
+        target_scope_id: SessionScopeId::new("root"),
+        process_id: process_id.clone(),
+        sequence,
+        event_type: "process.wake".to_string(),
+        event_invocation: RuntimeInvocation {
+            scope: RuntimeScope::new(session_id),
+            subject: RuntimeSubject::ProcessEvent {
+                process_id: process_id.clone(),
+                sequence,
+                event_type: "process.wake".to_string(),
+            },
+            caused_by: None,
+            replay: None,
+        },
+        process_caused_by: None,
+        dedupe_key: format!("dedupe:{text}"),
+        input: text.to_string(),
+        created_at_ms: 0,
+    };
     QueuedWorkBatchDraft::new(
         session_id,
         DeliveryPolicy::EarliestSafeBoundary,
         SlotPolicy::Exclusive,
-        vec![QueuedWorkPayload::turn_input(TurnInput::text(text))],
+        vec![QueuedWorkPayload::process_wake(wake)],
     )
 }
 

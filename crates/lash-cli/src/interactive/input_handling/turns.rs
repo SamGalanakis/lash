@@ -19,8 +19,7 @@ use crate::interactive::helpers::{
     TurnReplayPayload, record_queue_current_turn_input, record_queue_turn,
 };
 use crate::interactive::runtime::{
-    enqueue_prepared_turn, make_injected_plugin_message, refresh_queued_work_snapshot,
-    send_user_message,
+    enqueue_prepared_turn, refresh_queued_work_snapshot, send_user_message,
 };
 
 use super::SessionCtx;
@@ -62,8 +61,7 @@ async fn enqueue_prepared_turn_for_cli(
     app: &mut App,
     ui_trace: &mut Option<UiTraceRecorder>,
     runtime: &Option<LashSession>,
-    delivery_policy: lash_core::DeliveryPolicy,
-    slot_policy: lash_core::SlotPolicy,
+    ingress: lash_core::TurnInputIngress,
     show_preview: bool,
 ) -> bool {
     let Some(session) = runtime.as_ref() else {
@@ -74,7 +72,7 @@ async fn enqueue_prepared_turn_for_cli(
         app.restore_prepared_turn(queued);
         return false;
     };
-    match enqueue_prepared_turn(session, &queued, delivery_policy, slot_policy).await {
+    match enqueue_prepared_turn(session, &queued, ingress).await {
         Ok(()) => {
             if show_preview {
                 record_queue_turn(ui_trace, &queued);
@@ -96,9 +94,9 @@ async fn enqueue_prepared_turn_for_cli(
 /// Cancel the most recently queued full turn and restore it into the
 /// composer for editing.
 pub(super) async fn restore_last_durable_full_turn(app: &mut App, runtime: &Option<LashSession>) {
-    let Some(batch) = app
-        .visible_turn_batches_for_editing()
-        .max_by_key(|batch| batch.enqueue_seq)
+    let Some(pending) = app
+        .visible_turn_inputs_for_editing()
+        .max_by_key(|input| input.enqueue_seq)
         .cloned()
     else {
         return;
@@ -110,9 +108,9 @@ pub(super) async fn restore_last_durable_full_turn(app: &mut App, runtime: &Opti
         );
         return;
     };
-    match session.cancel_queued_work_batch(&batch.batch_id).await {
+    match session.cancel_pending_turn_input(&pending.input_id).await {
         Ok(Some(cancelled)) => {
-            if let Some(turn) = app.take_prepared_turn_for_queued_batch(&cancelled) {
+            if let Some(turn) = app.take_prepared_turn_for_pending_input(&cancelled) {
                 app.restore_prepared_turn(turn);
                 app.update_suggestions();
             } else {
@@ -340,8 +338,7 @@ async fn handle_tab_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
             ctx.app,
             ctx.ui_trace,
             ctx.runtime,
-            lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-            lash_core::SlotPolicy::Exclusive,
+            lash_core::TurnInputIngress::NextTurn,
             true,
         )
         .await;
@@ -460,8 +457,7 @@ async fn handle_enter_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
                     ctx.app,
                     ctx.ui_trace,
                     ctx.runtime,
-                    lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-                    lash_core::SlotPolicy::Exclusive,
+                    lash_core::TurnInputIngress::NextTurn,
                     true,
                 )
                 .await;
@@ -485,10 +481,6 @@ async fn handle_enter_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
             }
             TurnSubmissionRoute::InjectActiveTurn => {}
         }
-        let injection = lash_core::InjectedTurnInput {
-            id: Some(queued.draft_id.clone()),
-            message: make_injected_plugin_message(&queued).await,
-        };
         let Some(session) = ctx.runtime.as_ref() else {
             push_system_message(
                 ctx.app,
@@ -497,18 +489,20 @@ async fn handle_enter_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
             ctx.app.restore_prepared_turn(queued);
             return Ok(false);
         };
-        match session
-            .admin()
-            .injection()
-            .inject_turn_inputs(vec![injection])
-            .await
+        let active_turn_id = format!("cli-turn:{}", *ctx.active_stream_id);
+        match enqueue_prepared_turn(
+            session,
+            &queued,
+            lash_core::TurnInputIngress::active_turn(
+                active_turn_id,
+                lash_core::TurnInputCheckpointBoundary::AfterWork,
+            ),
+        )
+        .await
         {
             Ok(()) => {
                 record_queue_current_turn_input(ctx.ui_trace, &queued);
                 ctx.app.cache_draft_presentation(queued.clone());
-                if let Err(err) = refresh_queued_work_snapshot(ctx.app, ctx.runtime).await {
-                    push_system_message(ctx.app, format!("Failed to refresh durable queue: {err}"));
-                }
             }
             Err(err) => {
                 push_system_message(
@@ -576,8 +570,7 @@ async fn handle_enter_submit(ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
                 ctx.app,
                 ctx.ui_trace,
                 ctx.runtime,
-                lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-                lash_core::SlotPolicy::Exclusive,
+                lash_core::TurnInputIngress::NextTurn,
                 true,
             )
             .await;

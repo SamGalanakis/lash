@@ -95,6 +95,30 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             PRIMARY KEY (batch_id, item_index)
         );
 
+        CREATE TABLE IF NOT EXISTS lash_pending_turn_inputs (
+            enqueue_seq BIGSERIAL PRIMARY KEY,
+            input_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL,
+            source_key TEXT,
+            ingress_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            enqueued_at_ms BIGINT NOT NULL,
+            claim_id TEXT,
+            claim_owner_id TEXT,
+            claim_owner_incarnation_id TEXT,
+            claim_owner_liveness_json TEXT,
+            claim_token TEXT,
+            claim_fencing_token BIGINT NOT NULL DEFAULT 0,
+            claim_claimed_at_ms BIGINT NOT NULL DEFAULT 0,
+            claim_expires_at_ms BIGINT NOT NULL DEFAULT 0,
+            UNIQUE (session_id, source_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lash_pending_turn_inputs_session
+            ON lash_pending_turn_inputs(session_id, state, enqueue_seq);
+        CREATE INDEX IF NOT EXISTS idx_lash_pending_turn_inputs_claim
+            ON lash_pending_turn_inputs(session_id, claim_id, claim_token);
+
         CREATE TABLE IF NOT EXISTS lash_attachment_manifest (
             attachment_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,

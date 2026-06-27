@@ -110,23 +110,48 @@ where
     queued_work_completion_is_lease_guarded(make()).await;
     queued_wake_delivery_is_source_key_idempotent_and_claimed_once(make()).await;
     queue_completion_and_turn_commit_stamp_are_atomic(make()).await;
+    pending_turn_inputs_source_keys_order_cancel_and_cross_session(make()).await;
+    pending_turn_input_claims_reclaim_complete_and_fence(make()).await;
+    pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(make()).await;
     session_metadata_round_trips(make()).await;
     tombstone_vacuum_and_gc_are_minimally_consistent(make()).await;
     final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(make()).await;
 }
 
-/// Build a queued turn-input draft for backend conformance tests.
-pub fn queued_turn_input_draft(
+/// Build a queued process-wake draft for backend conformance tests.
+pub fn queued_process_wake_draft(
     session_id: &str,
     text: &str,
     delivery_policy: DeliveryPolicy,
     slot_policy: SlotPolicy,
 ) -> QueuedWorkBatchDraft {
+    let wake = ProcessWakeDelivery {
+        wake_id: format!("wake:{session_id}:{text}"),
+        target_session_id: session_id.to_string(),
+        target_scope_id: SessionScopeId::new(format!("session:{session_id}")),
+        process_id: format!("process:{text}"),
+        sequence: 1,
+        event_type: "process.wake".to_string(),
+        event_invocation: RuntimeInvocation {
+            scope: RuntimeScope::new(session_id),
+            subject: RuntimeSubject::ProcessEvent {
+                process_id: format!("process:{text}"),
+                sequence: 1,
+                event_type: "process.wake".to_string(),
+            },
+            caused_by: None,
+            replay: None,
+        },
+        process_caused_by: None,
+        dedupe_key: format!("wake:{session_id}:{text}:1"),
+        input: text.to_string(),
+        created_at_ms: 1,
+    };
     QueuedWorkBatchDraft::new(
         session_id,
         delivery_policy,
         slot_policy,
-        vec![QueuedWorkPayload::turn_input(TurnInput::text(text))],
+        vec![QueuedWorkPayload::process_wake(wake)],
     )
 }
 
@@ -136,7 +161,7 @@ fn queued_draft(
     delivery_policy: DeliveryPolicy,
     slot_policy: SlotPolicy,
 ) -> QueuedWorkBatchDraft {
-    queued_turn_input_draft(session_id, text, delivery_policy, slot_policy)
+    queued_process_wake_draft(session_id, text, delivery_policy, slot_policy)
 }
 
 fn queued_session_command_draft(session_id: &str, reason: &str) -> QueuedWorkBatchDraft {
@@ -155,11 +180,36 @@ fn queued_session_command_draft(session_id: &str, reason: &str) -> QueuedWorkBat
 fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
     let payload = batch.items.first().map(|item| &item.payload)?;
     match payload {
-        QueuedWorkPayload::TurnInput { input } => input.items.first().and_then(|item| match item {
-            crate::InputItem::Text { text } => Some(text.as_str()),
-            crate::InputItem::ImageRef { .. } => None,
-        }),
-        QueuedWorkPayload::ProcessWake { .. } | QueuedWorkPayload::SessionCommand { .. } => None,
+        QueuedWorkPayload::ProcessWake { wake } => Some(wake.input.as_str()),
+        QueuedWorkPayload::SessionCommand { .. } => None,
+    }
+}
+
+fn pending_next_turn_input_draft(session_id: &str, text: &str) -> crate::PendingTurnInputDraft {
+    crate::PendingTurnInputDraft::new(
+        session_id,
+        crate::TurnInputIngress::NextTurn,
+        crate::TurnInput::text(text),
+    )
+}
+
+fn pending_active_turn_input_draft(
+    session_id: &str,
+    turn_id: &str,
+    min_boundary: crate::TurnInputCheckpointBoundary,
+    text: &str,
+) -> crate::PendingTurnInputDraft {
+    crate::PendingTurnInputDraft::new(
+        session_id,
+        crate::TurnInputIngress::active_turn(turn_id, min_boundary),
+        crate::TurnInput::text(text),
+    )
+}
+
+fn pending_input_text(input: &crate::PendingTurnInput) -> Option<&str> {
+    match input.input.items.first()? {
+        crate::InputItem::Text { text } => Some(text.as_str()),
+        crate::InputItem::ImageRef { .. } => None,
     }
 }
 
@@ -2060,6 +2110,375 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
             .await
             .expect("list after accepted atomic commit")
             .is_empty()
+    );
+}
+
+async fn pending_turn_inputs_source_keys_order_cancel_and_cross_session(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let first = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "first").with_source_key("source:first"),
+        )
+        .await
+        .expect("enqueue first pending input");
+    let replay = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "different replay payload")
+                .with_source_key("source:first"),
+        )
+        .await
+        .expect("replay first pending input");
+    let second = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft("root", "second"))
+        .await
+        .expect("enqueue second pending input");
+    store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft("other", "other session"))
+        .await
+        .expect("enqueue other session pending input");
+
+    assert_eq!(
+        first.input_id, replay.input_id,
+        "replaying a source key must return the original pending input"
+    );
+    assert_eq!(
+        pending_input_text(&replay),
+        Some("first"),
+        "source-key replay must return the original stored payload, not the replay attempt"
+    );
+    let listed = store
+        .list_pending_turn_inputs("root")
+        .await
+        .expect("list pending turn inputs");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.input_id.as_str(), second.input_id.as_str()]
+    );
+    assert!(listed[0].enqueue_seq < listed[1].enqueue_seq);
+    assert!(listed.iter().all(|input| input.session_id == "root"));
+
+    let cancelled = store
+        .cancel_pending_turn_input("root", &second.input_id)
+        .await
+        .expect("cancel pending turn input")
+        .expect("cancelled input");
+    assert_eq!(cancelled.input_id, second.input_id);
+    assert_eq!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list after cancel")
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.input_id.as_str()]
+    );
+}
+
+async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn RuntimePersistence>) {
+    let first = store
+        .enqueue_pending_turn_input(
+            crate::PendingTurnInputDraft::new(
+                "root",
+                crate::TurnInputIngress::NextTurn,
+                crate::TurnInput::text("first next").with_image_ref("next-image", vec![1, 2, 3]),
+            )
+            .with_source_key("next:first"),
+        )
+        .await
+        .expect("enqueue first next input");
+    let second = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft("root", "second next"))
+        .await
+        .expect("enqueue second next input");
+    let lease = claim_session_execution_lease_for_test(&store, "root", "turn-input-owner").await;
+    let claim = store
+        .claim_next_turn_inputs(
+            "root",
+            &lease.fence(),
+            &lease_owner("turn-input-owner"),
+            60_000,
+            10,
+        )
+        .await
+        .expect("claim next inputs")
+        .expect("next input claim");
+    assert_eq!(
+        claim
+            .inputs
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.input_id.as_str(), second.input_id.as_str()]
+    );
+    assert!(
+        claim
+            .materialize_for_turn()
+            .image_blobs
+            .contains_key("next-image"),
+        "claimed next-turn input must preserve image blobs"
+    );
+    assert!(
+        store
+            .cancel_pending_turn_input("root", &first.input_id)
+            .await
+            .expect("cancel claimed input")
+            .is_none(),
+        "live claimed pending input must not be cancellable"
+    );
+    assert!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list claimed inputs")
+            .is_empty(),
+        "live claimed pending inputs must be hidden from queue previews"
+    );
+
+    store
+        .abandon_turn_input_claim(&claim)
+        .await
+        .expect("abandon pending input claim");
+    assert_eq!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list after abandon")
+            .len(),
+        2
+    );
+    let reclaimed = store
+        .claim_next_turn_inputs(
+            "root",
+            &lease.fence(),
+            &lease_owner("turn-input-owner"),
+            60_000,
+            10,
+        )
+        .await
+        .expect("reclaim next inputs")
+        .expect("reclaimed next claim");
+    assert!(
+        reclaimed.fencing_token > claim.fencing_token,
+        "reclaiming abandoned pending inputs must advance the fencing token"
+    );
+
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(lease.fence())
+                .completing_turn_input_claim(claim.completion()),
+        )
+        .await
+        .expect_err("stale turn-input completion must fail");
+    assert!(matches!(err, StoreError::TurnInputClaimExpired { .. }));
+    assert!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list reclaimed live inputs")
+            .is_empty(),
+        "stale completion must not abandon the live reclaimed claim"
+    );
+
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(lease.fence())
+                .releasing_session_execution_lease(lease.completion())
+                .completing_turn_input_claim(reclaimed.completion()),
+        )
+        .await
+        .expect("valid pending input completion commits");
+    assert!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list after valid completion")
+            .is_empty()
+    );
+}
+
+async fn pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let turn_id = "active-turn-1";
+    let accepted = store
+        .enqueue_pending_turn_input(
+            crate::PendingTurnInputDraft::new(
+                "root",
+                crate::TurnInputIngress::active_turn(
+                    turn_id,
+                    crate::TurnInputCheckpointBoundary::AfterWork,
+                ),
+                crate::TurnInput::text("accepted active")
+                    .with_image_ref("accepted-active-image", vec![9, 8, 7]),
+            )
+            .with_source_key("active:accepted"),
+        )
+        .await
+        .expect("enqueue accepted active input");
+    let unaccepted = store
+        .enqueue_pending_turn_input(pending_active_turn_input_draft(
+            "root",
+            turn_id,
+            crate::TurnInputCheckpointBoundary::AfterWork,
+            "unaccepted active",
+        ))
+        .await
+        .expect("enqueue unaccepted active input");
+    let before_completion = store
+        .enqueue_pending_turn_input(pending_active_turn_input_draft(
+            "root",
+            turn_id,
+            crate::TurnInputCheckpointBoundary::BeforeCompletion,
+            "before-completion active",
+        ))
+        .await
+        .expect("enqueue before-completion active input");
+    let other_active = store
+        .enqueue_pending_turn_input(pending_active_turn_input_draft(
+            "root",
+            "other-turn",
+            crate::TurnInputCheckpointBoundary::AfterWork,
+            "other active",
+        ))
+        .await
+        .expect("enqueue other active input");
+
+    let lease = claim_session_execution_lease_for_test(&store, "root", "active-input-owner").await;
+    let claim = store
+        .claim_active_turn_inputs(
+            "root",
+            &lease.fence(),
+            &lease_owner("active-input-owner"),
+            turn_id,
+            crate::CheckpointKind::AfterWork,
+            60_000,
+            1,
+        )
+        .await
+        .expect("claim active inputs")
+        .expect("active input claim");
+    assert_eq!(
+        claim
+            .inputs
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![accepted.input_id.as_str()],
+        "AfterWork claims must include matching active inputs admitted at that boundary in order"
+    );
+    assert!(
+        claim
+            .materialize_for_turn()
+            .image_blobs
+            .contains_key("accepted-active-image"),
+        "accepted active claim must preserve image blobs"
+    );
+
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(lease.fence())
+                .completing_turn_input_claim(claim.completion())
+                .deferring_interrupted_turn_inputs(turn_id),
+        )
+        .await
+        .expect("interrupt commit completes accepted inputs and defers unaccepted inputs");
+    let pending_after_interrupt = store
+        .list_pending_turn_inputs("root")
+        .await
+        .expect("list after interrupt deferral");
+    assert_eq!(
+        pending_after_interrupt
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            unaccepted.input_id.as_str(),
+            before_completion.input_id.as_str(),
+            other_active.input_id.as_str(),
+        ],
+        "interrupt must complete accepted input, defer matching unaccepted inputs, and retain other-turn active input"
+    );
+    let deferred_after_interrupt = pending_after_interrupt
+        .iter()
+        .filter(|input| input.ingress.active_turn_id().is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deferred_after_interrupt
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            unaccepted.input_id.as_str(),
+            before_completion.input_id.as_str()
+        ],
+        "accepted active inputs must be completed and only unaccepted matching active inputs become next-turn work"
+    );
+    assert!(deferred_after_interrupt.iter().all(|input| {
+        matches!(input.ingress, crate::TurnInputIngress::NextTurn)
+            && input.state == crate::TurnInputState::DeferredNextTurn
+    }));
+    assert!(
+        pending_after_interrupt
+            .iter()
+            .any(|input| input.ingress.active_turn_id() == Some("other-turn")),
+        "inputs for other active turns must not be deferred by this interrupt"
+    );
+
+    let next_claim = store
+        .claim_next_turn_inputs(
+            "root",
+            &lease.fence(),
+            &lease_owner("active-input-owner"),
+            60_000,
+            10,
+        )
+        .await
+        .expect("claim deferred next inputs")
+        .expect("deferred next input claim");
+    assert_eq!(
+        next_claim
+            .inputs
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            unaccepted.input_id.as_str(),
+            before_completion.input_id.as_str()
+        ]
+    );
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(lease.fence())
+                .releasing_session_execution_lease(lease.completion())
+                .completing_turn_input_claim(next_claim.completion()),
+        )
+        .await
+        .expect("complete deferred next input");
+    assert!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list after completing deferred input")
+            .iter()
+            .all(|input| input.ingress.active_turn_id() == Some("other-turn")),
+        "inputs for other active turns must not be deferred by this interrupt"
     );
 }
 

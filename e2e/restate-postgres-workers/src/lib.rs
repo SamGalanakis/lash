@@ -112,7 +112,7 @@ pub struct TurnResponse {
     pub attachment_id: String,
     pub final_text: String,
     #[serde(default)]
-    pub submitted_value: serde_json::Value,
+    pub final_value: serde_json::Value,
     #[serde(default)]
     pub streamed_event_count: usize,
     #[serde(default)]
@@ -368,7 +368,7 @@ pub async fn record_terminal_result(pool: &PgPool, response: &TurnResponse) -> R
     .bind(&response.worker_id)
     .bind(&response.attachment_id)
     .bind(&response.final_text)
-    .bind(response.submitted_value.to_string())
+    .bind(response.final_value.to_string())
     .bind(response.queued_turn_ran)
     .bind(response.streamed_event_count as i64)
     .bind(response.replay_cursor.as_deref())

@@ -300,7 +300,7 @@ pub(super) fn log_runtime_transition(
         runtime_present = runtime.is_some(),
         runtime_return_rx_present,
         cancel_token_present,
-        queued_work = app.queued_work_snapshot().len(),
+        queued_turn_inputs = app.pending_turn_input_snapshot().len(),
         draft_presentations = app.queues.draft_presentations.len(),
         active_stream_id,
         live_turn = ?app.live.turn.as_ref().map(|turn| turn.run_state),

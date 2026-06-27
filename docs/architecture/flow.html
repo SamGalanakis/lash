@@ -154,7 +154,7 @@ flowchart LR
 flowchart TD
   Host["Host application"] --> Runtime["LashRuntime"]
   Runtime --> Surface["tools and mode controls<br/>llm_query, spawn_agent, continue_as, process admins"]
-  Surface --> Submit["submit JSON schema validation"]
+  Surface --> Submit["finish JSON schema validation"]
   Runtime --> Usage["SessionUsageReport<br/>ledger by source + model"]
   Usage --> Deltas["usage deltas<br/>host reports"]
   Runtime --> Trace["provider JSONL trace<br/>LLM started/completed"]

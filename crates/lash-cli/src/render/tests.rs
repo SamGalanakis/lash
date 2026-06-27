@@ -672,11 +672,7 @@ fn input_box_shows_ui_command_argument_hint_inline() {
 fn queue_preview_highlights_slash_command_slash() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::prepare("/retry later".into(), Vec::new(), &app.skills);
-    app.test_seed_queued_turn_snapshot(
-        turn,
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
-    );
+    app.test_seed_queued_turn_snapshot(turn, lash_core::TurnInputIngress::NextTurn);
 
     let rendered = queue_preview_lines_snapshot(&app, 40);
     let item_line = rendered
@@ -751,11 +747,7 @@ fn queue_preview_highlights_multiple_detected_slash_commands() {
         Vec::new(),
         &app.skills,
     );
-    app.test_seed_queued_turn_snapshot(
-        turn,
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
-    );
+    app.test_seed_queued_turn_snapshot(turn, lash_core::TurnInputIngress::NextTurn);
 
     let rendered = queue_preview_lines_snapshot(&app, 80);
     let slash_spans = rendered
@@ -1112,7 +1104,7 @@ fn snippet_preview_wraps_long_markdown_bullets_to_viewport_width() {
 #[test]
 fn lashlang_code_block_is_hidden_below_full_expand() {
     let blocks = vec![UiTimelineItem::LashlangCode(
-        "r = await tools.read_file({ path: \"a\" })\nsubmit r.value".to_string(),
+        "r = await tools.read_file({ path: \"a\" })\nfinish r.value".to_string(),
     )];
     for level in [0u8, 1] {
         let rendered = render_block(&blocks, 0, level, 80, 24);
@@ -1534,7 +1526,7 @@ fn live_reasoning_compacts_after_turn_stops() {
 
 #[test]
 fn lashlang_code_block_renders_header_and_body_at_full_expand() {
-    let code = "r = await tools.read_file({ path: \"a\" })\nsubmit r.value";
+    let code = "r = await tools.read_file({ path: \"a\" })\nfinish r.value";
     let blocks = vec![UiTimelineItem::LashlangCode(code.to_string())];
     let rendered = render_block(&blocks, 0, 2, 80, 24);
     let text: Vec<String> = rendered
@@ -1557,7 +1549,7 @@ fn lashlang_code_block_renders_header_and_body_at_full_expand() {
         "missing first code line in {text:?}",
     );
     assert!(
-        text.iter().any(|line| line.starts_with("╎ submit r.value")),
-        "missing submit line in {text:?}",
+        text.iter().any(|line| line.starts_with("╎ finish r.value")),
+        "missing finish line in {text:?}",
     );
 }

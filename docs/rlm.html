@@ -53,7 +53,7 @@
       </div>
       <aside class="use-when">
         <strong>Choose RLM</strong>
-        <p>The model needs a typed scratchpad, repeated host calls, structured <code>submit</code>, projected state, or Lashlang background/process abilities.</p>
+        <p>The model needs a typed scratchpad, repeated host calls, structured <code>finish</code>, projected state, or Lashlang background/process abilities.</p>
       </aside>
       <aside class="avoid">
         <strong>Choose standard mode</strong>
@@ -87,7 +87,7 @@ let core = lash::RlmCore::builder()
 let session = core.session("task-42").open().await?;
 let output = session
     .turn(TurnInput::text(
-        "Inspect the task and submit a concise result.",
+        "Inspect the task and finish a concise result.",
     ))
     .run()
     .await?;</code></pre>
@@ -158,7 +158,7 @@ let output = session
         <div class="listing__row"><div class="listing__label">2. code</div><div class="listing__body"><p>The model emits prose plus one closed <code>lashlang</code> block. Stream masking keeps raw code out of normal assistant-prose UI.</p></div></div>
         <div class="listing__row"><div class="listing__label">3. execute</div><div class="listing__body"><p>The executor resolves host descriptors, links against the active <code>LashlangHostEnvironment</code>, and runs the code in the current VM state.</p></div></div>
         <div class="listing__row"><div class="listing__label">4. observe</div><div class="listing__body"><p><code>print</code> output, operation results, diagnostics, and images become the next iteration's history context.</p></div></div>
-        <div class="listing__row"><div class="listing__label">5. finish</div><div class="listing__body"><p><code>submit</code> finishes as <code>TurnFinish::SubmittedValue</code>; prose can finish as <code>TurnFinish::AssistantMessage</code> when the mode's final-answer policy allows it.</p></div></div>
+        <div class="listing__row"><div class="listing__label">5. finish</div><div class="listing__body"><p><code>finish</code> finishes as <code>TurnFinish::FinalValue</code>; prose can finish as <code>TurnFinish::AssistantMessage</code> when the mode's final-answer policy allows it.</p></div></div>
       </div>
     </div>
 
@@ -174,7 +174,7 @@ let output = session
         </div>
         <div class="listing__row">
           <div class="listing__label">shape final output</div>
-          <div class="listing__body"><p>Use <code>RlmTurnBuilderExt::require_submit()</code>, <code>require_submit_schema(...)</code>, or <code>allow_prose_or_submit()</code> per turn. Use <code>RlmSessionBuilderExt::final_answer_format(...)</code> when a root RLM session should submit Markdown, a raw value, or custom final-answer guidance. See <a href="./embedding-turns.html#rlm-and-submit">RLM submit</a>.</p></div>
+          <div class="listing__body"><p>Use <code>RlmTurnBuilderExt::require_finish()</code>, <code>require_finish_schema(...)</code>, or <code>allow_prose_or_finish()</code> per turn. Use <code>RlmSessionBuilderExt::final_answer_format(...)</code> when a root RLM session should finish Markdown, a raw value, or custom final-answer guidance. See <a href="./embedding-turns.html#rlm-and-finish">RLM finish</a>.</p></div>
         </div>
         <div class="listing__row">
           <div class="listing__label">add tools</div>
@@ -206,8 +206,8 @@ let output = session
           <div class="listing__body"><p>Lazy <code>ProjectionRef</code> values must resolve in the active resolver. If the resolver changed after resume, execution fails loudly instead of substituting <code>null</code>.</p></div>
         </div>
         <div class="listing__row">
-          <div class="listing__label">no submit</div>
-          <div class="listing__body"><p>When <code>submit</code> is required and the model never emits it, the turn stops after the configured max-turn policy. See <a href="./embedding-turns.html#rlm-and-submit">RLM submit</a>.</p></div>
+          <div class="listing__label">no finish</div>
+          <div class="listing__body"><p>When <code>finish</code> is required and the model never emits it, the turn stops after the configured max-turn policy. See <a href="./embedding-turns.html#rlm-and-finish">RLM finish</a>.</p></div>
         </div>
       </div>
     </div>

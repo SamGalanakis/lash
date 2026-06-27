@@ -79,7 +79,7 @@
         pattern: /#.*|\/\/.*/,
         greedy: true,
       },
-      "keyword": /\b(?:and|as|await|break|call|cancel|continue|each|else|enum|every|fail|false|finish|for|if|in|let|not|null|on|or|print|process|run|signal|sleep|start|submit|trigger|true|type|wait|wake|while|with|yield)\b/,
+      "keyword": /\b(?:and|as|await|break|call|cancel|continue|each|else|enum|every|fail|false|finish|for|if|in|let|not|null|on|or|print|process|run|signal|sleep|start|trigger|true|type|wait|wake|while|with|yield)\b/,
       "class-name": /\b[A-Z][A-Za-z0-9_]*\b/,
       "type": /\b(?:str|string|int|integer|float|number|bool|boolean|any|list)\b/,
       "builtin": /\b(?:ceil_div|contains|empty|ends_with|find|floor_div|format|grep_text|join|json_parse|keys|len|push|range|slice|split|starts_with|to_float|to_int|to_string|trim|validate|values)\b/,

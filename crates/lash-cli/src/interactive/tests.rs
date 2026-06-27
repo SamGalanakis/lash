@@ -225,7 +225,7 @@ fn completed_runtime_stream_rejects_late_activity() {
 }
 
 #[test]
-fn late_submitted_value_after_reconciliation_is_not_rendered_again() {
+fn late_final_value_after_reconciliation_is_not_rendered_again() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline = vec![
         UiTimelineItem::Splash,
@@ -237,7 +237,7 @@ fn late_submitted_value_after_reconciliation_is_not_rendered_again() {
     .into();
 
     if session_activity_is_current(1, 1, false) {
-        app.handle_turn_activity(TurnActivity::independent(TurnEvent::SubmittedValue {
+        app.handle_turn_activity(TurnActivity::independent(TurnEvent::FinalValue {
             value: serde_json::json!("Hi! How can I help?"),
         }));
     }
@@ -376,8 +376,7 @@ fn manual_interrupt_keeps_durable_queue_snapshot_out_of_history() {
     ));
     app.test_seed_queued_turn_snapshot(
         PreparedTurn::new("next queued thing".into(), Vec::new()),
-        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-        lash_core::SlotPolicy::Exclusive,
+        lash_core::TurnInputIngress::NextTurn,
     );
 
     assert!(app.has_queued_messages());

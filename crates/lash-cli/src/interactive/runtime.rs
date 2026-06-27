@@ -15,6 +15,7 @@ use crate::turn_runner::{
     RuntimeRunResult, make_turn_input, spawn_session_queued_turn, spawn_session_turn,
 };
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
@@ -110,14 +111,12 @@ pub(super) async fn sync_runtime_tool_catalog(
 pub(super) async fn enqueue_prepared_turn(
     session: &LashSession,
     turn: &PreparedTurn,
-    delivery_policy: lash_core::DeliveryPolicy,
-    slot_policy: lash_core::SlotPolicy,
+    ingress: lash_core::TurnInputIngress,
 ) -> Result<(), String> {
     session
         .enqueue(make_turn_input(turn))
         .id(turn.draft_id.clone())
-        .delivery_policy(delivery_policy)
-        .slot_policy(slot_policy)
+        .ingress(ingress)
         .send()
         .await
         .map(|_| ())
@@ -129,11 +128,14 @@ pub(super) async fn refresh_queued_work_snapshot(
     runtime: &Option<LashSession>,
 ) -> Result<(), String> {
     let Some(session) = runtime.as_ref() else {
-        app.clear_queued_work_snapshot();
+        app.clear_pending_turn_input_snapshot();
         return Ok(());
     };
-    let queued = session.queued_work().await.map_err(|err| err.to_string())?;
-    app.set_queued_work_snapshot(queued);
+    let queued = session
+        .pending_turn_inputs()
+        .await
+        .map_err(|err| err.to_string())?;
+    app.set_pending_turn_input_snapshot(queued);
     Ok(())
 }
 
@@ -173,7 +175,7 @@ pub(super) async fn send_user_message(
         runtime_present_before_take = runtime.is_some(),
         runtime_return_rx_present_before_take = runtime_return_rx.is_some(),
         cancel_token_present_before_take = cancel_token.is_some(),
-        queued_work = app.queued_work_snapshot().len(),
+        queued_turn_inputs = app.pending_turn_input_snapshot().len(),
         draft_presentations = app.queues.draft_presentations.len(),
         "send_user_message taking runtime for dispatch"
     );

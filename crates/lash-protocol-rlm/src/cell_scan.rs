@@ -220,12 +220,12 @@ mod tests {
 
     #[test]
     fn start_only_incomplete_block_has_no_cell() {
-        assert!(first_lashlang_cell_span("<lashlang>\nsubmit 1").is_none());
+        assert!(first_lashlang_cell_span("<lashlang>\nfinish 1").is_none());
     }
 
     #[test]
     fn end_without_start_has_no_cell() {
-        assert!(first_lashlang_cell_span("</lashlang>\nsubmit 1").is_none());
+        assert!(first_lashlang_cell_span("</lashlang>\nfinish 1").is_none());
     }
 
     #[test]
@@ -235,18 +235,18 @@ mod tests {
 
     #[test]
     fn prose_plus_complete_block_extracts_code_and_prose_offsets() {
-        let text = "Before\n\n<lashlang>\nprint 1\nsubmit 2\n</lashlang>";
+        let text = "Before\n\n<lashlang>\nprint 1\nfinish 2\n</lashlang>";
         let span = first_lashlang_cell_span(text).expect("complete block");
         assert_eq!(&text[..span.start_tag_start].trim_end(), &"Before");
-        assert_eq!(&text[span.body_start..span.body_end], "print 1\nsubmit 2");
+        assert_eq!(&text[span.body_start..span.body_end], "print 1\nfinish 2");
         assert_eq!(&text[span.end_tag_start..span.end_tag_end], "</lashlang>");
     }
 
     #[test]
     fn indented_tag_lines_parse() {
         assert_eq!(
-            code("Before\n  <lashlang>  \nsubmit 1\n  </lashlang>  \nAfter"),
-            Some("submit 1")
+            code("Before\n  <lashlang>  \nfinish 1\n  </lashlang>  \nAfter"),
+            Some("finish 1")
         );
     }
 
@@ -254,37 +254,37 @@ mod tests {
     fn markdown_fences_inside_block_are_source() {
         assert_eq!(
             code(
-                "<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload\n</lashlang>"
+                "<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nfinish payload\n</lashlang>"
             ),
-            Some("payload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload")
+            Some("payload = r\"\"\"```markdown\nbody\n```\"\"\"\nfinish payload")
         );
     }
 
     #[test]
     fn raw_triple_strings_containing_backticks_are_source() {
         assert_eq!(
-            code("<lashlang>\npayload = r\"\"\"```\nvalue\n```\"\"\"\nsubmit payload\n</lashlang>"),
-            Some("payload = r\"\"\"```\nvalue\n```\"\"\"\nsubmit payload")
+            code("<lashlang>\npayload = r\"\"\"```\nvalue\n```\"\"\"\nfinish payload\n</lashlang>"),
+            Some("payload = r\"\"\"```\nvalue\n```\"\"\"\nfinish payload")
         );
     }
 
     #[test]
     fn suffix_text_after_end_tag_is_ignored_by_span() {
-        let text = "<lashlang>\nsubmit 1\n</lashlang>\nTrailing prose.";
+        let text = "<lashlang>\nfinish 1\n</lashlang>\nTrailing prose.";
         let span = first_lashlang_cell_span(text).expect("complete block");
-        assert_eq!(&text[span.body_start..span.body_end], "submit 1");
+        assert_eq!(&text[span.body_start..span.body_end], "finish 1");
         assert_eq!(&text[span.end_tag_end..], "Trailing prose.");
     }
 
     #[test]
     fn second_block_is_ignored_after_first_close() {
-        let text = "<lashlang>\nsubmit 1\n</lashlang>\n<lashlang>\nsubmit 2\n</lashlang>";
-        assert_eq!(code(text), Some("submit 1"));
+        let text = "<lashlang>\nfinish 1\n</lashlang>\n<lashlang>\nfinish 2\n</lashlang>";
+        assert_eq!(code(text), Some("finish 1"));
     }
 
     #[test]
     fn retired_percent_marker_is_plain_prose() {
-        assert!(first_lashlang_cell_span("%%lashlang\nsubmit 1").is_none());
+        assert!(first_lashlang_cell_span("%%lashlang\nfinish 1").is_none());
     }
 
     #[test]

@@ -93,7 +93,6 @@ pub enum MergeKey {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QueuedWorkPayload {
-    TurnInput { input: Box<TurnInput> },
     ProcessWake { wake: Box<ProcessWakeDelivery> },
     SessionCommand { command: Box<SessionCommand> },
 }
@@ -106,12 +105,6 @@ pub enum QueuedWorkClass {
 }
 
 impl QueuedWorkPayload {
-    pub fn turn_input(input: TurnInput) -> Self {
-        Self::TurnInput {
-            input: Box::new(input),
-        }
-    }
-
     pub fn process_wake(wake: ProcessWakeDelivery) -> Self {
         Self::ProcessWake {
             wake: Box::new(wake),
@@ -127,7 +120,7 @@ impl QueuedWorkPayload {
     pub fn work_class(&self) -> QueuedWorkClass {
         match self {
             Self::SessionCommand { .. } => QueuedWorkClass::SessionCommand,
-            Self::TurnInput { .. } | Self::ProcessWake { .. } => QueuedWorkClass::TurnWork,
+            Self::ProcessWake { .. } => QueuedWorkClass::TurnWork,
         }
     }
 }
@@ -274,16 +267,11 @@ impl QueuedWorkClaim {
 
     pub fn materialize_for_checkpoint(&self) -> QueuedCheckpointWork {
         let messages = Vec::new();
-        let mut transient_messages = Vec::new();
+        let transient_messages = Vec::new();
         let mut turn_causes = Vec::new();
         for batch in &self.batches {
             for item in &batch.items {
                 match &item.payload {
-                    QueuedWorkPayload::TurnInput { input } => {
-                        if let Some(message) = plugin_message_from_turn_input(input) {
-                            transient_messages.push(message);
-                        }
-                    }
                     QueuedWorkPayload::ProcessWake { wake } => {
                         turn_causes.push(crate::process_wake_turn_cause(wake));
                     }
@@ -300,22 +288,14 @@ impl QueuedWorkClaim {
 
     pub async fn materialize_for_checkpoint_with_attachments(
         &self,
-        attachment_store: &dyn crate::AttachmentStore,
+        _attachment_store: &dyn crate::AttachmentStore,
     ) -> Result<QueuedCheckpointWork, String> {
         let messages = Vec::new();
-        let mut transient_messages = Vec::new();
+        let transient_messages = Vec::new();
         let mut turn_causes = Vec::new();
         for batch in &self.batches {
             for item in &batch.items {
                 match &item.payload {
-                    QueuedWorkPayload::TurnInput { input } => {
-                        if let Some(message) =
-                            plugin_message_from_turn_input_with_attachments(input, attachment_store)
-                                .await?
-                        {
-                            transient_messages.push(message);
-                        }
-                    }
                     QueuedWorkPayload::ProcessWake { wake } => {
                         turn_causes.push(crate::process_wake_turn_cause(wake));
                     }
@@ -328,30 +308,6 @@ impl QueuedWorkClaim {
             transient_messages,
             turn_causes,
         })
-    }
-
-    pub fn accepted_turn_inputs(&self) -> Vec<crate::AcceptedInjectedTurnInput> {
-        let mut accepted = Vec::new();
-        for batch in &self.batches {
-            let id = batch.source_key.as_deref().map(|source| {
-                source
-                    .strip_prefix("host:")
-                    .or_else(|| source.strip_prefix("injection:"))
-                    .unwrap_or(source)
-                    .to_string()
-            });
-            for item in &batch.items {
-                if let QueuedWorkPayload::TurnInput { input } = &item.payload
-                    && let Some(message) = plugin_message_from_turn_input(input)
-                {
-                    accepted.push(crate::AcceptedInjectedTurnInput {
-                        id: id.clone(),
-                        message,
-                    });
-                }
-            }
-        }
-        accepted
     }
 
     pub fn exclusive_session_command(&self) -> Option<(&QueuedWorkBatch, &SessionCommand)> {
@@ -371,33 +327,8 @@ impl QueuedWorkClaim {
 
     pub fn materialize_for_turn(&self) -> QueuedTurnWork {
         let checkpoint = self.materialize_for_checkpoint();
-        let mut input_items = Vec::new();
-        let mut image_blobs = std::collections::HashMap::new();
-        let mut protocol_turn_options = None;
-        let mut trace_turn_id = None;
-        for batch in &self.batches {
-            for item in &batch.items {
-                if let QueuedWorkPayload::TurnInput { input } = &item.payload {
-                    input_items.extend(input.items.clone());
-                    image_blobs.extend(input.image_blobs.clone());
-                    if protocol_turn_options.is_none() {
-                        protocol_turn_options = input.protocol_turn_options.clone();
-                    }
-                    if trace_turn_id.is_none() {
-                        trace_turn_id = input.trace_turn_id.clone();
-                    }
-                }
-            }
-        }
         QueuedTurnWork {
-            input: TurnInput {
-                items: input_items,
-                image_blobs,
-                protocol_turn_options,
-                trace_turn_id,
-                protocol_extension: None,
-                turn_context: crate::TurnContext::default(),
-            },
+            input: TurnInput::empty(),
             messages: checkpoint.messages,
             turn_causes: checkpoint.turn_causes,
         }
@@ -427,96 +358,4 @@ pub fn process_wake_batch_draft(wake: ProcessWakeDelivery) -> QueuedWorkBatchDra
         vec![QueuedWorkPayload::process_wake(wake)],
     )
     .with_source_key(source_key)
-}
-
-fn plugin_message_from_turn_input(input: &TurnInput) -> Option<PluginMessage> {
-    let mut text = Vec::new();
-    let mut images = Vec::new();
-    for item in &input.items {
-        match item {
-            crate::InputItem::Text { text: item_text } if !item_text.is_empty() => {
-                text.push(item_text.clone());
-            }
-            crate::InputItem::Text { .. } => {}
-            crate::InputItem::ImageRef { id } => {
-                if let Some(bytes) = input.image_blobs.get(id).cloned() {
-                    images.push(bytes);
-                }
-            }
-        }
-    }
-    if text.is_empty() && images.is_empty() {
-        return None;
-    }
-    Some(PluginMessage {
-        role: crate::MessageRole::User,
-        content: text.join("\n"),
-        origin: None,
-        parts: Vec::new(),
-        images,
-    })
-}
-
-async fn plugin_message_from_turn_input_with_attachments(
-    input: &TurnInput,
-    attachment_store: &dyn crate::AttachmentStore,
-) -> Result<Option<PluginMessage>, String> {
-    let normalized =
-        super::io::normalize_input_items(&input.items, &input.image_blobs, attachment_store)
-            .await?;
-    let has_image = normalized
-        .iter()
-        .any(|item| matches!(item, super::NormalizedItem::Image(_)));
-    if !has_image {
-        return Ok(plugin_message_from_turn_input(input));
-    }
-
-    let mut content = Vec::new();
-    let mut parts = Vec::new();
-    for item in normalized {
-        match item {
-            super::NormalizedItem::Text(text) if !text.is_empty() => {
-                let part_id = format!("queued.p{}", parts.len());
-                content.push(text.clone());
-                parts.push(crate::Part {
-                    id: part_id,
-                    kind: crate::PartKind::Text,
-                    content: text,
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_replay: None,
-                    prune_state: crate::PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-            }
-            super::NormalizedItem::Text(_) => {}
-            super::NormalizedItem::Image(reference) => {
-                let part_id = format!("queued.p{}", parts.len());
-                parts.push(crate::Part {
-                    id: part_id,
-                    kind: crate::PartKind::Image,
-                    content: String::new(),
-                    attachment: Some(crate::session_model::message::PartAttachment { reference }),
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_replay: None,
-                    prune_state: crate::PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-            }
-        }
-    }
-    if parts.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(PluginMessage {
-        role: crate::MessageRole::User,
-        content: content.join("\n"),
-        origin: None,
-        parts,
-        images: Vec::new(),
-    }))
 }

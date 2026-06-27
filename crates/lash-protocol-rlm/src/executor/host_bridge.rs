@@ -705,9 +705,7 @@ impl ExecutionHost for HostBridge<'_> {
                 "`wait_signal` is only available inside lashlang process bodies",
             )),
             AbilityOp::SignalRun(signal) => self.signal_run(signal).await.map(AbilityResult::Value),
-            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
-                Ok(AbilityResult::Value(value))
-            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
         }
     }
 

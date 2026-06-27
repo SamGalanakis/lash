@@ -220,10 +220,9 @@ impl LashRuntime {
     pub async fn enqueue_turn_input(
         &self,
         input: crate::TurnInput,
-        delivery_policy: crate::DeliveryPolicy,
-        slot_policy: crate::SlotPolicy,
+        ingress: crate::TurnInputIngress,
         source_key: Option<String>,
-    ) -> Result<crate::QueuedWorkBatch, RuntimeError> {
+    ) -> Result<crate::PendingTurnInput, RuntimeError> {
         let store = self
             .session
             .as_ref()
@@ -234,8 +233,7 @@ impl LashRuntime {
             store,
             self.host.queued_work_driver.clone(),
             input,
-            delivery_policy,
-            slot_policy,
+            ingress,
             source_key,
         )
         .await
@@ -376,25 +374,18 @@ pub(in crate::runtime) async fn enqueue_turn_input_to_store(
     store: Arc<dyn crate::RuntimePersistence>,
     queued_work_driver: Option<crate::QueuedWorkDriver>,
     input: crate::TurnInput,
-    delivery_policy: crate::DeliveryPolicy,
-    slot_policy: crate::SlotPolicy,
+    ingress: crate::TurnInputIngress,
     source_key: Option<String>,
-) -> Result<crate::QueuedWorkBatch, RuntimeError> {
+) -> Result<crate::PendingTurnInput, RuntimeError> {
     super::turn_loop::ensure_durable_effect_input(&input)?;
-    let mut draft = crate::QueuedWorkBatchDraft::new(
-        session_id,
-        delivery_policy,
-        slot_policy,
-        vec![crate::QueuedWorkPayload::turn_input(input)],
-    );
+    let is_next_turn = matches!(ingress, crate::TurnInputIngress::NextTurn);
+    let mut draft = crate::PendingTurnInputDraft::new(session_id, ingress, input);
     draft.source_key = source_key;
     let enqueued = store
-        .enqueue_queued_work(draft)
+        .enqueue_pending_turn_input(draft)
         .await
         .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
-    if enqueued.delivery_policy == crate::DeliveryPolicy::AfterCurrentTurnCommit
-        && let Some(driver) = queued_work_driver.as_ref()
-    {
+    if is_next_turn && let Some(driver) = queued_work_driver.as_ref() {
         driver
             .claim_and_run_pending(Some(&enqueued.session_id), "queued_turn_input")
             .await

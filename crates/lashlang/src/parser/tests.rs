@@ -12,11 +12,28 @@ mod tests {
 
     #[test]
     fn top_level_source_becomes_root_block() {
-        let program = parse("x = 1\nsubmit x").expect("program should parse");
+        let program = parse("x = 1\nfinish x").expect("program should parse");
         let expressions = block(&program);
         assert_eq!(expressions.len(), 2);
         assert!(matches!(expressions[0], Expr::Assign { .. }));
-        assert!(matches!(expressions[1], Expr::Submit(Some(_))));
+        assert!(matches!(expressions[1], Expr::Finish(_)));
+    }
+
+    #[test]
+    fn bare_finish_requires_value() {
+        let err = parse("finish").expect_err("bare finish should be rejected");
+        assert!(matches!(err, ParseError::MissingFinishValue { .. }));
+
+        let err = parse("process p() { finish }")
+            .expect_err("bare process finish should be rejected");
+        assert!(matches!(err, ParseError::MissingFinishValue { .. }));
+    }
+
+    #[test]
+    fn submit_keyword_is_removed() {
+        let err = parse(r#"submit "ok""#).expect_err("submit should be rejected");
+        assert!(matches!(err, ParseError::SubmitRemoved { .. }));
+        assert_eq!(err.to_string(), "`submit` was removed; use `finish <value>`");
     }
 
     #[test]
@@ -89,11 +106,11 @@ mod tests {
     #[test]
     fn await_list_of_process_starts_parses_directly() {
         let program = parse(
-            "process one() { finish null }\nprocess two() { finish null }\nsubmit await [start one(), start two()]",
+            "process one() { finish null }\nprocess two() { finish null }\nfinish await [start one(), start two()]",
         )
             .expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         let Expr::Await(inner) = expr.as_ref() else {
             panic!("expected await expression");
@@ -111,7 +128,7 @@ mod tests {
 
     #[test]
     fn comma_expressions_parse_as_tuples_outside_delimited_lists() {
-        let program = parse("pair = 1, 2\nsubmit pair").expect("program should parse");
+        let program = parse("pair = 1, 2\nfinish pair").expect("program should parse");
         let Expr::Assign { expr, .. } = &block(&program)[0] else {
             panic!("expected assignment");
         };
@@ -120,12 +137,12 @@ mod tests {
         };
         assert_eq!(items.len(), 2);
 
-        let program = parse("submit 1, 2").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish 1, 2").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         let Expr::Tuple(items) = expr.as_ref() else {
-            panic!("submit value should be a tuple");
+            panic!("finish value should be a tuple");
         };
         assert_eq!(items.len(), 2);
 
@@ -143,27 +160,27 @@ mod tests {
 
     #[test]
     fn parenthesized_tuple_rules_match_python_shape() {
-        let program = parse("submit (1,)").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish (1,)").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         let Expr::Tuple(items) = expr.as_ref() else {
             panic!("singleton should be a tuple");
         };
         assert_eq!(items.len(), 1);
 
-        let program = parse("submit ()").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish ()").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         let Expr::Tuple(items) = expr.as_ref() else {
             panic!("empty parens should be an empty tuple");
         };
         assert!(items.is_empty());
 
-        let program = parse("submit (1)").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish (1)").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         assert!(matches!(expr.as_ref(), Expr::Number(_)));
     }
@@ -184,15 +201,15 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert!(matches!(&args[0], Expr::Tuple(items) if items.len() == 2));
 
-        let program = parse("submit [1, 2,]").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish [1, 2,]").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         assert!(matches!(expr.as_ref(), Expr::List(items) if items.len() == 2));
 
-        let program = parse("submit [(1, 2)]").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish [(1, 2)]").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         let Expr::List(items) = expr.as_ref() else {
             panic!("expected list");
@@ -200,15 +217,15 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(matches!(&items[0], Expr::Tuple(tuple_items) if tuple_items.len() == 2));
 
-        let program = parse("submit { a: 1, b: 2, }").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish { a: 1, b: 2, }").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         assert!(matches!(expr.as_ref(), Expr::Record(entries) if entries.len() == 2));
 
-        let program = parse("submit { a: (1, 2) }").expect("program should parse");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let program = parse("finish { a: (1, 2) }").expect("program should parse");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         let Expr::Record(entries) = expr.as_ref() else {
             panic!("expected record");
@@ -262,7 +279,7 @@ mod tests {
               inputs: { tick: trigger.event },
               name: "daily_digest"
             })?
-            submit handle
+            finish handle
             "#,
         )
         .expect("module should parse");
@@ -274,7 +291,7 @@ mod tests {
         assert_eq!(expressions.len(), 3);
         assert!(matches!(expressions[0], Expr::Assign { .. }));
         assert!(matches!(expressions[1], Expr::Assign { .. }));
-        assert!(matches!(expressions[2], Expr::Submit(Some(_))));
+        assert!(matches!(expressions[2], Expr::Finish(_)));
     }
 
     #[test]
@@ -323,8 +340,8 @@ mod tests {
             r#"
             @label(title: "Setup")
             value = 1
-            @label(title: "Submit", description: "Return the value")
-            submit value
+            @label(title: "Finish", description: "Return the value")
+            finish value
             "#,
         )
         .expect("top-level labels should parse");
@@ -338,9 +355,9 @@ mod tests {
         assert_eq!(label.title.as_str(), "Setup");
         assert!(matches!(expr.as_ref(), Expr::Assign { .. }));
         let Expr::LabelAnnotated { label, expr } = &expressions[1] else {
-            panic!("expected annotated submit");
+            panic!("expected annotated finish");
         };
-        assert_eq!(label.title.as_str(), "Submit");
+        assert_eq!(label.title.as_str(), "Finish");
         assert_eq!(
             label
                 .description
@@ -348,7 +365,7 @@ mod tests {
                 .map(|description| description.as_str()),
             Some("Return the value")
         );
-        assert!(matches!(expr.as_ref(), Expr::Submit { .. }));
+        assert!(matches!(expr.as_ref(), Expr::Finish { .. }));
     }
 
     #[test]
@@ -389,13 +406,13 @@ mod tests {
     fn label_annotation_text_inside_strings_is_plain_text() {
         let program = parse(
             r####"
-            submit r"""@label(title: "Plain text")
+            finish r"""@label(title: "Plain text")
 @label(title: "Still text") finish null"""
             "####,
         )
         .expect("label-like text inside strings should parse as text");
-        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
-            panic!("expected submit");
+        let Expr::Finish(expr) = &block(&program)[0] else {
+            panic!("expected finish");
         };
         let Expr::String(value) = expr.as_ref() else {
             panic!("expected string");
@@ -439,7 +456,7 @@ mod tests {
               inputs: { input: trigger.event, gmail: gmail.work },
               name: "daily_digest"
             })?
-            submit handle
+            finish handle
             "#,
         )
         .expect("module should parse");

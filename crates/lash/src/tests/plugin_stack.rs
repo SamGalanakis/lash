@@ -245,7 +245,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
         let rlm_core = explicit_ephemeral_facets(RlmCore::builder())
             .provider(queued_text_provider(vec![lashlang_block(
                 r#"value = await tools.app_lookup({})?
-submit "done""#,
+finish "done""#,
             )]))
             .model(mock_model_spec())
             .tools(Arc::new(LongTextTools))

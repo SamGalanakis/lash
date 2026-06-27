@@ -19,10 +19,11 @@ pub(crate) enum UiPerfScenario {
     TimelineProjection,
     ActivityProjection,
     HtmlExport,
+    TurnInterruptSteerReconciliation,
 }
 
 impl UiPerfScenario {
-    pub(crate) const DEFAULTS: [Self; 9] = [
+    pub(crate) const DEFAULTS: [Self; 10] = [
         Self::HistoryRender,
         Self::WorkspaceSurface,
         Self::WorkspaceOverlay,
@@ -32,9 +33,10 @@ impl UiPerfScenario {
         Self::TimelineProjection,
         Self::ActivityProjection,
         Self::HtmlExport,
+        Self::TurnInterruptSteerReconciliation,
     ];
 
-    pub(crate) const KNOWN: [Self; 9] = Self::DEFAULTS;
+    pub(crate) const KNOWN: [Self; 10] = Self::DEFAULTS;
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
@@ -47,6 +49,9 @@ impl UiPerfScenario {
             "timeline_projection" | "projection" => Some(Self::TimelineProjection),
             "activity_projection" | "activity" => Some(Self::ActivityProjection),
             "html_export" | "export" => Some(Self::HtmlExport),
+            "turn_interrupt_steer_reconciliation" | "interrupt_steer" => {
+                Some(Self::TurnInterruptSteerReconciliation)
+            }
             _ => None,
         }
     }
@@ -62,6 +67,7 @@ impl UiPerfScenario {
             Self::TimelineProjection => "timeline_projection",
             Self::ActivityProjection => "activity_projection",
             Self::HtmlExport => "html_export",
+            Self::TurnInterruptSteerReconciliation => "turn_interrupt_steer_reconciliation",
         }
     }
 }

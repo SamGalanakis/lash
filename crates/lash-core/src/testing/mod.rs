@@ -921,7 +921,7 @@ mod test_protocol_fakes {
 
     fn default_test_code_termination() -> serde_json::Value {
         serde_json::json!({
-            "kind": "submit_required",
+            "kind": "finish_required",
             "schema": null,
         })
     }

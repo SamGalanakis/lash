@@ -63,7 +63,7 @@ pub enum RemoteTurnFinish {
     AssistantMessage {
         text: String,
     },
-    SubmittedValue {
+    FinalValue {
         value: serde_json::Value,
     },
     ToolValue {

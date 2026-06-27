@@ -11,19 +11,21 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     let mut after_current_step_previews = Vec::new();
     let mut next_turn_previews = Vec::new();
-    for batch in app
-        .queued_work_snapshot()
+    for pending in app
+        .pending_turn_input_snapshot()
         .iter()
-        .filter(|batch| !app.queued_batch_preview_suppressed(batch))
+        .filter(|input| !app.queued_input_preview_suppressed(input))
     {
         let target = if app.turn_active()
-            && batch.delivery_policy == lash_core::DeliveryPolicy::EarliestSafeBoundary
-        {
+            && matches!(
+                pending.ingress,
+                lash_core::TurnInputIngress::ActiveTurn { .. }
+            ) {
             &mut after_current_step_previews
         } else {
             &mut next_turn_previews
         };
-        if let Some(turn) = app.prepared_turn_for_queued_batch(batch) {
+        if let Some(turn) = app.prepared_turn_for_pending_input(pending) {
             target.push(turn.preview());
         }
     }

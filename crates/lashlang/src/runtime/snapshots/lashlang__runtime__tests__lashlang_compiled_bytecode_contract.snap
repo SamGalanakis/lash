@@ -1,5 +1,6 @@
 ---
 source: crates/lashlang/src/runtime/tests.rs
+assertion_line: 363
 expression: compiled_program_snapshot(GOLDEN_CONTRACT_SOURCE)
 ---
 compile_stats: total=1 const_folded=1 dynamic=0 refs=0
@@ -41,4 +42,4 @@ code:
   0025: load_name 4:counts
   0026: build_record [beta_index, matches, counts]
   0027: intrinsic validate_compiled schema#0
-  0028: submit
+  0028: finish

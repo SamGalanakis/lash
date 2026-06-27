@@ -594,7 +594,7 @@ impl SessionAdmin {
         let receipt = runtime
             .run_plugin_command(name, args, Some(session_id))
             .await?;
-        self.record_plugin_operation_observations(&receipt.events, &receipt.queued_batches);
+        self.record_plugin_operation_observations(&receipt.events, &receipt.pending_turn_inputs);
         self.runtime.publish_from(&runtime);
         Ok(receipt)
     }
@@ -630,7 +630,7 @@ impl SessionAdmin {
                 cancellation_token,
             )
             .await?;
-        self.record_plugin_operation_observations(&receipt.events, &receipt.queued_batches);
+        self.record_plugin_operation_observations(&receipt.events, &receipt.pending_turn_inputs);
         self.runtime.publish_from(&runtime);
         Ok(receipt)
     }
@@ -638,7 +638,7 @@ impl SessionAdmin {
     fn record_plugin_operation_observations(
         &self,
         events: &[lash_core::PluginOwned<lash_core::PluginRuntimeEvent>],
-        queued_batches: &[lash_core::runtime::QueuedWorkBatch],
+        pending_turn_inputs: &[lash_core::PendingTurnInput],
     ) {
         for owned in events {
             self.runtime
@@ -649,12 +649,12 @@ impl SessionAdmin {
                     },
                 ));
         }
-        if !queued_batches.is_empty() {
+        if !pending_turn_inputs.is_empty() {
             self.runtime.record_queue_changed(
                 lash_core::SessionQueueEventKind::Enqueued,
-                queued_batches
+                pending_turn_inputs
                     .iter()
-                    .map(|batch| batch.batch_id.clone())
+                    .map(|input| input.input_id.clone())
                     .collect(),
             );
         }
@@ -891,20 +891,34 @@ impl SessionAdmin {
         .await
     }
 
-    async fn inject_turn_input(&self, id: Option<String>, message: PluginMessage) -> Result<()> {
-        self.inject_turn_inputs(vec![lash_core::InjectedTurnInput { id, message }])
-            .await
+    async fn inject_turn_input(
+        &self,
+        turn_id: &str,
+        id: Option<String>,
+        message: PluginMessage,
+    ) -> Result<()> {
+        self.inject_turn_inputs_for_turn(
+            turn_id,
+            vec![lash_core::InjectedTurnInput { id, message }],
+        )
+        .await
     }
 
-    async fn inject_turn_inputs(&self, messages: Vec<lash_core::InjectedTurnInput>) -> Result<()> {
+    async fn inject_turn_inputs_for_turn(
+        &self,
+        turn_id: &str,
+        messages: Vec<lash_core::InjectedTurnInput>,
+    ) -> Result<()> {
         for input in messages {
             let source_key = input.id.map(|id| format!("injection:{id}"));
             let turn_input = turn_input_from_plugin_message(input.message);
             self.runtime
                 .enqueue_turn_input(
                     turn_input,
-                    lash_core::DeliveryPolicy::EarliestSafeBoundary,
-                    lash_core::SlotPolicy::Join,
+                    lash_core::TurnInputIngress::active_turn(
+                        turn_id,
+                        lash_core::TurnInputCheckpointBoundary::AfterWork,
+                    ),
                     source_key,
                 )
                 .await
@@ -1289,7 +1303,7 @@ impl PluginOperations {
         Ok(lash_core::PluginCommandReceipt {
             output: decode_plugin_output::<Op>(receipt.output)?,
             events: receipt.events,
-            queued_batches: receipt.queued_batches,
+            pending_turn_inputs: receipt.pending_turn_inputs,
         })
     }
 
@@ -1325,7 +1339,7 @@ impl PluginOperations {
         Ok(lash_core::PluginTaskReceipt {
             output: decode_plugin_output::<Op>(receipt.output)?,
             events: receipt.events,
-            queued_batches: receipt.queued_batches,
+            pending_turn_inputs: receipt.pending_turn_inputs,
         })
     }
 
@@ -1397,17 +1411,21 @@ pub struct InjectionAdmin {
 impl InjectionAdmin {
     pub async fn inject_turn_input(
         &self,
+        turn_id: &str,
         id: Option<String>,
         message: PluginMessage,
     ) -> Result<()> {
-        self.control.inject_turn_input(id, message).await
+        self.control.inject_turn_input(turn_id, id, message).await
     }
 
-    pub async fn inject_turn_inputs(
+    pub async fn inject_turn_inputs_for_turn(
         &self,
+        turn_id: &str,
         messages: Vec<lash_core::InjectedTurnInput>,
     ) -> Result<()> {
-        self.control.inject_turn_inputs(messages).await
+        self.control
+            .inject_turn_inputs_for_turn(turn_id, messages)
+            .await
     }
 }
 

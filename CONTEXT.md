@@ -16,6 +16,7 @@
 - **Session Observation Event**: Observer-visible session activity that advances a Session Cursor. It may include preview activity before it is durable and committed activity that settles the session view; it is not scoped to a single turn.
 - **Turn Activity**: App-facing live stream item for one active turn.
 - **Turn Event**: Semantic payload carried by Turn Activity.
+- **Submitted Value**: Terminal value produced by an RLM foreground `submit`; it ends the turn as durable runtime output. Hosts decide whether and how to render that value as user-facing transcript text.
 - **Suspended Turn**: Active session turn parked on a Durable Wait before it commits. It remains session-owned and observable, is not durable session history, and ends if the session is deleted. Avoid: Background Process, Degenerate Process.
 - **Session Event**: Runtime-internal turn/protocol machinery tolerated inside implementation boundaries. Avoid using Session Event as app-facing vocabulary.
 - **Session Revision**: Durable point in the committed session graph as observed through a session read view.

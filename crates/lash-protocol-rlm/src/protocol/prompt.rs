@@ -171,23 +171,23 @@ fn render_execution_intro(has_operations: bool) -> String {
 
 ### Persistence
 
-Keep going until the request is fully resolved. End your turn only when you `submit` a final answer or genuinely have nothing left to do — until then, every step is another `<lashlang>` block.
+Keep going until the request is fully resolved. End your turn only when you `finish` a final answer or genuinely have nothing left to do — until then, every step is another `<lashlang>` block.
 
 - If you say you will do something ("let me…", "I'll keep going"), emit the `<lashlang>` block that does it in the same reply. Never describe an action and then stop without running it.
 - You are solving the task, not narrating how it could be solved. Prefer acting over asking; ask only when genuinely blocked by a missing decision or permission.
 
-### `print` vs `submit`
+### `print` vs `finish`
 
 - `print <expr>` — inspect a value and keep going; output appears on the next step. Print the part you need to decide the next step: a whole value when it is small and all of it is useful (e.g. state you consult each turn), otherwise selected fields, samples, or slices. Avoid dumping a large value when only part of it is relevant.
-- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance. Keep the submitted value concise; do not include large variables such as diffs, full logs, raw command output, or other bulky dumps unless the user explicitly asks for them.
+- `finish <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance. Keep the final value concise; do not include large variables such as diffs, full logs, raw command output, or other bulky dumps unless the user explicitly asks for them.
 
-Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
+Never `finish` a raw tool-result dump. If you need to look at something, `print` it, then `finish` a summary on a later step.
 
-Do not submit final results that depend on operations, files, generated patches, or other current-state artifacts without inspecting first. Only `submit` once you have observed and verified the relevant results.
+Do not finish with final results that depend on operations, files, generated patches, or other current-state artifacts without inspecting first. Only `finish` once you have observed and verified the relevant results.
 
 ### Response shape
 
-Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose. If the block calls `submit`, that submitted value is the final answer; any preceding prose should be brief setup, not a second answer.
+Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose. If the block calls `finish`, that final value is the final answer; any preceding prose should be brief setup, not a second answer.
 "#,
     );
     section
@@ -229,7 +229,7 @@ fn render_language_section(
 fn push_value_language_bullets(bullets: &mut Vec<String>, images: bool) {
     if images {
         bullets.push("- Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.".to_string());
-        bullets.push("- Images: image-producing tools may return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ \"type\": \"image\", \"id\": ..., \"label\": ..., \"size\": ..., \"width\": ..., \"height\": ... }`. `len(image)` is invalid; use `.size`.".to_string());
+        bullets.push("- Images: image-producing tools may return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `finish image`, `to_string(image)`, and JSON-like serialization emit only `{ \"type\": \"image\", \"id\": ..., \"label\": ..., \"size\": ..., \"width\": ..., \"height\": ... }`. `len(image)` is invalid; use `.size`.".to_string());
     } else {
         bullets.push("- Values: null, booleans, numbers, strings, lists, and records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.".to_string());
     }
@@ -279,7 +279,7 @@ fn push_process_language_bullets(
         ""
     };
     bullets.push(format!(
-        "- Background processes: `process name(param: TYPE) {{ ... }}` declares a reusable process definition.{signal_declaration_note} `handle = start name(param: value)` creates one process run from that definition and returns its run handle;{trigger_process_note} For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the process success value. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Parallelism comes from starting all independent process handles before waiting for any of them; join a list or record of handles with `results = await handles`. `await handle` waits and returns a result wrapper like `{{ ok: true, value: ... }}`; when you need fields from the `finish` value, use `result = (await handle)?` and then read `result.field`. Cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({{}})?` for running runs, `await processes.list({{ definition: name }})?` for runs of a definition, and `await processes.list({{ status: \"any\" }})?` for visible run history.",
+        "- Background processes: `process name(param: TYPE) {{ ... }}` declares a reusable process definition.{signal_declaration_note} `handle = start name(param: value)` creates one process run from that definition and returns its run handle;{trigger_process_note} For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the process success value. `fail value` completes it as failed; falling off the end is `finish null`. `print` is foreground-only and invalid inside processes. Parallelism comes from starting all independent process handles before waiting for any of them; join a list or record of handles with `results = await handles`. `await handle` waits and returns a result wrapper like `{{ ok: true, value: ... }}`; when you need fields from the `finish` value, use `result = (await handle)?` and then read `result.field`. Cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({{}})?` for running runs, `await processes.list({{ definition: name }})?` for runs of a definition, and `await processes.list({{ status: \"any\" }})?` for visible run history.",
         join_words(&forms),
     ));
     if abilities.process_signals {
@@ -313,7 +313,7 @@ fn operation_scheduling_language_bullet(processes: bool) -> String {
 
 fn base_tail_language_bullets() -> [String; 3] {
     [
-        "- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string(),
+        "- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `finish` is different from `break`: it ends the whole program/turn.".to_string(),
         "- Bare expressions are valid statements in normal blocks.".to_string(),
         "- Values already in scope are listed under **Bound Variables** (plus `history`) — use them directly in lashlang, don't recreate them.".to_string(),
     ]
@@ -372,7 +372,7 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations && processes {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: module.operation({ query: \"one\" })?,\n      two: module.operation({ query: \"two\" })?\n    }\n    submit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.\n\nExample parallel fan-out around an available operation (aggregate await preserves the record shape; use `?` on each leaf to unwrap it):\n\n    <lashlang>\n    results = await {\n      one: module.operation({ query: \"one\" })?,\n      two: module.operation({ query: \"two\" })?\n    }\n    finish format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(results.one), 0, 800), slice(to_string(results.two), 0, 800))\n    </lashlang>");
     } else if has_operations {
         section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Tools**.");
     } else {

@@ -36,7 +36,7 @@ pub struct LoadedSessionNode {
 #[derive(Clone, Debug)]
 pub enum NodeRelation {
     Root,
-    /// Parent called `spawn_agent` and waited for this session to submit.
+    /// Parent called `spawn_agent` and waited for this session to finish.
     Subagent {
         parent_session_id: String,
         task: Option<String>,

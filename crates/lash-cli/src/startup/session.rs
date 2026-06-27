@@ -500,14 +500,14 @@ mod tests {
             &CliSessionHostConfig::new(
                 ExecutionMode::Rlm,
                 None,
-                Some(RlmTerminationMode::SubmitRequired),
+                Some(RlmTerminationMode::FinishRequired),
             ),
         )?;
         let loaded = load_host_config(temp.path(), "rlm.db").expect("saved host config");
         assert_eq!(loaded.execution_mode, ExecutionMode::Rlm);
         assert_eq!(
             loaded.rlm_termination,
-            Some(RlmTerminationMode::SubmitRequired)
+            Some(RlmTerminationMode::FinishRequired)
         );
 
         std::fs::write(
@@ -565,7 +565,7 @@ mod tests {
                 .expect("saved host config");
         assert_eq!(
             host_config.rlm_termination,
-            Some(RlmTerminationMode::ProseOrSubmit)
+            Some(RlmTerminationMode::Natural)
         );
         Ok(())
     }

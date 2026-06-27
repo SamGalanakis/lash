@@ -205,10 +205,9 @@ pub enum Expr {
     ResultUnwrap(Box<Expr>),
     Cancel(Box<Expr>),
     Print(Box<Expr>),
-    Submit(Option<Box<Expr>>),
     Yield(Box<Expr>),
     Wake(Box<Expr>),
-    Finish(Option<Box<Expr>>),
+    Finish(Box<Expr>),
     Fail(Box<Expr>),
     BuiltinCall {
         name: AstString,
@@ -327,11 +326,7 @@ impl Expr {
             | Expr::Wake(expr)
             | Expr::Fail(expr)
             | Expr::Unary { expr, .. } => buffer.push(expr),
-            Expr::Submit(expr) | Expr::Finish(expr) => {
-                if let Some(expr) = expr {
-                    buffer.push(expr);
-                }
-            }
+            Expr::Finish(expr) => buffer.push(expr),
             Expr::BuiltinCall { args, .. } => buffer.extend(args.iter()),
             Expr::Field { target, .. } => buffer.push(target),
             Expr::Index { target, index } => {
@@ -500,10 +495,9 @@ where
         Expr::ResultUnwrap(expr) => Expr::ResultUnwrap(Box::new(folder.fold_expr(*expr))),
         Expr::Cancel(expr) => Expr::Cancel(Box::new(folder.fold_expr(*expr))),
         Expr::Print(expr) => Expr::Print(Box::new(folder.fold_expr(*expr))),
-        Expr::Submit(expr) => Expr::Submit(expr.map(|expr| Box::new(folder.fold_expr(*expr)))),
         Expr::Yield(expr) => Expr::Yield(Box::new(folder.fold_expr(*expr))),
         Expr::Wake(expr) => Expr::Wake(Box::new(folder.fold_expr(*expr))),
-        Expr::Finish(expr) => Expr::Finish(expr.map(|expr| Box::new(folder.fold_expr(*expr)))),
+        Expr::Finish(expr) => Expr::Finish(Box::new(folder.fold_expr(*expr))),
         Expr::Fail(expr) => Expr::Fail(Box::new(folder.fold_expr(*expr))),
         Expr::BuiltinCall { name, args } => Expr::BuiltinCall {
             name,
@@ -864,13 +858,8 @@ mod tests {
     }
 
     #[test]
-    fn children_handles_optional_finish_and_submit() {
-        assert!(Expr::Submit(None).children().next().is_none());
-        assert!(Expr::Finish(None).children().next().is_none());
-        assert_eq!(
-            child_vars(&Expr::Submit(Some(Box::new(var("done"))))),
-            ["done"]
-        );
+    fn children_handles_finish() {
+        assert_eq!(child_vars(&Expr::Finish(Box::new(var("done")))), ["done"]);
     }
 
     #[test]
@@ -904,7 +893,7 @@ mod tests {
                     },
                     expr: Box::new(var("value")),
                 },
-                Expr::Submit(Some(Box::new(var("done")))),
+                Expr::Finish(Box::new(var("done"))),
             ])),
         };
 

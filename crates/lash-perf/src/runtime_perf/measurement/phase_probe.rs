@@ -137,6 +137,9 @@ pub(crate) async fn run_once(
         RuntimePerfScenario::QueuedWorkClaimStress => {
             return run_once_queued_work_claim_stress(chat_turns).await;
         }
+        RuntimePerfScenario::TurnInputIngressInterrupt => {
+            return run_once_turn_input_ingress_interrupt(chat_turns).await;
+        }
         RuntimePerfScenario::EmbedStandard | RuntimePerfScenario::EmbedRlm => {
             return run_once_embed(scenario, chat_turns).await;
         }

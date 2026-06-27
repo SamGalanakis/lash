@@ -613,7 +613,7 @@ async fn run_user_turn(
         .turn(input)
         .turn_id(request.turn_id.clone())
         .model(turn_model)
-        .require_submit()
+        .require_finish()
         .map_err(AppError::internal)?
         .effects(controller)
         .stream_to(&ui_events)
@@ -884,7 +884,7 @@ fn record_turn_output(
         json!({
             "assistant_text": assistant_text.clone(),
             "streamed_prose": streamed_prose,
-            "submitted_value": output.submitted_value().cloned(),
+            "final_value": output.final_value().cloned(),
             "tool_value": output.tool_value().map(|(tool_name, value)| {
                 json!({
                     "tool_name": tool_name,

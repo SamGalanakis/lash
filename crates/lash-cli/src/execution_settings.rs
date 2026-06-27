@@ -43,23 +43,23 @@ pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String>
 )]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RlmTerminationMode {
-    #[value(name = "prose-or-submit")]
-    ProseOrSubmit,
-    #[value(name = "submit-required")]
-    SubmitRequired,
+    #[value(name = "natural")]
+    Natural,
+    #[value(name = "finish-required")]
+    FinishRequired,
 }
 
 impl RlmTerminationMode {
     pub(crate) fn as_rlm_termination(self) -> lash_rlm_types::RlmTermination {
         match self {
-            Self::ProseOrSubmit => lash_rlm_types::RlmTermination::ProseOrSubmit,
-            Self::SubmitRequired => lash_rlm_types::RlmTermination::SubmitRequired { schema: None },
+            Self::Natural => lash_rlm_types::RlmTermination::Natural,
+            Self::FinishRequired => lash_rlm_types::RlmTermination::FinishRequired { schema: None },
         }
     }
 }
 
 pub(crate) fn default_rlm_termination_for_mode(mode: ExecutionMode) -> Option<RlmTerminationMode> {
-    mode.is_rlm().then_some(RlmTerminationMode::ProseOrSubmit)
+    mode.is_rlm().then_some(RlmTerminationMode::Natural)
 }
 
 pub(crate) fn parse_standard_context_approach(
@@ -272,12 +272,12 @@ mod tests {
     #[test]
     fn rlm_termination_mode_maps_to_protocol_termination() {
         assert_eq!(
-            RlmTerminationMode::ProseOrSubmit.as_rlm_termination(),
-            lash_rlm_types::RlmTermination::ProseOrSubmit
+            RlmTerminationMode::Natural.as_rlm_termination(),
+            lash_rlm_types::RlmTermination::Natural
         );
         assert!(matches!(
-            RlmTerminationMode::SubmitRequired.as_rlm_termination(),
-            lash_rlm_types::RlmTermination::SubmitRequired { schema: None }
+            RlmTerminationMode::FinishRequired.as_rlm_termination(),
+            lash_rlm_types::RlmTermination::FinishRequired { schema: None }
         ));
     }
 
@@ -285,7 +285,7 @@ mod tests {
     fn rlm_termination_defaults_only_for_rlm_mode() {
         assert_eq!(
             default_rlm_termination_for_mode(ExecutionMode::Rlm),
-            Some(RlmTerminationMode::ProseOrSubmit)
+            Some(RlmTerminationMode::Natural)
         );
         assert_eq!(
             default_rlm_termination_for_mode(ExecutionMode::Standard),

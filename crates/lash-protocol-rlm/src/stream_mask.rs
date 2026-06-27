@@ -254,11 +254,11 @@ mod tests {
         assert_eq!(t.chunk, "Plan.\n");
         assert_eq!(d.pending, "  ");
 
-        let t = d.process_chunk("<lashlang>\nsubmit 1");
+        let t = d.process_chunk("<lashlang>\nfinish 1");
         assert_eq!(t.chunk, "");
         assert!(d.inside_cell);
         assert!(!d.cell_closed);
-        assert_eq!(d.cell_body, "submit 1");
+        assert_eq!(d.cell_body, "finish 1");
     }
 
     #[test]
@@ -275,10 +275,10 @@ mod tests {
     fn body_after_start_tag_is_suppressed_until_close() {
         let mut d = CellDetector::new();
         assert_eq!(d.process_chunk("<lashlang>\n").chunk, "");
-        let t = d.process_chunk("submit \"hi\"\n");
+        let t = d.process_chunk("finish \"hi\"\n");
         assert_eq!(t.chunk, "");
         assert!(!t.abort_stream);
-        assert_eq!(d.cell_body, "submit \"hi\"\n");
+        assert_eq!(d.cell_body, "finish \"hi\"\n");
     }
 
     #[test]
@@ -313,43 +313,43 @@ mod tests {
     #[test]
     fn close_tag_split_across_chunks_aborts_stream() {
         let mut d = CellDetector::new();
-        assert_eq!(d.process_chunk("<lashlang>\nsubmit 1\n</lash").chunk, "");
+        assert_eq!(d.process_chunk("<lashlang>\nfinish 1\n</lash").chunk, "");
 
         let t = d.process_chunk("lang>");
         assert_eq!(t.chunk, "");
         assert!(t.abort_stream);
         assert!(d.cell_closed);
-        assert_eq!(d.cell_body, "submit 1");
+        assert_eq!(d.cell_body, "finish 1");
         assert_eq!(event_names(&t.events), vec!["rlm_lashlang_cell_end"]);
     }
 
     #[test]
     fn close_tag_plus_trailing_prose_in_same_chunk_aborts_and_drops_suffix() {
         let mut d = CellDetector::new();
-        let t = d.process_chunk("Visible.\n<lashlang>\nsubmit 1\n</lashlang>\nTrailing prose.");
+        let t = d.process_chunk("Visible.\n<lashlang>\nfinish 1\n</lashlang>\nTrailing prose.");
         assert_eq!(t.chunk, "Visible.\n");
         assert!(t.abort_stream);
         assert!(d.cell_closed);
-        assert_eq!(d.cell_body, "submit 1");
+        assert_eq!(d.cell_body, "finish 1");
         assert_eq!(
             event_names(&t.events),
             vec!["rlm_lashlang_cell_start", "rlm_lashlang_cell_end"]
         );
         assert_eq!(
             d.spliced_response_text(),
-            "Visible.\n<lashlang>\nsubmit 1\n</lashlang>"
+            "Visible.\n<lashlang>\nfinish 1\n</lashlang>"
         );
     }
 
     #[test]
     fn incomplete_block_does_not_abort_and_does_not_close() {
         let mut d = CellDetector::new();
-        let t = d.process_chunk("Visible.\n<lashlang>\nsubmit 1");
+        let t = d.process_chunk("Visible.\n<lashlang>\nfinish 1");
         assert_eq!(t.chunk, "Visible.\n");
         assert!(!t.abort_stream);
         assert!(d.inside_cell);
         assert!(!d.cell_closed);
-        assert_eq!(d.cell_body, "submit 1");
+        assert_eq!(d.cell_body, "finish 1");
     }
 
     fn stream_chunks(chunks: &[&str]) -> (CellDetector, String) {
@@ -382,22 +382,22 @@ mod tests {
         let (d, visible) = stream_chunks(&[
             "Quick check.\n\n<lashlang>\n",
             "print \"hi\"\n",
-            "submit 1\n</lashlang>",
+            "finish 1\n</lashlang>",
         ]);
         assert_eq!(visible, "Quick check.\n\n");
         let spliced = d.spliced_response_text();
         let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
         let code = &spliced[span.body_start..span.body_end];
-        assert_eq!(code, "print \"hi\"\nsubmit 1");
+        assert_eq!(code, "print \"hi\"\nfinish 1");
     }
 
     #[test]
     fn final_response_splice_ignores_raw_provider_full_text_with_suffix() {
-        let raw_final = "Visible before code.\n<lashlang>\nsubmit \"ok\"\n</lashlang>\nignored";
+        let raw_final = "Visible before code.\n<lashlang>\nfinish \"ok\"\n</lashlang>\nignored";
         let (d, visible) = stream_chunks(&[
             "Visible before",
             " code.\n<lash",
-            "lang>\nsubmit ",
+            "lang>\nfinish ",
             "\"ok\"\n</lashlang>\nignored",
         ]);
         assert_eq!(visible, "Visible before code.\n");
@@ -410,20 +410,20 @@ mod tests {
         let spliced = d.spliced_response_text();
         assert_eq!(
             spliced,
-            "Visible before code.\n<lashlang>\nsubmit \"ok\"\n</lashlang>"
+            "Visible before code.\n<lashlang>\nfinish \"ok\"\n</lashlang>"
         );
         let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
-        assert_eq!(&spliced[span.body_start..span.body_end], "submit \"ok\"");
+        assert_eq!(&spliced[span.body_start..span.body_end], "finish \"ok\"");
         assert!(!spliced.contains("ignored"));
     }
 
     #[test]
     fn final_response_transform_never_splices_using_raw_provider_text() {
-        let raw_final = "Visible before code.\n<lashlang>\nsubmit \"ok\"\n</lashlang>\nignored";
+        let raw_final = "Visible before code.\n<lashlang>\nfinish \"ok\"\n</lashlang>\nignored";
         let (d, visible) = stream_chunks(&[
             "Visible before",
             " code.\n%%",
-            " ordinary prose\n<lashlang>\nsubmit ",
+            " ordinary prose\n<lashlang>\nfinish ",
             "\"ok\"\n</lashlang>\nignored",
         ]);
         assert_eq!(visible, "Visible before code.\n%% ordinary prose\n");
@@ -431,14 +431,14 @@ mod tests {
         let response = transform_final_response(&d, response_with_text(raw_final));
         assert_eq!(
             response.full_text,
-            "Visible before code.\n%% ordinary prose\n<lashlang>\nsubmit \"ok\"\n</lashlang>"
+            "Visible before code.\n%% ordinary prose\n<lashlang>\nfinish \"ok\"\n</lashlang>"
         );
         assert_eq!(response.full_text.matches("<lashlang>").count(), 1);
         assert_eq!(response.full_text.matches("</lashlang>").count(), 1);
         let span = first_lashlang_cell_span(&response.full_text).expect("cell parses");
         assert_eq!(
             &response.full_text[span.body_start..span.body_end],
-            "submit \"ok\""
+            "finish \"ok\""
         );
         assert!(
             !response.full_text[span.end_tag_end..].contains("ignored"),
@@ -457,8 +457,8 @@ mod tests {
 
     #[test]
     fn final_response_transform_replaces_raw_text_parts_but_preserves_reasoning_parts() {
-        let raw_final = "Plan.\n<lashlang>\nsubmit \"ok\"\n</lashlang>\nignored";
-        let (d, visible) = stream_chunks(&["Plan.\n<lash", "lang>\nsubmit \"ok\"\n</lashlang>"]);
+        let raw_final = "Plan.\n<lashlang>\nfinish \"ok\"\n</lashlang>\nignored";
+        let (d, visible) = stream_chunks(&["Plan.\n<lash", "lang>\nfinish \"ok\"\n</lashlang>"]);
         assert_eq!(visible, "Plan.\n");
         let response = lash_core::LlmResponse {
             full_text: raw_final.to_string(),
@@ -482,7 +482,7 @@ mod tests {
         let response = transform_final_response(&d, response);
         assert_eq!(
             response.full_text,
-            "Plan.\n<lashlang>\nsubmit \"ok\"\n</lashlang>"
+            "Plan.\n<lashlang>\nfinish \"ok\"\n</lashlang>"
         );
         assert_eq!(response.full_text.matches("<lashlang>").count(), 1);
         assert!(matches!(
@@ -514,13 +514,13 @@ mod tests {
 
     #[test]
     fn final_response_splice_also_handles_already_transformed_visible_text() {
-        let (d, visible) = stream_chunks(&["Visible.\n", "<lashlang>\nsubmit \"ok\"\n</lashlang>"]);
+        let (d, visible) = stream_chunks(&["Visible.\n", "<lashlang>\nfinish \"ok\"\n</lashlang>"]);
         assert_eq!(visible, "Visible.\n");
 
         let spliced = d.spliced_response_text();
-        assert_eq!(spliced, "Visible.\n<lashlang>\nsubmit \"ok\"\n</lashlang>");
+        assert_eq!(spliced, "Visible.\n<lashlang>\nfinish \"ok\"\n</lashlang>");
         let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
-        assert_eq!(&spliced[span.body_start..span.body_end], "submit \"ok\"");
+        assert_eq!(&spliced[span.body_start..span.body_end], "finish \"ok\"");
     }
 
     #[test]
@@ -531,7 +531,7 @@ mod tests {
             "<las",
             "hlang>  \n",
             "payload = r\"\"\"```markdown\nbody\n```\"\"\"\n",
-            "submit payload\n  </lash",
+            "finish payload\n  </lash",
             "lang>  ",
         ]);
         assert_eq!(visible, "Line one.\n");
@@ -539,12 +539,12 @@ mod tests {
         let spliced = d.spliced_response_text();
         assert_eq!(
             spliced,
-            "Line one.\n<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload\n</lashlang>"
+            "Line one.\n<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nfinish payload\n</lashlang>"
         );
         let span = first_lashlang_cell_span(&spliced).expect("spliced cell parses");
         assert_eq!(
             &spliced[span.body_start..span.body_end],
-            "payload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload"
+            "payload = r\"\"\"```markdown\nbody\n```\"\"\"\nfinish payload"
         );
     }
 
@@ -561,13 +561,13 @@ mod tests {
     fn final_response_transform_is_noop_for_incomplete_streamed_block() {
         let mut d = CellDetector::new();
         assert_eq!(
-            d.process_chunk("Visible.\n<lashlang>\nsubmit 1").chunk,
+            d.process_chunk("Visible.\n<lashlang>\nfinish 1").chunk,
             "Visible.\n"
         );
         assert!(d.inside_cell);
         assert!(!d.cell_closed);
 
-        let response = response_with_text("Visible.\n<lashlang>\nsubmit 1");
+        let response = response_with_text("Visible.\n<lashlang>\nfinish 1");
         let transformed = transform_final_response(&d, response.clone());
         assert_eq!(transformed.full_text, response.full_text);
         assert_eq!(transformed.parts, response.parts);
@@ -576,8 +576,8 @@ mod tests {
     #[test]
     fn old_percent_marker_streams_as_plain_prose() {
         let mut d = CellDetector::new();
-        let t = d.process_chunk("%%lashlang\nsubmit 1\n");
-        assert_eq!(t.chunk, "%%lashlang\nsubmit 1\n");
+        let t = d.process_chunk("%%lashlang\nfinish 1\n");
+        assert_eq!(t.chunk, "%%lashlang\nfinish 1\n");
         assert!(!d.inside_cell);
         assert!(!t.abort_stream);
     }

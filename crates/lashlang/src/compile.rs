@@ -356,7 +356,7 @@ process watch(event: ui.ButtonPressed, file: File) signals { done: str } -> str 
   finish event.color
 }
 source = ui.button({})
-submit source
+finish source
 "#,
             environment: &environment,
             artifact_store: None,

@@ -180,7 +180,7 @@ process on_button(event: app.ButtonPressed) {
   finish event.color
 }
 source = app.button({})
-submit source
+finish source
 "#,
     environment: &amp;environment,
     artifact_store: Some(artifact_store.as_ref()),
@@ -368,7 +368,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
           <div class="module-grid">
             <article class="panel"><h3><a href="./quickstart.html">Quickstart</a></h3><p>Minimal builder, one turn, prose extraction.</p></article>
             <article class="panel"><h3><a href="./rlm.html">RLM Protocol</a></h3><p>Prompt construction, history projection, bound variables, and the Lashlang execution loop.</p></article>
-            <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>Browser example: OpenRouter, RLM submit, typed session plugin activation, app-owned tools, streaming, per-chat model selection, SQLite, Restate.</p></article>
+            <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>Browser example: OpenRouter, RLM finish, typed session plugin activation, app-owned tools, streaming, per-chat model selection, SQLite, Restate.</p></article>
             <article class="panel"><h3><a href="./tools.html">Tools</a></h3><p><code>ToolProvider</code>, tool context capabilities, and registry state.</p></article>
             <article class="panel"><h3><a href="./tools-execution.html">Tool execution</a></h3><p>Scheduling, deferred completion, durable effects, and output budgeting.</p></article>
             <article class="panel"><h3><a href="./plugins.html">Plugins</a></h3><p><code>PluginFactory</code>, <code>SessionPlugin</code>, prompt/runtime hooks, catalog policy, and resumable plugin state.</p></article>

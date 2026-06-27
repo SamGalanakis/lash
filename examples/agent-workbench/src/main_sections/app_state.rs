@@ -257,7 +257,7 @@ async fn apply_model_selection_to_session(
 
 fn assistant_text_for_display(output: &TurnResult, streamed_prose: &str) -> String {
     let terminal = output
-        .submitted_value()
+        .final_value()
         .map(terminal_value_text)
         .or_else(|| {
             output

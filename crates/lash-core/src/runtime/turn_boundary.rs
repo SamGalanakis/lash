@@ -70,6 +70,8 @@ struct FinalCommitInput<'a> {
     outcome: &'a TurnOutcome,
     turn_id: Option<&'a str>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
+    completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+    interrupted_turn_input_turn_id: Option<String>,
     pending_attachment_ids: Vec<crate::AttachmentId>,
     session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
 }
@@ -350,6 +352,8 @@ impl TurnBoundary {
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+        interrupted_turn_input_turn_id: Option<String>,
         pending_attachment_ids: Vec<crate::AttachmentId>,
         session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
     ) -> Result<(), RuntimeError> {
@@ -372,6 +376,8 @@ impl TurnBoundary {
             outcome: &returned_turn.outcome,
             turn_id,
             completed_queue_claims,
+            completed_turn_input_claims,
+            interrupted_turn_input_turn_id,
             pending_attachment_ids,
             session_execution_lease_completion,
         })
@@ -440,6 +446,8 @@ impl TurnBoundary {
             Vec::new(),
             Vec::new(),
             None,
+            Vec::new(),
+            None,
         )
         .await
     }
@@ -458,6 +466,8 @@ impl TurnBoundary {
             outcome,
             turn_id,
             completed_queue_claims,
+            completed_turn_input_claims,
+            interrupted_turn_input_turn_id,
             pending_attachment_ids,
             session_execution_lease_completion,
         } = input;
@@ -517,6 +527,8 @@ impl TurnBoundary {
                 usage_deltas,
                 turn_id,
                 completed_queue_claims,
+                completed_turn_input_claims,
+                interrupted_turn_input_turn_id,
                 committed_attachment_ids,
                 session_execution_lease_completion,
             )
@@ -535,6 +547,8 @@ impl TurnBoundary {
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+        interrupted_turn_input_turn_id: Option<String>,
         committed_attachment_ids: Vec<crate::AttachmentId>,
         session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
     ) -> Result<(), StoreError> {
@@ -551,6 +565,8 @@ impl TurnBoundary {
             commit = commit.releasing_session_execution_lease(completion);
         }
         commit.completed_queue_claims = completed_queue_claims;
+        commit.completed_turn_input_claims = completed_turn_input_claims;
+        commit.interrupted_turn_input_turn_id = interrupted_turn_input_turn_id;
         if let Some(turn_id) = turn_id {
             let turn_commit_hash = commit.turn_commit_hash()?;
             commit.turn_commit = Some(crate::RuntimeTurnCommitStamp::new(
@@ -1377,6 +1393,8 @@ mod tests {
                 tool_calls: &[],
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
+                completed_turn_input_claims: Vec::new(),
+                interrupted_turn_input_turn_id: None,
                 pending_attachment_ids: Vec::new(),
                 session_execution_lease_completion: None,
             })
@@ -1416,6 +1434,8 @@ mod tests {
                 tool_calls: &[],
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
+                completed_turn_input_claims: Vec::new(),
+                interrupted_turn_input_turn_id: None,
                 pending_attachment_ids: Vec::new(),
                 session_execution_lease_completion: None,
             })

@@ -493,7 +493,7 @@ impl RuntimeTurnDriver<'_> {
         }
 
         let elapsed_ms = debug.elapsed_ms(self.host.core.clock.as_ref());
-        if matches!(log.event_type, "delta" | "text_part") {
+        if matches!(log.event_type, "delta") {
             debug
                 .summary
                 .record_text_chunk(log.text.visible, elapsed_ms);
@@ -731,14 +731,21 @@ impl RuntimeTurnDriver<'_> {
                 response_meta,
             }) => {
                 let item_id = response_meta.as_ref().and_then(|meta| meta.id.clone());
-                self.emit_visible_assistant_text(
-                    event_tx,
-                    text,
-                    item_id.as_deref(),
-                    "text_part",
-                    state,
-                )
-                .await?;
+                self.log_llm_stream_event(
+                    state.debug,
+                    LlmStreamEventLog {
+                        protocol_iteration: state.protocol_iteration,
+                        event_type: "text_part",
+                        text: LlmDebugText {
+                            raw: Some(&text),
+                            visible: None,
+                        },
+                        item_id: item_id.as_deref(),
+                        usage: None,
+                        tool_call: None,
+                    },
+                );
+                state.stream_accumulator.push_text_part(text, response_meta);
             }
             LlmStreamEvent::Part(LlmOutputPart::ToolCall {
                 call_id,

@@ -122,6 +122,29 @@ fn turn_has_visible_output(turn: &lash::TurnResult) -> bool {
     !turn.assistant_output.safe_text.trim().is_empty() || !turn.errors.is_empty()
 }
 
+fn completed_turn_should_warn_no_visible_output(
+    outcome: &lash_core::TurnOutcome,
+    result_has_visible_output: bool,
+    active_turn_had_visible_output: bool,
+) -> bool {
+    matches!(
+        outcome,
+        lash_core::TurnOutcome::Finished(_) | lash_core::TurnOutcome::AgentFrameSwitch { .. }
+    ) && !result_has_visible_output
+        && !active_turn_had_visible_output
+}
+
+pub(crate) fn turn_should_warn_no_visible_output(
+    turn: &lash::TurnResult,
+    active_turn_had_visible_output: bool,
+) -> bool {
+    completed_turn_should_warn_no_visible_output(
+        &turn.outcome,
+        turn_has_visible_output(turn),
+        active_turn_had_visible_output,
+    )
+}
+
 fn normalized_cli_args() -> Vec<std::ffi::OsString> {
     let mut out = Vec::new();
     let mut iter = std::env::args_os();
@@ -222,7 +245,7 @@ struct Args {
     #[arg(long = "rlm-vars-file", value_name = "PATH")]
     rlm_vars_file: Option<std::path::PathBuf>,
 
-    /// RLM modes only: finalization mode (`prose-or-submit` or `submit-required`)
+    /// RLM modes only: finalization mode (`natural` or `finish-required`; default: `natural`)
     #[arg(long = "rlm-termination", value_enum, value_name = "MODE")]
     rlm_termination: Option<RlmTerminationMode>,
 
@@ -395,10 +418,13 @@ fn cleanup_terminal() {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse_from(normalized_cli_args());
+    let worker_stack_bytes = tokio_thread_stack_bytes(&args);
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
-    runtime.thread_stack_size(tokio_thread_stack_bytes(&args));
-    runtime.build()?.block_on(async_main(args))
+    runtime.thread_stack_size(worker_stack_bytes);
+    runtime
+        .build()?
+        .block_on(async_main(args, worker_stack_bytes))
 }
 
 fn tokio_thread_stack_bytes(_args: &Args) -> usize {
@@ -408,7 +434,10 @@ fn tokio_thread_stack_bytes(_args: &Args) -> usize {
         .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES)
 }
 
-async fn async_main(args: Args) -> anyhow::Result<()> {
+async fn async_main(args: Args, worker_stack_bytes: usize) -> anyhow::Result<()> {
+    #[cfg(not(feature = "bench"))]
+    let _ = worker_stack_bytes;
+
     #[cfg(feature = "bench")]
     if args.ui_perf_benchmark {
         return ui_perf::run_cli(
@@ -422,6 +451,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             args.ui_perf_profile,
             args.ui_perf_compare,
             args.ui_perf_enforce_budgets,
+            Some(worker_stack_bytes),
             APP_VERSION,
             BUILD_GIT_HEAD,
         );
@@ -608,6 +638,23 @@ mod tests {
     }
 
     #[test]
+    fn no_visible_output_warning_is_suppressed_after_live_output() {
+        let outcome = lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue {
+            value: serde_json::Value::Null,
+        });
+
+        assert!(completed_turn_should_warn_no_visible_output(
+            &outcome, false, false
+        ));
+        assert!(!completed_turn_should_warn_no_visible_output(
+            &outcome, false, true
+        ));
+        assert!(!completed_turn_should_warn_no_visible_output(
+            &outcome, true, false
+        ));
+    }
+
+    #[test]
     fn prepared_turn_keeps_plain_slash_text() {
         let skills = skill_catalog_with(&[("yolopush", "ship changes")]);
         let turn = PreparedTurn::new("/not-a-command details".into(), Vec::new());
@@ -635,25 +682,22 @@ mod tests {
             "--execution-mode",
             "rlm",
             "--rlm-termination",
-            "prose-or-submit",
+            "natural",
         ])
-        .expect("parse prose-or-submit");
-        assert_eq!(
-            prose.rlm_termination,
-            Some(RlmTerminationMode::ProseOrSubmit)
-        );
+        .expect("parse natural");
+        assert_eq!(prose.rlm_termination, Some(RlmTerminationMode::Natural));
 
         let strict = Args::try_parse_from([
             "lash",
             "--execution-mode",
             "rlm",
             "--rlm-termination",
-            "submit-required",
+            "finish-required",
         ])
-        .expect("parse submit-required");
+        .expect("parse finish-required");
         assert_eq!(
             strict.rlm_termination,
-            Some(RlmTerminationMode::SubmitRequired)
+            Some(RlmTerminationMode::FinishRequired)
         );
     }
 
@@ -664,13 +708,13 @@ mod tests {
             "--execution-mode",
             "rlm",
             "--rlm-termination",
-            "always-submit",
+            "always-finish",
         ]) {
             Ok(_) => panic!("unknown value should fail clap parsing"),
             Err(err) => err,
         };
 
-        assert!(err.to_string().contains("always-submit"));
+        assert!(err.to_string().contains("always-finish"));
     }
 
     #[test]

@@ -194,6 +194,24 @@ async fn standard_runtime_with_transport_and_queue_store(
     (runtime, store)
 }
 
+async fn standard_runtime_with_transport_and_queue_store_clock(
+    transport: TestProvider,
+    clock: Arc<dyn crate::Clock>,
+) -> (LashRuntime, Arc<RecordingStore>) {
+    let store = Arc::new(RecordingStore::with_clock(clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    (runtime, store)
+}
+
 async fn append_process_wake_to_queue(
     registry: &dyn crate::ProcessRegistry,
     store: &RecordingStore,
@@ -232,33 +250,35 @@ fn process_wake_event_type() -> crate::ProcessEventType {
 async fn enqueue_turn_input_for_checkpoint(
     store: &RecordingStore,
     session_id: &str,
+    turn_id: &str,
     source_key: Option<String>,
     input: TurnInput,
-) {
-    let mut draft = crate::QueuedWorkBatchDraft::new(
+) -> crate::PendingTurnInput {
+    let mut draft = crate::PendingTurnInputDraft::new(
         session_id.to_string(),
-        crate::DeliveryPolicy::EarliestSafeBoundary,
-        crate::SlotPolicy::Join,
-        vec![crate::QueuedWorkPayload::turn_input(input)],
+        crate::TurnInputIngress::active_turn(
+            turn_id.to_string(),
+            crate::TurnInputCheckpointBoundary::AfterWork,
+        ),
+        input,
     );
     draft.source_key = source_key;
-    crate::store::RuntimePersistence::enqueue_queued_work(store, draft)
+    crate::store::RuntimePersistence::enqueue_pending_turn_input(store, draft)
         .await
-        .expect("enqueue turn input");
+        .expect("enqueue turn input")
 }
 
 async fn enqueue_idle_turn_input(
     store: &RecordingStore,
     session_id: &str,
     text: &str,
-) -> crate::QueuedWorkBatch {
-    crate::store::RuntimePersistence::enqueue_queued_work(
+) -> crate::PendingTurnInput {
+    crate::store::RuntimePersistence::enqueue_pending_turn_input(
         store,
-        crate::QueuedWorkBatchDraft::new(
+        crate::PendingTurnInputDraft::new(
             session_id.to_string(),
-            crate::DeliveryPolicy::AfterCurrentTurnCommit,
-            crate::SlotPolicy::Exclusive,
-            vec![crate::QueuedWorkPayload::turn_input(TurnInput::text(text))],
+            crate::TurnInputIngress::NextTurn,
+            TurnInput::text(text),
         ),
     )
     .await
@@ -604,6 +624,7 @@ async fn queued_checkpoint_input_continues_standard_turn() {
     enqueue_turn_input_for_checkpoint(
         store.as_ref(),
         "root",
+        "queued-checkpoint-turn",
         None,
         TurnInput::text("one more thing"),
     )
@@ -688,6 +709,7 @@ async fn queued_checkpoint_input_preserves_images() {
     enqueue_turn_input_for_checkpoint(
         store.as_ref(),
         "root",
+        "image-attachment-turn",
         None,
         TurnInput::text("see image").with_image_ref("test-image", vec![1, 2, 3]),
     )
@@ -835,6 +857,7 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
     enqueue_turn_input_for_checkpoint(
         store.as_ref(),
         "root",
+        "injection-accepted-turn",
         Some("host:follow-up-id".to_string()),
         TurnInput::text("follow up"),
     )
@@ -932,8 +955,12 @@ async fn leading_session_command_drains_before_queued_turn() {
             ..LlmResponse::default()
         }),
     }]);
-    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let (mut runtime, store) =
+        standard_runtime_with_transport_and_queue_store_clock(transport, store_clock).await;
     let command = enqueue_session_command(store.as_ref(), "root", "refresh before turn").await;
+    clock.advance_ms(1);
     let turn = enqueue_idle_turn_input(store.as_ref(), "root", "user turn").await;
     let turn_events = RecordingTurnEvents::default();
 
@@ -955,19 +982,10 @@ async fn leading_session_command_drains_before_queued_turn() {
             .await
             .expect("list queue after command plus turn")
             .is_empty(),
-        "command `{}` and turn `{}` should both be completed",
+        "command `{}` and turn input `{}` should both be completed",
         command.batch_id,
-        turn.batch_id
+        turn.input_id
     );
-    let started_batch_ids = turn_events
-        .snapshot()
-        .into_iter()
-        .find_map(|activity| match activity.event {
-            crate::TurnEvent::QueuedWorkStarted { batch_ids, .. } => Some(batch_ids),
-            _ => None,
-        })
-        .expect("queued work started event");
-    assert_eq!(started_batch_ids, vec![turn.batch_id]);
 }
 
 #[tokio::test]
@@ -983,8 +1001,12 @@ async fn later_session_command_does_not_jump_earlier_queued_turn() {
             ..LlmResponse::default()
         }),
     }]);
-    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let clock = Arc::new(ManualClock::new(2_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let (mut runtime, store) =
+        standard_runtime_with_transport_and_queue_store_clock(transport, store_clock).await;
     let turn = enqueue_idle_turn_input(store.as_ref(), "root", "first user turn").await;
+    clock.advance_ms(1);
     let command = enqueue_session_command(store.as_ref(), "root", "refresh after turn").await;
 
     let drained = runtime
@@ -1006,7 +1028,7 @@ async fn later_session_command_does_not_jump_earlier_queued_turn() {
             .collect::<Vec<_>>(),
         vec![command.batch_id.as_str()],
         "later command should remain after turn `{}` runs",
-        turn.batch_id
+        turn.input_id
     );
 
     let command_only = runtime
@@ -1244,13 +1266,7 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
         }),
     }]);
     let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
-    enqueue_turn_input_for_checkpoint(
-        store.as_ref(),
-        "root",
-        Some("busy-lane-queued-input".to_string()),
-        TurnInput::text("queued while busy"),
-    )
-    .await;
+    enqueue_idle_turn_input(store.as_ref(), "root", "queued while busy").await;
     let owner = lease_owner("foreground-runtime");
     let held_lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
         store.as_ref(),
@@ -1276,12 +1292,12 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
         "idle queued drain must no-op while another owner holds the session lane"
     );
     assert_eq!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
             .await
-            .expect("queued work while busy")
+            .expect("queued turn input while busy")
             .len(),
         1,
-        "busy drain must not consume queued work"
+        "busy drain must not consume queued turn input"
     );
 
     crate::store::RuntimePersistence::release_session_execution_lease(
@@ -1301,9 +1317,9 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
 
     assert_eq!(drained.assistant_output.safe_text, "queued answer");
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
             .await
-            .expect("queued work after drain")
+            .expect("queued turn input after drain")
             .is_empty()
     );
 }
@@ -1865,10 +1881,7 @@ async fn session_manager_can_run_child_session_turn() {
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("child ".to_string()),
-            LlmStreamEvent::Part(LlmOutputPart::Text {
-                text: "session".to_string(),
-                response_meta: None,
-            }),
+            LlmStreamEvent::Delta("session".to_string()),
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 7,
                 output_tokens: 2,

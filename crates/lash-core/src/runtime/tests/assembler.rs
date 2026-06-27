@@ -136,16 +136,16 @@ fn assembler_uses_assistant_message_outcome_without_recovery_issue_when_no_strea
 }
 
 #[test]
-fn assembler_uses_submitted_value_for_assistant_output_when_semantic_prose_streamed() {
+fn assembler_uses_final_value_for_assistant_output_when_semantic_prose_streamed() {
     let mut assembler = TurnAssembler::default();
     assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:before-submit"),
+        TurnActivityId::new("assistant:before-finish"),
         TurnEvent::AssistantProseDelta {
-            text: "thinking before submit".to_string(),
+            text: "thinking before finish".to_string(),
         },
     ));
     assembler.push(&SessionEvent::TurnOutcome {
-        outcome: TurnOutcome::Finished(TurnFinish::SubmittedValue {
+        outcome: TurnOutcome::Finished(TurnFinish::FinalValue {
             value: serde_json::json!({ "ok": true }),
         }),
     });
@@ -160,7 +160,7 @@ fn assembler_uses_submitted_value_for_assistant_output_when_semantic_prose_strea
 
     assert_eq!(
         out.outcome,
-        TurnOutcome::Finished(TurnFinish::SubmittedValue {
+        TurnOutcome::Finished(TurnFinish::FinalValue {
             value: serde_json::json!({ "ok": true })
         })
     );

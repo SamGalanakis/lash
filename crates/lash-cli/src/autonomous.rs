@@ -98,7 +98,7 @@ impl AutonomousRenderer {
             | TurnEvent::QueuedMessagesCommitted { .. }
             | TurnEvent::CodeBlockStarted { .. }
             | TurnEvent::CodeBlockCompleted { .. }
-            | TurnEvent::SubmittedValue { .. }
+            | TurnEvent::FinalValue { .. }
             | TurnEvent::ToolValue { .. } => {}
         }
         Ok(())

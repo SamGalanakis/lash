@@ -170,6 +170,15 @@ impl RuntimePersistence for PostgresSessionStore {
             }
             ensure_queued_work_completion_tx(&mut tx, completed).await?;
         }
+        for completed in &commit.completed_turn_input_claims {
+            if completed.session_id != commit.session_id {
+                return Err(StoreError::TurnInputClaimExpired {
+                    session_id: completed.session_id.clone(),
+                    claim_id: completed.claim_id.clone(),
+                });
+            }
+            ensure_turn_input_completion_tx(&mut tx, completed).await?;
+        }
         let (checkpoint_ref, manifest) = put_checkpoint_tx(&mut tx, &commit.checkpoint).await?;
         for entry in &commit.usage_deltas {
             sqlx::query("INSERT INTO lash_usage_deltas (session_id, entry_json) VALUES ($1, $2)")
@@ -304,6 +313,71 @@ impl RuntimePersistence for PostgresSessionStore {
                 .bind(batch_id)
                 .bind(&completed.claim_id)
                 .bind(&completed.lease_token)
+                .execute(&mut *tx)
+                .await
+                .map_err(store_sqlx_error)?;
+            }
+        }
+        for completed in &commit.completed_turn_input_claims {
+            for input_id in &completed.input_ids {
+                sqlx::query(
+                    "DELETE FROM lash_pending_turn_inputs
+                     WHERE session_id = $1 AND input_id = $2 AND claim_id = $3 AND claim_token = $4",
+                )
+                .bind(&completed.session_id)
+                .bind(input_id)
+                .bind(&completed.claim_id)
+                .bind(&completed.lease_token)
+                .execute(&mut *tx)
+                .await
+                .map_err(store_sqlx_error)?;
+            }
+        }
+        if let Some(turn_id) = commit.interrupted_turn_input_turn_id.as_deref() {
+            let rows = sqlx::query(
+                "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                        state, input_json, enqueued_at_ms, claim_fencing_token,
+                        claim_owner_id, claim_owner_incarnation_id,
+                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                 FROM lash_pending_turn_inputs
+                 WHERE session_id = $1 AND state = $2
+                 ORDER BY enqueue_seq ASC
+                 FOR UPDATE",
+            )
+            .bind(&commit.session_id)
+            .bind(lash_core::TurnInputState::PendingActive.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+            let mut input_ids = Vec::new();
+            for row in rows {
+                let input = pending_turn_input_from_row(pending_turn_input_row(row)?)?;
+                if input
+                    .ingress
+                    .active_turn_id()
+                    .is_some_and(|active| active == turn_id)
+                {
+                    input_ids.push(input.input_id);
+                }
+            }
+            for input_id in input_ids {
+                sqlx::query(
+                    "UPDATE lash_pending_turn_inputs
+                     SET state = $3,
+                         ingress_json = $4,
+                         claim_id = NULL,
+                         claim_owner_id = NULL,
+                         claim_owner_incarnation_id = NULL,
+                         claim_owner_liveness_json = NULL,
+                         claim_token = NULL,
+                         claim_claimed_at_ms = 0,
+                         claim_expires_at_ms = 0
+                     WHERE session_id = $1 AND input_id = $2",
+                )
+                .bind(&commit.session_id)
+                .bind(input_id)
+                .bind(lash_core::TurnInputState::DeferredNextTurn.as_str())
+                .bind(encode_json(&lash_core::TurnInputIngress::NextTurn))
                 .execute(&mut *tx)
                 .await
                 .map_err(store_sqlx_error)?;
@@ -1074,6 +1148,229 @@ impl RuntimePersistence for PostgresSessionStore {
         Ok(batches)
     }
 
+    async fn enqueue_pending_turn_input(
+        &self,
+        draft: lash_core::PendingTurnInputDraft,
+    ) -> Result<lash_core::PendingTurnInput, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        if let Some(source_key) = draft.source_key.as_deref() {
+            let existing_id: Option<String> = sqlx::query_scalar(
+                "SELECT input_id FROM lash_pending_turn_inputs
+                 WHERE session_id = $1 AND source_key = $2",
+            )
+            .bind(&draft.session_id)
+            .bind(source_key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+            if let Some(input_id) = existing_id {
+                let existing = load_pending_turn_input(&mut tx, &draft.session_id, &input_id)
+                    .await?
+                    .ok_or_else(|| {
+                        StoreError::Backend(
+                            "pending turn input source row disappeared".to_string(),
+                        )
+                    })?;
+                tx.commit().await.map_err(store_sqlx_error)?;
+                return Ok(existing);
+            }
+        }
+        let now = current_epoch_ms();
+        let input_id = draft.input_id.clone().unwrap_or_else(|| {
+            derive_pending_turn_input_id(&draft.session_id, draft.source_key.as_deref(), now)
+        });
+        let state = match draft.ingress {
+            lash_core::TurnInputIngress::ActiveTurn { .. } => {
+                lash_core::TurnInputState::PendingActive
+            }
+            lash_core::TurnInputIngress::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+        };
+        sqlx::query(
+            "INSERT INTO lash_pending_turn_inputs (
+                input_id, session_id, source_key, ingress_json, state, input_json, enqueued_at_ms
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&input_id)
+        .bind(&draft.session_id)
+        .bind(&draft.source_key)
+        .bind(encode_json(&draft.ingress))
+        .bind(state.as_str())
+        .bind(encode_json(&draft.input))
+        .bind(now as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let input = load_pending_turn_input(&mut tx, &draft.session_id, &input_id)
+            .await?
+            .ok_or_else(|| {
+                StoreError::Backend("pending turn input insert disappeared".to_string())
+            })?;
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(input)
+    }
+
+    async fn list_pending_turn_inputs(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<lash_core::PendingTurnInput>, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        let now = current_epoch_ms();
+        let rows = sqlx::query(
+            "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                    state, input_json, enqueued_at_ms, claim_fencing_token,
+                    claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+             FROM lash_pending_turn_inputs
+             WHERE session_id = $1
+               AND state IN ($2, $3)
+               AND (claim_token IS NULL OR claim_expires_at_ms <= $4)
+             ORDER BY enqueue_seq ASC",
+        )
+        .bind(session_id)
+        .bind(lash_core::TurnInputState::PendingActive.as_str())
+        .bind(lash_core::TurnInputState::DeferredNextTurn.as_str())
+        .bind(now as i64)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let inputs = rows
+            .into_iter()
+            .map(pending_turn_input_row)
+            .map(|row| row.and_then(pending_turn_input_from_row))
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(inputs)
+    }
+
+    async fn cancel_pending_turn_input(
+        &self,
+        session_id: &str,
+        input_id: &str,
+    ) -> Result<Option<lash_core::PendingTurnInput>, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        let now = current_epoch_ms();
+        let row = sqlx::query(
+            "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                    state, input_json, enqueued_at_ms, claim_fencing_token,
+                    claim_owner_id, claim_owner_incarnation_id,
+                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+             FROM lash_pending_turn_inputs
+             WHERE session_id = $1
+               AND input_id = $2
+               AND (claim_token IS NULL OR claim_expires_at_ms <= $3)
+             FOR UPDATE",
+        )
+        .bind(session_id)
+        .bind(input_id)
+        .bind(now as i64)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let Some(row) = row else {
+            tx.commit().await.map_err(store_sqlx_error)?;
+            return Ok(None);
+        };
+        let input = pending_turn_input_from_row(pending_turn_input_row(row)?)?;
+        sqlx::query(
+            "DELETE FROM lash_pending_turn_inputs
+             WHERE session_id = $1
+               AND input_id = $2
+               AND (claim_token IS NULL OR claim_expires_at_ms <= $3)",
+        )
+        .bind(session_id)
+        .bind(input_id)
+        .bind(now as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(Some(input))
+    }
+
+    async fn claim_active_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: lash_core::CheckpointKind,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
+        claim_pending_turn_inputs_postgres(
+            &self.pool,
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            max_inputs,
+            lash_core::TurnInputClaimMode::ActiveTurn {
+                turn_id: turn_id.to_string(),
+                checkpoint,
+            },
+        )
+        .await
+    }
+
+    async fn claim_next_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
+        claim_pending_turn_inputs_postgres(
+            &self.pool,
+            session_id,
+            session_execution_lease,
+            owner,
+            lease_ttl_ms,
+            max_inputs,
+            lash_core::TurnInputClaimMode::NextTurn,
+        )
+        .await
+    }
+
+    async fn abandon_turn_input_claim(
+        &self,
+        claim: &lash_core::TurnInputClaim,
+    ) -> Result<(), StoreError> {
+        let restored_state = match claim.mode {
+            lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
+                lash_core::TurnInputState::PendingActive
+            }
+            lash_core::TurnInputClaimMode::NextTurn => {
+                lash_core::TurnInputState::DeferredNextTurn
+            }
+        };
+        sqlx::query(
+            "UPDATE lash_pending_turn_inputs
+             SET state = CASE
+                     WHEN state = $4 THEN $5
+                     ELSE state
+                 END,
+                 claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
+                 claim_token = NULL,
+                 claim_claimed_at_ms = 0,
+                 claim_expires_at_ms = 0
+             WHERE session_id = $1 AND claim_id = $2 AND claim_token = $3",
+        )
+        .bind(&claim.session_id)
+        .bind(&claim.claim_id)
+        .bind(&claim.lease_token)
+        .bind(lash_core::TurnInputState::Accepted.as_str())
+        .bind(restored_state.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(store_sqlx_error)?;
+        Ok(())
+    }
+
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO lash_session_meta (session_id, meta_json)
@@ -1158,6 +1455,175 @@ impl RuntimePersistence for PostgresSessionStore {
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
         Ok(GcReport::default())
     }
+}
+
+fn derive_pending_turn_input_id(
+    session_id: &str,
+    source_key: Option<&str>,
+    now_epoch_ms: u64,
+) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "ti:{:x}",
+        Sha256::digest(format!("{session_id}:{source_key:?}:{now_epoch_ms}:{nanos}").as_bytes())
+    )
+}
+
+async fn claim_pending_turn_inputs_postgres(
+    pool: &PgPool,
+    session_id: &str,
+    session_execution_lease: &SessionExecutionLeaseFence,
+    owner: &LeaseOwnerIdentity,
+    lease_ttl_ms: u64,
+    max_inputs: usize,
+    mode: lash_core::TurnInputClaimMode,
+) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
+    if max_inputs == 0 {
+        return Ok(None);
+    }
+    let mut tx = pool.begin().await.map_err(store_sqlx_error)?;
+    ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
+    let now = current_epoch_ms();
+    let wanted_state = match &mode {
+        lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
+            lash_core::TurnInputState::PendingActive
+        }
+        lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+    };
+    let rows = sqlx::query(
+        "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                state, input_json, enqueued_at_ms, claim_fencing_token,
+                claim_owner_id, claim_owner_incarnation_id,
+                claim_owner_liveness_json, claim_token, claim_expires_at_ms
+         FROM lash_pending_turn_inputs
+         WHERE session_id = $1 AND state = $2
+         ORDER BY enqueue_seq ASC
+         LIMIT $3
+         FOR UPDATE SKIP LOCKED",
+    )
+    .bind(session_id)
+    .bind(wanted_state.as_str())
+    .bind(claim_scan_limit(max_inputs))
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(store_sqlx_error)?;
+    let mut selected = Vec::new();
+    for row in rows {
+        let row = pending_turn_input_row(row)?;
+        let claim_available = row.claim_token.is_none()
+            || row.claim_expires_at_ms <= now
+            || row
+                .claim_owner
+                .as_ref()
+                .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner));
+        if !claim_available {
+            continue;
+        }
+        let input = pending_turn_input_from_row(row.clone())?;
+        let matches_mode = match &mode {
+            lash_core::TurnInputClaimMode::ActiveTurn {
+                turn_id,
+                checkpoint,
+            } => {
+                input
+                    .ingress
+                    .active_turn_id()
+                    .is_some_and(|active| active == turn_id)
+                    && input.ingress.admits_checkpoint(*checkpoint)
+            }
+            lash_core::TurnInputClaimMode::NextTurn => input.state.is_next_turn_pending(),
+        };
+        if matches_mode {
+            selected.push((row, input));
+            if selected.len() >= max_inputs {
+                break;
+            }
+        }
+    }
+    let Some((head, _)) = selected.first() else {
+        tx.commit().await.map_err(store_sqlx_error)?;
+        return Ok(None);
+    };
+    let lease = TurnInputClaimLease::derive(head, session_id, owner, now, lease_ttl_ms);
+    let liveness_json = encode_liveness(&owner.liveness)?;
+    let state_after_claim = match &mode {
+        lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
+            lash_core::TurnInputState::Accepted
+        }
+        lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+    };
+    let mut inputs = Vec::new();
+    for (row, mut input) in selected {
+        let changed = sqlx::query(
+            "UPDATE lash_pending_turn_inputs
+             SET state = $3,
+                 claim_id = $4,
+                 claim_owner_id = $5,
+                 claim_owner_incarnation_id = $6,
+                 claim_owner_liveness_json = $7,
+                 claim_token = $8,
+                 claim_fencing_token = claim_fencing_token + 1,
+                 claim_claimed_at_ms = $9,
+                 claim_expires_at_ms = $10
+             WHERE session_id = $1
+               AND input_id = $2
+               AND (
+                    claim_token IS NULL
+                    OR claim_expires_at_ms <= $9
+                    OR (
+                        claim_token = $11
+                        AND claim_owner_id = $12
+                        AND claim_owner_incarnation_id = $13
+                    )
+               )",
+        )
+        .bind(session_id)
+        .bind(&row.input_id)
+        .bind(state_after_claim.as_str())
+        .bind(&lease.claim_id)
+        .bind(&owner.owner_id)
+        .bind(&owner.incarnation_id)
+        .bind(&liveness_json)
+        .bind(&lease.lease_token)
+        .bind(now as i64)
+        .bind(lease.expires_at_epoch_ms as i64)
+        .bind(&row.claim_token)
+        .bind(
+            row.claim_owner
+                .as_ref()
+                .map(|owner| owner.owner_id.as_str()),
+        )
+        .bind(
+            row.claim_owner
+                .as_ref()
+                .map(|owner| owner.incarnation_id.as_str()),
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?
+        .rows_affected();
+        if changed == 0 {
+            tx.rollback().await.map_err(store_sqlx_error)?;
+            return Ok(None);
+        }
+        input.state = state_after_claim;
+        inputs.push(input);
+    }
+    tx.commit().await.map_err(store_sqlx_error)?;
+    Ok(Some(lash_core::TurnInputClaim {
+        session_id: session_id.to_string(),
+        claim_id: lease.claim_id,
+        owner: owner.clone(),
+        lease_token: lease.lease_token,
+        fencing_token: lease.fencing_token,
+        claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
+        expires_at_epoch_ms: lease.expires_at_epoch_ms,
+        mode,
+        inputs,
+    }))
 }
 
 struct SessionExecutionLeaseRow {

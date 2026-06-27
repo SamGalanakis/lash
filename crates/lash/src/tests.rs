@@ -1392,7 +1392,7 @@ fn recording_request_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Provi
                 seen.lock()
                     .expect("seen prompts")
                     .push(request_text(&request));
-                Ok(text_response(&lashlang_block("submit \"ok\"")))
+                Ok(text_response(&lashlang_block("finish \"ok\"")))
             }
         })
         .build()

@@ -28,7 +28,7 @@ impl SubagentsPluginFactory {
             session_spec: SessionSpec::inherit(),
             tool_access: SessionToolAccess::default(),
             registry,
-            final_answer_format: RlmFinalAnswerFormat::RawSubmitValue,
+            final_answer_format: RlmFinalAnswerFormat::RawFinalValue,
         }
     }
 

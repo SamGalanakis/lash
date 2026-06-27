@@ -517,7 +517,7 @@ impl StandardShell {
             .with_examples(vec![
                 r#"await shell.exec({ cmd: "cargo test -p lash-protocol-rlm", timeout_ms: 600000 })?"#.into(),
                 r#"probe = await shell.exec({ cmd: "test -f Cargo.lock" })?
-submit probe.exit_code == 0"#.into(),
+finish probe.exit_code == 0"#.into(),
             ])
             .with_lashlang_binding(lash_tool_support::lashlang_binding(
                 ["shell"],

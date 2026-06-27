@@ -170,13 +170,13 @@ pub fn project_trajectory(
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RlmTermination {
-    SubmitRequired { schema: Option<serde_json::Value> },
-    ProseOrSubmit,
+    FinishRequired { schema: Option<serde_json::Value> },
+    Natural,
 }
 
 impl Default for RlmTermination {
     fn default() -> Self {
-        Self::SubmitRequired { schema: None }
+        Self::Natural
     }
 }
 
@@ -185,13 +185,14 @@ impl Default for RlmTermination {
 pub enum RlmFinalAnswerFormat {
     Markdown,
     Custom { guidance: String },
-    RawSubmitValue,
+    RawFinalValue,
 }
 
-/// RLM protocol session config. RLM turns terminate through `submit`,
-/// optionally validated against a schema, unless prose completion is
-/// explicitly enabled for the turn. `final_answer_format` is a session
-/// presentation preference; schema-required turns ignore it.
+/// RLM protocol session config. Natural turns finish with prose-only model
+/// responses or explicit `finish <value>` from lashlang. Programmatic turns can
+/// require an explicit finish value, optionally validated against a schema.
+/// `final_answer_format` is a session presentation preference; schema-required
+/// turns ignore it.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RlmCreateExtras {
@@ -297,7 +298,7 @@ mod tests {
         let entry = RlmTrajectoryEntry {
             id: "step-1".to_string(),
             protocol_iteration: 1,
-            code: "submit 1".to_string(),
+            code: "finish 1".to_string(),
             ..Default::default()
         };
         let seed = RlmSeedPluginBody {

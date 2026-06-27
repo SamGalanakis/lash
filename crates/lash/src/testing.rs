@@ -78,7 +78,7 @@ handle = await triggers.register({
   inputs: { tick: trigger.event },
   name: "remembered"
 })?
-submit "registered"
+finish "registered"
 "#;
 
     const BUTTON_TRIGGER_SOURCE: &str = r#"
@@ -94,7 +94,7 @@ handle = await triggers.register({
   inputs: { event: trigger.event },
   name: "button remembered"
 })?
-submit "registered"
+finish "registered"
 "#;
 
     const SESSION_ID: &str = "rebuild-conformance";
@@ -270,7 +270,7 @@ submit "registered"
             .complete(|req| async move {
                 let rendered_messages = format!("{:?}", req.messages);
                 let text = if rendered_messages.contains("run child") {
-                    lashlang_block("submit \"child done\"")
+                    lashlang_block("finish \"child done\"")
                 } else if rendered_messages.contains("register rebuild button trigger") {
                     lashlang_block(BUTTON_TRIGGER_SOURCE)
                 } else {
@@ -356,10 +356,7 @@ submit "registered"
             .run()
             .await
             .expect("register trigger route");
-        assert_eq!(
-            output.submitted_value(),
-            Some(&serde_json::json!("registered"))
-        );
+        assert_eq!(output.final_value(), Some(&serde_json::json!("registered")));
         if let Some(registration) = register {
             registry
                 .register_process(registration)

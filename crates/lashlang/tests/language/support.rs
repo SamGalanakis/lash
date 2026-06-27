@@ -25,7 +25,7 @@ async fn end_to_end_type_value_is_json_schema_shaped() {
           },
           isbn: str?
         }
-        submit Books
+        finish Books
         "#,
     )
     .expect("should parse");
@@ -67,7 +67,7 @@ async fn type_is_usable_as_a_tool_call_argument() {
                         .cloned();
                     Ok(AbilityResult::Value(Value::Null))
                 }
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
@@ -79,7 +79,7 @@ async fn type_is_usable_as_a_tool_call_argument() {
         r#"
         Shape = Type { name: str, labels: list[enum["a","b"]] }
         await agents.spawn({ task: "find X", output: Shape })
-        submit null
+        finish null
         "#,
         &mut State::new(),
         &host,
@@ -118,7 +118,7 @@ async fn validate_reuses_type_literals_for_intermediate_checks() {
               version: str,
               labels: list[str]
             })
-            submit package
+            finish package
             "#,
             &mut state,
             &host,
@@ -135,7 +135,7 @@ async fn validate_reuses_type_literals_for_intermediate_checks() {
     let mut state = State::new();
     let err = execute(
         r#"
-        submit validate(
+        finish validate(
           { name: "lashlang", labels: ["agent", 42] },
           Type { name: str, labels: list[str] }
         )
@@ -156,7 +156,7 @@ async fn validate_reuses_type_literals_for_intermediate_checks() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn undefined_ref_in_type_produces_runtime_error() {
-    let program = parse("submit Type { inner: Missing }").expect("should parse");
+    let program = parse("finish Type { inner: Missing }").expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
     let err = lashlang::execute(&program, &mut state, &host)
@@ -170,7 +170,7 @@ async fn snapshot_round_trip_preserves_type_values() {
     let program = parse(
         r#"
         Books = Type { title: str, count: int }
-        submit Books
+        finish Books
         "#,
     )
     .expect("should parse");
@@ -187,7 +187,7 @@ async fn snapshot_round_trip_preserves_type_values() {
     let restored: lashlang::Snapshot = serde_json::from_str(&serialized).expect("deserialize");
     let restored_state = State::from_snapshot(restored);
     // Re-execute a program that references Books — the ref should still resolve.
-    let program2 = parse("submit Books").expect("parse");
+    let program2 = parse("finish Books").expect("parse");
     let mut state2 = restored_state;
     let outcome2 = lashlang::execute(&program2, &mut state2, &host)
         .await

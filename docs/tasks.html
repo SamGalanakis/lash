@@ -39,7 +39,7 @@
   <div class="section" id="turn-work">
     <div class="section-header">
       <h2>Turn Work</h2>
-      <p>Running turns is the core application path. Pick collected output for backend jobs, streaming output for interactive UI, and queued turns for background/session-driven ingress.</p>
+      <p>Running turns is the core application path. Pick collected output for backend jobs, streaming output for interactive UI, and pending next-turn input when user follow-up should dispatch durably after the current turn.</p>
     </div>
     <div class="listing">
       <div class="listing__row">
@@ -93,7 +93,7 @@
   <div class="section" id="long-running-work">
     <div class="section-header">
       <h2>Long-Running Work</h2>
-      <p>Use child sessions for delegated reasoning, Lashlang processes for reusable background work, and queued turns when background events should re-enter the model.</p>
+      <p>Use child sessions for delegated reasoning, Lashlang processes for reusable background work, and process wakes when background events should re-enter the model through queued work.</p>
     </div>
     <div class="listing">
       <div class="listing__row">

@@ -32,8 +32,8 @@ use crate::resume;
 use crate::session_log::{self, SessionLogger};
 use crate::startup::session::CliSessionOpener;
 use crate::theme;
-use crate::turn_has_visible_output;
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
+use crate::turn_should_warn_no_visible_output;
 use crate::ui_effects::{apply_ui_host_effects, push_system_message};
 use crate::ui_trace::{
     UiTraceRecorder, disable_aux_op_recording, enable_aux_op_recording, render_screen_text,
@@ -404,11 +404,15 @@ pub(crate) async fn run_app(
                         &done.result.outcome,
                         lash_core::TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
                     );
-                    let no_visible_output = matches!(
-                        &done.result.outcome,
-                        lash_core::TurnOutcome::Finished(_)
-                            | lash_core::TurnOutcome::AgentFrameSwitch { .. }
-                    ) && !turn_has_visible_output(&done.result);
+                    let active_turn_had_visible_output = app
+                        .live
+                        .turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.has_visible_output);
+                    let no_visible_output = turn_should_warn_no_visible_output(
+                        &done.result,
+                        active_turn_had_visible_output,
+                    );
                     let state = done.result.state;
                     tracing::info!(
                         turn_index = state.turn_index,

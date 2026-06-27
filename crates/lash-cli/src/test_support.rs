@@ -118,11 +118,8 @@ impl UiHarness {
 
     pub(crate) fn queue_turn(&mut self, text: impl Into<String>) -> PreparedTurn {
         let turn = PreparedTurn::new(text.into(), Vec::new());
-        self.app.test_seed_queued_turn_snapshot(
-            turn.clone(),
-            lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-            lash_core::SlotPolicy::Exclusive,
-        );
+        self.app
+            .test_seed_queued_turn_snapshot(turn.clone(), lash_core::TurnInputIngress::NextTurn);
         turn
     }
 
@@ -295,8 +292,10 @@ mod tests {
         harness.start_turn();
         harness.app.test_seed_queued_turn_snapshot(
             PreparedTurn::new("after tool do this".into(), Vec::new()),
-            lash_core::DeliveryPolicy::EarliestSafeBoundary,
-            lash_core::SlotPolicy::Join,
+            lash_core::TurnInputIngress::active_turn(
+                "test-turn",
+                lash_core::TurnInputCheckpointBoundary::AfterWork,
+            ),
         );
         harness.queue_turn("queued follow-up one");
         harness.queue_turn("queued follow-up two");

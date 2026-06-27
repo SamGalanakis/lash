@@ -108,7 +108,6 @@ fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
         | Expr::SleepUntil(_)
         | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
-        | Expr::Submit(_)
         | Expr::Yield(_)
         | Expr::Wake(_)
         | Expr::Finish(_)
@@ -151,7 +150,6 @@ fn label_attaches_to_assignment_value(expr: &Expr) -> bool {
         | Expr::SleepUntil(_)
         | Expr::WaitSignal { .. }
         | Expr::SignalRun { .. }
-        | Expr::Submit(_)
         | Expr::Yield(_)
         | Expr::Wake(_)
         | Expr::Finish(_)
@@ -203,7 +201,6 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         | Expr::SignalRun { .. }
         | Expr::Cancel(_)
         | Expr::Print(_)
-        | Expr::Submit(_)
         | Expr::Yield(_)
         | Expr::Wake(_)
         | Expr::Finish(_)
@@ -309,7 +306,7 @@ fn wrap_type_schema_value(schema: Value) -> Value {
 fn is_terminal_expr(expr: &Expr) -> bool {
     match expr {
         Expr::LabelAnnotated { expr, .. } => is_terminal_expr(expr),
-        Expr::Submit(_) | Expr::Finish(_) | Expr::Fail(_) => true,
+        Expr::Finish(_) | Expr::Fail(_) => true,
         Expr::Block(expressions) => expressions.last().is_some_and(is_terminal_expr),
         Expr::If {
             then_block,

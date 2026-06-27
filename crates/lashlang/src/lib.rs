@@ -243,7 +243,7 @@ mod tests {
                             .collect(),
                     }),
                 ),
-                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
                 _ => Ok(AbilityResult::Value(Value::Null)),
@@ -259,7 +259,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn execute_reports_runtime_errors() {
-        let compiled = compile("submit missing").expect("source should compile");
+        let compiled = compile("finish missing").expect("source should compile");
         let mut state = State::new();
         let err = execute(&compiled, &mut state, &Host)
             .await
@@ -269,7 +269,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn traced_environment_records_source_location() {
-        let source = "x = 1\nsubmit missing";
+        let source = "x = 1\nfinish missing";
         let compiled = compile(source).expect("source should compile");
         let mut state = State::new();
         let env = ExecutionEnvironment::new(&Host).traced();
@@ -282,14 +282,14 @@ mod tests {
         let message = format_runtime_diagnostic(source, &failure.error, failure.span);
         assert!(message.contains("unknown name `missing`"), "{message}");
         assert!(message.contains("--> line 2, column 1"), "{message}");
-        assert!(message.contains("submit missing"), "{message}");
+        assert!(message.contains("finish missing"), "{message}");
         assert!(message.contains("^"), "{message}");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn compile_prewarm_and_environment_scratch_execution_work_together() {
         prewarm();
-        let compiled = compile("submit 7").expect("source should compile");
+        let compiled = compile("finish 7").expect("source should compile");
         let mut state = State::new();
         let env = ExecutionEnvironment::new(&Host)
             .traced()
@@ -304,13 +304,13 @@ mod tests {
     #[test]
     fn compiled_program_cache_reuses_source_and_tracks_lru_stats() {
         let mut cache = CompiledProgramCache::with_capacity(2);
-        let first = cache.get_or_compile("submit 1").expect("compile first");
-        let second = cache.get_or_compile("submit 1").expect("compile cache hit");
+        let first = cache.get_or_compile("finish 1").expect("compile first");
+        let second = cache.get_or_compile("finish 1").expect("compile cache hit");
         let same_ast = cache
-            .get_or_compile("submit 1\n")
+            .get_or_compile("finish 1\n")
             .expect("compile source-distinct program");
-        let other = cache.get_or_compile("submit 2").expect("compile second");
-        let third = cache.get_or_compile("submit 3").expect("compile third");
+        let other = cache.get_or_compile("finish 2").expect("compile second");
+        let third = cache.get_or_compile("finish 3").expect("compile third");
 
         assert!(std::sync::Arc::ptr_eq(&first, &second));
         assert!(!std::sync::Arc::ptr_eq(&first, &same_ast));
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn linked_program_cache_reuses_source_when_host_environment_satisfies_requirements() {
-        let source = r#"submit (await tools.read_file({ path: "." }))?"#;
+        let source = r#"finish (await tools.read_file({ path: "." }))?"#;
         let base_environment = LashlangHostEnvironment::new(
             LashlangHostCatalog::tool_default(["read_file"]),
             LashlangAbilities::default(),
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn linked_program_cache_keeps_source_and_host_requirements_distinct() {
-        let source = r#"submit (await tools.read_file({ path: "." }))?"#;
+        let source = r#"finish (await tools.read_file({ path: "." }))?"#;
         let base_environment = LashlangHostEnvironment::new(
             LashlangHostCatalog::tool_default(["read_file"]),
             LashlangAbilities::default(),
@@ -424,21 +424,21 @@ mod tests {
     async fn execute_with_diagnostics_covers_representative_runtime_failures() {
         let cases = [
             (
-                "x = 1\nsubmit ({ ok: false, error: \"boom\" })?",
+                "x = 1\nfinish ({ ok: false, error: \"boom\" })?",
                 "`?` unwrapped failed tool result: boom",
-                "submit ({ ok: false, error: \"boom\" })?",
+                "finish ({ ok: false, error: \"boom\" })?",
             ),
             (
-                "x = 1\nsubmit len(true)",
+                "x = 1\nfinish len(true)",
                 "`len` requires a string, tuple, list, record, or null",
-                "submit len(true)",
+                "finish len(true)",
             ),
             (
-                "x = 1\nsubmit \"text\".field",
+                "x = 1\nfinish \"text\".field",
                 "can't read `.field` from string",
-                "submit \"text\".field",
+                "finish \"text\".field",
             ),
-            ("x = 1\nsubmit 7[0]", "can't index number", "submit 7[0]"),
+            ("x = 1\nfinish 7[0]", "can't index number", "finish 7[0]"),
         ];
 
         for (source, expected_error, expected_snippet) in cases {
@@ -461,7 +461,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn execute_success_path_uses_host() {
         let linked = LinkedModule::link(
-            parse("v = await tools.anything({})? submit v").expect("source should parse"),
+            parse("v = await tools.anything({})? finish v").expect("source should parse"),
             LashlangHostEnvironment::new(
                 LashlangHostCatalog::tool_default(["anything"]),
                 LashlangAbilities::default(),
@@ -483,8 +483,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn execute_allows_bare_finish() {
-        let compiled = compile("submit").expect("source should compile");
+    async fn execute_allows_finish_null() {
+        let compiled = compile("finish null").expect("source should compile");
         let mut state = State::new();
         let outcome = execute(&compiled, &mut state, &Host)
             .await

@@ -661,9 +661,9 @@ impl lashlang::ExecutionHost for LashlangProcessHost<'_> {
             lashlang::AbilityOp::Print(_) => Err(ExecutionHostError::new(
                 "`print` is not available inside lashlang process bodies",
             )),
-            lashlang::AbilityOp::Submit(value)
-            | lashlang::AbilityOp::Finish(value)
-            | lashlang::AbilityOp::Fail(value) => Ok(lashlang::AbilityResult::Value(value)),
+            lashlang::AbilityOp::Finish(value) | lashlang::AbilityOp::Fail(value) => {
+                Ok(lashlang::AbilityResult::Value(value))
+            }
         }
     }
 

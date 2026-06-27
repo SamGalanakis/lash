@@ -109,7 +109,7 @@ fn execution_section_makes_paired_lashlang_tag_contract_explicit() {
     assert!(!section.contains("NEVER have multiple `<lashlang>` blocks"));
     assert!(!section.contains("Any text after it is ignored"));
     assert!(
-        section.contains("Only `submit` once you have observed and verified the relevant results")
+        section.contains("Only `finish` once you have observed and verified the relevant results")
     );
 }
 
@@ -390,7 +390,11 @@ fn execution_section_documents_list_comprehensions() {
 
 #[test]
 fn cell_extraction_returns_none_for_prose_only() {
-    assert!(extract_lashlang_cell("plain prose").is_none());
+    assert!(
+        extract_lashlang_cell("plain prose")
+            .expect("valid prose-only response")
+            .is_none()
+    );
     assert_eq!(
         project_visible_assistant_prose("plain prose"),
         "plain prose"
@@ -402,12 +406,14 @@ fn cell_extraction_returns_none_for_prose_only() {
 fn cell_extraction_requires_complete_paired_block() {
     for text in [
         "<lashlang>",
-        "<lashlang>\nsubmit 1",
-        "</lashlang>\nsubmit 1",
-        "%%lashlang\nsubmit 1",
+        "<lashlang>\nfinish 1",
+        "</lashlang>\nfinish 1",
+        "%%lashlang\nfinish 1",
     ] {
         assert!(
-            extract_lashlang_cell(text).is_none(),
+            extract_lashlang_cell(text)
+                .expect("incomplete or retired form is not an extraction error")
+                .is_none(),
             "incomplete or retired form should not parse: {text:?}"
         );
         assert!(!contains_lashlang_cell(text));
@@ -416,33 +422,43 @@ fn cell_extraction_requires_complete_paired_block() {
 
 #[test]
 fn cell_extraction_uses_prose_before_start_tag_and_code_before_end_tag() {
-    let text = "Before\n\n<lashlang>\nprint 1\nsubmit 2\n</lashlang>\nignored";
-    let extraction = extract_lashlang_cell(text).expect("should extract");
+    let text = "Before\n\n<lashlang>\nprint 1\nfinish 2\n</lashlang>\n  \n";
+    let extraction = extract_lashlang_cell(text)
+        .expect("valid cell")
+        .expect("should extract");
     assert_eq!(extraction.prose, "Before");
-    assert_eq!(extraction.code, "print 1\nsubmit 2");
+    assert_eq!(extraction.code, "print 1\nfinish 2");
     assert_eq!(project_visible_assistant_prose(text), "Before");
 }
 
 #[test]
 fn cell_extraction_accepts_indented_tag_lines() {
-    let text = "Before\n  <lashlang>  \nsubmit 1\n  </lashlang>  \nignored";
-    let extraction = extract_lashlang_cell(text).expect("should extract");
+    let text = "Before\n  <lashlang>  \nfinish 1\n  </lashlang>  \n";
+    let extraction = extract_lashlang_cell(text)
+        .expect("valid cell")
+        .expect("should extract");
     assert_eq!(extraction.prose, "Before");
-    assert_eq!(extraction.code, "submit 1");
+    assert_eq!(extraction.code, "finish 1");
 }
 
 #[test]
 fn inline_tag_text_is_plain_prose() {
     let text = "Use <lashlang> in documentation.";
-    assert!(extract_lashlang_cell(text).is_none());
+    assert!(
+        extract_lashlang_cell(text)
+            .expect("valid prose-only response")
+            .is_none()
+    );
     assert_eq!(project_visible_assistant_prose(text), text);
 }
 
 #[test]
 fn markdown_code_blocks_before_tags_remain_visible_prose() {
-    let text = "Example:\n```python\nprint('x')\n```\n<lashlang>\nsubmit 1\n</lashlang>";
-    let extraction = extract_lashlang_cell(text).expect("should extract paired block");
-    assert_eq!(extraction.code, "submit 1");
+    let text = "Example:\n```python\nprint('x')\n```\n<lashlang>\nfinish 1\n</lashlang>";
+    let extraction = extract_lashlang_cell(text)
+        .expect("valid cell")
+        .expect("should extract paired block");
+    assert_eq!(extraction.code, "finish 1");
     assert_eq!(extraction.prose, "Example:\n```python\nprint('x')\n```");
     assert_eq!(
         project_visible_assistant_prose(text),
@@ -453,11 +469,13 @@ fn markdown_code_blocks_before_tags_remain_visible_prose() {
 #[test]
 fn markdown_code_blocks_inside_tags_are_lashlang_source() {
     let text =
-        "<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload\n</lashlang>";
-    let extraction = extract_lashlang_cell(text).expect("should extract");
+        "<lashlang>\npayload = r\"\"\"```markdown\nbody\n```\"\"\"\nfinish payload\n</lashlang>";
+    let extraction = extract_lashlang_cell(text)
+        .expect("valid cell")
+        .expect("should extract");
     assert_eq!(
         extraction.code,
-        "payload = r\"\"\"```markdown\nbody\n```\"\"\"\nsubmit payload"
+        "payload = r\"\"\"```markdown\nbody\n```\"\"\"\nfinish payload"
     );
 }
 
@@ -472,7 +490,27 @@ fn rendered_history_cell_round_trips_through_extractor() {
     let cell = crate::cell_scan::render_lashlang_cell_text("Found it.", code);
     assert!(!cell.contains("--- history["));
     assert!(!cell.contains("\nCode:\n"));
-    let extraction = extract_lashlang_cell(&cell).expect("renders a valid cell");
+    let extraction = extract_lashlang_cell(&cell)
+        .expect("valid cell")
+        .expect("renders a valid cell");
     assert_eq!(extraction.prose, "Found it.");
     assert_eq!(extraction.code, code);
+}
+
+#[test]
+fn cell_extraction_rejects_trailing_text_after_cell() {
+    let text = "Before\n<lashlang>\nfinish 1\n</lashlang>\nafter";
+    assert!(matches!(
+        extract_lashlang_cell(text),
+        Err(super::cell::CellExtractionError::TrailingText)
+    ));
+}
+
+#[test]
+fn cell_extraction_rejects_multiple_cells() {
+    let text = "<lashlang>\nprint 1\n</lashlang>\n<lashlang>\nfinish 2\n</lashlang>";
+    assert!(matches!(
+        extract_lashlang_cell(text),
+        Err(super::cell::CellExtractionError::MultipleCells)
+    ));
 }

@@ -24,7 +24,7 @@ Available host features:
     results = await handles
     first = results.first?
     second = results.second?
-    submit format("## Results\n\n### First topic\n{}\n\nKey metrics:\n- {}\n\n### Second topic\n{}\n\nKey metrics:\n- {}", first.summary, join(first.key_metrics, "\n- "), second.summary, join(second.key_metrics, "\n- "))
+    finish format("## Results\n\n### First topic\n{}\n\nKey metrics:\n- {}\n\n### Second topic\n{}\n\nKey metrics:\n- {}", first.summary, join(first.key_metrics, "\n- "), second.summary, join(second.key_metrics, "\n- "))
     </lashlang>
 
 - The red and blue UI buttons emit `ui.button.pressed`. Register `ui.button.pressed({})`; the selected button arrives in the event payload, not in the source config:
@@ -42,7 +42,7 @@ Available host features:
       name: "button watcher"
     })?
     registrations = await triggers.list({ name: "button watcher" })?
-    submit format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
+    finish format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
     </lashlang>
 
 - For schedule requests, build `cron.Schedule(...)` values and register a process definition with explicit `inputs`. Use `trigger.event` directly for the `cron.Tick` param, for example `inputs: { tick: trigger.event }`. The workbench syncs enabled `cron.Schedule` registrations to Restate cron objects by stored source key, then emits trigger occurrences with `cron.Tick { fired_at: str }`; use a seconds expression such as `*/10 * * * * *` when the user wants a quick smoke test. Use `await triggers.list({})?` to discover registrations and `await triggers.cancel({ handle: handle })?` to disable future occurrence delivery.
@@ -70,7 +70,7 @@ Available host features:
       inputs: { event: trigger.event },
       name: "inbox concierge"
     })?
-    submit format("Inbox concierge registered as `{}`.", handle)
+    finish format("Inbox concierge registered as `{}`.", handle)
     </lashlang>
 
 Reference only the `inbox.<account>` authorities that actually exist; if the user has not connected an account yet, ask them to add one from the Accounts tab first.

@@ -109,7 +109,15 @@ def resolve_binary(args: argparse.Namespace, repo_root: Path) -> Path:
     if args.binary:
         return args.binary
     profile = "release" if args.release else "debug"
-    return repo_root / "target" / profile / "lash-perf"
+    return cargo_target_dir(repo_root) / profile / "lash-perf"
+
+
+def cargo_target_dir(repo_root: Path) -> Path:
+    value = os.environ.get("CARGO_TARGET_DIR")
+    if value:
+        path = Path(value)
+        return path if path.is_absolute() else repo_root / path
+    return repo_root / "target"
 
 
 def maybe_build(
