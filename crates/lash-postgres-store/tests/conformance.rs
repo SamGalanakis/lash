@@ -55,6 +55,7 @@ async fn reset(storage: &PostgresStorage) {
             lash_processes,
             lash_queued_work_items,
             lash_queued_work_batches,
+            lash_pending_turn_inputs,
             lash_runtime_turn_commits,
             lash_session_execution_leases,
             lash_session_meta,
