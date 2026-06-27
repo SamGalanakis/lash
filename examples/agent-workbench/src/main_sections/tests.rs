@@ -1693,7 +1693,7 @@ finish initial
         };
         let invocation_id = tokio::time::timeout(
             Duration::from_secs(60),
-            restate::finish_user_turn(state, request),
+            restate::submit_user_turn(state, request),
         )
         .await
             .expect("Restate-backed workbench turn timed out")
@@ -1841,7 +1841,7 @@ finish initial
         let restate_http = reqwest::Client::new();
         let active_restate_invocations = ActiveRestateInvocations::default();
         let queued_work_driver =
-            lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkFinishter {
+            lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
                 session_ids: session_ids.clone(),
                 store_factory: Arc::clone(&core_store_factory),
                 restate_ingress_url: restate_ingress_url.clone(),
