@@ -250,7 +250,6 @@ impl LlmStreamAccumulator {
         summary: Vec<String>,
         encrypted_content: Option<String>,
     ) {
-        let has_roundtrip_payload = encrypted_content.is_some();
         let replay = ProviderReasoningReplay {
             item_id,
             encrypted_content,
@@ -258,6 +257,15 @@ impl LlmStreamAccumulator {
             redacted: false,
             summary,
         };
+        self.push_reasoning_with_replay(text, (!replay.is_empty()).then_some(replay));
+    }
+
+    pub(super) fn push_reasoning_with_replay(
+        &mut self,
+        text: String,
+        replay: Option<ProviderReasoningReplay>,
+    ) {
+        let replay_value = replay.clone().unwrap_or_default();
         if let Some(LlmOutputPart::Reasoning {
             text: existing,
             replay: existing_replay,
@@ -265,7 +273,7 @@ impl LlmStreamAccumulator {
             && existing_replay
                 .as_ref()
                 .is_none_or(ProviderReasoningReplay::is_empty)
-            && replay.is_empty()
+            && replay_value.is_empty()
         {
             append_stream_piece(existing, &text);
             return;
@@ -274,45 +282,34 @@ impl LlmStreamAccumulator {
             text: existing,
             replay: existing_replay,
         }) = self.parts.last_mut()
-            && has_roundtrip_payload
+            && !replay_value.is_empty()
             && existing_replay
                 .as_ref()
-                .is_none_or(|meta| meta.encrypted_content.is_none())
+                .is_none_or(ProviderReasoningReplay::is_empty)
             && !existing.trim().is_empty()
             && (text.trim().is_empty() || text.contains(existing.as_str()))
         {
             if !text.trim().is_empty() && text != *existing {
                 *existing = text;
             }
-            *existing_replay = Some(replay);
+            *existing_replay = replay;
             return;
         }
         if let Some(LlmOutputPart::Reasoning {
             text: existing,
             replay: existing_replay,
         }) = self.parts.last_mut()
-            && !has_roundtrip_payload
+            && replay_value.is_empty()
             && existing_replay
                 .as_ref()
-                .is_some_and(|meta| meta.encrypted_content.is_some())
+                .is_some_and(|meta| !meta.is_empty())
             && !text.trim().is_empty()
             && existing.trim().is_empty()
         {
             append_stream_piece(existing, &text);
-            if let Some(meta) = existing_replay.as_mut() {
-                if meta.item_id.is_none() {
-                    meta.item_id = replay.item_id;
-                }
-                if meta.summary.is_empty() {
-                    meta.summary = replay.summary;
-                }
-            }
             return;
         }
-        self.parts.push(LlmOutputPart::Reasoning {
-            text,
-            replay: (!replay.is_empty()).then_some(replay),
-        });
+        self.parts.push(LlmOutputPart::Reasoning { text, replay });
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -324,13 +321,7 @@ impl LlmStreamAccumulator {
     }
 
     pub(super) fn full_text(&self) -> String {
-        let mut full_text = String::new();
-        for part in &self.parts {
-            if let LlmOutputPart::Text { text, .. } = part {
-                full_text.push_str(text);
-            }
-        }
-        full_text
+        crate::visible_response_text_from_parts(&self.parts)
     }
 
     pub(super) fn apply_to_response(&self, response: &mut LlmResponse) {
@@ -351,7 +342,7 @@ impl LlmStreamAccumulator {
 
         response.parts = reconcile_accumulated_parts(&self.parts, &response.parts);
         if response.full_text.is_empty() {
-            response.full_text = response_parts_text(&response.parts);
+            response.full_text = crate::visible_response_text_from_parts(&response.parts);
         }
     }
 }
@@ -515,16 +506,6 @@ fn reasoning_matches(candidate: &LlmOutputPart, expected: &LlmOutputPart) -> boo
         }
         _ => false,
     }
-}
-
-fn response_parts_text(parts: &[LlmOutputPart]) -> String {
-    let mut full_text = String::new();
-    for part in parts {
-        if let LlmOutputPart::Text { text, .. } = part {
-            full_text.push_str(text);
-        }
-    }
-    full_text
 }
 
 fn append_stream_piece(full: &mut String, piece: &str) {

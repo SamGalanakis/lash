@@ -53,8 +53,19 @@ fn encode_msgpack<T: serde::Serialize>(value: &T) -> Vec<u8> {
     buf
 }
 
-fn decode_msgpack<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-    rmp_serde::from_slice(bytes).ok()
+fn decode_versioned_msgpack_record<T>(
+    bytes: &[u8],
+    record_kind: &'static str,
+    expected: u32,
+) -> Result<T, StoreError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value: serde_json::Value = rmp_serde::from_slice(bytes)
+        .map_err(|err| StoreError::Backend(format!("failed to decode {record_kind}: {err}")))?;
+    lash_core::store::ensure_supported_record_schema_version(record_kind, &value, expected)?;
+    rmp_serde::from_slice(bytes)
+        .map_err(|err| StoreError::Backend(format!("failed to decode {record_kind}: {err}")))
 }
 
 fn block_on_detached<T: Send + 'static>(
@@ -92,8 +103,11 @@ fn merge_token_ledger_entries(entries: Vec<TokenLedgerEntry>) -> Vec<TokenLedger
     merged
 }
 
+const POSTGRES_SESSION_CHECKPOINT_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct SessionCheckpointEnvelope {
+    schema_version: u32,
     manifest: SessionCheckpoint,
     tool_state: Option<lash_core::ToolState>,
     plugin_snapshot: Option<lash_core::PluginSessionSnapshot>,
@@ -131,14 +145,15 @@ async fn put_checkpoint_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     checkpoint: &HydratedSessionCheckpoint,
 ) -> Result<(BlobRef, SessionCheckpoint), StoreError> {
-    let manifest = SessionCheckpoint {
-        turn_state: checkpoint.turn_state.clone(),
-        tool_state_ref: checkpoint.tool_state_ref.clone(),
-        plugin_snapshot_ref: checkpoint.plugin_snapshot_ref.clone(),
-        plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
-        execution_state_ref: checkpoint.execution_state_ref.clone(),
-    };
+    let manifest = SessionCheckpoint::new(
+        checkpoint.turn_state.clone(),
+        checkpoint.tool_state_ref.clone(),
+        checkpoint.plugin_snapshot_ref.clone(),
+        checkpoint.plugin_snapshot_revision,
+        checkpoint.execution_state_ref.clone(),
+    );
     let envelope = SessionCheckpointEnvelope {
+        schema_version: POSTGRES_SESSION_CHECKPOINT_ENVELOPE_SCHEMA_VERSION,
         manifest: manifest.clone(),
         tool_state: checkpoint.tool_state.clone(),
         plugin_snapshot: checkpoint.plugin_snapshot.clone(),
@@ -149,10 +164,24 @@ async fn put_checkpoint_tx(
     Ok((checkpoint_ref, manifest))
 }
 
-async fn get_checkpoint(pool: &PgPool, blob_ref: &BlobRef) -> Option<HydratedSessionCheckpoint> {
-    let bytes = get_blob(pool, blob_ref).await?;
-    let envelope: SessionCheckpointEnvelope = decode_msgpack(&bytes)?;
-    Some(HydratedSessionCheckpoint {
+async fn get_checkpoint(
+    pool: &PgPool,
+    blob_ref: &BlobRef,
+) -> Result<Option<HydratedSessionCheckpoint>, StoreError> {
+    let Some(bytes) = get_blob(pool, blob_ref).await else {
+        return Ok(None);
+    };
+    let envelope: SessionCheckpointEnvelope = decode_versioned_msgpack_record(
+        &bytes,
+        "PostgresSessionCheckpointEnvelope",
+        POSTGRES_SESSION_CHECKPOINT_ENVELOPE_SCHEMA_VERSION,
+    )?;
+    lash_core::store::ensure_supported_schema_version(
+        "SessionCheckpoint",
+        envelope.manifest.schema_version,
+        lash_core::store::SESSION_CHECKPOINT_SCHEMA_VERSION,
+    )?;
+    Ok(Some(HydratedSessionCheckpoint {
         turn_state: envelope.manifest.turn_state,
         tool_state_ref: envelope.manifest.tool_state_ref,
         tool_state: envelope.tool_state,
@@ -161,7 +190,7 @@ async fn get_checkpoint(pool: &PgPool, blob_ref: &BlobRef) -> Option<HydratedSes
         plugin_snapshot_revision: envelope.manifest.plugin_snapshot_revision,
         execution_state_ref: envelope.manifest.execution_state_ref,
         execution_state: envelope.execution_state,
-    })
+    }))
 }
 
 async fn load_session_head_meta_tx(
@@ -184,7 +213,11 @@ async fn load_session_head_meta_tx(
     };
     let head_json: String = row.get(0);
     let head_revision: i64 = row.get(1);
-    let mut meta: SessionHeadMeta = store_decode_json(&head_json, "session head")?;
+    let mut meta: SessionHeadMeta = lash_core::store::decode_versioned_json_record(
+        &head_json,
+        "SessionHeadMeta",
+        lash_core::store::SESSION_HEAD_META_SCHEMA_VERSION,
+    )?;
     meta.head_revision = head_revision as u64;
     Ok(Some(meta))
 }

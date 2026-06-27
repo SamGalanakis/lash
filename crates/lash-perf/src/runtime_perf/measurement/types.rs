@@ -4,6 +4,7 @@ const DEFAULT_RUNTIME_PERF_TURN_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RuntimePerfRunResult {
     pub(crate) scenario: String,
+    pub(crate) scenario_harness: String,
     pub(crate) chat_turns: usize,
     pub(crate) stack_profile: Option<StackProfile>,
     pub(crate) build_runtime_ms: f64,
@@ -145,6 +146,9 @@ pub(crate) struct RuntimePerfPhaseSummary {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RuntimePerfScenarioSummary {
     pub(crate) scenario: String,
+    pub(crate) scenario_harness: String,
+    pub(crate) scenario_harness_rationale: String,
+    pub(crate) correctness_coverage_ids: Vec<String>,
     pub(crate) runs: usize,
     pub(crate) chat_turns: usize,
     pub(crate) stack_profile: StackProfile,

@@ -248,12 +248,7 @@ impl Store {
                 continue;
             };
             let content = decode_artifact_blob(&bytes).unwrap_or(bytes);
-            let checkpoint = decode_checkpoint(&content).ok_or_else(|| {
-                StoreError::Backend(format!(
-                    "gc: live checkpoint manifest `{}` could not be decoded",
-                    current.blob_ref
-                ))
-            })?;
+            let checkpoint = decode_checkpoint(&content)?;
             stack.extend(retained_artifact_refs(&checkpoint));
         }
         let all_hashes = {

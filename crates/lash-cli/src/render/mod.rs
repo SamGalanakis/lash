@@ -1,5 +1,6 @@
 mod activity;
 mod artifact;
+pub(crate) use artifact::highlight_code_snippet;
 pub(crate) mod compositor;
 mod prompt;
 mod queue;

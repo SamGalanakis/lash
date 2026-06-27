@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use lash_core::runtime::PendingTurnInput;
 use lash_core::{
     Message, MessageRole, PartKind, PluginMessage, ProcessHandleSummary, ProcessLifecycleStatus,
-    PromptUsage, TokenUsage, ToolCallRecord,
+    PromptUsage, SessionProcessEventKind, TokenUsage, ToolCallRecord,
 };
 use lash_tui::{Line, Rect};
 use lash_tui_extensions::TuiExtensions;
@@ -1100,6 +1100,35 @@ impl App {
         }
         if self.processes != next {
             self.processes = next;
+            self.invalidate_height_cache();
+            self.dirty = true;
+        }
+    }
+
+    pub fn apply_process_changed(&mut self, kind: SessionProcessEventKind, process_ids: &[String]) {
+        if process_ids.is_empty() {
+            return;
+        }
+        if kind != SessionProcessEventKind::Cancelled {
+            return;
+        }
+
+        let process_ids: HashSet<&str> = process_ids.iter().map(String::as_str).collect();
+        let now = std::time::Instant::now();
+        let mut changed = false;
+        for process in &mut self.processes {
+            if !process_ids.contains(process.process_id.as_str()) || process.status.is_terminal() {
+                continue;
+            }
+            process.status = ProcessLifecycleStatus::Cancelled;
+            process
+                .status_duration
+                .get_or_insert_with(|| process.first_seen.elapsed());
+            process.transient_until = Some(now + std::time::Duration::from_secs(10));
+            changed = true;
+        }
+
+        if changed {
             self.invalidate_height_cache();
             self.dirty = true;
         }

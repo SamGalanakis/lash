@@ -505,6 +505,107 @@ fn responses_none_cache_retention_omits_prompt_cache_fields() {
 }
 
 #[test]
+fn openai_compat_config_serializes_when_non_default() {
+    let provider =
+        OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_compat(OpenAiCompat {
+            max_tokens_field: Some(OpenAiCompatMaxTokensField::MaxCompletionTokens),
+            streaming_usage: Some(false),
+            ..OpenAiCompat::default()
+        });
+
+    let config = provider.serialize_config();
+
+    assert_eq!(
+        config["compat"]["max_tokens_field"],
+        json!("max_completion_tokens")
+    );
+    assert_eq!(config["compat"]["streaming_usage"], false);
+}
+
+#[test]
+fn openai_compat_resolver_covers_openrouter_local_and_session_affinity() {
+    let openrouter = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let openrouter_caps = openrouter.resolved_compat(CompletionEndpoint::ChatCompletions);
+    assert_eq!(
+        openrouter_caps.reasoning_format,
+        OpenAiCompatReasoningFormat::OpenRouter
+    );
+    assert!(openrouter_caps.streaming_usage);
+    assert!(openrouter_caps.cache_session_affinity);
+
+    let local = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1");
+    let local_caps = local.resolved_compat(CompletionEndpoint::ChatCompletions);
+    assert_eq!(
+        local_caps.reasoning_format,
+        OpenAiCompatReasoningFormat::None
+    );
+    assert!(!local_caps.request_fields);
+    assert!(!local_caps.streaming_usage);
+    assert!(!local_caps.cache_session_affinity);
+}
+
+#[test]
+fn chat_body_honors_compat_max_token_field_streaming_usage_and_strict_tools() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.tools = Arc::new(vec![LlmToolSpec {
+        name: "lookup".to_string(),
+        description: "Lookup".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": { "q": { "type": "string" } }
+        }),
+        output_schema: json!({}),
+        input_schema_projections: Vec::new(),
+        output_schema_projections: Vec::new(),
+    }]);
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_compat(OpenAiCompat {
+            max_tokens_field: Some(OpenAiCompatMaxTokensField::MaxCompletionTokens),
+            streaming_usage: Some(false),
+            strict_tools: Some(true),
+            ..OpenAiCompat::default()
+        })
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert!(body.get("max_tokens").is_none());
+    assert_eq!(body["max_completion_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
+    assert!(body.get("stream_options").is_none());
+    assert_eq!(body["tools"][0]["function"]["strict"], true);
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"]["additionalProperties"],
+        false
+    );
+}
+
+#[test]
+fn local_openai_compatible_suppresses_optional_openai_fields() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model_variant = Some("medium".to_string());
+    req.tools = Arc::new(vec![LlmToolSpec {
+        name: "lookup".to_string(),
+        description: "Lookup".to_string(),
+        input_schema: json!({"type": "object"}),
+        output_schema: json!({}),
+        input_schema_projections: Vec::new(),
+        output_schema_projections: Vec::new(),
+    }]);
+
+    let local = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1");
+    let chat = local.build_chat_request_body(&req, true).unwrap();
+    assert!(chat.get("stream_options").is_none());
+    assert!(chat.get("parallel_tool_calls").is_none());
+    assert!(chat.get("reasoning").is_none());
+
+    let responses = local.build_responses_request_body(&req, true).unwrap();
+    assert!(responses.get("include").is_none());
+    assert!(responses.get("store").is_none());
+    assert!(responses.get("text").is_none());
+    assert!(responses.get("prompt_cache_key").is_none());
+}
+
+#[test]
 fn output_token_cap_maps_to_wire_fields() {
     let options = ProviderOptions {
         max_output_tokens: Some(9999),
@@ -554,6 +655,7 @@ fn assistant_text_preserves_response_meta() {
                 id: Some("msg_1".to_string()),
                 status: Some("completed".to_string()),
                 phase: Some("final_answer".to_string()),
+                ..ResponseTextMeta::default()
             }),
             cache_breakpoint: false,
         }],
@@ -817,6 +919,48 @@ fn stream_parser_captures_text_reasoning_tool_and_phase() {
             ..
         } if replay.item_id.as_deref() == Some("fc_1") && input_json == "{\"x\":1}"
     ));
+}
+
+#[test]
+fn responses_final_answer_phase_hides_commentary_from_visible_text() {
+    let mut state = ResponsesStreamState::default();
+    for event in [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_commentary","phase":"commentary"}}"#,
+        r#"{"type":"response.output_text.delta","output_index":0,"item_id":"msg_commentary","delta":"Working notes."}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_commentary","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Working notes."}]}}"#,
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_final","phase":"final_answer"}}"#,
+        r#"{"type":"response.output_text.delta","output_index":1,"item_id":"msg_final","delta":"Final answer."}"#,
+        r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_final","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Final answer."}]}}"#,
+        r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_commentary","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Working notes."}]},{"type":"message","id":"msg_final","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Final answer."}]}]}}"#,
+    ] {
+        OpenAiCompatibleProvider::process_sse_event(event, &mut state, None).unwrap();
+    }
+
+    let parts = state.response_parts();
+    assert_eq!(state.full_text, "Final answer.");
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|part| matches!(part, LlmOutputPart::Text { .. }))
+            .count(),
+        2
+    );
+    let response = LlmResponse {
+        full_text: state.full_text.clone(),
+        parts,
+        ..LlmResponse::default()
+    };
+    let visible = lash_core::normalized_response_parts(&response);
+    assert_eq!(
+        visible
+            .iter()
+            .filter_map(|part| match part {
+                LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>(),
+        "Final answer."
+    );
 }
 
 #[test]

@@ -4,10 +4,6 @@ use crate::support::*;
 const PROVIDER: &str = "OpenAI-compatible";
 
 impl OpenAiCompatibleProvider {
-    pub(crate) fn build_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
-        shared::build_tools(PROVIDER, req)
-    }
-
     pub(crate) fn projected_schema(
         canonical: &Value,
         overrides: &[SchemaProjectionOverride],
@@ -16,25 +12,14 @@ impl OpenAiCompatibleProvider {
         shared::projected_schema(PROVIDER, canonical, overrides, profile)
     }
 
-    fn local_style_base_url(base_url: &str) -> bool {
-        let normalized = base_url.trim().to_ascii_lowercase();
-        normalized.contains("localhost")
-            || normalized.contains("127.0.0.1")
-            || normalized.contains("0.0.0.0")
-            || normalized.contains("ollama")
-    }
-
-    fn supports_openai_request_fields(base_url: &str) -> bool {
-        !Self::local_style_base_url(base_url)
-    }
-
     pub(crate) fn build_responses_request_body(
         &self,
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI Responses")?;
-        let tools = Self::build_tools(req)?;
+        let compat = self.resolved_compat(CompletionEndpoint::Responses);
+        let tools = shared::build_tools_with_strict(PROVIDER, req, compat.strict_tools)?;
         let (instructions, input) =
             shared::build_responses_input(req, shared::ResponsesInputOptions::OPENAI);
         let policy = resolve_generation_policy(
@@ -49,20 +34,23 @@ impl OpenAiCompatibleProvider {
             "input": input,
             "tools": tools,
             "stream": stream,
-            "max_output_tokens": policy.max_output_tokens,
         });
+        apply_max_tokens_field(&mut body, compat.max_tokens_field, policy.max_output_tokens);
         if !req.tools.is_empty() {
             body["tool_choice"] = json!(shared::tool_choice_value(&req.tool_choice));
         }
-        if Self::supports_openai_request_fields(&self.base_url) {
+        if compat.request_fields {
             body["include"] = json!(["reasoning.encrypted_content"]);
-            body["store"] = json!(false);
             body["parallel_tool_calls"] = json!(!req.tools.is_empty());
             body["text"] = json!({"verbosity": "medium"});
+        }
+        if compat.store {
+            body["store"] = json!(false);
         }
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(effort) = OpenAiDirectModelPolicy.reasoning_effort(&req.model, variant)
             && effort != "none"
+            && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {
             let mut reasoning = json!({
                 "effort": clamp_reasoning_effort(&req.model, &effort),
@@ -96,12 +84,11 @@ impl OpenAiCompatibleProvider {
         }
         if policy.cache_retention != CacheRetention::None
             && let Some(session_id) = req.session_id.as_deref()
+            && compat.cache_session_affinity
         {
             body["prompt_cache_key"] = json!(session_id);
         }
-        if policy.cache_retention == CacheRetention::Long
-            && Self::supports_openai_request_fields(&self.base_url)
-        {
+        if policy.cache_retention == CacheRetention::Long && compat.prompt_cache_retention {
             body["prompt_cache_retention"] = json!("24h");
         }
         Ok(body)

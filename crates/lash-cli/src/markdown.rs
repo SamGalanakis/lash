@@ -1,5 +1,5 @@
 use lash_tui::{Line, Modifier, Span, Style};
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::{text_layout, theme};
 
@@ -318,6 +318,7 @@ struct MdRenderer {
     style_stack: Vec<Style>,
     max_width: usize,
     in_code_block: bool,
+    code_block_lang: Option<String>,
     in_item: bool,
     list_stack: Vec<ListContext>,
     // Table buffering: collect all rows, then render with aligned columns
@@ -397,6 +398,7 @@ impl MdRenderer {
             style_stack: vec![theme::assistant_text()],
             max_width,
             in_code_block: false,
+            code_block_lang: None,
             in_item: false,
             list_stack: Vec::new(),
             in_table: false,
@@ -618,12 +620,21 @@ impl MdRenderer {
             }
 
             // ── Code blocks ──
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 self.flush_line();
                 self.in_code_block = true;
+                self.code_block_lang = match kind {
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .filter(|token| !token.is_empty())
+                        .map(|token| token.to_ascii_lowercase()),
+                    CodeBlockKind::Indented => None,
+                };
             }
             Event::End(TagEnd::CodeBlock) => {
                 self.in_code_block = false;
+                self.code_block_lang = None;
                 self.blank_line();
             }
 
@@ -680,10 +691,12 @@ impl MdRenderer {
                         .push(Span::styled(text.to_string(), self.current_style()));
                 } else if self.in_code_block {
                     for line in text.lines() {
-                        self.lines.push(Line::from(vec![
-                            Span::styled("\u{2502} ", theme::code_chrome()),
-                            Span::styled(line.to_string(), theme::code_content()),
-                        ]));
+                        let mut spans = vec![Span::styled("\u{2502} ", theme::code_chrome())];
+                        spans.extend(crate::render::highlight_code_snippet(
+                            line,
+                            self.code_block_lang.as_deref(),
+                        ));
+                        self.lines.push(Line::from(spans));
                     }
                 } else {
                     self.spans

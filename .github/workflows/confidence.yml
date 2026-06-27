@@ -1,0 +1,66 @@
+name: Confidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Confidence lane to run"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - default
+          - full
+  schedule:
+    - cron: "29 4 * * 0"
+
+concurrency:
+  group: confidence-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LASH_CONFIDENCE_BOOTSTRAP: "1"
+  LASH_CI_FEATURES: >-
+    -F lash-cli/fff-zlob
+    -F lash-cli/bench
+
+jobs:
+  confidence:
+    name: Confidence ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+          shared-key: confidence
+
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
+
+      - name: Run confidence gate
+        run: bash scripts/confidence-gate.sh "${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'full' }}"
+
+      - name: Upload confidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: confidence-artifacts
+          path: target/confidence/**

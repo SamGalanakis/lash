@@ -359,7 +359,7 @@ fn styled_snippet_chunk(
     vec![Span::styled(chunk.to_string(), content_style)]
 }
 
-fn highlight_code_snippet(text: &str, language: Option<&str>) -> Vec<Span<'static>> {
+pub(crate) fn highlight_code_snippet(text: &str, language: Option<&str>) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut cursor = 0usize;
 

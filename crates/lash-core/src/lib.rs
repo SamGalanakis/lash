@@ -81,7 +81,8 @@ pub use lash_sansio::{
     build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
     normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
     prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
-    resolve_prompt_layers, shared_parts, validate_tool_input,
+    resolve_prompt_layers, shared_parts, validate_tool_input, visible_response_parts,
+    visible_response_text_from_parts,
 };
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
@@ -98,14 +99,87 @@ pub use triggers::{
     deterministic_occurrence_id, empty_trigger_source_key, trigger_event_type,
     trigger_occurrence_request_hash, validate_trigger_occurrence_request,
 };
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub const PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ProtocolTurnOptions {
-    #[serde(default = "empty_protocol_turn_payload")]
+    pub schema_version: u32,
     pub payload: serde_json::Value,
 }
 
 fn empty_protocol_turn_payload() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolTurnOptionsError {
+    #[error(
+        "protocol turn options are missing schema_version and were written by unsupported pre-versioned state (expected {expected})"
+    )]
+    MissingSchemaVersion { expected: u32 },
+    #[error(
+        "protocol turn options schema_version {actual} is not supported by this binary (expected {expected})"
+    )]
+    UnsupportedSchemaVersion { actual: u32, expected: u32 },
+    #[error(
+        "protocol turn options schema_version {actual} is invalid (expected integer {expected})"
+    )]
+    InvalidSchemaVersion { actual: String, expected: u32 },
+    #[error("failed to decode protocol turn options payload: {0}")]
+    Decode(#[source] serde_json::Error),
+}
+
+fn parse_protocol_turn_options_schema_version(
+    value: Option<serde_json::Value>,
+) -> Result<u32, ProtocolTurnOptionsError> {
+    let expected = PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION;
+    let Some(value) = value else {
+        return Err(ProtocolTurnOptionsError::MissingSchemaVersion { expected });
+    };
+    let Some(actual) = value
+        .as_u64()
+        .and_then(|version| u32::try_from(version).ok())
+    else {
+        return Err(ProtocolTurnOptionsError::InvalidSchemaVersion {
+            actual: value.to_string(),
+            expected,
+        });
+    };
+    ensure_protocol_turn_options_schema_version(actual)?;
+    Ok(actual)
+}
+
+fn ensure_protocol_turn_options_schema_version(
+    actual: u32,
+) -> Result<(), ProtocolTurnOptionsError> {
+    let expected = PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ProtocolTurnOptionsError::UnsupportedSchemaVersion { actual, expected })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProtocolTurnOptions {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct ProtocolTurnOptionsWire {
+            schema_version: Option<serde_json::Value>,
+            #[serde(default = "empty_protocol_turn_payload")]
+            payload: serde_json::Value,
+        }
+
+        let wire = ProtocolTurnOptionsWire::deserialize(deserializer)?;
+        let schema_version = parse_protocol_turn_options_schema_version(wire.schema_version)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            schema_version,
+            payload: wire.payload,
+        })
+    }
 }
 
 impl Default for ProtocolTurnOptions {
@@ -117,7 +191,15 @@ impl Default for ProtocolTurnOptions {
 impl ProtocolTurnOptions {
     pub fn empty() -> Self {
         Self {
+            schema_version: PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION,
             payload: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    pub fn from_payload(payload: serde_json::Value) -> Self {
+        Self {
+            schema_version: PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION,
+            payload,
         }
     }
 
@@ -134,6 +216,7 @@ impl ProtocolTurnOptions {
                 let mut payload = base.clone();
                 payload.extend(overrides.clone());
                 Self {
+                    schema_version: PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION,
                     payload: serde_json::Value::Object(payload),
                 }
             }
@@ -146,15 +229,17 @@ impl ProtocolTurnOptions {
         T: serde::Serialize,
     {
         Ok(Self {
+            schema_version: PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION,
             payload: serde_json::to_value(value)?,
         })
     }
 
-    pub fn decode<T>(&self) -> Result<T, serde_json::Error>
+    pub fn decode<T>(&self) -> Result<T, ProtocolTurnOptionsError>
     where
         T: serde::de::DeserializeOwned,
     {
-        serde_json::from_value(self.payload.clone())
+        ensure_protocol_turn_options_schema_version(self.schema_version)?;
+        serde_json::from_value(self.payload.clone()).map_err(ProtocolTurnOptionsError::Decode)
     }
 }
 
@@ -348,21 +433,54 @@ mod tests {
 
     #[test]
     fn protocol_turn_options_missing_payload_deserializes_to_empty_object() {
-        let options: ProtocolTurnOptions =
-            serde_json::from_value(serde_json::json!({})).expect("deserialize options");
+        let options: ProtocolTurnOptions = serde_json::from_value(serde_json::json!({
+            "schema_version": PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION
+        }))
+        .expect("deserialize options");
 
         assert!(options.is_empty());
+        assert_eq!(options.schema_version, PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION);
         assert_eq!(options.payload, serde_json::json!({}));
     }
 
     #[test]
     fn protocol_turn_options_explicit_null_is_not_empty() {
-        let options: ProtocolTurnOptions =
-            serde_json::from_value(serde_json::json!({ "payload": null }))
-                .expect("deserialize options");
+        let options: ProtocolTurnOptions = serde_json::from_value(serde_json::json!({
+            "schema_version": PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION,
+            "payload": null
+        }))
+        .expect("deserialize options");
 
         assert!(!options.is_empty());
         assert_eq!(options.payload, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn protocol_turn_options_missing_schema_version_rejects_preversioned_state() {
+        let err =
+            serde_json::from_value::<ProtocolTurnOptions>(serde_json::json!({ "payload": {} }))
+                .expect_err("pre-versioned options should fail");
+
+        assert!(
+            err.to_string().contains(
+                "missing schema_version and were written by unsupported pre-versioned state"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn protocol_turn_options_unsupported_schema_version_rejects_state() {
+        let err = serde_json::from_value::<ProtocolTurnOptions>(serde_json::json!({
+            "schema_version": PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION + 1,
+            "payload": {}
+        }))
+        .expect_err("unsupported options version should fail");
+
+        assert!(
+            err.to_string().contains("is not supported by this binary"),
+            "{err}"
+        );
     }
 
     #[test]

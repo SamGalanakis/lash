@@ -201,6 +201,22 @@ mod tests {
     }
 
     #[test]
+    fn request_body_omits_temperature_without_explicit_temperature_option() {
+        let provider = AnthropicProvider::new("key");
+        let plain = provider
+            .build_request_body(&request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .expect("plain body");
+        assert!(plain.get("temperature").is_none());
+
+        let mut thinking_req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        thinking_req.model_variant = Some("medium".to_string());
+        let thinking = provider
+            .build_request_body(&thinking_req)
+            .expect("thinking body");
+        assert!(thinking.get("temperature").is_none());
+    }
+
+    #[test]
     fn explicit_text_cache_breakpoint_beats_last_user_block() {
         let provider = AnthropicProvider::new("key");
         let req = request(vec![LlmMessage::new(

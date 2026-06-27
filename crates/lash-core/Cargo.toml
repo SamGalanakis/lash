@@ -41,4 +41,5 @@ futures-util = { workspace = true }
 hmac = { workspace = true }
 
 [dev-dependencies]
+proptest = "1"
 tempfile = { workspace = true }

@@ -77,15 +77,9 @@ impl GoogleOAuthProvider {
                 LlmTransportError::new(format!("Invalid Cloud Code response JSON: {e}"))
                     .with_raw(text.clone())
             })?;
-            let parts = Self::response_parts_from_value(&value);
-            let full_text = parts
-                .iter()
-                .filter_map(|part| match part {
-                    LlmOutputPart::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
+            let origin_model = request.get("model").and_then(Value::as_str);
+            let parts = Self::response_parts_from_value(&value, origin_model);
+            let full_text = lash_core::visible_response_text_from_parts(&parts);
             let usage = value
                 .get("usageMetadata")
                 .map(|meta| {
@@ -111,8 +105,13 @@ impl GoogleOAuthProvider {
 
         let mut full = String::new();
         let mut usage = LlmUsage::default();
+        let mut text_parts: Vec<LlmOutputPart> = Vec::new();
         let mut tool_call_parts: Vec<LlmOutputPart> = Vec::new();
         let mut finish_event: Option<Value> = None;
+        let origin_model = request
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         drive_sse_response(
             resp,
             self.options.llm_timeouts().chunk_timeout,
@@ -121,12 +120,14 @@ impl GoogleOAuthProvider {
                 emit_provider_trace(provider_trace.as_ref(), "google", raw);
                 let mut text_deltas = Vec::new();
                 let prev_usage = usage.clone();
-                Self::process_sse_event(
+                Self::process_sse_event_with_text_parts(
                     raw,
                     &mut full,
                     &mut text_deltas,
                     &mut usage,
                     Some(&mut tool_call_parts),
+                    Some(&mut text_parts),
+                    origin_model.as_deref(),
                     &mut finish_event,
                 )?;
                 emit_stream_progress(stream_events.as_ref(), text_deltas, &usage, &prev_usage);
@@ -135,8 +136,17 @@ impl GoogleOAuthProvider {
         )
         .await?;
 
-        let mut parts = Vec::new();
-        if !full.is_empty() {
+        let mut parts = text_parts;
+        if parts
+            .iter()
+            .filter_map(|part| match part {
+                LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+            .is_empty()
+            && !full.is_empty()
+        {
             parts.push(LlmOutputPart::Text {
                 text: full.clone(),
                 response_meta: None,

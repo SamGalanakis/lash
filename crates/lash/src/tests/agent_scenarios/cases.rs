@@ -1,0 +1,486 @@
+use super::super::*;
+use super::contracts::{
+    GraphContract, assert_all_processes_terminal, assert_failed_code_block_present,
+    assert_graph_lineage_connected, assert_labeled_resource_operation,
+    assert_no_duplicate_label_step, assert_no_false_finishted_success,
+    assert_no_forbidden_error_text, assert_subagent_bridge_exec_graphs,
+};
+use super::harness::{
+    AgentScenario, lashlang_block, run_agent_durable_input_request_scenario,
+    run_agent_session_turn_process_scenario, run_agent_turn_scenario,
+    run_agent_turn_scenario_without_success_assertions,
+};
+use std::collections::BTreeSet;
+
+#[derive(Clone, Copy, Debug)]
+struct AgentScenarioCoverage {
+    test_name: &'static str,
+    declared_test: fn() -> Result<()>,
+    scenario_name: &'static str,
+    owned_boundary: &'static str,
+}
+
+macro_rules! agent_scenario_coverage {
+    ($test_fn:ident, $scenario_name:literal, $owned_boundary:literal) => {
+        AgentScenarioCoverage {
+            test_name: stringify!($test_fn),
+            declared_test: $test_fn,
+            scenario_name: $scenario_name,
+            owned_boundary: $owned_boundary,
+        }
+    };
+}
+
+const FOREGROUND_LABELED_TOOL_CALL: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_foreground_labeled_tool_call,
+    "foreground labeled tool call",
+    "Facade root turn, app tool execution, label graph, final value, and remote DTO round trip."
+);
+const STARTED_PROCESS_LABELED_TOOL_CALL: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_started_process_labeled_tool_call,
+    "started process labeled tool call",
+    "Started Lashlang process calling an app tool with process graph completion."
+);
+const DURABLE_INPUT_REQUEST: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_process_durable_input_request_tool,
+    "durable input suspension",
+    "Live durable input suspension, external resolution, process event, and final value."
+);
+const SHELL_RESULTS_ARE_DATA: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_shell_nonzero_and_pipeline_results_are_data,
+    "shell nonzero and pipeline results are data",
+    "Shell failures and pipelines remain data at the facade boundary."
+);
+const SHELL_OUTPUT_VARIABLE: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_shell_output_survives_print_projection_in_variable,
+    "shell output survives print projection in variable",
+    "Large shell output survives print projection and remains addressable."
+);
+const STARTED_PROCESS_SUBAGENT: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_started_process_labeled_subagent_spawn,
+    "started process labeled subagent spawn",
+    "Started process spawns a subagent and records child session execution graphs."
+);
+const NESTED_PROCESS_START_AWAIT: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_nested_process_start_await,
+    "nested process start await",
+    "Nested process start/await produces deterministic process ids and graph lineage."
+);
+const SESSION_TURN_PROCESS_CHILD: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_session_turn_process_child,
+    "session turn process child",
+    "Host session-turn process API creates and awaits a child session turn."
+);
+const FAILED_CHILD_PRESERVES_GRAPH: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_failed_child_preserves_failure_graph,
+    "failed child preserves failure graph",
+    "Child failure path preserves failure graph and avoids provider-exhaustion false failures."
+);
+const PARALLEL_SPAWN_AND_JOIN: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_parallel_spawn_and_join,
+    "parallel process spawn and join",
+    "Parallel process starts join deterministically with unique process ids."
+);
+const TUPLE_VALUES_AS_JSON_ARRAYS: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_tuple_values_finish_as_json_arrays,
+    "tuple values finish as json arrays",
+    "Facade final values preserve tuple-to-JSON array projection."
+);
+
+const AGENT_SCENARIO_COVERAGE: &[AgentScenarioCoverage] = &[
+    FOREGROUND_LABELED_TOOL_CALL,
+    STARTED_PROCESS_LABELED_TOOL_CALL,
+    DURABLE_INPUT_REQUEST,
+    SHELL_RESULTS_ARE_DATA,
+    SHELL_OUTPUT_VARIABLE,
+    STARTED_PROCESS_SUBAGENT,
+    NESTED_PROCESS_START_AWAIT,
+    SESSION_TURN_PROCESS_CHILD,
+    FAILED_CHILD_PRESERVES_GRAPH,
+    PARALLEL_SPAWN_AND_JOIN,
+    TUPLE_VALUES_AS_JSON_ARRAYS,
+];
+
+#[test]
+fn agent_scenario_coverage_metadata_is_unique_and_complete() {
+    assert_eq!(AGENT_SCENARIO_COVERAGE.len(), 11);
+    let mut names = BTreeSet::new();
+    for coverage in AGENT_SCENARIO_COVERAGE {
+        let _declared_test = coverage.declared_test;
+        assert!(
+            coverage.test_name.starts_with("agent_scenario_"),
+            "unexpected Agent Scenario test name {}",
+            coverage.test_name
+        );
+        assert!(!coverage.scenario_name.trim().is_empty());
+        assert!(!coverage.owned_boundary.trim().is_empty());
+        assert!(
+            names.insert(coverage.test_name),
+            "duplicate Agent Scenario coverage metadata for {}",
+            coverage.test_name
+        );
+    }
+}
+
+#[test]
+fn agent_scenario_foreground_labeled_tool_call() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-foreground-tool", || async {
+        let case = AgentScenario::new(
+            FOREGROUND_LABELED_TOOL_CALL.scenario_name,
+            "Call the app lookup tool and finish its value.",
+        )
+        .response(lashlang_block(
+            r#"
+@label(title: "Lookup app state")
+value = await tools.app_lookup({})?
+finish value"#,
+        ))
+        .expected_final_value(serde_json::json!({ "ok": true }))
+        .tool_provider(Arc::new(AppTools))
+        .labeled_resource("Lookup app state");
+
+        let run = run_agent_turn_scenario(case).await?;
+        assert_eq!(run.prompt_captures.len(), 1);
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_started_process_labeled_tool_call() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-started-process-tool", || async {
+        run_agent_turn_scenario(
+            AgentScenario::new(
+                STARTED_PROCESS_LABELED_TOOL_CALL.scenario_name,
+                "Start a process that calls the app lookup tool.",
+            )
+            .response(lashlang_block(
+                r#"
+process lookup(tools: Tools) {
+  @label(title: "Lookup app state in process")
+  value = await tools.app_lookup({})?
+  finish value
+}
+handle = start lookup(tools: tools)
+result = (await handle)?
+finish result"#,
+            ))
+            .expected_final_value(serde_json::json!({ "ok": true }))
+            .tool_provider(Arc::new(AppTools))
+            .labeled_resource("Lookup app state in process")
+            .completed_process("lookup")
+            .min_completed_process_graphs(1),
+        )
+        .await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_process_durable_input_request_tool() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-durable-input-request", || async {
+        run_agent_durable_input_request_scenario().await
+    })
+}
+
+#[test]
+fn agent_scenario_shell_nonzero_and_pipeline_results_are_data() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-shell-results-are-data", || async {
+        run_agent_turn_scenario(
+            AgentScenario::new(
+                SHELL_RESULTS_ARE_DATA.scenario_name,
+                "Run shell commands and report their result metadata.",
+            )
+            .response(lashlang_block(
+                r#"
+pipe = await shell.exec({ cmd: "yes line | head -n 3", login: false })?
+missing = await shell.exec({ cmd: "test -f /tmp/agent-scenario-definitely-missing-file", login: false })?
+finish {
+  pipe_exit: pipe.exit_code,
+  pipe_output: pipe.output,
+  missing_exit: missing.exit_code,
+  missing_status: missing.status
+}"#,
+            ))
+            .expected_final_value(serde_json::json!({
+                "pipe_exit": 0,
+                "pipe_output": "line\nline\nline\n",
+                "missing_exit": 1,
+                "missing_status": "completed"
+            }))
+            .tool_provider(Arc::new(lash_tools::shell::shell_provider(
+                lash_tools::shell::StandardShell::new(),
+            ))),
+        )
+        .await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_shell_output_survives_print_projection_in_variable() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-shell-output-variable", || async {
+        run_agent_turn_scenario(
+            AgentScenario::new(
+                SHELL_OUTPUT_VARIABLE.scenario_name,
+                "Run a large shell command, inspect it, then report retained metadata.",
+            )
+            .responses([
+                lashlang_block(
+                    r#"
+big = await shell.exec({ cmd: "yes x | head -c 60000", login: false })?
+print big.output"#,
+                ),
+                lashlang_block(
+                    r#"
+finish {
+  chars: len(big.output),
+  tail: slice(big.output, 59996, null),
+  has_full_output_path: big.full_output_path == null ? false : len(big.full_output_path) > 0
+}"#,
+                ),
+            ])
+            .expected_final_value(serde_json::json!({
+                "chars": 60000,
+                "tail": "x\nx\n",
+                "has_full_output_path": true
+            }))
+            .tool_provider(Arc::new(lash_tools::shell::shell_provider(
+                lash_tools::shell::StandardShell::new(),
+            ))),
+        )
+        .await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_started_process_labeled_subagent_spawn() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-started-process-subagent", || async {
+        run_agent_turn_scenario(
+            AgentScenario::new(
+                STARTED_PROCESS_SUBAGENT.scenario_name,
+                "Run a Lashlang process that spawns a subagent and returns its value.",
+            )
+            .responses([
+                lashlang_block(
+                    r#"
+process spawn_child() {
+  @label(title: "Spawn subagent with web search")
+  result = await agents.spawn({
+    capability: "default",
+    task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    seed: { chunk: ["a", "b"] },
+    output: Type { len: int }
+  })?
+  finish result
+}
+handle = start spawn_child()
+result = (await handle)?
+finish result"#,
+                ),
+                lashlang_block("finish { len: len(chunk) }"),
+            ])
+            .expected_final_value(serde_json::json!({ "len": 2 }))
+            .install_subagents()
+            .labeled_resource("Spawn subagent with web search")
+            .completed_process("spawn_child")
+            .min_completed_child_session_exec_graphs(1)
+            .min_completed_process_graphs(1),
+        )
+        .await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_nested_process_start_await() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-nested-process", || async {
+        let run = run_agent_turn_scenario(
+            AgentScenario::new(
+                NESTED_PROCESS_START_AWAIT.scenario_name,
+                "Start a parent process that starts and awaits a child process.",
+            )
+            .response(lashlang_block(
+                r#"
+process child() {
+  finish { child: "done" }
+}
+process parent() {
+  @label(title: "Start nested child process")
+  handle = start child()
+  result = (await handle)?
+  finish { parent: result.child }
+}
+handle = start parent()
+result = (await handle)?
+finish result"#,
+            ))
+            .expected_final_value(serde_json::json!({ "parent": "done" }))
+            .labeled_node("Start nested child process")
+            .completed_process("parent")
+            .completed_process("child")
+            .min_completed_process_graphs(2),
+        )
+        .await?;
+        assert_lashlang_process_ids_unique_for_labels(&run.final_process_list, ["parent", "child"]);
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_session_turn_process_child() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-session-turn-process", || async {
+        run_agent_session_turn_process_scenario().await
+    })
+}
+
+#[test]
+fn agent_scenario_failed_child_preserves_failure_graph() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-failed-child", || async {
+        let run = run_agent_turn_scenario_without_success_assertions(
+            AgentScenario::new(
+                FAILED_CHILD_PRESERVES_GRAPH.scenario_name,
+                "Spawn a child that fails and preserve its execution graph.",
+            )
+            .responses([
+                lashlang_block(
+                    r#"
+@label(title: "Spawn failing subagent")
+result = await agents.spawn({
+  capability: "default",
+  task: "Fail with reason child boom.",
+  seed: {},
+  output: Type { reason: str }
+})?
+finish result"#,
+                ),
+                lashlang_block(r#"await task.fail({ reason: "child boom" })?"#),
+                lashlang_block(r#"await task.fail({ reason: "parent observed child failure" })?"#),
+            ])
+            .install_subagents()
+            .max_turns(1),
+        )
+        .await?;
+
+        assert_failed_code_block_present(&run.streamed_events);
+        assert_no_forbidden_error_text(&run.streamed_events);
+        assert!(
+            !format!("{:#?}", run.streamed_events)
+                .contains("scripted agent scenario provider exhausted"),
+            "failed-child scenario must fail through the child task.fail path, not provider exhaustion"
+        );
+        assert_no_false_finishted_success(&run);
+        assert_all_processes_terminal(&run.final_process_list);
+        let contract = GraphContract::from_graphs(&run.graph_snapshots);
+        assert_labeled_resource_operation(
+            &contract,
+            "Spawn failing subagent",
+            crate::tracing::TraceLashlangNodeStatus::Failed,
+        );
+        assert_no_duplicate_label_step(&contract, "Spawn failing subagent");
+        assert_graph_lineage_connected(&contract, &run.final_process_list);
+        assert_subagent_bridge_exec_graphs(&run, crate::tracing::TraceLashlangStatus::Completed);
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_parallel_spawn_and_join() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-parallel-spawn-join", || async {
+        let run = run_agent_turn_scenario(
+            AgentScenario::new(
+                PARALLEL_SPAWN_AND_JOIN.scenario_name,
+                "Start two processes, await both, and finish their joined result.",
+            )
+            .response(lashlang_block(
+                r#"
+process child(value: str) {
+  finish value
+}
+@label(title: "Start left process")
+left = start child(value: "left")
+@label(title: "Start right process")
+right = start child(value: "right")
+left_value = (await left)?
+right_value = (await right)?
+finish { joined: [left_value, right_value] }"#,
+            ))
+            .expected_final_value(serde_json::json!({ "joined": ["left", "right"] }))
+            .labeled_node("Start left process")
+            .labeled_node("Start right process")
+            .completed_process("child")
+            .min_completed_process_graphs(2),
+        )
+        .await?;
+        assert_lashlang_process_ids_unique_for_labels(&run.final_process_list, ["child", "child"]);
+        Ok(())
+    })
+}
+
+#[test]
+fn agent_scenario_tuple_values_finish_as_json_arrays() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-tuple-values", || async {
+        run_agent_turn_scenario(
+            AgentScenario::new(
+                TUPLE_VALUES_AS_JSON_ARRAYS.scenario_name,
+                "Use tuple values and finish the derived result.",
+            )
+            .response(lashlang_block(
+                r#"
+pair = "left", "right"
+tail = slice(pair, 1, null)
+seen = []
+for item in pair {
+  seen = push(seen, item)
+}
+finish {
+  first: pair[0],
+  tail: tail,
+  seen: seen,
+  tuple: pair,
+  nested: { pair: pair }
+}"#,
+            ))
+            .expected_final_value(serde_json::json!({
+                "first": "left",
+                "tail": ["right"],
+                "seen": ["left", "right"],
+                "tuple": ["left", "right"],
+                "nested": { "pair": ["left", "right"] }
+            })),
+        )
+        .await?;
+        Ok(())
+    })
+}
+
+fn assert_lashlang_process_ids_unique_for_labels<const N: usize>(
+    processes: &[lash_core::ProcessHandleSummary],
+    expected_labels: [&str; N],
+) {
+    let mut ids = BTreeSet::new();
+    let mut labels = Vec::new();
+    for process in processes {
+        let Some(kind) = process.descriptor.kind.as_deref() else {
+            continue;
+        };
+        if kind != lash_lashlang_runtime::LASHLANG_ENGINE_KIND {
+            continue;
+        }
+        assert!(
+            process.process_id.starts_with("process:lashlang:sha256:"),
+            "lashlang process `{}` did not use a deterministic process id",
+            process.process_id
+        );
+        assert!(
+            ids.insert(process.process_id.as_str()),
+            "duplicate lashlang process id `{}`",
+            process.process_id
+        );
+        labels.push(process.descriptor.label.as_deref().unwrap_or("<missing>"));
+    }
+    labels.sort_unstable();
+    let mut expected = expected_labels;
+    expected.sort_unstable();
+    assert_eq!(labels, expected);
+}

@@ -108,6 +108,9 @@ jobs:
           # shellcheck disable=SC2086
           cargo nextest run --workspace --locked ${LASH_CI_FEATURES}
 
+      - name: Confidence gate fast lane
+        run: bash scripts/confidence-gate.sh fast
+
       # nextest does not run doctests; keep them covered.
       - name: Test workspace doctests
         run: |

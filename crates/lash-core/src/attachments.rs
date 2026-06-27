@@ -310,10 +310,13 @@ pub async fn resolve_llm_request_attachments(
 mod tests {
     use super::*;
     use lash_sansio::{ImageMediaType, MediaType};
+    use std::collections::HashSet;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Default)]
     struct RecordingManifest {
         intents: Mutex<Vec<AttachmentIntent>>,
+        committed: Mutex<Vec<(String, AttachmentId)>>,
     }
 
     impl AttachmentManifest for RecordingManifest {
@@ -324,21 +327,184 @@ mod tests {
 
         fn commit_refs(
             &self,
-            _session_id: &str,
-            _attachment_ids: &[AttachmentId],
+            session_id: &str,
+            attachment_ids: &[AttachmentId],
         ) -> Result<(), crate::StoreError> {
+            let mut committed = self.committed.lock().expect("lock committed attachments");
+            committed.extend(
+                attachment_ids
+                    .iter()
+                    .cloned()
+                    .map(|attachment_id| (session_id.to_string(), attachment_id)),
+            );
             Ok(())
         }
 
         fn list_uncommitted(
             &self,
-            _older_than_epoch_ms: u64,
+            older_than_epoch_ms: u64,
         ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::StoreError> {
-            Ok(Vec::new())
+            let committed = self
+                .committed
+                .lock()
+                .expect("lock committed attachments")
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            Ok(self
+                .intents
+                .lock()
+                .expect("lock intents")
+                .iter()
+                .filter(|intent| intent.intent_at_epoch_ms <= older_than_epoch_ms)
+                .filter(|intent| {
+                    !committed.contains(&(intent.session_id.clone(), intent.attachment_id.clone()))
+                })
+                .map(|intent| crate::AttachmentManifestEntry {
+                    attachment_id: intent.attachment_id.clone(),
+                    session_id: intent.session_id.clone(),
+                    canonical_uri: intent.canonical_uri.clone(),
+                    intent_at_epoch_ms: intent.intent_at_epoch_ms,
+                    committed_at_epoch_ms: None,
+                })
+                .collect())
         }
 
         fn forget(&self, _attachment_id: &AttachmentId) -> Result<(), crate::StoreError> {
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRuntimePersistence {
+        inner: crate::InMemorySessionStore,
+        manifest: RecordingManifest,
+    }
+
+    impl AttachmentManifest for RecordingRuntimePersistence {
+        fn record_intent(&self, intent: AttachmentIntent) -> Result<(), crate::StoreError> {
+            self.manifest.record_intent(intent)
+        }
+
+        fn commit_refs(
+            &self,
+            session_id: &str,
+            attachment_ids: &[AttachmentId],
+        ) -> Result<(), crate::StoreError> {
+            self.manifest.commit_refs(session_id, attachment_ids)
+        }
+
+        fn list_uncommitted(
+            &self,
+            older_than_epoch_ms: u64,
+        ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::StoreError> {
+            self.manifest.list_uncommitted(older_than_epoch_ms)
+        }
+
+        fn forget(&self, attachment_id: &AttachmentId) -> Result<(), crate::StoreError> {
+            self.manifest.forget(attachment_id)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimePersistence for RecordingRuntimePersistence {
+        async fn load_session(
+            &self,
+            scope: crate::SessionReadScope,
+        ) -> Result<Option<crate::PersistedSessionRead>, crate::StoreError> {
+            crate::RuntimePersistence::load_session(&self.inner, scope).await
+        }
+
+        async fn load_node(
+            &self,
+            node_id: &str,
+        ) -> Result<Option<crate::SessionNodeRecord>, crate::StoreError> {
+            crate::RuntimePersistence::load_node(&self.inner, node_id).await
+        }
+
+        async fn commit_runtime_state(
+            &self,
+            commit: crate::RuntimeCommit,
+        ) -> Result<crate::RuntimeCommitResult, crate::StoreError> {
+            crate::RuntimePersistence::commit_runtime_state(&self.inner, commit).await
+        }
+
+        async fn try_claim_session_execution_lease(
+            &self,
+            session_id: &str,
+            owner: &crate::LeaseOwnerIdentity,
+            lease_ttl_ms: u64,
+        ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::StoreError> {
+            crate::RuntimePersistence::try_claim_session_execution_lease(
+                &self.inner,
+                session_id,
+                owner,
+                lease_ttl_ms,
+            )
+            .await
+        }
+
+        async fn reclaim_session_execution_lease(
+            &self,
+            session_id: &str,
+            owner: &crate::LeaseOwnerIdentity,
+            observed_holder: &crate::SessionExecutionLeaseFence,
+            lease_ttl_ms: u64,
+        ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::StoreError> {
+            crate::RuntimePersistence::reclaim_session_execution_lease(
+                &self.inner,
+                session_id,
+                owner,
+                observed_holder,
+                lease_ttl_ms,
+            )
+            .await
+        }
+
+        async fn renew_session_execution_lease(
+            &self,
+            fence: &crate::SessionExecutionLeaseFence,
+            lease_ttl_ms: u64,
+        ) -> Result<crate::SessionExecutionLease, crate::StoreError> {
+            crate::RuntimePersistence::renew_session_execution_lease(
+                &self.inner,
+                fence,
+                lease_ttl_ms,
+            )
+            .await
+        }
+
+        async fn release_session_execution_lease(
+            &self,
+            completion: &crate::SessionExecutionLeaseCompletion,
+        ) -> Result<(), crate::StoreError> {
+            crate::RuntimePersistence::release_session_execution_lease(&self.inner, completion)
+                .await
+        }
+
+        async fn save_session_meta(
+            &self,
+            meta: crate::SessionMeta,
+        ) -> Result<(), crate::StoreError> {
+            crate::RuntimePersistence::save_session_meta(&self.inner, meta).await
+        }
+
+        async fn load_session_meta(
+            &self,
+        ) -> Result<Option<crate::SessionMeta>, crate::StoreError> {
+            crate::RuntimePersistence::load_session_meta(&self.inner).await
+        }
+
+        async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), crate::StoreError> {
+            crate::RuntimePersistence::tombstone_nodes(&self.inner, ids).await
+        }
+
+        async fn vacuum(&self) -> Result<crate::VacuumReport, crate::StoreError> {
+            crate::RuntimePersistence::vacuum(&self.inner).await
+        }
+
+        async fn gc_unreachable(&self) -> Result<crate::GcReport, crate::StoreError> {
+            crate::RuntimePersistence::gc_unreachable(&self.inner).await
         }
     }
 
@@ -349,6 +515,13 @@ mod tests {
             Some(1),
             Some("pixel".to_string()),
         )
+    }
+
+    fn system_epoch_ms_for_test() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after Unix epoch")
+            .as_millis() as u64
     }
 
     #[tokio::test]
@@ -415,5 +588,86 @@ mod tests {
 
         store.mark_manifest_committed(std::slice::from_ref(&reference.id));
         assert!(store.pending_manifest_commit_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_scoped_store_records_intent_timestamp_from_system_clock() {
+        let manifest = Arc::new(RecordingManifest::default());
+        let manifest_for_store: Arc<dyn AttachmentManifest> = manifest.clone();
+        let store = SessionScopedAttachmentStore::new(
+            Arc::new(InMemoryAttachmentStore::new()),
+            manifest_for_store,
+            "session-clock",
+        );
+
+        let before_put_epoch_ms = system_epoch_ms_for_test();
+        let reference = store.put(vec![11, 12, 13], meta()).await.expect("put");
+        let after_put_epoch_ms = system_epoch_ms_for_test();
+
+        let intents = manifest.intents.lock().expect("lock intents");
+        assert_eq!(intents.len(), 1);
+        let intent = &intents[0];
+        assert_eq!(intent.attachment_id, reference.id);
+        assert!(
+            intent.intent_at_epoch_ms > 1_000_000_000_000,
+            "intent timestamp should be a real epoch millis value, got {}",
+            intent.intent_at_epoch_ms
+        );
+        assert!(
+            intent.intent_at_epoch_ms >= before_put_epoch_ms.saturating_sub(1000),
+            "intent timestamp {} should be close to or after put start {}",
+            intent.intent_at_epoch_ms,
+            before_put_epoch_ms
+        );
+        assert!(
+            intent.intent_at_epoch_ms <= after_put_epoch_ms.saturating_add(1000),
+            "intent timestamp {} should be close to or before put finish {}",
+            intent.intent_at_epoch_ms,
+            after_put_epoch_ms
+        );
+    }
+
+    #[test]
+    fn persistence_manifest_adapter_forwards_to_wrapped_runtime_persistence() {
+        let runtime = Arc::new(RecordingRuntimePersistence::default());
+        let persistence: Arc<dyn crate::RuntimePersistence> = runtime.clone();
+        let adapter = PersistenceManifestAdapter(persistence);
+        let attachment_id = AttachmentId::new("adapter-forwarding");
+        let intent = AttachmentIntent {
+            attachment_id: attachment_id.clone(),
+            session_id: "adapter-session".to_string(),
+            canonical_uri: "sha256:adapter-forwarding".to_string(),
+            intent_at_epoch_ms: 10,
+        };
+
+        adapter.record_intent(intent).expect("record intent");
+        let uncommitted = adapter
+            .list_uncommitted(10)
+            .expect("list uncommitted through adapter");
+        assert_eq!(uncommitted.len(), 1);
+        assert_eq!(uncommitted[0].attachment_id, attachment_id);
+        assert_eq!(uncommitted[0].session_id, "adapter-session");
+        assert_eq!(uncommitted[0].canonical_uri, "sha256:adapter-forwarding");
+        assert_eq!(uncommitted[0].intent_at_epoch_ms, 10);
+        assert!(uncommitted[0].committed_at_epoch_ms.is_none());
+
+        adapter
+            .commit_refs("adapter-session", std::slice::from_ref(&attachment_id))
+            .expect("commit refs through adapter");
+        assert!(
+            adapter
+                .list_uncommitted(10)
+                .expect("list after commit through adapter")
+                .is_empty()
+        );
+        assert_eq!(
+            runtime
+                .manifest
+                .committed
+                .lock()
+                .expect("lock committed attachments")
+                .as_slice(),
+            &[("adapter-session".to_string(), attachment_id)]
+        );
     }
 }

@@ -421,6 +421,7 @@ fn retained_artifact_refs(checkpoint: &SessionCheckpoint) -> Vec<RetainedArtifac
 
 fn session_head_meta(head: &SessionHead) -> SessionHeadMeta {
     SessionHeadMeta {
+        schema_version: lash_core::store::SESSION_HEAD_META_SCHEMA_VERSION,
         session_id: head.session_id.clone(),
         head_revision: 0,
         config: head.config.clone(),
@@ -507,8 +508,11 @@ fn try_load_session_head_meta_from_conn(
     let Some((head_json, head_revision)) = row else {
         return Ok(None);
     };
-    let mut meta: SessionHeadMeta = serde_json::from_str(&head_json)
-        .map_err(|err| StoreError::Backend(format!("decode session head: {err}")))?;
+    let mut meta: SessionHeadMeta = lash_core::store::decode_versioned_json_record(
+        &head_json,
+        "SessionHeadMeta",
+        lash_core::store::SESSION_HEAD_META_SCHEMA_VERSION,
+    )?;
     meta.head_revision = head_revision as u64;
     Ok(Some(meta))
 }
@@ -542,8 +546,16 @@ fn load_session_meta_from_conn(conn: &Connection) -> Option<SessionMeta> {
     .flatten()
 }
 
-fn decode_checkpoint(bytes: &[u8]) -> Option<SessionCheckpoint> {
-    rmp_serde::from_slice(bytes).ok()
+fn decode_checkpoint(bytes: &[u8]) -> Result<SessionCheckpoint, StoreError> {
+    let value: serde_json::Value = rmp_serde::from_slice(bytes)
+        .map_err(|err| StoreError::Backend(format!("failed to decode SessionCheckpoint: {err}")))?;
+    lash_core::store::ensure_supported_record_schema_version(
+        "SessionCheckpoint",
+        &value,
+        lash_core::store::SESSION_CHECKPOINT_SCHEMA_VERSION,
+    )?;
+    rmp_serde::from_slice(bytes)
+        .map_err(|err| StoreError::Backend(format!("failed to decode SessionCheckpoint: {err}")))
 }
 
 fn encode_msgpack<T: serde::Serialize>(value: &T) -> Vec<u8> {

@@ -962,9 +962,8 @@ mod tests {
             .current_agent_frame_mut()
             .expect("current frame before compaction");
         previous.assignment.usage_source = Some("root-assignment".to_string());
-        previous.protocol_turn_options = crate::ProtocolTurnOptions {
-            payload: serde_json::json!({ "mode": "test" }),
-        };
+        previous.protocol_turn_options =
+            crate::ProtocolTurnOptions::from_payload(serde_json::json!({ "mode": "test" }));
 
         let frame_id = "frame-compaction".to_string();
         let seed_node = crate::SessionAppendNode::message(

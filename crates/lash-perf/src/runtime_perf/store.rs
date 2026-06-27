@@ -621,31 +621,32 @@ impl RuntimePersistence for RuntimePerfStore {
             let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
             BlobRef(format!("perf-{kind}-{id}"))
         };
-        let manifest = SessionCheckpoint {
-            turn_state: checkpoint.turn_state,
-            tool_state_ref: if checkpoint.tool_state.is_some() {
+        let manifest = SessionCheckpoint::new(
+            checkpoint.turn_state,
+            if checkpoint.tool_state.is_some() {
                 Some(next_checkpoint_blob_ref("tool-state"))
             } else {
                 checkpoint.tool_state_ref
             },
-            plugin_snapshot_ref: if checkpoint.plugin_snapshot.is_some() {
+            if checkpoint.plugin_snapshot.is_some() {
                 Some(next_checkpoint_blob_ref("plugin-snapshot"))
             } else {
                 checkpoint.plugin_snapshot_ref
             },
-            plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
-            execution_state_ref: if checkpoint.execution_state.is_some() {
+            checkpoint.plugin_snapshot_revision,
+            if checkpoint.execution_state.is_some() {
                 Some(next_checkpoint_blob_ref("execution-state"))
             } else {
                 checkpoint.execution_state_ref
             },
-        };
+        );
         let graph_node_count = graph.nodes.len();
         drop(graph);
         let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
         let checkpoint_ref = BlobRef(format!("perf-checkpoint-{id}"));
         let head_revision = actual + 1;
         *meta_guard = Some(SessionHeadMeta {
+            schema_version: lash_core::store::SESSION_HEAD_META_SCHEMA_VERSION,
             session_id: session_id.clone(),
             head_revision,
             config,

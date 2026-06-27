@@ -91,6 +91,79 @@ fn cli_interactive_pty_smoke_runs_turn_and_exits() {
 }
 
 #[test]
+fn cli_interactive_pty_active_steer_escape_replays_once() {
+    let lash_home = test_lash_home("standard-gated-escape");
+    let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Standard, None);
+
+    harness
+        .send_line("gated initial prompt")
+        .expect("send gated prompt");
+    wait_for_provider_marker(
+        lash_home.path(),
+        "gated-initial-started",
+        Duration::from_secs(10),
+    );
+    harness
+        .type_text("queued after escape")
+        .expect("type active steer");
+    harness.press_key("Enter").expect("submit active steer");
+    harness
+        .wait_for_text("queued after escape", Duration::from_secs(10))
+        .expect("wait for active steer preview");
+    harness.press_key("Esc").expect("interrupt active turn");
+    harness
+        .wait_for_text("Manually interrupted.", Duration::from_secs(30))
+        .expect("wait for manual interrupt marker");
+    harness
+        .wait_for_text(
+            "test-provider echo: queued after escape",
+            Duration::from_secs(45),
+        )
+        .expect("wait for deferred active steer response");
+
+    let run = harness.finish_cleanly().expect("finish harness");
+    assert!(
+        run.screen_text.contains("Manually interrupted.")
+            && run
+                .screen_text
+                .contains("test-provider echo: queued after escape"),
+        "final screen should show the interrupted first turn and exactly-once replayed steer\nscreen:\n{}\nartifacts: {}",
+        run.screen_text,
+        run.artifacts.output_dir.display()
+    );
+
+    let trace = std::fs::read_to_string(&run.artifacts.ui_trace_json).unwrap_or_else(|err| {
+        panic!(
+            "failed to read UI trace {}: {err}\nvisible screen:\n{}",
+            run.artifacts.ui_trace_json.display(),
+            run.screen_text
+        )
+    });
+    let trace: serde_json::Value = serde_json::from_str(&trace).expect("parse UI trace");
+    assert_eq!(
+        trace_op_count(&trace, "queue_current_turn_input", "queued after escape"),
+        1,
+        "Enter during the active turn should enqueue one current-turn steer\ntrace:\n{trace:#}"
+    );
+    assert_eq!(
+        trace_op_count(&trace, "queue_turn", "queued after escape"),
+        0,
+        "Enter during the active turn must not also queue the same text as an idle next turn\ntrace:\n{trace:#}"
+    );
+
+    let provider_requests = provider_request_visible_user_texts(lash_home.path());
+    assert_eq!(
+        provider_requests
+            .iter()
+            .flatten()
+            .filter(|text| text.as_str() == "queued after escape")
+            .count(),
+        1,
+        "deferred steer should appear in provider requests exactly once\nrequests:\n{provider_requests:#?}"
+    );
+}
+
+#[test]
 fn cli_interactive_pty_mouse_selection_copies_and_escape_keeps_draft() {
     let lash_home = test_lash_home("standard-echo");
     let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Standard, None);
@@ -365,6 +438,49 @@ fn write_test_model_catalog(lash_home: &std::path::Path) {
         serde_json::to_vec_pretty(&catalog).expect("catalog json"),
     )
     .expect("write model catalog");
+}
+
+fn trace_op_count(trace: &serde_json::Value, op: &str, text: &str) -> usize {
+    trace
+        .get("ops")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("op").and_then(serde_json::Value::as_str) == Some(op))
+        .filter(|entry| entry.get("text").and_then(serde_json::Value::as_str) == Some(text))
+        .count()
+}
+
+fn provider_request_visible_user_texts(lash_home: &std::path::Path) -> Vec<Vec<String>> {
+    let path = lash_home.join("test-provider-requests.jsonl");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read provider request log {}: {err}", path.display()));
+    raw.lines()
+        .map(|line| {
+            let value: serde_json::Value =
+                serde_json::from_str(line).expect("parse provider request log line");
+            value
+                .get("user_texts")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn wait_for_provider_marker(lash_home: &std::path::Path, marker: &str, timeout: Duration) {
+    let path = lash_home.join(marker);
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for provider marker {}", path.display());
 }
 
 fn screen_cell_for(screen: &str, needle: &str) -> Option<(u16, u16)> {

@@ -32,7 +32,7 @@ impl LlmTerminalReason {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResponseTextMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -43,6 +43,31 @@ pub struct ResponseTextMeta {
     /// the kernel treats it as an opaque string and round-trips it verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Provider-owned payload needed to replay this text part on a future
+    /// request. The kernel stores it opaquely and providers decide whether it
+    /// is valid for their next wire request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_payload: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_model: Option<String>,
+}
+
+impl ResponseTextMeta {
+    pub fn phase_is(&self, expected: &str) -> bool {
+        self.phase
+            .as_deref()
+            .is_some_and(|phase| phase.eq_ignore_ascii_case(expected))
+    }
+
+    pub fn is_final_answer_phase(&self) -> bool {
+        self.phase_is("final_answer")
+    }
+
+    pub fn is_commentary_phase(&self) -> bool {
+        self.phase_is("commentary")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

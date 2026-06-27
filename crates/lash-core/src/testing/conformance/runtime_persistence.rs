@@ -112,6 +112,7 @@ where
     queue_completion_and_turn_commit_stamp_are_atomic(make()).await;
     pending_turn_inputs_source_keys_order_cancel_and_cross_session(make()).await;
     pending_turn_input_claims_reclaim_complete_and_fence(make()).await;
+    pending_turn_input_cancel_covers_active_and_deferred_states(make()).await;
     pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(make()).await;
     session_metadata_round_trips(make()).await;
     tombstone_vacuum_and_gc_are_minimally_consistent(make()).await;
@@ -2304,6 +2305,110 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
             .await
             .expect("list after valid completion")
             .is_empty()
+    );
+}
+
+async fn pending_turn_input_cancel_covers_active_and_deferred_states(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let turn_id = "cancel-active-turn";
+    let active_keep = store
+        .enqueue_pending_turn_input(pending_active_turn_input_draft(
+            "root",
+            turn_id,
+            crate::TurnInputCheckpointBoundary::AfterWork,
+            "active that defers",
+        ))
+        .await
+        .expect("enqueue active input to defer");
+    let active_cancel = store
+        .enqueue_pending_turn_input(pending_active_turn_input_draft(
+            "root",
+            turn_id,
+            crate::TurnInputCheckpointBoundary::AfterWork,
+            "active cancelled before interrupt",
+        ))
+        .await
+        .expect("enqueue active input to cancel");
+    let next_cancel = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft(
+            "root",
+            "next cancelled before claim",
+        ))
+        .await
+        .expect("enqueue next input to cancel");
+
+    let cancelled_active = store
+        .cancel_pending_turn_input("root", &active_cancel.input_id)
+        .await
+        .expect("cancel active input")
+        .expect("active input should be cancellable before claim");
+    assert_eq!(cancelled_active.input_id, active_cancel.input_id);
+    assert!(matches!(
+        cancelled_active.ingress,
+        crate::TurnInputIngress::ActiveTurn { .. }
+    ));
+    let cancelled_next = store
+        .cancel_pending_turn_input("root", &next_cancel.input_id)
+        .await
+        .expect("cancel next input")
+        .expect("next input should be cancellable before claim");
+    assert_eq!(cancelled_next.input_id, next_cancel.input_id);
+
+    let lease = claim_session_execution_lease_for_test(&store, "root", "cancel-input-owner").await;
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(lease.fence())
+                .deferring_interrupted_turn_inputs(turn_id),
+        )
+        .await
+        .expect("interrupt commit defers uncancelled active input");
+
+    let pending_after_interrupt = store
+        .list_pending_turn_inputs("root")
+        .await
+        .expect("list after interrupt");
+    assert_eq!(
+        pending_after_interrupt
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![active_keep.input_id.as_str()],
+        "cancelled active and next-turn inputs must not be resurrected by interrupt deferral"
+    );
+    assert!(matches!(
+        pending_after_interrupt[0].ingress,
+        crate::TurnInputIngress::NextTurn
+    ));
+    assert_eq!(
+        pending_after_interrupt[0].state,
+        crate::TurnInputState::DeferredNextTurn
+    );
+
+    let cancelled_deferred = store
+        .cancel_pending_turn_input("root", &active_keep.input_id)
+        .await
+        .expect("cancel deferred input")
+        .expect("deferred input should be cancellable before idle claim");
+    assert_eq!(cancelled_deferred.input_id, active_keep.input_id);
+    assert!(
+        store
+            .claim_next_turn_inputs(
+                "root",
+                &lease.fence(),
+                &lease_owner("cancel-input-owner"),
+                60_000,
+                10,
+            )
+            .await
+            .expect("claim after cancelling deferred input")
+            .is_none(),
+        "cancelled deferred input must not be claimable"
     );
 }
 

@@ -30,7 +30,7 @@ impl RuntimePersistence for PostgresSessionStore {
         )
         .await?;
         let checkpoint = match meta.checkpoint_ref.as_ref() {
-            Some(blob_ref) => get_checkpoint(&self.pool, blob_ref).await,
+            Some(blob_ref) => get_checkpoint(&self.pool, blob_ref).await?,
             None => None,
         };
         Ok(Some(PersistedSessionRead {
@@ -241,6 +241,7 @@ impl RuntimePersistence for PostgresSessionStore {
         .map_err(store_sqlx_error)?;
         let next_revision = actual_revision + 1;
         let meta = SessionHeadMeta {
+            schema_version: lash_core::store::SESSION_HEAD_META_SCHEMA_VERSION,
             session_id: commit.session_id.clone(),
             head_revision: next_revision,
             config: commit.config.clone(),

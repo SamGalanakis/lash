@@ -58,3 +58,22 @@ pub(crate) fn empty_response_error(raw: String) -> lash_core::llm::transport::Ll
         .with_code("empty_response")
         .with_raw(raw)
 }
+
+pub(crate) fn apply_max_tokens_field(
+    body: &mut Value,
+    field: crate::config::OpenAiCompatMaxTokensField,
+    value: u64,
+) {
+    match field {
+        crate::config::OpenAiCompatMaxTokensField::MaxTokens => {
+            body["max_tokens"] = json!(value);
+        }
+        crate::config::OpenAiCompatMaxTokensField::MaxCompletionTokens => {
+            body["max_completion_tokens"] = json!(value);
+        }
+        crate::config::OpenAiCompatMaxTokensField::MaxOutputTokens => {
+            body["max_output_tokens"] = json!(value);
+        }
+        crate::config::OpenAiCompatMaxTokensField::Omit => {}
+    }
+}

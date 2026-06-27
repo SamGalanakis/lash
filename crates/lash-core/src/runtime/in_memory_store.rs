@@ -639,16 +639,17 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             .expect("lock usage deltas")
             .extend(commit.usage_deltas.iter().cloned());
         let checkpoint_ref = crate::BlobRef(format!("recording-checkpoint-{}", actual + 1));
-        let manifest = crate::store::SessionCheckpoint {
-            turn_state: commit.checkpoint.turn_state.clone(),
-            tool_state_ref: commit.checkpoint.tool_state_ref.clone(),
-            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref.clone(),
-            plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
-            execution_state_ref: commit.checkpoint.execution_state_ref.clone(),
-        };
+        let manifest = crate::store::SessionCheckpoint::new(
+            commit.checkpoint.turn_state.clone(),
+            commit.checkpoint.tool_state_ref.clone(),
+            commit.checkpoint.plugin_snapshot_ref.clone(),
+            commit.checkpoint.plugin_snapshot_revision,
+            commit.checkpoint.execution_state_ref.clone(),
+        );
         *self.checkpoint.lock().expect("lock checkpoint") = Some(commit.checkpoint);
         let head_revision = actual + 1;
         *meta = Some(crate::SessionHeadMeta {
+            schema_version: crate::store::SESSION_HEAD_META_SCHEMA_VERSION,
             session_id: commit.session_id,
             head_revision,
             config: commit.config,

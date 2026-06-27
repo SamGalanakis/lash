@@ -429,6 +429,7 @@ pub(crate) async fn run_once(
 
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
+        scenario_harness: scenario.scenario_harness().name().to_string(),
         chat_turns,
         stack_profile: None,
         build_runtime_ms,

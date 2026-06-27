@@ -20,6 +20,7 @@ mod child_sessions;
 mod effect;
 mod persistence;
 mod projection;
+mod runtime_scenarios;
 mod stream_accumulator;
 mod tracing;
 mod turns;

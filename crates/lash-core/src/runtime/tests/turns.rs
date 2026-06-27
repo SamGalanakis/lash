@@ -247,6 +247,15 @@ fn process_wake_event_type() -> crate::ProcessEventType {
     }
 }
 
+fn request_contains_text(request: &crate::llm::types::LlmRequest, needle: &str) -> bool {
+    request.messages.iter().any(|message| {
+        message.blocks.iter().any(|block| match block {
+            crate::llm::types::LlmContentBlock::Text { text, .. } => text.contains(needle),
+            _ => false,
+        })
+    })
+}
+
 async fn enqueue_turn_input_for_checkpoint(
     store: &RecordingStore,
     session_id: &str,
@@ -744,6 +753,10 @@ async fn queued_checkpoint_input_preserves_images() {
     }));
 }
 
+// Boundary: active-turn checkpoint input tests stay in `turns.rs` when they
+// assert model prompt replay, plugin checkpoint hooks, injected-input stream
+// events, image materialization, or persisted conversation projection. Runtime
+// Scenarios own the host-level active-input redrive/cancel/queue invariants.
 #[tokio::test]
 async fn checkpoint_hook_can_inject_messages() {
     let plugin = Arc::new(RuntimeTestPluginFactory {
@@ -917,6 +930,9 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
     }));
 }
 
+// Boundary: Runtime Scenarios own command-only queue completion at the store
+// layer. This full runtime test stays here to assert the public scheduler API:
+// command-only work returns `None` rather than fabricating a turn.
 #[tokio::test]
 async fn command_only_queued_work_drain_completes_without_turn() {
     let (mut runtime, store) =
@@ -942,6 +958,386 @@ async fn command_only_queued_work_drain_completes_without_turn() {
     );
 }
 
+// Boundary: these process-wake and active-checkpoint steering tests stay in
+// `turns.rs` because they verify the full `LashRuntime` scheduler, provider
+// prompt contents, cancellation path, and selected queued-work APIs. Runtime
+// Scenarios cover the overlapping store-level queue/input/lease invariants,
+// including active-checkpoint process-wake claim eligibility and the selected
+// queued-work invariant that pending next-turn input is not consumed. The
+// selected-drain case remains here because the owned behavior is the public
+// `stream_selected_queued_work` API running a turn while preserving unrelated
+// pending input.
+#[tokio::test]
+async fn next_turn_input_turn_claims_process_wake_at_active_checkpoint() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_calls = Arc::clone(&calls);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |req| {
+            let captured_requests = Arc::clone(&captured_requests);
+            let captured_calls = Arc::clone(&captured_calls);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("request capture lock")
+                    .push(req);
+                let call = captured_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let text = if call == 0 {
+                    "turn input response"
+                } else {
+                    "wake checkpoint response"
+                };
+                Ok(LlmResponse {
+                    full_text: text.to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: text.to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let queued_input = enqueue_idle_turn_input(store.as_ref(), "root", "queued user input").await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+    let target_scope = crate::SessionScope::new("root");
+    registry
+        .register_process(
+            crate::ProcessRegistration::new(
+                "wake-after-user-input",
+                crate::ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+                crate::ProcessProvenance::session(target_scope.clone()),
+            )
+            .with_extra_event_types([process_wake_event_type()]),
+        )
+        .await
+        .expect("register wake process");
+    let wake = append_process_wake_to_queue(
+        registry.as_ref(),
+        store.as_ref(),
+        "wake-after-user-input",
+        crate::ProcessEventAppendRequest::new(
+            "process.wake",
+            json!({
+                "text": "wake should wait",
+                "value": {
+                    "status": "wake should wait"
+                }
+            }),
+        )
+        .with_wake_target_scope(target_scope),
+    )
+    .await;
+
+    let drained = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "next-input-before-wake-drain"),
+        ))
+        .await
+        .expect("queued drain succeeds")
+        .expect("pending turn input drains first");
+
+    assert_eq!(
+        drained.assistant_output.safe_text,
+        "wake checkpoint response"
+    );
+    assert!(
+        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+            .await
+            .expect("pending inputs after drain")
+            .is_empty(),
+        "turn input `{}` should be completed",
+        queued_input.input_id
+    );
+    assert!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queued work after pending input drain")
+            .is_empty(),
+        "process wake `{}` should be claimed at the user-input turn checkpoint",
+        wake.wake_id
+    );
+
+    let requests = requests.lock().expect("request capture lock").clone();
+    assert_eq!(requests.len(), 2);
+    assert!(request_contains_text(&requests[0], "queued user input"));
+    assert!(!request_contains_text(&requests[0], "wake should wait"));
+    assert!(request_contains_text(&requests[1], "queued user input"));
+    assert!(request_contains_text(&requests[1], "wake should wait"));
+}
+
+#[tokio::test]
+async fn selected_process_wake_drain_does_not_claim_pending_next_turn_input() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "selected wake response".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "selected wake response".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let queued_input = enqueue_idle_turn_input(store.as_ref(), "root", "still pending user").await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+    let target_scope = crate::SessionScope::new("root");
+    registry
+        .register_process(
+            crate::ProcessRegistration::new(
+                "selected-wake",
+                crate::ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+                crate::ProcessProvenance::session(target_scope.clone()),
+            )
+            .with_extra_event_types([process_wake_event_type()]),
+        )
+        .await
+        .expect("register wake process");
+    let wake = append_process_wake_to_queue(
+        registry.as_ref(),
+        store.as_ref(),
+        "selected-wake",
+        crate::ProcessEventAppendRequest::new(
+            "process.wake",
+            json!({
+                "text": "selected wake",
+                "value": {
+                    "status": "selected wake"
+                }
+            }),
+        )
+        .with_wake_target_scope(target_scope),
+    )
+    .await;
+    let wake_batch = crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        .await
+        .expect("queued work before selected drain")
+        .into_iter()
+        .find(|batch| {
+            batch.items.iter().any(|item| {
+                matches!(
+                    &item.payload,
+                    crate::QueuedWorkPayload::ProcessWake { wake: queued_wake }
+                        if queued_wake.wake_id == wake.wake_id
+                )
+            })
+        })
+        .expect("wake batch");
+
+    let drained = runtime
+        .stream_selected_queued_work(
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "selected-wake-drain"),
+            ),
+            std::slice::from_ref(&wake_batch.batch_id),
+        )
+        .await
+        .expect("selected wake drain succeeds")
+        .expect("selected wake produces a turn");
+
+    assert_eq!(drained.assistant_output.safe_text, "selected wake response");
+    let pending_inputs =
+        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+            .await
+            .expect("pending inputs after selected wake drain");
+    assert_eq!(
+        pending_inputs
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![queued_input.input_id.as_str()],
+        "selected queued-work drains must not also claim pending user input"
+    );
+    assert!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queued work after selected wake drain")
+            .is_empty(),
+        "selected wake batch should be completed"
+    );
+}
+
+#[tokio::test]
+async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_calls = Arc::clone(&calls);
+    let (wake_started_tx, wake_started_rx) = tokio::sync::oneshot::channel::<()>();
+    let wake_started_tx = Arc::new(Mutex::new(Some(wake_started_tx)));
+    let captured_wake_started_tx = Arc::clone(&wake_started_tx);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |req| {
+            let captured_requests = Arc::clone(&captured_requests);
+            let captured_calls = Arc::clone(&captured_calls);
+            let captured_wake_started_tx = Arc::clone(&captured_wake_started_tx);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("request capture lock")
+                    .push(req);
+                let call = captured_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    return Ok(LlmResponse {
+                        full_text: "initial queued input response".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "initial queued input response".to_string(),
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    });
+                }
+                if let Some(tx) = captured_wake_started_tx
+                    .lock()
+                    .expect("wake started signal")
+                    .take()
+                {
+                    let _ = tx.send(());
+                }
+                std::future::pending::<Result<LlmResponse, _>>().await
+            }
+        })
+        .build();
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let queued_input =
+        enqueue_idle_turn_input(store.as_ref(), "root", "cancel with wake pending").await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+    let target_scope = crate::SessionScope::new("root");
+    registry
+        .register_process(
+            crate::ProcessRegistration::new(
+                "cancel-claimed-wake",
+                crate::ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+                crate::ProcessProvenance::session(target_scope.clone()),
+            )
+            .with_extra_event_types([process_wake_event_type()]),
+        )
+        .await
+        .expect("register wake process");
+    let wake = append_process_wake_to_queue(
+        registry.as_ref(),
+        store.as_ref(),
+        "cancel-claimed-wake",
+        crate::ProcessEventAppendRequest::new(
+            "process.wake",
+            json!({
+                "text": "wake cancelled in checkpoint",
+                "value": {
+                    "status": "wake cancelled in checkpoint"
+                }
+            }),
+        )
+        .with_wake_target_scope(target_scope),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let cancel_after_wake_started = cancel.clone();
+    let canceller = tokio::spawn(async move {
+        wake_started_rx
+            .await
+            .expect("wake provider call should start");
+        cancel_after_wake_started.cancel();
+    });
+
+    let drained = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.stream_next_queued_work(TurnOptions::new(
+            cancel,
+            named_turn_scope("root", "cancel-claimed-wake-drain"),
+        )),
+    )
+    .await
+    .expect("cancelled wake drain should finish")
+    .expect("cancelled wake drain should not error")
+    .expect("cancelled queued input turn should still assemble");
+    canceller.await.expect("canceller task");
+
+    assert!(matches!(
+        drained.outcome,
+        TurnOutcome::Stopped(TurnStop::Cancelled)
+    ));
+    assert!(
+        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+            .await
+            .expect("pending inputs after cancellation")
+            .is_empty(),
+        "queued input `{}` should be completed by the cancelled turn",
+        queued_input.input_id
+    );
+    assert!(
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queued work after cancellation")
+            .is_empty(),
+        "claimed wake `{}` should be completed by the cancelled turn",
+        wake.wake_id
+    );
+    assert!(
+        runtime
+            .stream_next_queued_work(TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "after-cancel-claimed-wake-drain"),
+            ))
+            .await
+            .expect("post-cancel drain should succeed")
+            .is_none(),
+        "neither the cancelled input nor the claimed wake should replay"
+    );
+    let requests = requests.lock().expect("request capture lock").clone();
+    assert_eq!(requests.len(), 2);
+    assert!(request_contains_text(
+        &requests[0],
+        "cancel with wake pending"
+    ));
+    assert!(!request_contains_text(
+        &requests[0],
+        "wake cancelled in checkpoint"
+    ));
+    assert!(request_contains_text(
+        &requests[1],
+        "cancel with wake pending"
+    ));
+    assert!(request_contains_text(
+        &requests[1],
+        "wake cancelled in checkpoint"
+    ));
+}
+
+// Boundary: command ordering tests stay in `turns.rs` when they assert public
+// queued-work scheduler behavior across `stream_next_queued_work` calls,
+// provider execution, and the API distinction between "ran a turn" and
+// command-only `None`. Runtime Scenarios own the store-level command-before
+// turn-work gate and command-only drain invariants.
 #[tokio::test]
 async fn leading_session_command_drains_before_queued_turn() {
     let transport = mock_provider(vec![MockCall {
@@ -1047,6 +1443,10 @@ async fn later_session_command_does_not_jump_earlier_queued_turn() {
     );
 }
 
+// Boundary: Runtime Scenarios own the idle queue claim and completion
+// invariant. This full runtime test stays here because it verifies the
+// app-facing queued-work turn event, prompt projection, and blank-history
+// suppression produced by `stream_next_queued_work`.
 #[tokio::test]
 async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1218,6 +1618,12 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     );
 }
 
+// Boundary: busy and lease-loss tests stay in `turns.rs` because they exercise
+// live `LashRuntime` lease acquisition, public busy/no-op scheduling, turn
+// phase probes, provider suspension, and runtime error-code mapping. Runtime
+// Scenarios own persistence-level released/stale lease rejection and
+// queue/input claim invariants; these tests own the facade scheduler response
+// to those store states.
 #[tokio::test]
 async fn foreground_turn_returns_session_execution_busy_when_lane_is_held() {
     let (mut runtime, store) =
@@ -1583,6 +1989,9 @@ async fn prepared_checkpoint_lease_expiry_surfaces_session_execution_lease_lost(
     assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
 }
 
+// Boundary: this durable process-wake case stays in `turns.rs` because it
+// asserts committed conversation history, streamed turn events, and process
+// origin metadata across the full runtime, not only persistence ownership.
 #[tokio::test]
 async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges() {
     let transport = mock_provider(vec![

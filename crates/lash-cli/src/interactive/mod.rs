@@ -664,6 +664,27 @@ pub(crate) async fn run_app(
                 apply_ui_host_effects(&mut app, result.effects);
                 app_tx.request_frame();
             }
+            AppEvent::ProcessChanged {
+                stream_id,
+                kind,
+                process_ids,
+            } => {
+                if !session_activity_is_current(
+                    stream_id,
+                    active_stream_id,
+                    runtime_return_rx.is_some(),
+                ) {
+                    tracing::trace!(
+                        stream_id,
+                        active_stream_id,
+                        runtime_active = runtime_return_rx.is_some(),
+                        "dropping stale process change"
+                    );
+                    continue;
+                }
+                app.apply_process_changed(kind, &process_ids);
+                app_tx.request_frame();
+            }
             AppEvent::Terminal(TermEvent::Paste(text)) => {
                 app.dirty = true;
 

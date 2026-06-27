@@ -329,6 +329,7 @@ async fn run_once_queued_work_claim_stress(
 
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
+        scenario_harness: scenario.scenario_harness().name().to_string(),
         chat_turns,
         stack_profile: None,
         build_runtime_ms,
@@ -853,6 +854,7 @@ async fn run_once_turn_input_ingress_interrupt(
 
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
+        scenario_harness: scenario.scenario_harness().name().to_string(),
         chat_turns,
         stack_profile: None,
         build_runtime_ms,

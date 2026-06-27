@@ -20,8 +20,8 @@ mod tests {
     use base64::Engine;
     use lash_core::llm::transport::validate_image_attachments;
     use lash_core::llm::types::{
-        LlmEventSender, LlmMessage, LlmOutputPart, LlmRequest, LlmRole, LlmTerminalReason,
-        LlmToolChoice, LlmToolSpec, LlmUsage,
+        LlmContentBlock, LlmEventSender, LlmMessage, LlmOutputPart, LlmRequest, LlmRole,
+        LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage, ResponseTextMeta,
     };
     use lash_core::provider::ProviderOptions;
     use serde_json::{Value, json};
@@ -216,6 +216,136 @@ mod tests {
         );
     }
 
+    #[test]
+    fn google_text_thought_signature_is_stored_and_replayed_for_same_origin() {
+        let signature = base64::engine::general_purpose::STANDARD.encode("sig");
+        let value = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "text": "hello",
+                        "thoughtSignature": signature
+                    }]
+                }
+            }]
+        });
+        let parts =
+            GoogleOAuthProvider::response_parts_from_value(&value, Some("gemini-3.1-pro-preview"));
+        let meta = match &parts[0] {
+            LlmOutputPart::Text {
+                response_meta: Some(meta),
+                ..
+            } => meta,
+            other => panic!("expected text metadata, got {other:?}"),
+        };
+        assert_eq!(meta.provider_payload.as_deref(), Some(signature.as_str()));
+        assert_eq!(
+            meta.origin_provider.as_deref(),
+            Some(GoogleOAuthProvider::PROVIDER_KIND)
+        );
+        assert_eq!(meta.origin_model.as_deref(), Some("gemini-3.1-pro-preview"));
+
+        let mut req = request(None);
+        req.messages = vec![LlmMessage::new(
+            LlmRole::Assistant,
+            vec![LlmContentBlock::Text {
+                text: "hello".into(),
+                response_meta: Some(meta.clone()),
+                cache_breakpoint: false,
+            }],
+        )];
+        let contents = GoogleOAuthProvider::build_contents_with_attachment_parts(&req, &[]);
+        assert_eq!(contents[0]["parts"][0]["thoughtSignature"], signature);
+    }
+
+    #[test]
+    fn google_text_thought_signature_replay_rejects_invalid_or_cross_origin_metadata() {
+        let valid = base64::engine::general_purpose::STANDARD.encode("sig");
+        for meta in [
+            ResponseTextMeta {
+                provider_payload: Some("not base64!".to_string()),
+                origin_provider: Some(GoogleOAuthProvider::PROVIDER_KIND.to_string()),
+                origin_model: Some("gemini-3.1-pro-preview".to_string()),
+                ..ResponseTextMeta::default()
+            },
+            ResponseTextMeta {
+                provider_payload: Some(valid.clone()),
+                origin_provider: Some("other_provider".to_string()),
+                origin_model: Some("gemini-3.1-pro-preview".to_string()),
+                ..ResponseTextMeta::default()
+            },
+            ResponseTextMeta {
+                provider_payload: Some(valid.clone()),
+                origin_provider: Some(GoogleOAuthProvider::PROVIDER_KIND.to_string()),
+                origin_model: Some("gemini-2.5-pro".to_string()),
+                ..ResponseTextMeta::default()
+            },
+        ] {
+            let mut req = request(None);
+            req.messages = vec![LlmMessage::new(
+                LlmRole::Assistant,
+                vec![LlmContentBlock::Text {
+                    text: "hello".into(),
+                    response_meta: Some(meta),
+                    cache_breakpoint: false,
+                }],
+            )];
+            let contents = GoogleOAuthProvider::build_contents_with_attachment_parts(&req, &[]);
+            assert!(contents[0]["parts"][0].get("thoughtSignature").is_none());
+        }
+    }
+
+    #[test]
+    fn google_legacy_tool_parameters_strip_json_schema_meta_declarations() {
+        let provider = GoogleOAuthProvider::new("access", "refresh", 0);
+        let mut legacy = request(None);
+        legacy.model = "claude-sonnet-4-6".to_string();
+        legacy.tools = Arc::new(vec![LlmToolSpec {
+            name: "lookup".to_string(),
+            description: "Lookup".to_string(),
+            input_schema: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$id": "tool.schema.json",
+                "$defs": { "unused": { "type": "string" } },
+                "definitions": { "old": { "type": "string" } },
+                "type": "object",
+                "properties": {
+                    "nested": {
+                        "$id": "nested",
+                        "$defs": { "x": { "type": "string" } },
+                        "type": "object"
+                    }
+                }
+            }),
+            output_schema: json!({}),
+            input_schema_projections: Vec::new(),
+            output_schema_projections: Vec::new(),
+        }]);
+        let legacy_body = GoogleOAuthProvider::build_request(&provider, &legacy, Vec::new(), None);
+        let parameters =
+            &legacy_body["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+        assert!(parameters.get("$schema").is_none());
+        assert!(parameters.get("$id").is_none());
+        assert!(parameters.get("$defs").is_none());
+        assert!(parameters.get("definitions").is_none());
+        assert!(parameters["properties"]["nested"].get("$id").is_none());
+        assert!(
+            legacy_body["request"]["tools"][0]["functionDeclarations"][0]
+                .get("parametersJsonSchema")
+                .is_none()
+        );
+
+        let mut current = legacy;
+        current.model = "gemini-3.1-pro-preview".to_string();
+        let current_body =
+            GoogleOAuthProvider::build_request(&provider, &current, Vec::new(), None);
+        assert!(
+            current_body["request"]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]
+                .get("$schema")
+                .is_some()
+        );
+    }
+
     /// Cross-provider response-normalization conformance. Wraps this crate's
     /// (private) Gemini parsers in a `ProviderNormalizer`. Gemini materializes
     /// non-streaming function calls, but it does not expose the streaming
@@ -328,7 +458,7 @@ mod tests {
             }
 
             fn parts_from_wire(&self, body: &Value) -> Vec<LlmOutputPart> {
-                GoogleOAuthProvider::response_parts_from_value(body)
+                GoogleOAuthProvider::response_parts_from_value(body, None)
             }
 
             fn usage_from_wire(&self, body: &Value) -> LlmUsage {

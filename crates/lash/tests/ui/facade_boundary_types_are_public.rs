@@ -47,13 +47,13 @@ impl RuntimePersistence for FacadeStore {
         &self,
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError> {
-        let manifest = SessionCheckpoint {
-            turn_state: commit.checkpoint.turn_state,
-            tool_state_ref: commit.checkpoint.tool_state_ref,
-            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
-            plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
-            execution_state_ref: commit.checkpoint.execution_state_ref,
-        };
+        let manifest = SessionCheckpoint::new(
+            commit.checkpoint.turn_state,
+            commit.checkpoint.tool_state_ref,
+            commit.checkpoint.plugin_snapshot_ref,
+            commit.checkpoint.plugin_snapshot_revision,
+            commit.checkpoint.execution_state_ref,
+        );
         Ok(RuntimeCommitResult {
             head_revision: commit.expected_head_revision.unwrap_or_default() + 1,
             checkpoint_ref: "checkpoint".to_string().into(),

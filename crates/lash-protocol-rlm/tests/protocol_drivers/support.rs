@@ -1,0 +1,766 @@
+pub(crate) use std::sync::Arc;
+
+pub(crate) use lash_core::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Response};
+pub(crate) use lash_core::{Effect, TurnMachine, TurnMachineConfig};
+pub(crate) use lash_protocol_rlm::RlmDriver;
+pub(crate) use lash_rlm_types::{
+    RlmCreateExtras, RlmProtocolEvent, RlmTermination, RlmTrajectoryEntry,
+};
+pub(crate) use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
+pub(crate) use lash_sansio::{
+    CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+};
+
+pub(crate) fn test_config() -> TurnMachineConfig {
+    test_config_with_termination(RlmTermination::default())
+}
+
+pub(crate) fn test_config_with_termination(rlm_termination: RlmTermination) -> TurnMachineConfig {
+    test_config_with_protocol_turn_options(
+        lash_core::ProtocolTurnOptions::typed(RlmCreateExtras {
+            termination: rlm_termination,
+            final_answer_format: None,
+        })
+        .expect("valid rlm turn options"),
+    )
+}
+
+pub(crate) fn test_config_with_protocol_turn_options(
+    termination: lash_core::ProtocolTurnOptions,
+) -> TurnMachineConfig {
+    let protocol_driver: Arc<dyn ProtocolDriverHandle<lash_core::HostTurnProtocol>> =
+        Arc::new(RlmDriver);
+    TurnMachineConfig {
+        protocol_driver,
+        projector: Arc::new(ChatContextProjector),
+        sync_execution_environment: true,
+        model: "test-model".to_string(),
+        max_context_tokens: None,
+        max_turns: None,
+        model_variant: None,
+        generation: lash_core::GenerationOptions::default(),
+        run_session_id: None,
+        autonomous: false,
+        tool_specs: Vec::new().into(),
+        system_prompt: std::sync::Arc::from(""),
+        session_id: "test".to_string(),
+        emit_llm_trace: false,
+        termination,
+        turn_limit_final_message: Arc::new(test_turn_limit_final_message),
+    }
+}
+
+pub(crate) fn test_turn_limit_final_message(message_id: String, max_turns: usize) -> Message {
+    Message {
+        id: message_id.clone(),
+        role: MessageRole::System,
+        parts: lash_sansio::shared_parts(vec![Part {
+            id: format!("{message_id}.p0"),
+            kind: PartKind::Error,
+            content: format!("Turn limit reached ({max_turns}) before a final test response."),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
+    }
+}
+
+pub(crate) fn user_message(content: &str) -> Message {
+    Message {
+        id: "m0".to_string(),
+        role: MessageRole::User,
+        parts: vec![Part {
+            id: "m0.p0".to_string(),
+            kind: PartKind::Text,
+            content: content.to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]
+        .into(),
+        origin: None,
+    }
+}
+
+pub(crate) fn drain_effects(machine: &mut TurnMachine) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    while let Some(effect) = machine.poll_effect() {
+        if let Effect::SyncExecutionEnvironment { id, .. } = effect {
+            effects.push(effect);
+            machine.handle_response(Response::ExecutionEnvironmentSynced {
+                id,
+                result: Ok(Some(sansio::ExecutionEnvironmentSync {
+                    system_prompt: std::sync::Arc::from(""),
+                    tool_specs: Arc::new(Vec::new()),
+                })),
+            });
+            continue;
+        }
+        effects.push(effect);
+    }
+    effects
+}
+
+pub(crate) fn find_llm_call(effects: &[Effect]) -> Option<&sansio::EffectId> {
+    effects.iter().find_map(|e| match e {
+        Effect::LlmCall { id, .. } => Some(id),
+        _ => None,
+    })
+}
+
+pub(crate) fn find_llm_request(effects: &[Effect]) -> Option<&LlmRequest> {
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::LlmCall { request, .. } => Some(request),
+            _ => None,
+        })
+        .map(|request| request.as_ref())
+}
+
+pub(crate) fn find_checkpoint(effects: &[Effect]) -> Option<(sansio::EffectId, CheckpointKind)> {
+    effects.iter().find_map(|e| match e {
+        Effect::Checkpoint { id, checkpoint } => Some((*id, *checkpoint)),
+        _ => None,
+    })
+}
+
+pub(crate) fn find_done(effects: &[Effect]) -> Option<(&lash_sansio::MessageSequence, usize)> {
+    effects.iter().find_map(|e| match e {
+        Effect::Done {
+            messages,
+            event_delta: _,
+            protocol_iteration,
+        } => Some((messages, *protocol_iteration)),
+        _ => None,
+    })
+}
+
+pub(crate) fn roundtrip_turn_checkpoint(
+    checkpoint: lash_sansio::TurnCheckpoint<lash_core::HostTurnProtocol>,
+) -> lash_sansio::TurnCheckpoint<lash_core::HostTurnProtocol> {
+    let encoded = serde_json::to_string(&checkpoint).expect("serialize checkpoint");
+    serde_json::from_str(&encoded).expect("deserialize checkpoint")
+}
+
+pub(crate) fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
+    machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Protocol(event) => {
+                match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+                    Some(RlmProtocolEvent::RlmTrajectoryEntry(entry)) => Some(entry),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn single_llm_extraction_payload(machine: &TurnMachine) -> serde_json::Value {
+    let payloads: Vec<_> = machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Protocol(event) => {
+                match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+                    Some(RlmProtocolEvent::RlmDiagnostic(diagnostic)) => {
+                        (diagnostic.phase == "llm_extraction").then_some(diagnostic.payload)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(payloads.len(), 1, "expected one llm_extraction diagnostic");
+    let payload = payloads.into_iter().next().expect("payload");
+    assert_no_legacy_llm_extraction_keys(&payload);
+    payload
+}
+
+pub(crate) fn assert_no_legacy_llm_extraction_keys(payload: &serde_json::Value) {
+    let object = payload.as_object().expect("diagnostic payload object");
+    assert_eq!(
+        object.len(),
+        3,
+        "llm_extraction payload should only contain decision, termination, and counts"
+    );
+    for key in [
+        "assistant_text_chars",
+        "prose_only_ends_turn",
+        "finalization_reason",
+    ] {
+        assert!(
+            object.get(key).is_none(),
+            "legacy llm_extraction key `{key}` should not be emitted"
+        );
+    }
+}
+
+pub(crate) fn assistant_messages(machine: &TurnMachine) -> Vec<Message> {
+    machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Conversation(record) => {
+                let message = record.to_message();
+                (message.role == MessageRole::Assistant).then_some(message)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn assistant_reasoning_texts(machine: &TurnMachine) -> Vec<String> {
+    assistant_messages(machine)
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .parts
+                .iter()
+                .filter(|part| matches!(part.kind, PartKind::Reasoning))
+                .map(|part| part.content.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+pub(crate) fn assistant_visible_texts(machine: &TurnMachine) -> Vec<String> {
+    assistant_messages(machine)
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .parts
+                .iter()
+                .filter(|part| matches!(part.kind, PartKind::Text | PartKind::Prose))
+                .map(|part| part.content.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+pub(crate) fn text_part(text: &str) -> LlmOutputPart {
+    LlmOutputPart::Text {
+        text: text.to_string(),
+        response_meta: None,
+    }
+}
+
+pub(crate) fn reasoning_part(text: &str) -> LlmOutputPart {
+    LlmOutputPart::Reasoning {
+        text: text.to_string(),
+        replay: None,
+    }
+}
+
+pub(crate) fn lashlang_block(code: &str) -> String {
+    format!("<lashlang>\n{code}\n</lashlang>")
+}
+
+pub(crate) fn lashlang_block_with_prose(prose: &str, code: &str) -> String {
+    format!("{prose}\n<lashlang>\n{code}\n</lashlang>")
+}
+
+pub(crate) fn rlm_response(parts: Vec<LlmOutputPart>) -> LlmResponse {
+    let full_text = parts
+        .iter()
+        .filter_map(|part| match part {
+            LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    LlmResponse {
+        full_text,
+        parts,
+        ..LlmResponse::default()
+    }
+}
+
+pub(crate) fn exec_response(
+    output: &[&str],
+    error: Option<&str>,
+    final_output: Option<serde_json::Value>,
+) -> lash_sansio::ExecResponse {
+    lash_sansio::ExecResponse {
+        observations: output.iter().map(|item| (*item).to_string()).collect(),
+        observation_truncation: Vec::new(),
+        tool_calls: Vec::new(),
+        images: Vec::new(),
+        printed_images: Vec::new(),
+        error: error.map(str::to_string),
+        duration_ms: 1,
+        terminal_finish: final_output,
+    }
+}
+
+pub(crate) fn effects_include_runtime_error(effects: &[Effect], message_fragment: &str) -> bool {
+    let has_error = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Emit(SessionEvent::Error { message, .. })
+                if message.contains(message_fragment)
+        )
+    });
+    let has_runtime_outcome = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Emit(SessionEvent::TurnOutcome {
+                outcome: lash_sansio::TurnOutcome::Stopped(lash_sansio::TurnStop::RuntimeError)
+            })
+        )
+    });
+    has_error && has_runtime_outcome
+}
+
+pub(crate) fn rewrite_first_rlm_driver_state_owner(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("plugin_id").and_then(serde_json::Value::as_str)
+                == Some(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID)
+            {
+                map.insert(
+                    "plugin_id".to_string(),
+                    serde_json::Value::String("other_protocol".to_string()),
+                );
+                return true;
+            }
+            map.values_mut().any(rewrite_first_rlm_driver_state_owner)
+        }
+        serde_json::Value::Array(values) => {
+            values.iter_mut().any(rewrite_first_rlm_driver_state_owner)
+        }
+        _ => false,
+    }
+}
+
+// === RLM Protocol Scenario Harness ===
+//
+// These scenarios drive the protocol state machine through declarative LLM,
+// exec, and checkpoint steps. Direct white-box tests remain below only when
+// they intentionally corrupt turn options or checkpoint driver state.
+#[derive(Clone, Debug)]
+pub(crate) struct RlmProtocolScenario {
+    pub(crate) name: &'static str,
+    pub(crate) user_message: &'static str,
+    pub(crate) termination: RlmTermination,
+    pub(crate) protocol_turn_options: Option<lash_core::ProtocolTurnOptions>,
+    pub(crate) max_turns: Option<usize>,
+    pub(crate) steps: Vec<RlmProtocolStep>,
+    pub(crate) expectations: RlmProtocolExpectations,
+}
+
+impl RlmProtocolScenario {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            user_message: "perform one step",
+            termination: RlmTermination::default(),
+            protocol_turn_options: None,
+            max_turns: None,
+            steps: Vec::new(),
+            expectations: RlmProtocolExpectations::default(),
+        }
+    }
+
+    pub(crate) fn user_message(mut self, user_message: &'static str) -> Self {
+        self.user_message = user_message;
+        self
+    }
+
+    pub(crate) fn termination(mut self, termination: RlmTermination) -> Self {
+        self.termination = termination;
+        self
+    }
+
+    pub(crate) fn protocol_turn_options(mut self, options: lash_core::ProtocolTurnOptions) -> Self {
+        self.protocol_turn_options = Some(options);
+        self
+    }
+
+    pub(crate) fn max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = Some(max_turns);
+        self
+    }
+
+    pub(crate) fn llm_response(mut self, parts: Vec<LlmOutputPart>) -> Self {
+        self.steps.push(RlmProtocolStep::LlmResponse {
+            text_streamed: false,
+            parts,
+        });
+        self
+    }
+
+    pub(crate) fn streamed_llm_response(mut self, parts: Vec<LlmOutputPart>) -> Self {
+        self.steps.push(RlmProtocolStep::LlmResponse {
+            text_streamed: true,
+            parts,
+        });
+        self
+    }
+
+    pub(crate) fn exec_result(mut self, result: lash_sansio::ExecResponse) -> Self {
+        self.steps.push(RlmProtocolStep::ExecResult(result));
+        self
+    }
+
+    pub(crate) fn checkpoint(mut self) -> Self {
+        self.steps.push(RlmProtocolStep::Checkpoint);
+        self
+    }
+
+    pub(crate) fn expect(mut self, expectations: RlmProtocolExpectations) -> Self {
+        self.expectations = expectations;
+        self
+    }
+
+    pub(crate) fn run(self) {
+        let mut config = if let Some(options) = self.protocol_turn_options.clone() {
+            test_config_with_protocol_turn_options(options)
+        } else {
+            test_config_with_termination(self.termination)
+        };
+        config.max_turns = self.max_turns;
+        let mut machine = TurnMachine::new(
+            config,
+            vec![user_message(self.user_message)],
+            Arc::new(Vec::new()),
+            0,
+        );
+        let mut observed = RlmProtocolRun::default();
+        let mut effects = drain_effects(&mut machine);
+        observed.record(&effects);
+        observed.initial_request = find_llm_request(&effects).cloned();
+
+        for step in &self.steps {
+            match step {
+                RlmProtocolStep::LlmResponse {
+                    text_streamed,
+                    parts,
+                } => {
+                    let llm_id = *find_llm_call(&effects)
+                        .unwrap_or_else(|| panic!("{} expected pending LLM call", self.name));
+                    machine.handle_response(Response::LlmComplete {
+                        id: llm_id,
+                        text_streamed: *text_streamed,
+                        result: Ok(rlm_response(parts.clone())),
+                    });
+                }
+                RlmProtocolStep::ExecResult(result) => {
+                    let exec_id = effects
+                        .iter()
+                        .find_map(|effect| match effect {
+                            Effect::ExecCode { id, .. } => Some(*id),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| panic!("{} expected pending exec code", self.name));
+                    machine.handle_response(Response::ExecResult {
+                        id: exec_id,
+                        result: Ok(result.clone()),
+                    });
+                }
+                RlmProtocolStep::Checkpoint => {
+                    let (checkpoint_id, _) = find_checkpoint(&effects)
+                        .unwrap_or_else(|| panic!("{} expected checkpoint", self.name));
+                    machine.handle_response(Response::Checkpoint {
+                        id: checkpoint_id,
+                        delivery: sansio::CheckpointDelivery::default(),
+                    });
+                }
+            }
+
+            effects = drain_effects(&mut machine);
+            observed.record(&effects);
+        }
+
+        self.expectations.assert(self.name, &observed, &machine);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RlmProtocolStep {
+    LlmResponse {
+        text_streamed: bool,
+        parts: Vec<LlmOutputPart>,
+    },
+    ExecResult(lash_sansio::ExecResponse),
+    Checkpoint,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RlmProtocolExpectations {
+    pub(crate) initial_request_tools_empty: bool,
+    pub(crate) exec_codes: Vec<&'static str>,
+    pub(crate) checkpoints: Vec<CheckpointKind>,
+    pub(crate) llm_call_count: Option<usize>,
+    pub(crate) done: Option<bool>,
+    pub(crate) no_exec_code: bool,
+    pub(crate) no_final_message_event: bool,
+    pub(crate) no_tool_call_events: bool,
+    pub(crate) no_assistant_conversation_progress: bool,
+    pub(crate) trajectory_omits_tool_call_ids: bool,
+    pub(crate) system_message_contains: Vec<&'static str>,
+    pub(crate) system_message_omits: Vec<&'static str>,
+    pub(crate) assistant_reasoning_texts: Option<Vec<&'static str>>,
+    pub(crate) assistant_visible_texts: Option<Vec<&'static str>>,
+    pub(crate) assistant_message_count: Option<usize>,
+    pub(crate) llm_extraction_payload: Option<serde_json::Value>,
+    pub(crate) turn_outcome: Option<lash_sansio::TurnOutcome>,
+    pub(crate) agent_frame_switch: Option<(&'static str, &'static str)>,
+    pub(crate) tool_error_message: Option<(&'static str, &'static str)>,
+    pub(crate) trajectory_last: Option<RlmTrajectoryExpectation>,
+}
+
+impl RlmProtocolExpectations {
+    pub(crate) fn assert(&self, scenario_name: &str, run: &RlmProtocolRun, machine: &TurnMachine) {
+        if self.initial_request_tools_empty {
+            let request = run
+                .initial_request
+                .as_ref()
+                .unwrap_or_else(|| panic!("{scenario_name} did not project an LLM request"));
+            assert!(
+                request.tools.is_empty(),
+                "{scenario_name} RLM projection should not advertise native tools"
+            );
+        }
+        assert_eq!(
+            run.exec_codes,
+            self.exec_codes
+                .iter()
+                .map(|code| (*code).to_string())
+                .collect::<Vec<_>>(),
+            "{scenario_name} exec-code sequence changed"
+        );
+        assert_eq!(
+            run.checkpoints, self.checkpoints,
+            "{scenario_name} checkpoint sequence changed"
+        );
+        if let Some(llm_call_count) = self.llm_call_count {
+            assert_eq!(
+                run.llm_call_count, llm_call_count,
+                "{scenario_name} LLM call count changed"
+            );
+        }
+        if let Some(done) = self.done {
+            assert_eq!(
+                machine.is_done(),
+                done,
+                "{scenario_name} done state changed"
+            );
+        }
+        if self.no_exec_code {
+            assert!(
+                run.exec_codes.is_empty(),
+                "{scenario_name} unexpectedly executed code: {:?}",
+                run.exec_codes
+            );
+        }
+        if self.no_final_message_event {
+            assert!(
+                !run.final_message_event,
+                "{scenario_name} emitted duplicate protocol final message"
+            );
+        }
+        if self.no_tool_call_events {
+            assert!(
+                !run.tool_call_event,
+                "{scenario_name} emitted host tool-call events for protocol-internal exec results"
+            );
+        }
+        if self.no_assistant_conversation_progress {
+            assert!(
+                !run.assistant_conversation_progress,
+                "{scenario_name} wrote protocol-owned assistant conversation progress"
+            );
+        }
+        for expected in &self.system_message_contains {
+            assert!(
+                machine.messages().iter().any(|message| {
+                    message.role == MessageRole::System
+                        && message
+                            .parts
+                            .iter()
+                            .any(|part| part.content.contains(expected))
+                }),
+                "{scenario_name} missing system repair feedback containing `{expected}`"
+            );
+        }
+        for omitted in &self.system_message_omits {
+            assert!(
+                !machine.messages().iter().any(|message| {
+                    message.role == MessageRole::System
+                        && message
+                            .parts
+                            .iter()
+                            .any(|part| part.content.contains(omitted))
+                }),
+                "{scenario_name} found unexpected system feedback containing `{omitted}`"
+            );
+        }
+        if let Some(expected) = &self.assistant_reasoning_texts {
+            assert_eq!(
+                assistant_reasoning_texts(machine),
+                expected
+                    .iter()
+                    .map(|text| (*text).to_string())
+                    .collect::<Vec<_>>(),
+                "{scenario_name} assistant reasoning texts changed"
+            );
+        }
+        if let Some(expected) = &self.assistant_visible_texts {
+            assert_eq!(
+                assistant_visible_texts(machine),
+                expected
+                    .iter()
+                    .map(|text| (*text).to_string())
+                    .collect::<Vec<_>>(),
+                "{scenario_name} assistant visible texts changed"
+            );
+        }
+        if let Some(expected) = self.assistant_message_count {
+            assert_eq!(
+                assistant_messages(machine).len(),
+                expected,
+                "{scenario_name} assistant message count changed"
+            );
+        }
+        if let Some(expected) = &self.llm_extraction_payload {
+            assert_eq!(
+                single_llm_extraction_payload(machine),
+                *expected,
+                "{scenario_name} llm_extraction diagnostic changed"
+            );
+        }
+        if let Some(expected) = &self.turn_outcome {
+            assert!(
+                run.turn_outcomes.iter().any(|outcome| outcome == expected),
+                "{scenario_name} missing turn outcome {expected:?}: {:?}",
+                run.turn_outcomes
+            );
+        }
+        if let Some((frame_id, task)) = self.agent_frame_switch {
+            assert!(
+                run.turn_outcomes.iter().any(|outcome| matches!(
+                    outcome,
+                    lash_sansio::TurnOutcome::AgentFrameSwitch {
+                        frame_id: actual_frame_id,
+                        task: actual_task,
+                    } if actual_frame_id == frame_id && actual_task == task
+                )),
+                "{scenario_name} missing agent-frame switch outcome for {frame_id}: {:?}",
+                run.turn_outcomes
+            );
+        }
+        if let Some((tool_name, message)) = self.tool_error_message {
+            assert!(
+                run.turn_outcomes.iter().any(|outcome| matches!(
+                    outcome,
+                    lash_sansio::TurnOutcome::Stopped(lash_sansio::TurnStop::ToolError {
+                        tool_name: actual_tool_name,
+                        value,
+                    }) if actual_tool_name == tool_name
+                        && value.get("message") == Some(&serde_json::json!(message))
+                )),
+                "{scenario_name} missing tool-error outcome for {tool_name}: {:?}",
+                run.turn_outcomes
+            );
+        }
+        if let Some(expected) = &self.trajectory_last {
+            let trajectory = machine_trajectory(machine);
+            let entry = trajectory
+                .last()
+                .unwrap_or_else(|| panic!("{scenario_name} missing RLM trajectory entry"));
+            assert_eq!(entry.code, expected.code, "{scenario_name} trajectory code");
+            assert_eq!(
+                entry.output, expected.output,
+                "{scenario_name} trajectory output"
+            );
+            assert_eq!(
+                entry.final_output, expected.final_output,
+                "{scenario_name} trajectory final value"
+            );
+            assert_eq!(
+                entry.error, expected.error,
+                "{scenario_name} trajectory error"
+            );
+        }
+        if self.trajectory_omits_tool_call_ids {
+            let trajectory = machine_trajectory(machine);
+            let entry = trajectory
+                .last()
+                .unwrap_or_else(|| panic!("{scenario_name} missing RLM trajectory entry"));
+            assert!(
+                serde_json::to_value(entry)
+                    .expect("trajectory entry serializes")
+                    .get("tool_call_ids")
+                    .is_none(),
+                "{scenario_name} leaked protocol-internal tool call ids into the RLM trajectory"
+            );
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RlmTrajectoryExpectation {
+    pub(crate) code: &'static str,
+    pub(crate) output: Vec<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) final_output: Option<serde_json::Value>,
+}
+
+#[derive(Default)]
+pub(crate) struct RlmProtocolRun {
+    pub(crate) initial_request: Option<LlmRequest>,
+    pub(crate) exec_codes: Vec<String>,
+    pub(crate) checkpoints: Vec<CheckpointKind>,
+    pub(crate) llm_call_count: usize,
+    pub(crate) turn_outcomes: Vec<lash_sansio::TurnOutcome>,
+    pub(crate) final_message_event: bool,
+    pub(crate) tool_call_event: bool,
+    pub(crate) assistant_conversation_progress: bool,
+}
+
+impl RlmProtocolRun {
+    pub(crate) fn record(&mut self, effects: &[Effect]) {
+        for effect in effects {
+            match effect {
+                Effect::LlmCall { .. } => self.llm_call_count += 1,
+                Effect::ExecCode { code, .. } => {
+                    self.exec_codes.push(code.clone());
+                }
+                Effect::Checkpoint { checkpoint, .. } => self.checkpoints.push(*checkpoint),
+                Effect::Emit(SessionEvent::TurnOutcome { outcome }) => {
+                    self.turn_outcomes.push(outcome.clone());
+                }
+                Effect::Emit(SessionEvent::Message { kind, .. }) if kind == "final" => {
+                    self.final_message_event = true;
+                }
+                Effect::Emit(SessionEvent::ToolCall { .. }) => {
+                    self.tool_call_event = true;
+                }
+                Effect::Progress { event_delta, .. } => {
+                    self.assistant_conversation_progress |= event_delta.iter().any(|event| {
+                        matches!(
+                            event,
+                            lash_sansio::SessionEventRecord::Conversation(record)
+                                if record.to_message().role == MessageRole::Assistant
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+}

@@ -1,8 +1,14 @@
 //! OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
 
 use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
 use crate::responses_shared as shared;
 use crate::schema::{OpenAiSchemaProfile, model_id};
@@ -36,6 +42,33 @@ const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
 const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexTransport {
+    #[default]
+    Auto,
+    Sse,
+    Websocket,
+    WebsocketCached,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CodexContinuation {
+    previous_response_id: String,
+    input: Vec<Value>,
+    body_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CodexContinuationCache {
+    by_session: HashMap<String, CodexContinuation>,
+}
+
+struct CodexWebSocketAttemptError {
+    error: LlmTransportError,
+    events_seen: bool,
+}
+
 fn has_xhigh_suffix(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     lower.contains("5.2") || lower.contains("5.3") || lower.contains("5.4")
@@ -57,6 +90,8 @@ pub struct CodexProvider {
     pub expires_at: u64,
     pub account_id: Option<String>,
     pub options: ProviderOptions,
+    pub transport: CodexTransport,
+    continuation_cache: CodexContinuationCache,
     client: reqwest::Client,
 }
 
@@ -66,6 +101,7 @@ struct CodexModelPolicy;
 impl CodexProvider {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
     const CODEX_RESPONSES_URL: &'static str = "https://chatgpt.com/backend-api/codex/responses";
+    const CODEX_RESPONSES_WS_URL: &'static str = "wss://chatgpt.com/backend-api/codex/responses";
 
     pub fn new(
         access_token: impl Into<String>,
@@ -81,6 +117,8 @@ impl CodexProvider {
                 reliability: ProviderReliability::codex(),
                 ..ProviderOptions::default()
             },
+            transport: CodexTransport::Auto,
+            continuation_cache: CodexContinuationCache::default(),
             client: build_http_client(),
         }
     }
@@ -92,6 +130,11 @@ impl CodexProvider {
 
     pub fn with_options(mut self, options: ProviderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    pub fn with_transport(mut self, transport: CodexTransport) -> Self {
+        self.transport = transport;
         self
     }
 
@@ -312,6 +355,283 @@ impl CodexProvider {
         Ok(body)
     }
 
+    fn body_input(body: &Value) -> Vec<Value> {
+        body.get("input")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn body_fingerprint(body: &Value) -> String {
+        let mut comparable = body.clone();
+        if let Some(obj) = comparable.as_object_mut() {
+            obj.remove("input");
+            obj.remove("previous_response_id");
+        }
+        comparable.to_string()
+    }
+
+    fn cached_websocket_body(&mut self, req: &LlmRequest, full_body: &Value) -> (Value, bool) {
+        let Some(session_id) = req.session_id.as_deref() else {
+            return (full_body.clone(), false);
+        };
+        let Some(cached) = self.continuation_cache.by_session.get(session_id).cloned() else {
+            return (full_body.clone(), false);
+        };
+        let current_fingerprint = Self::body_fingerprint(full_body);
+        let current_input = Self::body_input(full_body);
+        let compatible = cached.body_fingerprint == current_fingerprint
+            && current_input.len() >= cached.input.len()
+            && current_input
+                .iter()
+                .take(cached.input.len())
+                .eq(cached.input.iter());
+        if !compatible {
+            self.continuation_cache.by_session.remove(session_id);
+            return (full_body.clone(), false);
+        }
+        let mut body = full_body.clone();
+        body["previous_response_id"] = json!(cached.previous_response_id);
+        body["input"] = Value::Array(current_input[cached.input.len()..].to_vec());
+        (body, true)
+    }
+
+    fn record_continuation(&mut self, req: &LlmRequest, full_body: &Value, final_response: &Value) {
+        let Some(session_id) = req.session_id.as_deref() else {
+            return;
+        };
+        let Some(response_id) = final_response.get("id").and_then(Value::as_str) else {
+            self.continuation_cache.by_session.remove(session_id);
+            return;
+        };
+        self.continuation_cache.by_session.insert(
+            session_id.to_string(),
+            CodexContinuation {
+                previous_response_id: response_id.to_string(),
+                input: Self::body_input(full_body),
+                body_fingerprint: Self::body_fingerprint(full_body),
+            },
+        );
+    }
+
+    fn clear_continuation(&mut self, req: &LlmRequest) {
+        if let Some(session_id) = req.session_id.as_deref() {
+            self.continuation_cache.by_session.remove(session_id);
+        }
+    }
+
+    async fn complete_websocket(
+        &mut self,
+        req: LlmRequest,
+    ) -> Result<LlmResponse, CodexWebSocketAttemptError> {
+        let stream_events = req.stream_events.clone();
+        let provider_trace = req.provider_trace.clone();
+        let full_body =
+            self.build_request_body(&req, true)
+                .map_err(|error| CodexWebSocketAttemptError {
+                    error,
+                    events_seen: false,
+                })?;
+        let use_cached = matches!(
+            self.transport,
+            CodexTransport::Auto | CodexTransport::WebsocketCached
+        );
+        let (body, cached) = if use_cached {
+            self.cached_websocket_body(&req, &full_body)
+        } else {
+            (full_body.clone(), false)
+        };
+        let request_body =
+            serde_json::to_string(&body).map_err(|error| CodexWebSocketAttemptError {
+                error: LlmTransportError::new(format!(
+                    "Failed to serialize Codex WebSocket body: {error}"
+                )),
+                events_seen: false,
+            })?;
+
+        let mut ws_request =
+            Self::CODEX_RESPONSES_WS_URL
+                .into_client_request()
+                .map_err(|error| CodexWebSocketAttemptError {
+                    error: LlmTransportError::new(format!(
+                        "Failed to build Codex WebSocket request: {error}"
+                    )),
+                    events_seen: false,
+                })?;
+        let headers = ws_request.headers_mut();
+        headers.insert(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {}", self.access_token)).map_err(|error| {
+                CodexWebSocketAttemptError {
+                    error: LlmTransportError::new(format!(
+                        "Invalid Codex WebSocket authorization header: {error}"
+                    )),
+                    events_seen: false,
+                }
+            })?,
+        );
+        headers.insert(
+            "OpenAI-Beta",
+            HeaderValue::from_static("responses=experimental"),
+        );
+        headers.insert(
+            "originator",
+            HeaderValue::from_static(Self::CODEX_ORIGINATOR),
+        );
+        headers.insert(
+            "User-Agent",
+            HeaderValue::from_str(&Self::codex_user_agent()).map_err(|error| {
+                CodexWebSocketAttemptError {
+                    error: LlmTransportError::new(format!(
+                        "Invalid Codex WebSocket user-agent header: {error}"
+                    )),
+                    events_seen: false,
+                }
+            })?,
+        );
+        if let Some(session_id) = req.session_id.as_deref() {
+            let value =
+                HeaderValue::from_str(session_id).map_err(|error| CodexWebSocketAttemptError {
+                    error: LlmTransportError::new(format!(
+                        "Invalid Codex WebSocket session header: {error}"
+                    )),
+                    events_seen: false,
+                })?;
+            headers.insert("session_id", value.clone());
+            headers.insert("x-client-request-id", value);
+        }
+        if let Some(account_id) = self.account_id.as_deref() {
+            headers.insert(
+                "ChatGPT-Account-ID",
+                HeaderValue::from_str(account_id).map_err(|error| CodexWebSocketAttemptError {
+                    error: LlmTransportError::new(format!(
+                        "Invalid Codex WebSocket account header: {error}"
+                    )),
+                    events_seen: false,
+                })?,
+            );
+        }
+
+        let mut events_seen = false;
+        let (mut websocket, _) =
+            connect_async(ws_request)
+                .await
+                .map_err(|error| CodexWebSocketAttemptError {
+                    error: LlmTransportError::new(format!(
+                        "Codex WebSocket connect failed: {error}"
+                    ))
+                    .retryable(true)
+                    .with_code("websocket_connect"),
+                    events_seen,
+                })?;
+        websocket
+            .send(WsMessage::Text(request_body.clone().into()))
+            .await
+            .map_err(|error| CodexWebSocketAttemptError {
+                error: LlmTransportError::new(format!("Codex WebSocket send failed: {error}"))
+                    .retryable(true)
+                    .with_code("websocket_send"),
+                events_seen,
+            })?;
+
+        let mut state = shared::ResponsesStreamState::default();
+        let expose_thinking = self.options.expose_thinking;
+        while let Some(message) = websocket.next().await {
+            let message = message.map_err(|error| CodexWebSocketAttemptError {
+                error: LlmTransportError::new(format!("Codex WebSocket receive failed: {error}"))
+                    .retryable(true)
+                    .with_code("websocket_receive"),
+                events_seen,
+            })?;
+            let raw = match message {
+                WsMessage::Text(text) => text.to_string(),
+                WsMessage::Binary(bytes) => String::from_utf8(bytes.to_vec()).map_err(|error| {
+                    CodexWebSocketAttemptError {
+                        error: LlmTransportError::new(format!(
+                            "Codex WebSocket binary frame was not UTF-8: {error}"
+                        ))
+                        .with_code("websocket_protocol"),
+                        events_seen,
+                    }
+                })?,
+                WsMessage::Close(_) => break,
+                WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => continue,
+            };
+            emit_provider_trace(provider_trace.as_ref(), "codex", &raw);
+            events_seen = true;
+            let prev_usage = state.usage.clone();
+            let mut emitted_parts = Vec::new();
+            if Self::looks_like_sse_payload(&raw) {
+                shared::parse_sse_payload(PROVIDER, &raw, &mut state)
+                    .map_err(|error| CodexWebSocketAttemptError { error, events_seen })?;
+            } else {
+                shared::process_sse_event(PROVIDER, &raw, &mut state, Some(&mut emitted_parts))
+                    .map_err(|error| CodexWebSocketAttemptError { error, events_seen })?;
+            }
+            emit_stream_progress(
+                stream_events.as_ref(),
+                state.take_text_deltas(),
+                &state.usage,
+                &prev_usage,
+            );
+            if let Some(tx) = &stream_events {
+                for piece in state.take_reasoning_deltas() {
+                    if expose_thinking {
+                        tx.send(LlmStreamEvent::ReasoningDelta(piece));
+                    }
+                }
+                for part in emitted_parts {
+                    if matches!(part, lash_core::llm::types::LlmOutputPart::Reasoning { .. })
+                        && !expose_thinking
+                    {
+                        continue;
+                    }
+                    tx.send(LlmStreamEvent::Part(part));
+                }
+            } else {
+                state.take_reasoning_deltas();
+            }
+            if state
+                .final_response
+                .as_ref()
+                .and_then(|response| response.get("status").and_then(Value::as_str))
+                .is_some_and(|status| matches!(status, "completed" | "failed" | "incomplete"))
+            {
+                break;
+            }
+        }
+
+        if state.final_response.is_none() && state.parts.is_empty() {
+            return Err(CodexWebSocketAttemptError {
+                error: LlmTransportError::new("Codex WebSocket ended without response events")
+                    .retryable(true)
+                    .with_code("empty_websocket_stream"),
+                events_seen,
+            });
+        }
+
+        if let Some(final_response) = state.final_response.clone() {
+            self.record_continuation(&req, &full_body, &final_response);
+        } else {
+            self.clear_continuation(&req);
+        }
+        let mut response = shared::response_from_stream_state(
+            state,
+            Some(request_body),
+            format!(
+                "WS {}{}",
+                Self::CODEX_RESPONSES_WS_URL,
+                if cached { " (cached)" } else { "" }
+            ),
+        );
+        response.http_summary = Some(format!(
+            "WS {}{}",
+            Self::CODEX_RESPONSES_WS_URL,
+            if cached { " (cached)" } else { "" }
+        ));
+        Ok(response)
+    }
+
     fn looks_like_sse_payload(payload: &str) -> bool {
         let trimmed = payload.trim_start();
         trimmed.starts_with("event:")
@@ -434,6 +754,12 @@ impl Provider for CodexProvider {
                 serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
             );
         }
+        if self.transport != CodexTransport::Auto {
+            map.insert(
+                "transport".to_string(),
+                serde_json::to_value(self.transport).unwrap_or(serde_json::Value::Null),
+            );
+        }
         serde_json::Value::Object(map)
     }
 
@@ -442,6 +768,23 @@ impl Provider for CodexProvider {
     }
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        if !matches!(self.transport, CodexTransport::Sse) {
+            match self.complete_websocket(req.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(err) if matches!(self.transport, CodexTransport::Auto) && !err.events_seen => {
+                    self.clear_continuation(&req);
+                    tracing::debug!(
+                        target: "lash_core::llm::codex_oauth",
+                        error = %err.error.message,
+                        "Codex WebSocket failed before stream start; falling back to SSE"
+                    );
+                }
+                Err(err) => {
+                    self.clear_continuation(&req);
+                    return Err(err.error);
+                }
+            }
+        }
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
         let access_token = self.access_token.clone();
@@ -540,6 +883,9 @@ impl Provider for CodexProvider {
             if Self::looks_like_sse_payload(&text) {
                 let mut state = shared::ResponsesStreamState::default();
                 shared::parse_sse_payload(PROVIDER, &text, &mut state)?;
+                if let Some(final_response) = state.final_response.clone() {
+                    self.record_continuation(&req, &body, &final_response);
+                }
                 let response = shared::response_from_stream_state(
                     state,
                     request_body,
@@ -576,6 +922,7 @@ impl Provider for CodexProvider {
                 LlmTransportError::new(format!("Invalid Codex response JSON: {e}"))
                     .with_raw(text.clone())
             })?;
+            self.record_continuation(&req, &body, &value);
             let content = shared::extract_text(&value);
             let usage = openai_usage_from_response_value(&value);
             let mut parts = shared::response_parts_from_value(&value);
@@ -668,6 +1015,10 @@ impl Provider for CodexProvider {
             .with_code("empty_stream"));
         }
 
+        if let Some(final_response) = state.final_response.clone() {
+            self.record_continuation(&req, &body, &final_response);
+        }
+
         Ok(shared::response_from_stream_state(
             state,
             request_body,
@@ -689,6 +1040,8 @@ struct CodexProviderConfig {
     account_id: Option<String>,
     #[serde(default = "default_codex_options")]
     options: ProviderOptions,
+    #[serde(default)]
+    transport: CodexTransport,
 }
 
 fn default_codex_options() -> ProviderOptions {
@@ -715,6 +1068,8 @@ impl ProviderFactory for CodexProviderFactory {
             expires_at: cfg.expires_at,
             account_id: cfg.account_id,
             options: cfg.options,
+            transport: cfg.transport,
+            continuation_cache: CodexContinuationCache::default(),
             client: build_http_client(),
         }
         .into_components())
@@ -912,6 +1267,72 @@ mod tests {
     }
 
     #[test]
+    fn codex_request_history_preserves_assistant_message_metadata() {
+        let req = request(vec![LlmMessage::new(
+            LlmRole::Assistant,
+            vec![lash_core::llm::types::LlmContentBlock::Text {
+                text: "final".into(),
+                response_meta: Some(ResponseTextMeta {
+                    id: Some("msg_1".to_string()),
+                    status: Some("completed".to_string()),
+                    phase: Some("final_answer".to_string()),
+                    ..ResponseTextMeta::default()
+                }),
+                cache_breakpoint: false,
+            }],
+        )]);
+
+        let body = CodexProvider::new("access", "refresh", 0)
+            .build_request_body(&req, false)
+            .unwrap();
+
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][0]["id"], "msg_1");
+        assert_eq!(body["input"][0]["status"], "completed");
+        assert_eq!(body["input"][0]["phase"], "final_answer");
+        assert_eq!(body["input"][0]["content"][0]["type"], "output_text");
+        assert!(body["input"][0]["content"][0]["annotations"].is_array());
+    }
+
+    #[test]
+    fn codex_cached_continuation_sends_delta_after_full_input() {
+        let mut provider = CodexProvider::new("access", "refresh", 0)
+            .with_transport(CodexTransport::WebsocketCached);
+        let first = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        let first_body = provider.build_request_body(&first, true).unwrap();
+        provider.record_continuation(&first, &first_body, &json!({"id":"resp_1"}));
+
+        let second = request(vec![
+            LlmMessage::text(LlmRole::User, "hello"),
+            LlmMessage::new(
+                LlmRole::Assistant,
+                vec![lash_core::llm::types::LlmContentBlock::Text {
+                    text: "answer".into(),
+                    response_meta: Some(ResponseTextMeta {
+                        id: Some("msg_1".to_string()),
+                        status: Some("completed".to_string()),
+                        phase: Some("final_answer".to_string()),
+                        ..ResponseTextMeta::default()
+                    }),
+                    cache_breakpoint: false,
+                }],
+            ),
+            LlmMessage::text(LlmRole::User, "next"),
+        ]);
+        let second_body = provider.build_request_body(&second, true).unwrap();
+        let (cached_body, cached) = provider.cached_websocket_body(&second, &second_body);
+
+        assert!(cached);
+        assert_eq!(cached_body["previous_response_id"], "resp_1");
+        assert_eq!(
+            cached_body["input"].as_array().expect("delta input").len(),
+            second_body["input"].as_array().unwrap().len()
+                - first_body["input"].as_array().unwrap().len()
+        );
+        assert_eq!(cached_body["input"][0]["type"], "message");
+    }
+
+    #[test]
     fn codex_schema_projection_failure_is_local_validation_error() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
@@ -955,6 +1376,7 @@ mod tests {
                     id: Some("msg_1".to_string()),
                     status: Some("completed".to_string()),
                     phase: Some("commentary".to_string()),
+                    ..ResponseTextMeta::default()
                 }),
             }
         );
@@ -1031,6 +1453,7 @@ mod tests {
                         id: Some("msg_1".to_string()),
                         status: Some("completed".to_string()),
                         phase: None,
+                        ..ResponseTextMeta::default()
                     }),
                 },
                 LlmOutputPart::Text {
@@ -1039,6 +1462,7 @@ mod tests {
                         id: Some("msg_2".to_string()),
                         status: Some("completed".to_string()),
                         phase: None,
+                        ..ResponseTextMeta::default()
                     }),
                 },
             ]

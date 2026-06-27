@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use crate::PromptContribution;
 use crate::PromptFingerprint;
-use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec, ProviderReasoningReplay};
+use crate::llm::types::{
+    LlmOutputPart, LlmResponse, LlmToolSpec, ProviderReasoningReplay, ResponseTextMeta,
+};
 use crate::sansio::{
     ChatContextProjector, ContextProjector, ProtocolDriverHandle, TurnProtocol, UnitTurnProtocol,
 };
@@ -59,14 +61,71 @@ pub struct TurnDriverPreamble<M: TurnProtocol = UnitTurnProtocol> {
 /// `full_text` (provider didn't populate `parts`), synthesize a single
 /// `Text` part.
 pub fn normalized_response_parts(llm_response: &LlmResponse) -> Vec<LlmOutputPart> {
-    if llm_response.parts.is_empty() && !llm_response.full_text.is_empty() {
+    let parts = if llm_response.parts.is_empty() && !llm_response.full_text.is_empty() {
         vec![LlmOutputPart::Text {
             text: llm_response.full_text.clone(),
             response_meta: None,
         }]
     } else {
         llm_response.parts.clone()
+    };
+    visible_response_parts(parts)
+}
+
+/// Apply provider phase semantics to response parts. If a Responses-family
+/// provider emits both `commentary` and `final_answer` text, the latter is the
+/// final assistant prose and commentary is retained only in the raw provider
+/// response, not in user-visible prose projection.
+pub fn visible_response_parts(parts: Vec<LlmOutputPart>) -> Vec<LlmOutputPart> {
+    let has_final_answer = parts.iter().any(|part| match part {
+        LlmOutputPart::Text {
+            text,
+            response_meta: Some(meta),
+        } => !text.is_empty() && meta.is_final_answer_phase(),
+        _ => false,
+    });
+    if !has_final_answer {
+        return parts;
     }
+    parts
+        .into_iter()
+        .filter(|part| match part {
+            LlmOutputPart::Text {
+                response_meta: Some(meta),
+                ..
+            } => !meta.is_commentary_phase(),
+            _ => true,
+        })
+        .collect()
+}
+
+pub fn visible_response_text_from_parts(parts: &[LlmOutputPart]) -> String {
+    let has_final_answer = parts.iter().any(|part| match part {
+        LlmOutputPart::Text {
+            text,
+            response_meta: Some(meta),
+        } => !text.is_empty() && meta.is_final_answer_phase(),
+        _ => false,
+    });
+    let mut full_text = String::new();
+    for part in parts {
+        let LlmOutputPart::Text {
+            text,
+            response_meta,
+        } = part
+        else {
+            continue;
+        };
+        if has_final_answer
+            && response_meta
+                .as_ref()
+                .is_some_and(ResponseTextMeta::is_commentary_phase)
+        {
+            continue;
+        }
+        full_text.push_str(text);
+    }
+    full_text
 }
 
 /// Build a Reasoning `Part` from a reasoning item. `meta` is Some when

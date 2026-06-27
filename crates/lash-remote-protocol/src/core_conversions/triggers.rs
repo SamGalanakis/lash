@@ -1,13 +1,13 @@
 impl From<RemoteProtocolTurnOptions> for lash_core::ProtocolTurnOptions {
     fn from(value: RemoteProtocolTurnOptions) -> Self {
         let RemoteProtocolTurnOptions { payload } = value;
-        Self { payload }
+        Self::from_payload(payload)
     }
 }
 
 impl From<lash_core::ProtocolTurnOptions> for RemoteProtocolTurnOptions {
     fn from(value: lash_core::ProtocolTurnOptions) -> Self {
-        let lash_core::ProtocolTurnOptions { payload } = value;
+        let lash_core::ProtocolTurnOptions { payload, .. } = value;
         Self { payload }
     }
 }

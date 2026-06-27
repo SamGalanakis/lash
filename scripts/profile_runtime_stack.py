@@ -58,7 +58,12 @@ RUNTIME_SCENARIOS_RS = (
 
 def load_known_runtime_scenarios() -> list[str]:
     scenarios_rs = RUNTIME_SCENARIOS_RS.read_text()
-    scenarios = re.findall(r'"([a-z0-9_]+)" => Some\(Self::', scenarios_rs)
+    scenarios = re.findall(
+        r"runtime_perf_metadata!\(\s*[A-Za-z0-9_]+,\s*\"([a-z0-9_]+)\"",
+        scenarios_rs,
+    )
+    if not scenarios:
+        scenarios = re.findall(r'"([a-z0-9_]+)" => Some\(Self::', scenarios_rs)
     if not scenarios:
         raise RuntimeError(f"no runtime perf scenarios found in {RUNTIME_SCENARIOS_RS}")
     return scenarios

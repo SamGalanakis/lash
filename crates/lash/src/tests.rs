@@ -1233,6 +1233,7 @@ fn semantic_group_provider() -> ProviderHandle {
                             id: Some("assistant:first".to_string()),
                             status: None,
                             phase: None,
+                            ..ResponseTextMeta::default()
                         }),
                     },
                     LlmOutputPart::Text {
@@ -1241,6 +1242,7 @@ fn semantic_group_provider() -> ProviderHandle {
                             id: Some("assistant:second".to_string()),
                             status: None,
                             phase: None,
+                            ..ResponseTextMeta::default()
                         }),
                     },
                 ],
@@ -1566,7 +1568,7 @@ mod control_admin;
 mod core_session_builder;
 mod harness;
 use harness::{mock_model_spec, model_spec, run_async_test_on_stack_budget};
-mod lash_e2e;
+mod agent_scenarios;
 mod plugin_stack;
 mod processes_endstate;
 mod rebuild_conformance;

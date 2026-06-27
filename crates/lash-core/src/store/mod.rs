@@ -8,6 +8,9 @@ fn default_root_session_id() -> String {
     "root".to_string()
 }
 
+pub const SESSION_HEAD_META_SCHEMA_VERSION: u32 = 1;
+pub const SESSION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+
 #[cfg(test)]
 mod persisted_state_tests {
     use super::*;
@@ -39,6 +42,62 @@ mod persisted_state_tests {
                 .all(|frame| frame.assignment.policy.recorded_provider_id() == "stored-provider")
         );
         assert_eq!(state.head_revision, Some(7));
+    }
+
+    #[test]
+    fn versioned_json_record_rejects_missing_schema_version() {
+        let err = decode_versioned_json_record::<SessionHeadMeta>(
+            "{}",
+            "SessionHeadMeta",
+            SESSION_HEAD_META_SCHEMA_VERSION,
+        )
+        .expect_err("pre-versioned session head should fail");
+
+        assert!(matches!(
+            err,
+            StoreError::MissingRecordSchemaVersion {
+                record_kind: "SessionHeadMeta",
+                expected: SESSION_HEAD_META_SCHEMA_VERSION
+            }
+        ));
+    }
+
+    #[test]
+    fn versioned_json_record_rejects_invalid_schema_version() {
+        let err = decode_versioned_json_record::<SessionHeadMeta>(
+            r#"{"schema_version":"1"}"#,
+            "SessionHeadMeta",
+            SESSION_HEAD_META_SCHEMA_VERSION,
+        )
+        .expect_err("invalid session head schema version should fail");
+
+        assert!(matches!(
+            err,
+            StoreError::InvalidRecordSchemaVersion {
+                record_kind: "SessionHeadMeta",
+                expected: SESSION_HEAD_META_SCHEMA_VERSION,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn versioned_json_record_rejects_unsupported_schema_version() {
+        let err = decode_versioned_json_record::<SessionHeadMeta>(
+            r#"{"schema_version":2}"#,
+            "SessionHeadMeta",
+            SESSION_HEAD_META_SCHEMA_VERSION,
+        )
+        .expect_err("unsupported session head schema version should fail");
+
+        assert!(matches!(
+            err,
+            StoreError::UnsupportedRecordSchemaVersion {
+                record_kind: "SessionHeadMeta",
+                actual: 2,
+                expected: SESSION_HEAD_META_SCHEMA_VERSION
+            }
+        ));
     }
 }
 
@@ -77,6 +136,19 @@ pub enum StoreError {
     UnsupportedRecordSchemaVersion {
         record_kind: &'static str,
         actual: u32,
+        expected: u32,
+    },
+    #[error(
+        "{record_kind} is missing schema_version and was written by unsupported pre-versioned state (expected {expected})"
+    )]
+    MissingRecordSchemaVersion {
+        record_kind: &'static str,
+        expected: u32,
+    },
+    #[error("{record_kind} schema_version {actual} is invalid (expected integer {expected})")]
+    InvalidRecordSchemaVersion {
+        record_kind: &'static str,
+        actual: String,
         expected: u32,
     },
     #[error("store backend error: {0}")]
@@ -154,9 +226,9 @@ pub struct VacuumReport {
     pub removed_node_count: usize,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionCheckpoint {
-    #[serde(default)]
+    pub schema_version: u32,
     pub turn_state: crate::PersistedTurnState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_state_ref: Option<BlobRef>,
@@ -166,6 +238,38 @@ pub struct SessionCheckpoint {
     pub plugin_snapshot_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_state_ref: Option<BlobRef>,
+}
+
+impl Default for SessionCheckpoint {
+    fn default() -> Self {
+        Self {
+            schema_version: SESSION_CHECKPOINT_SCHEMA_VERSION,
+            turn_state: crate::PersistedTurnState::default(),
+            tool_state_ref: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            execution_state_ref: None,
+        }
+    }
+}
+
+impl SessionCheckpoint {
+    pub fn new(
+        turn_state: crate::PersistedTurnState,
+        tool_state_ref: Option<BlobRef>,
+        plugin_snapshot_ref: Option<BlobRef>,
+        plugin_snapshot_revision: Option<u64>,
+        execution_state_ref: Option<BlobRef>,
+    ) -> Self {
+        Self {
+            schema_version: SESSION_CHECKPOINT_SCHEMA_VERSION,
+            turn_state,
+            tool_state_ref,
+            plugin_snapshot_ref,
+            plugin_snapshot_revision,
+            execution_state_ref,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -200,6 +304,7 @@ pub struct SessionHead {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionHeadMeta {
+    pub schema_version: u32,
     #[serde(default = "default_root_session_id")]
     pub session_id: String,
     #[serde(default)]
@@ -642,6 +747,45 @@ pub fn ensure_supported_schema_version(
     }
 }
 
+pub fn ensure_supported_record_schema_version(
+    record_kind: &'static str,
+    value: &serde_json::Value,
+    expected: u32,
+) -> Result<(), StoreError> {
+    let Some(schema_version) = value.get("schema_version") else {
+        return Err(StoreError::MissingRecordSchemaVersion {
+            record_kind,
+            expected,
+        });
+    };
+    let Some(actual) = schema_version
+        .as_u64()
+        .and_then(|version| u32::try_from(version).ok())
+    else {
+        return Err(StoreError::InvalidRecordSchemaVersion {
+            record_kind,
+            actual: schema_version.to_string(),
+            expected,
+        });
+    };
+    ensure_supported_schema_version(record_kind, actual, expected)
+}
+
+pub fn decode_versioned_json_record<T>(
+    json: &str,
+    record_kind: &'static str,
+    expected: u32,
+) -> Result<T, StoreError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|err| StoreError::Backend(format!("failed to decode {record_kind}: {err}")))?;
+    ensure_supported_record_schema_version(record_kind, &value, expected)?;
+    serde_json::from_value(value)
+        .map_err(|err| StoreError::Backend(format!("failed to decode {record_kind}: {err}")))
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeTurnCommitStamp {
     pub session_id: String,
@@ -918,6 +1062,7 @@ impl Default for SessionHead {
 impl Default for SessionHeadMeta {
     fn default() -> Self {
         Self {
+            schema_version: SESSION_HEAD_META_SCHEMA_VERSION,
             session_id: default_root_session_id(),
             head_revision: 0,
             config: crate::PersistedSessionConfig::default(),

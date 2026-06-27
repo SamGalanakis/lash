@@ -32,6 +32,8 @@ mod provider_metadata;
 mod render;
 mod repo_status;
 mod resume;
+#[cfg(test)]
+mod screenshot_harness;
 mod session_log;
 mod skill_catalog;
 mod skill_prompt;
