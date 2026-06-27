@@ -84,7 +84,7 @@ jobs:
 
       - name: Smoke release CLI stack guard
         run: |
-          python3 scripts/profile_cli_release_stack.py --scenario info_standard --stack-bytes 2m --timeout-seconds 30 --out .benchmarks/perf-guard/ci-cli-release-stack.json
+          python3 scripts/profile_cli_release_stack.py --scenario info_standard --stack-bytes 2m --timeout-seconds 30 --cargo-feature fff-zlob --out .benchmarks/perf-guard/ci-cli-release-stack.json
 
       - name: Check lash-runtime feature boundary
         run: |
