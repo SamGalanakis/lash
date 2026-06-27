@@ -27,7 +27,7 @@ Core owns scheduling across those classes. A queued drain consumes ready leading
 The CLI projects durable ingress into separate user-visible surfaces:
 
 - active-turn steer preview for pending `ActiveTurn` input,
-- queued-turn preview for pending `NextTurn` input,
+- next-turn pending-input preview for pending `NextTurn` input,
 - process dock for durable runtime process handles,
 - diagnostics/status details for background counts and failures.
 

@@ -113,7 +113,7 @@ impl GoogleOAuthProvider {
             .and_then(Value::as_str)
             .map(str::to_string);
         drive_sse_response(
-            resp,
+            LlmHttpBody::from_reqwest_response(resp),
             self.options.llm_timeouts().chunk_timeout,
             "Cloud Code stream chunk timed out",
             |raw| {

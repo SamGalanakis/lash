@@ -1,10 +1,16 @@
 #[cfg(feature = "testing")]
 pub mod conformance;
+pub mod http;
 pub mod normalize;
 pub mod streaming;
 pub mod timeouts;
 pub mod util;
 
+pub use http::{
+    LlmByteStream, LlmHttpBody, LlmHttpMethod, LlmHttpRequest, LlmHttpResponse, LlmHttpTransport,
+    ReqwestByteStream, ReqwestLlmHttpTransport, first_header_value, header_contains,
+    read_http_body_bytes, read_http_body_text,
+};
 pub use normalize::{
     frame_sse_payload, http_error_envelope, merge_usage,
     openai_terminal_reason_from_chat_finish_reason, openai_terminal_reason_from_chat_value,

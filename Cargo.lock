@@ -2680,6 +2680,7 @@ dependencies = [
 name = "lash-llm-transport"
 version = "0.1.0-alpha.75"
 dependencies = [
+ "async-trait",
  "bytes",
  "lash-core",
  "lash-sansio",
@@ -2885,6 +2886,7 @@ version = "0.1.0-alpha.75"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "futures-util",
  "lash-core",
  "lash-llm-transport",
@@ -3034,6 +3036,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "lash-sim"
+version = "0.1.0-alpha.75"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "lash-core",
+ "lash-llm-transport",
+ "lash-provider-anthropic",
+ "lash-provider-openai",
+ "lash-runtime",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

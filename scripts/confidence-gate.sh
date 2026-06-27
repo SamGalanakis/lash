@@ -24,7 +24,8 @@ Usage: scripts/confidence-gate.sh [fast|default|full]
 
 Lanes:
   fast     deterministic scenario harnesses, state-machine/property checks,
-           durable fault-matrix metadata, and perf guard identity tests.
+           generated DST replay/provider proof, durable fault-matrix metadata,
+           and perf guard identity tests.
   default  fast + local backend conformance, coverage blind-spot artifacts,
            and cargo-mutants smoke shards for critical crates.
   full     default + Postgres backend conformance and full cargo-mutants over
@@ -193,6 +194,24 @@ run_state_machine_and_fault_matrix() {
   cargo test -p lash-sqlite-store --locked --test conformance conformance
 }
 
+run_sim_provider_scripts() {
+  step "Deterministic simulation generated lane"
+  local sim_profile
+  case "$lane" in
+    fast) sim_profile="${LASH_SIM_PROFILE:-fast-random}" ;;
+    default) sim_profile="${LASH_SIM_PROFILE:-default-random}" ;;
+    full) sim_profile="${LASH_SIM_PROFILE:-full-random}" ;;
+  esac
+  local cmd=(cargo run -p lash-sim --locked -- run --out "${out_dir}/sim" --profile "$sim_profile")
+  if [ -n "${LASH_SIM_SEEDS:-}" ]; then
+    cmd+=(--seeds "$LASH_SIM_SEEDS")
+  fi
+  if [ -n "${LASH_SIM_MAX_BOUNDARIES:-}" ]; then
+    cmd+=(--max-boundaries "$LASH_SIM_MAX_BOUNDARIES")
+  fi
+  "${cmd[@]}"
+}
+
 run_perf_identity_checks() {
   step "Performance guard identity checks"
   python3 scripts/test_profile_guard.py
@@ -343,6 +362,7 @@ bootstrap_tools
 
 run_scenario_harnesses
 run_state_machine_and_fault_matrix
+run_sim_provider_scripts
 run_perf_identity_checks
 
 if [ "$lane" = "default" ] || [ "$lane" = "full" ]; then

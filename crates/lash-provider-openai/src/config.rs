@@ -59,7 +59,7 @@ pub struct OpenAiCompatibleProvider {
     pub base_url: String,
     pub options: ProviderOptions,
     pub compat: OpenAiCompat,
-    pub(crate) client: reqwest::Client,
+    pub(crate) transport: std::sync::Arc<dyn LlmHttpTransport>,
 }
 
 #[derive(Clone, Debug)]

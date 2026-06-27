@@ -1,9 +1,11 @@
 #![allow(clippy::result_large_err)]
 
-use lash_core::LlmTransportError;
+use lash_core::{LlmTransportError, ProviderFailureKind};
 use lash_sansio::llm::types::{LlmEventSender, LlmStreamEvent, LlmUsage};
 
 use std::time::Duration;
+
+use crate::http::LlmHttpBody;
 
 struct SseBuffer {
     /// Raw, not-yet-newline-terminated bytes. Held at the byte level so a
@@ -95,7 +97,7 @@ impl SseBuffer {
 }
 
 pub async fn drive_sse_response<F>(
-    mut resp: reqwest::Response,
+    body: LlmHttpBody,
     timeout: Duration,
     read_timeout_message: &str,
     mut on_event: F,
@@ -104,26 +106,38 @@ where
     F: FnMut(&str) -> Result<(), LlmTransportError>,
 {
     let mut buffer = SseBuffer::new();
+    let mut stream = match body {
+        LlmHttpBody::Buffered(bytes) => {
+            buffer.push_chunk(&bytes, &mut on_event)?;
+            return buffer.finish(on_event);
+        }
+        LlmHttpBody::Streamed(stream) => stream,
+    };
     loop {
-        let chunk_result = match tokio::time::timeout(timeout, resp.chunk()).await {
+        let chunk_result = match tokio::time::timeout(timeout, stream.next_chunk()).await {
             Ok(result) => result,
             Err(_) => {
                 // Read timed out: flush whatever event is already buffered so a
                 // terminal event sent without a trailing blank line isn't lost,
                 // then surface the timeout.
                 let _ = buffer.finish(&mut on_event);
-                return Err(LlmTransportError::new(read_timeout_message).retryable(true));
+                return Err(LlmTransportError::new(read_timeout_message)
+                    .with_kind(ProviderFailureKind::Timeout)
+                    .with_code("timeout")
+                    .retryable(true));
             }
         };
         let chunk_opt = match chunk_result {
             Ok(chunk_opt) => chunk_opt,
-            Err(e) => {
+            Err(mut error) => {
                 // Mid-stream disconnect: flush the buffered event before
                 // propagating, so a final event delivered without a trailing
                 // blank line still reaches the caller.
                 let _ = buffer.finish(&mut on_event);
-                return Err(LlmTransportError::new(format!("Stream read failed: {e}"))
-                    .retryable(e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode()));
+                if let Some(rest) = error.message.strip_prefix("HTTP response read failed: ") {
+                    error.message = format!("Stream read failed: {rest}");
+                }
+                return Err(error);
             }
         };
         let Some(chunk) = chunk_opt else { break };
@@ -215,5 +229,31 @@ mod tests {
     fn multiline_data_fields_join_with_newline() {
         let events = collect_events(&[b"data: a\ndata: b\n\n"]);
         assert_eq!(events, vec!["a\nb".to_string()]);
+    }
+
+    #[derive(Debug)]
+    struct PendingStream;
+
+    #[async_trait::async_trait]
+    impl crate::http::LlmByteStream for PendingStream {
+        async fn next_chunk(&mut self) -> Result<Option<bytes::Bytes>, LlmTransportError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_chunk_timeout_uses_timeout_envelope() {
+        let result = drive_sse_response(
+            LlmHttpBody::streamed(PendingStream),
+            Duration::from_millis(1),
+            "stream chunk timed out",
+            |_event| Ok(()),
+        )
+        .await;
+
+        let err = result.expect_err("stream read should time out");
+        assert_eq!(err.kind, ProviderFailureKind::Timeout);
+        assert_eq!(err.code.as_deref(), Some("timeout"));
+        assert!(err.retryable);
     }
 }

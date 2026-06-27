@@ -7,7 +7,7 @@ impl OpenAiCompatibleProvider {
             base_url: base_url.into(),
             options: ProviderOptions::default(),
             compat: OpenAiCompat::default(),
-            client: DEFAULT_HTTP_CLIENT.clone(),
+            transport: DEFAULT_HTTP_TRANSPORT.clone(),
         }
     }
 
@@ -21,8 +21,8 @@ impl OpenAiCompatibleProvider {
         self
     }
 
-    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
-        self.client = (*client).clone();
+    pub fn with_transport(mut self, transport: std::sync::Arc<dyn LlmHttpTransport>) -> Self {
+        self.transport = transport;
         self
     }
 
@@ -44,8 +44,8 @@ impl OpenAiProvider {
         self
     }
 
-    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
-        self.inner.client = (*client).clone();
+    pub fn with_transport(mut self, transport: std::sync::Arc<dyn LlmHttpTransport>) -> Self {
+        self.inner.transport = transport;
         self
     }
 

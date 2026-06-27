@@ -17,6 +17,7 @@ pub(crate) use lash_core::provider::{
     Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
     resolve_generation_policy,
 };
+pub(crate) use lash_llm_transport::LlmHttpBody;
 pub(crate) use lash_llm_transport::normalize::{
     http_error_envelope, serialize_options_tail, terminal_reason_from_parts,
 };

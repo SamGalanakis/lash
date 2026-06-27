@@ -27,7 +27,7 @@ use lash_llm_transport::timeouts::{
 };
 use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{
-    openai_terminal_reason_from_response_value, openai_usage_from_response_value,
+    LlmHttpBody, openai_terminal_reason_from_response_value, openai_usage_from_response_value,
 };
 
 pub mod oauth;
@@ -965,7 +965,7 @@ impl Provider for CodexProvider {
         let mut state = shared::ResponsesStreamState::default();
         let expose_thinking = self.options.expose_thinking;
         drive_sse_response(
-            resp,
+            LlmHttpBody::from_reqwest_response(resp),
             timeouts.chunk_timeout,
             "Codex stream chunk timed out",
             |raw| {

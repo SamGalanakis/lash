@@ -51,7 +51,11 @@ impl Provider for AnthropicProvider {
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         let body = self.build_request_body(&req)?;
-        let request_body = serde_json::to_string(&body).ok();
+        let request_body_bytes = serde_json::to_vec(&body).map_err(|err| {
+            LlmTransportError::new(format!("Failed to serialize Anthropic body: {err}"))
+                .with_kind(ProviderFailureKind::Validation)
+        })?;
+        let request_body = Some(String::from_utf8_lossy(&request_body_bytes).into_owned());
 
         // `fine-grained-tool-streaming-2025-05-14` streams partial JSON so we
         // can surface tool arguments incrementally. Interleaved thinking is
@@ -62,29 +66,28 @@ impl Provider for AnthropicProvider {
         }
 
         let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-        let request = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("anthropic-beta", betas.join(","))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .json(&body);
+        let request = LlmHttpRequest::post(url.clone(), request_body_bytes)
+            .with_header("x-api-key", self.api_key.clone())
+            .with_header("anthropic-version", ANTHROPIC_VERSION)
+            .with_header("anthropic-beta", betas.join(","))
+            .with_header("Content-Type", "application/json")
+            .with_header("Accept", "text/event-stream")
+            .with_body_for_error(request_body.clone().unwrap_or_default())
+            .with_response_start_timeout_message("Anthropic response start timed out");
 
-        let resp = send_request(
-            request,
-            request_body.clone().map(request_body_snapshot),
-            response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, true),
-            "Anthropic response start timed out",
-        )
-        .await?;
+        let resp = self
+            .transport
+            .send(
+                request,
+                response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, true),
+            )
+            .await?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let headers = resp.headers().clone();
-            let text = read_response_text(
-                resp,
+        let status = resp.status;
+        if !resp.is_success() {
+            let headers = resp.headers;
+            let text = read_http_body_text(
+                resp.body,
                 timeouts.request_timeout,
                 "Anthropic response body timed out",
             )
@@ -92,27 +95,21 @@ impl Provider for AnthropicProvider {
             .unwrap_or_default();
             let detail = extract_error_detail(&text);
             let message = if let Some(detail) = detail {
-                format!(
-                    "Anthropic request failed with {}: {}",
-                    status.as_u16(),
-                    detail,
-                )
+                format!("Anthropic request failed with {}: {}", status, detail,)
             } else {
-                format!("Anthropic request failed with {}", status.as_u16())
+                format!("Anthropic request failed with {}", status)
             };
-            return Err(http_error_envelope(
-                message,
-                status.as_u16(),
-                &headers,
-                text,
-                request_body,
-            ));
+            return Err(LlmTransportError::new(message)
+                .with_status(status)
+                .with_headers(headers)
+                .with_raw(text)
+                .with_request_body(request_body.clone().unwrap_or_default()));
         }
 
         let mut state = StreamState::default();
         let expose_thinking = self.options.expose_thinking;
         drive_sse_response(
-            resp,
+            resp.body,
             timeouts.chunk_timeout,
             "Anthropic stream chunk timed out",
             |raw| {
