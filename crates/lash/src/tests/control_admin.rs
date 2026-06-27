@@ -308,14 +308,23 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
     let session = core.session("queue-observation-events").open().await?;
     let cursor = session.observe().current_observation().cursor;
 
-    session
+    let pending = session
         .enqueue(TurnInput::text("queued observation"))
         .id("queue-observation")
         .send()
         .await?;
-    let queued = session.queued_work().await?;
-    let batch_id = queued.first().expect("queued batch").batch_id.clone();
-    session.cancel_queued_work_batch(&batch_id).await?;
+    let inputs = session.pending_turn_inputs().await?;
+    assert_eq!(
+        inputs
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![pending.input_id.as_str()]
+    );
+    session
+        .cancel_pending_turn_input(&pending.input_id)
+        .await?
+        .expect("pending turn input");
 
     let SessionResume::Replayed { events } = session.observe().resume_from_cursor(&cursor)? else {
         panic!("recent cursor should replay queue observation events");
@@ -324,13 +333,13 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
         &event.payload,
         lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids }
             if *kind == lash_core::SessionQueueEventKind::Enqueued
-                && batch_ids.as_slice() == std::slice::from_ref(&batch_id)
+                && batch_ids.as_slice() == std::slice::from_ref(&pending.input_id)
     )));
     assert!(events.iter().any(|event| matches!(
         &event.payload,
         lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids }
             if *kind == lash_core::SessionQueueEventKind::Cancelled
-                && batch_ids.as_slice() == std::slice::from_ref(&batch_id)
+                && batch_ids.as_slice() == std::slice::from_ref(&pending.input_id)
     )));
     Ok(())
 }
