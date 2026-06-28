@@ -173,7 +173,7 @@ println!("{assistant_text}");</code></pre>
             <dt><code>PluginStack</code></dt>
             <dd>Ordered plugin factory list. <code>StandardCore::builder()</code> and <code>RlmCore::builder()</code> install their protocol plugin; generic <code>LashCore::builder()</code> requires an explicit protocol plugin. All paths still require explicit effect and attachment facets before <code>build()</code>; RLM also requires a Lashlang artifact store.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code> (durable pending input for the next turn unless an active-turn ingress is specified), <code>pending_turn_inputs()</code> for user-input previews, <code>queued_work()</code> for admin/all-work inspection of process wakes and session commands, <code>await_queued_work_batch(batch_id)</code> (resolve when a non-user queued-work batch you enqueued is drained or cancelled, by any handle or process, without claiming it yourself; bound it with <code>tokio::time::timeout</code>), <code>read_view()</code>, and <code>admin()</code>.</dd>
+            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code> (durable pending input for the next turn unless an active-turn ingress is specified), <code>pending_turn_inputs()</code> plus typed pending-input cancellation for user-input previews and edit reconciliation, <code>queued_work()</code> for admin inspection of non-user process wakes and session commands, <code>await_queued_work_batch(batch_id)</code> (resolve when a non-user queued-work batch you enqueued is drained or cancelled, by any handle or process, without claiming it yourself; bound it with <code>tokio::time::timeout</code>), <code>read_view()</code>, and <code>admin()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn config: cancellation, typed plugin input, RLM projected bindings. <code>.stream_to(&amp;sink)</code> for a push sink, <code>.stream()</code> for a pull-style <code>futures_util::Stream</code>, and <code>.run()</code> for a collected activity log. Durable handlers add <code>.turn_id(...).effects(&amp;controller)</code>.</dd>
           </dl>
@@ -273,6 +273,71 @@ persist(
             </article>
           </div>
           <p>Fold <code>TurnActivity</code> directly for live UI state. At turn completion, replace the current-turn display from <code>TurnResult.state.read_view()</code>; do not append a separate final assistant event. Use <code>TurnActivity.correlation_id</code> as the stable identity for multi-phase rows: start events insert, completion events update.</p>
+        </div>
+
+        <div class="section" id="pending-input-reconciliation">
+          <div class="section-header">
+            <h2>Pending Input Reconciliation</h2>
+            <p>Apps that let users edit submitted messages should reconcile from pending-input receipts, then cancel the runtime suffix before replacing product text.</p>
+          </div>
+          <pre data-lang="rust" data-snippet="embedding#pending-input-reconciliation"><code>use lash::{
+    PendingTurnInputCancelOutcome, PendingTurnInputCancelTarget,
+    PendingTurnInputSuffixCancelOutcome, TurnInput,
+};
+
+session
+    .enqueue(TurnInput::text(&quot;first draft&quot;))
+    .id(&quot;message:1&quot;)
+    .send()
+    .await?;
+let second = session
+    .enqueue(TurnInput::text(&quot;second draft&quot;))
+    .id(&quot;message:2&quot;)
+    .send()
+    .await?;
+
+// Queue previews come from runtime admission receipts, not local draft
+// state. Persist `input_id` or `source_key` beside the product message.
+let pending = session.pending_turn_inputs().await?;
+render_pending_inputs(&amp;pending);
+
+// Before editing a product message, atomically cancel the runtime suffix
+// rooted at that submitted revision.
+let anchor = second
+    .source_key
+    .clone()
+    .map(PendingTurnInputCancelTarget::source_key)
+    .unwrap_or_else(|| PendingTurnInputCancelTarget::input_id(second.input_id.clone()));
+match session.cancel_pending_turn_input_suffix(anchor).await? {
+    PendingTurnInputSuffixCancelOutcome::AnchorNotFound { .. } =&gt; {
+        render_pending_inputs(&amp;session.pending_turn_inputs().await?);
+    }
+    PendingTurnInputSuffixCancelOutcome::Outcomes { outcomes, .. } =&gt; {
+        for outcome in outcomes {
+            match outcome {
+                PendingTurnInputCancelOutcome::Cancelled(input)
+                | PendingTurnInputCancelOutcome::AlreadyCancelled(input) =&gt; {
+                    remove_pending_input_preview(&amp;input.input_id);
+                }
+                PendingTurnInputCancelOutcome::AlreadyClaimed { input, .. }
+                | PendingTurnInputCancelOutcome::AlreadyCompleted(input) =&gt; {
+                    reconcile_pending_input_state(Some(&amp;input.input_id));
+                }
+                PendingTurnInputCancelOutcome::NotFound =&gt; {
+                    reconcile_pending_input_state(None);
+                }
+            }
+        }
+    }
+}
+
+let replacement = session
+    .enqueue(TurnInput::text(&quot;updated second draft&quot;))
+    .id(&quot;message:2:v2&quot;)
+    .send()
+    .await?;
+render_pending_inputs(std::slice::from_ref(&amp;replacement));</code></pre>
+          <p><code>PendingTurnInput</code> is runtime admission evidence. Keep product editing state in your app, store the returned <code>input_id</code> or <code>source_key</code> with your message revision, and treat claimed/completed outcomes as reconciliation signals instead of forcibly editing already-applied input.</p>
         </div>
   </main>
 

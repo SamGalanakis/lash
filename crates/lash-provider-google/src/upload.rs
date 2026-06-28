@@ -75,60 +75,59 @@ impl GoogleOAuthProvider {
         att: &LlmAttachment,
         filename: &str,
     ) -> Result<UploadedAttachmentRef, LlmTransportError> {
-        let mut start = self
-            .client
-            .post(GEMINI_FILES_UPLOAD_URL)
-            .bearer_auth(access_token)
-            .header("Content-Type", "application/json")
-            .header("X-Goog-Upload-Protocol", "resumable")
-            .header("X-Goog-Upload-Command", "start")
-            .header(
+        let start_body = json!({
+            "file": {
+                "displayName": filename,
+                "mimeType": att.mime.clone(),
+                "sizeBytes": att.data.len().to_string(),
+            }
+        });
+        let start_body_bytes = serde_json::to_vec(&start_body).map_err(|err| {
+            LlmTransportError::new(format!(
+                "Failed to serialize Gemini Files upload body: {err}"
+            ))
+            .with_kind(lash_core::ProviderFailureKind::Validation)
+        })?;
+        let mut start = LlmHttpRequest::post(GEMINI_FILES_UPLOAD_URL, start_body_bytes)
+            .with_header("Authorization", format!("Bearer {access_token}"))
+            .with_header("Content-Type", "application/json")
+            .with_header("X-Goog-Upload-Protocol", "resumable")
+            .with_header("X-Goog-Upload-Command", "start")
+            .with_header(
                 "X-Goog-Upload-Header-Content-Length",
                 att.data.len().to_string(),
             )
-            .header("X-Goog-Upload-Header-Content-Type", att.mime.as_str())
-            .header("X-Goog-Upload-File-Name", filename)
-            .json(&json!({
-                "file": {
-                    "displayName": filename,
-                    "mimeType": att.mime,
-                    "sizeBytes": att.data.len().to_string(),
-                }
-            }));
+            .with_header("X-Goog-Upload-Header-Content-Type", att.mime.as_str())
+            .with_header("X-Goog-Upload-File-Name", filename)
+            .with_response_start_timeout_message("Gemini Files upload start timed out");
         if let Some(project_id) = project_id.filter(|project_id| !project_id.trim().is_empty()) {
-            start = start.header("x-goog-user-project", project_id);
+            start = start.with_header("x-goog-user-project", project_id);
         }
 
-        let start_resp = send_request(
-            start,
-            None,
-            self.options.llm_timeouts().request_timeout,
-            "Gemini Files upload start timed out",
-        )
-        .await?;
-        if !start_resp.status().is_success() {
-            let status = start_resp.status().as_u16();
-            let headers = start_resp.headers().clone();
-            let body = read_response_text(
-                start_resp,
+        let start_resp = self
+            .transport
+            .send(start, self.options.llm_timeouts().request_timeout)
+            .await?;
+        if !start_resp.is_success() {
+            let status = start_resp.status;
+            let headers = start_resp.headers;
+            let body = read_http_body_text(
+                start_resp.body,
                 self.options.llm_timeouts().request_timeout,
                 "Gemini Files upload start body timed out",
             )
             .await
             .unwrap_or_default();
-            return Err(http_error_envelope(
+            return Err(http_error_envelope_from_pairs(
                 format!("Gemini Files upload start failed with {}", status),
                 status,
-                &headers,
+                headers,
                 body,
                 None,
             ));
         }
 
-        let upload_url = start_resp
-            .headers()
-            .get("x-goog-upload-url")
-            .and_then(|value| value.to_str().ok())
+        let upload_url = first_header_value(&start_resp.headers, "x-goog-upload-url")
             .ok_or_else(|| {
                 LlmTransportError::new(
                     "Gemini Files upload start response missing x-goog-upload-url header",
@@ -136,51 +135,43 @@ impl GoogleOAuthProvider {
             })?
             .to_string();
 
-        let mut finalize = self
-            .client
-            .post(upload_url)
-            .bearer_auth(access_token)
-            .header("X-Goog-Upload-Command", "upload, finalize")
-            .header("X-Goog-Upload-Offset", "0")
-            .header("Content-Length", att.data.len().to_string())
-            .body(att.data.clone());
+        let mut finalize = LlmHttpRequest::post(upload_url, att.data.clone())
+            .with_header("Authorization", format!("Bearer {access_token}"))
+            .with_header("X-Goog-Upload-Command", "upload, finalize")
+            .with_header("X-Goog-Upload-Offset", "0")
+            .with_header("Content-Length", att.data.len().to_string())
+            .with_response_start_timeout_message("Gemini Files upload finalize timed out");
         if let Some(project_id) = project_id.filter(|project_id| !project_id.trim().is_empty()) {
-            finalize = finalize.header("x-goog-user-project", project_id);
+            finalize = finalize.with_header("x-goog-user-project", project_id);
         }
 
-        let finalize_resp = send_request(
-            finalize,
-            None,
-            self.options.llm_timeouts().request_timeout,
-            "Gemini Files upload finalize timed out",
-        )
-        .await?;
-        if !finalize_resp.status().is_success() {
-            let status = finalize_resp.status().as_u16();
-            let headers = finalize_resp.headers().clone();
-            let body = read_response_text(
-                finalize_resp,
+        let finalize_resp = self
+            .transport
+            .send(finalize, self.options.llm_timeouts().request_timeout)
+            .await?;
+        if !finalize_resp.is_success() {
+            let status = finalize_resp.status;
+            let headers = finalize_resp.headers;
+            let body = read_http_body_text(
+                finalize_resp.body,
                 self.options.llm_timeouts().request_timeout,
                 "Gemini Files upload finalize body timed out",
             )
             .await
             .unwrap_or_default();
-            return Err(http_error_envelope(
+            return Err(http_error_envelope_from_pairs(
                 format!("Gemini Files upload finalize failed with {}", status),
                 status,
-                &headers,
+                headers,
                 body,
                 None,
             ));
         }
 
-        let upload_status = finalize_resp
-            .headers()
-            .get("x-goog-upload-status")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let body = read_response_text(
-            finalize_resp,
+        let upload_status =
+            first_header_value(&finalize_resp.headers, "x-goog-upload-status").map(str::to_string);
+        let body = read_http_body_text(
+            finalize_resp.body,
             self.options.llm_timeouts().request_timeout,
             "Gemini Files upload finalize body timed out",
         )

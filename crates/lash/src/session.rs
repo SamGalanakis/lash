@@ -4,7 +4,9 @@ use std::task::{Context, Poll};
 use crate::support::*;
 use futures_util::Stream;
 use lash_core::runtime::{
-    PendingTurnInput, PendingTurnInputCancelOutcome, QueuedWorkBatch, TurnInputIngress,
+    PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
+    PendingTurnInputCancelTarget, PendingTurnInputSuffixCancelOutcome, QueuedWorkBatch,
+    TurnInputIngress,
 };
 use lash_core::{LiveReplayGap, LiveReplayStoreError, SessionObservationEvent};
 use lash_remote_protocol::{
@@ -659,6 +661,44 @@ impl LashSession {
         let session_id = self.session_id();
         self.runtime
             .cancel_pending_turn_input(&session_id, input_id)
+            .await
+            .map_err(EmbedError::Runtime)
+    }
+
+    /// Atomically cancel a set of pending user inputs by runtime input id or
+    /// app source key.
+    ///
+    /// This is the app reconciliation path for explicit selections such as
+    /// "remove these pending drafts". Returned outcomes distinguish newly
+    /// cancelled input from input that was already claimed, completed,
+    /// cancelled, or missing.
+    pub async fn cancel_pending_turn_inputs(
+        &self,
+        targets: impl IntoIterator<Item = PendingTurnInputCancelTarget>,
+    ) -> Result<Vec<PendingTurnInputCancelResult>> {
+        let session_id = self.session_id();
+        let targets = targets.into_iter().collect::<Vec<_>>();
+        self.runtime
+            .cancel_pending_turn_inputs(&session_id, &targets)
+            .await
+            .map_err(EmbedError::Runtime)
+    }
+
+    /// Atomically cancel the same-session pending-input suffix from `anchor`.
+    ///
+    /// Apps that let users edit previously submitted product messages should
+    /// map the edited message to the stored pending-input `input_id` or
+    /// `source_key`, call this method, and only restore/edit drafts that return
+    /// [`PendingTurnInputCancelOutcome::Cancelled`]. Claimed or completed
+    /// inputs have already crossed the runtime boundary and should be treated
+    /// as reconciliation state, not local editable drafts.
+    pub async fn cancel_pending_turn_input_suffix(
+        &self,
+        anchor: PendingTurnInputCancelTarget,
+    ) -> Result<PendingTurnInputSuffixCancelOutcome> {
+        let session_id = self.session_id();
+        self.runtime
+            .cancel_pending_turn_input_suffix(&session_id, &anchor)
             .await
             .map_err(EmbedError::Runtime)
     }

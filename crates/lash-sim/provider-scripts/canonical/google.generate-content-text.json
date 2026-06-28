@@ -1,0 +1,43 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "google.generate-content-text",
+  "provider_kind": "google_oauth",
+  "endpoint": {
+    "method": "POST",
+    "path": "/v1internal:generateContent"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "gemini-3.1-pro-preview" },
+      "request.contents[0].role": { "equals": "user" },
+      "request.contents[0].parts[0].text": { "contains": "answer directly" },
+      "request.sessionId": { "equals": "session-1" },
+      "project": { "equals": "project-1" }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "response_start",
+      "status": 200,
+      "headers": [
+        { "name": "content-type", "value": "application/json; charset=utf-8" },
+        { "name": "x-request-id", "value": "req-google-generate" }
+      ]
+    },
+    {
+      "at": 20,
+      "event": "body",
+      "data": "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Google buffered answer.\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":6,\"candidatesTokenCount\":3,\"cachedContentTokenCount\":2}}"
+    },
+    { "at": 21, "event": "end" }
+  ],
+  "expected_provider": {
+    "terminal_reason": "stop",
+    "text": "Google buffered answer."
+  }
+}

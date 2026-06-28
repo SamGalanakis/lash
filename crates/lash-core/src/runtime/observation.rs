@@ -470,6 +470,80 @@ impl RuntimeHandle {
             })
     }
 
+    pub async fn cancel_pending_turn_inputs(
+        &self,
+        session_id: &str,
+        targets: &[crate::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<crate::PendingTurnInputCancelResult>, crate::RuntimeError> {
+        let observation = self.observe();
+        let store = observation
+            .queue_store
+            .clone()
+            .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        store
+            .cancel_pending_turn_inputs(session_id, targets)
+            .await
+            .map_err(|err| {
+                crate::RuntimeError::new(
+                    crate::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                )
+            })
+            .inspect(|results| {
+                let cancelled_ids = results
+                    .iter()
+                    .filter_map(|result| match &result.outcome {
+                        crate::PendingTurnInputCancelOutcome::Cancelled(input) => {
+                            Some(input.input_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !cancelled_ids.is_empty() {
+                    self.record_queue_changed(SessionQueueEventKind::Cancelled, cancelled_ids);
+                }
+            })
+    }
+
+    pub async fn cancel_pending_turn_input_suffix(
+        &self,
+        session_id: &str,
+        anchor: &crate::PendingTurnInputCancelTarget,
+    ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, crate::RuntimeError> {
+        let observation = self.observe();
+        let store = observation
+            .queue_store
+            .clone()
+            .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        store
+            .cancel_pending_turn_input_suffix(session_id, anchor)
+            .await
+            .map_err(|err| {
+                crate::RuntimeError::new(
+                    crate::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                )
+            })
+            .inspect(|outcome| {
+                let crate::PendingTurnInputSuffixCancelOutcome::Outcomes { outcomes, .. } = outcome
+                else {
+                    return;
+                };
+                let cancelled_ids = outcomes
+                    .iter()
+                    .filter_map(|outcome| match outcome {
+                        crate::PendingTurnInputCancelOutcome::Cancelled(input) => {
+                            Some(input.input_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !cancelled_ids.is_empty() {
+                    self.record_queue_changed(SessionQueueEventKind::Cancelled, cancelled_ids);
+                }
+            })
+    }
+
     pub async fn cancel_queued_work_batch(
         &self,
         session_id: &str,

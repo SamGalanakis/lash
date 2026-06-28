@@ -6,6 +6,50 @@ Planning target for Lash's Deterministic Simulation Harness. The full DST
 end-state is stated explicitly before the implementation phases; phase gates
 and v1 slices are only the path toward that end-state, not the target itself.
 
+Current executable evidence in the implementation:
+
+- Google Provider Wire Scripts now run through the production
+  `LlmHttpTransport` seam and are included in the canonical provider matrix.
+- Selected generated traces replay through real Lash SQLite session
+  persistence via `SqliteSessionStoreFactory`, with durable peer stores and
+  reopened-session evidence in the replay report.
+- Full-lane Postgres trace replay is implemented as `lash-sim replay-postgres
+  <trace> --out <artifact-root>`, gated by `LASH_POSTGRES_DATABASE_URL` or the
+  confidence gate's Docker bootstrap, and writes replay/divergence artifacts.
+- Generated traces are produced by `lash-sim.generated-workload.v5`, a
+  deterministic state-machine generator over sessions, provider scripts,
+  queued ingress, cancellation, triggers, observer reconnects, backend
+  failure choices, provider mutations, tools, exec-code, durable effects,
+  process wakes, worker lease/failover, retries, and duplicates.
+- Generated traces include scheduler-owned delivery evidence, a named
+  `sim.oracle.operational-coverage.v1` oracle for the operational case set,
+  and scenario contract oracles for Runtime, Standard, RLM, and Agent coverage
+  without importing scenario test modules.
+- Runtime, Standard, RLM, and Agent scenario contract metadata is now exported
+  from production/test-independent modules and serialized into `lash-sim`
+  summaries alongside the generated oracle verdicts.
+- Each exported Runtime, Standard, RLM, and Agent scenario contract must also
+  have a generated trace-slice artifact under
+  `scenario-contract-slices/<suite>/<test>.json`; the slice ties the contract's
+  semantic oracle to concrete generated boundary events, a contract-specific
+  generated transition shape, required evidence assertions, a family negative
+  fixture, and matching verdicts.
+- Generated summaries include explicit model-only boundary reviews for the
+  remaining partially modeled durable-effect, worker, backend-failure,
+  provider-mutation, tool, exec-code, and process-wake boundaries, each with a
+  named oracle and artifact evidence.
+- Provider manifests include reviewed non-DST exclusions for remaining
+  Codex/OAuth/direct provider paths so direct reqwest/OAuth seams are named
+  instead of accidental.
+- `lash-sim minimize <trace>` writes a minimized regression package containing
+  the minimized trace, replay verdict, oracle verdict, final summary, and
+  package manifest; failing minimization preserves the failing oracle id and
+  semantic reason. Failing trace fixture specs live under
+  `crates/lash-sim/failure-fixtures/`.
+- The confidence gate declares sim lane artifacts under
+  `target/confidence/<lane>/sim/`, including env-gated Postgres conformance
+  evidence when the lane is enabled.
+
 ## Related Documents
 
 - `CONTEXT.md` defines the canonical terms: Deterministic Simulation Harness,
@@ -158,14 +202,21 @@ extend that contract instead of creating a second gate.
   seed set, and basic oracle set with deterministic artifacts.
 - `default` runs broader generated workloads, selected SQLite replay, and
   enough provider matrix coverage to catch normal PR regressions.
+- `broad` runs a bounded full-profile generated workload, all generated and
+  minimized failing-regression traces through SQLite and Postgres when
+  available, targeted mutation evidence, and failure artifact verification. It
+  is a broad current artifact, not a true full confidence claim.
 - `full` runs long randomized workloads, full migrated-provider matrix,
-  SQLite/Postgres replay, mutation/property test lanes, and failure artifact
-  verification.
+  SQLite/Postgres replay, full mutation/property test lanes, and failure
+  artifact verification. A green `full` lane means full mutation actually ran.
 
 The gate emits machine-readable summaries and reproduction commands under
-`target/confidence/<lane>/sim/`. A green full lane means: for the contracts
-encoded as oracles and generator families, Lash is probably correct. Coverage
-reports remain useful as a map of blind spots, but they are not the goal.
+`target/confidence/<lane>/sim/`. Bounded broad artifacts report
+`confidence_class=bounded_broad`; they are comparable across current
+implementation passes but are not labeled as full confidence. A green full lane
+means: for the contracts encoded as oracles and generator families, Lash is
+probably correct. Coverage reports remain useful as a map of blind spots, but
+they are not the goal.
 
 ### Endstate Design Constraints
 
@@ -285,10 +336,13 @@ flowchart TB
 | `lash-sim::runner` | `lash-sim` | CLI/test entry points, seed selection, profile budgets, replay, minimization commands, artifact paths. |
 | `lash-sim::generator` | `lash-sim` | Versioned workload generation from canonical templates and seeded mutations. |
 | `lash-sim::scheduler` | `lash-sim` | Deterministic boundary-event queue, simulated time, pending completion selection, trace emission. |
-| `lash-sim::world` | `lash-sim` | Wires runtime/facade actors to model store, provider transport, tools, effect host, workers, and oracles. |
 | `lash-sim::provider` | `lash-sim` | Provider Wire Script registry, request matching, scheduled response chunks, transport failures, script mutation. |
-| `lash-sim::store` | `lash-sim` | Model store, abstract-state snapshots, instrumentation, and selected replay adapters for SQLite/Postgres. |
-| `lash-sim::workers` | `lash-sim` | Simulated Worker Topology and worker lifecycle events. |
+| `lash-sim::runtime_boundaries` | `lash-sim` | Scripted local runtime-effect host for provider/tool/exec/durable-effect/process-wake boundaries and replay-by-key checks. |
+| `lash-sim::runtime_providers` | `lash-sim` | No-live provider execution through migrated provider crates and scripted transports. |
+| `lash-sim::provider_mutations` | `lash-sim` | Provider parser/failure mutation matrices, including retryable and terminal parser/error paths. |
+| `lash-sim::store` | `lash-sim` | Model store, abstract-state snapshots, worker/lease topology state, instrumentation, and replay summaries. |
+| `lash-sim::sqlite_replay` / `postgres_replay` | `lash-sim` | Backend replay through production-facing SQLite/Postgres persistence and native Postgres runtime effect history. |
+| `lash-sim::backend_contention` | `lash-sim` | Production-backed lease contention, stale completion fencing, reopen, and dead-owner reclaim evidence. |
 | `lash-sim::oracles` | `lash-sim` plus testing APIs from existing crates | Invariant engine and adapters for runtime/protocol/provider/persistence contracts. |
 | `lash-llm-transport` | production crate | Provider-agnostic HTTP request/response/stream trait, reqwest implementation, timeout/body helpers, SSE framing helpers. |
 | Provider crates | production crates | Vendor request serialization, auth headers, response parsing, normalization, and error classification. They use the transport seam but do not contain simulation logic. |
@@ -309,15 +363,17 @@ Suggested modules:
 
 | Module | Contents |
 | --- | --- |
-| `runner` | `run_seed`, `run_profile`, `replay`, `minimize`, command-line parsing, artifact layout. |
+| `runner` | `run_seed`, `run_profile`, replay package generation, command-line entry support, artifact layout. |
 | `generator` | Versioned RNG, profiles, operation generators, canonical scenario seed import, mutation controls. |
-| `workload` | Generated sessions, operations, tools, providers, storage backend choice, worker topology, expected coverage tags. |
 | `scheduler` | Boundary event types, pending handles, deterministic tie-breaking, sim clock, delivery trace. |
-| `world` | Runtime/facade construction, actor lifecycle, session handles, worker handles, observer handles. |
 | `provider` | Provider Wire Script parser, matcher, canonical script library, chunk/timing/fault mutation. |
-| `store` | Model store, abstract-state model, store event log, SQLite/Postgres replay adapters. |
-| `effects` | Simulated durable effect host, tool completion scripts, sleep/timer completions, direct completion outcomes. |
-| `workers` | Simulated Worker Topology, lease owner/incarnation generation, crash/restart/failover operations. |
+| `provider_mutations` | Provider parser/fault mutation matrices for no-live provider crates. |
+| `runtime_boundaries` | Local scripted runtime-effect host, effect replay store, and boundary execution checks. |
+| `runtime_providers` | Runtime provider-turn construction through migrated provider crates and scripted transports. |
+| `store` | Model store, abstract-state model, store event log, worker/lease topology, backend replayable regression metadata. |
+| `sqlite_replay` / `postgres_replay` | Trace replay through production persistence APIs and backend-specific effect history. |
+| `backend_contention` | SQLite/Postgres contention and fencing conformance scenarios. |
+| `minimize` | Simulation Replay Script minimization and failing fixture preservation. |
 | `oracles` | Runtime/session/graph invariants plus adapters to protocol/provider/persistence/scenario oracles. |
 | `trace` | Event trace schema, stable aliasing for runtime IDs, redaction, hash computation. |
 | `replay` | Simulation Replay Script loader, deterministic rerun, minimized fixture generation. |
@@ -427,9 +483,11 @@ Current provider crates accept or construct `reqwest::Client` and use
 
 ### Codex OAuth Transport Boundary
 
-The first provider-transport simulation slice explicitly excludes
-`CodexProvider` transport migration. Codex uses ChatGPT OAuth credentials, a
-WebSocket-first execution path with SSE fallback, continuation-cache behavior,
+The current provider-transport simulation lane explicitly excludes
+`CodexProvider` transport migration and records that exclusion in the
+`provider_transport_exclusions` manifest field. Codex uses ChatGPT OAuth
+credentials, a WebSocket-first execution path with SSE fallback,
+continuation-cache behavior,
 Codex-specific headers, and OAuth/device-flow lifecycle concerns. Migrating
 only the SSE fallback to `LlmHttpTransport` would leave the primary WebSocket
 path outside the seam and create a partial simulation contract for a provider
@@ -438,9 +496,10 @@ whose boundary is broader than provider-native HTTP/SSE parsing.
 Codex belongs to a later Codex/OAuth transport phase that migrates or models
 the whole Codex execution boundary deliberately, including WebSocket behavior
 and OAuth-owned request headers. Until that phase, the deterministic provider
-simulation contract for this vertical slice is limited to OpenAI-compatible
-Chat Completions and direct OpenAI Responses scripts flowing through production
-`LlmHttpTransport`.
+simulation contract is OpenAI-compatible Chat Completions, direct OpenAI
+Responses, Anthropic Messages, and Google generateContent scripts flowing
+through production `LlmHttpTransport`, with OAuth token endpoints reviewed as
+non-DST auth-flow exclusions.
 
 ## Provider Wire Script Format
 
@@ -555,8 +614,8 @@ Initial v1 event types:
 ### Execution Loop
 
 1. The runner builds a workload from a seed and generator version.
-2. The world starts actors: sessions, turns, workers, observers, and scripted
-   providers.
+2. The runner starts deterministic actors: sessions, turns, worker topology
+   events, observers, and scripted providers.
 3. Actors use production APIs until they hit a boundary seam and register a
    pending boundary handle with the scheduler.
 4. The scheduler selects the next deliverable boundary according to the
@@ -717,6 +776,10 @@ SQLite replay is used for selected confidence:
   scripts.
 - Divergence between model-store and SQLite replay is a failure, not a flaky
   skip.
+- The confidence gate also writes
+  `sim/backend-contention/backend-contention.json`, which drives the real
+  SQLite `RuntimePersistence` lease APIs for competing claims, stale completion
+  fencing, reopen handles, and dead-owner reclaim.
 
 ### Postgres Replay
 
@@ -725,10 +788,22 @@ Postgres replay is a full/nightly confidence layer:
 - Full lane runs selected and randomized replay through Postgres when
   `LASH_POSTGRES_DATABASE_URL` or Docker bootstrap is available, matching the
   existing confidence gate posture.
+- Native Postgres effect-history replay uses
+  `lash_postgres_store::PostgresRuntimeEffectController` and the
+  `lash_runtime_effect_replay` table. Replay is keyed by `scope_id` plus
+  `replay_key`, rejects stable-envelope hash conflicts, fences completion with
+  owner/token leases, and records completed/failed outcomes for durable/tool/exec
+  runtime boundaries. The confidence gate records this as
+  `sim/postgres-effect-history-status.json`.
 - Nightly/manual full runs include provider matrix permutations and longer
   seeds.
 - Postgres replay should reuse the existing conformance database setup pattern
   and serialize shared database reset just as current conformance tests do.
+- The same backend-contention artifact runs against
+  `PostgresSessionStoreFactory` whenever `LASH_POSTGRES_DATABASE_URL` or broad
+  gate Docker bootstrap provides a database. If Postgres is unavailable, the
+  artifact records an explicit skip for that backend rather than counting it as
+  passed.
 
 ### Simulation Replay Script
 
@@ -822,10 +897,10 @@ Existing tests plug in by extracting narrow shared specs/oracles:
 
 | Existing contract | Simulation integration |
 | --- | --- |
-| Runtime Scenarios | Export scenario metadata and reusable runtime invariant helpers behind `lash-core` testing APIs. Use named cases as canonical fixed seeds and oracle tags. |
-| Standard Protocol Scenarios | Export protocol-step expectations and response/streaming oracles without importing the test file directly. Use provider error/tool-loop/stream cases as generator templates. |
-| RLM Protocol Scenarios | Export response classification, Lashlang cell, repair-loop, history, and final-value oracles behind testing support. Use cases as protocol workload templates. |
-| Agent Scenarios | Export graph/final-value/facade contracts behind `lash` testing support. Use selected cases for facade replay, not dense core simulation. |
+| Runtime Scenarios | `lash-core::runtime::RUNTIME_SCENARIO_CONTRACTS` exports contract metadata and required sim evidence. Generated summaries serialize the contract set and `sim.oracle.scenario.runtime-contract.v1` checks the trace evidence. |
+| Standard Protocol Scenarios | `lash_protocol_standard::scenario_contracts::STANDARD_PROTOCOL_SCENARIO_CONTRACTS` exports protocol contract metadata without importing the test file. Provider/tool evidence is checked by `sim.oracle.scenario.standard-contract.v1`. |
+| RLM Protocol Scenarios | `lash_protocol_rlm::scenario_contracts::RLM_PROTOCOL_SCENARIO_CONTRACTS` exports response, exec, repair, and final-value contract metadata. Exec/trigger/durable evidence is checked by `sim.oracle.scenario.rlm-contract.v1`. |
+| Agent Scenarios | `lash::scenario_contracts::AGENT_SCENARIO_CONTRACTS` exports facade/graph contract metadata. Multi-session observer/reconnect evidence is checked by `sim.oracle.scenario.agent-contract.v1`. |
 | Provider conformance | Convert canonical provider conformance cases into Provider Wire Script templates and provider normalization oracles. |
 | Persistence conformance | Run model store, SQLite, and Postgres against existing suites; use conformance cases to seed storage-heavy simulation operations. |
 | Durable Fault Matrix | Every matrix class maps to either generated workload coverage, fixed replay, existing executable evidence, or an explicit blocked rationale. |
@@ -913,7 +988,30 @@ Example command shape:
 
 ```sh
 cargo run -p lash-sim -- run --profile default-random --seeds "${LASH_SIM_DEFAULT_SEEDS:-256}"
-cargo run -p lash-sim -- replay-suite --backend sqlite --profile default
+cargo run -p lash-sim -- replay-sqlite target/confidence/default/sim/replays/<trace>.trace.json --out target/confidence/default/sim/replays/<trace>.sqlite
+```
+
+### Broad Lane
+
+Purpose: current high-confidence bounded evidence without claiming true full
+mutation.
+
+Runs:
+
+- Full-profile generated simulation under explicit broad-lane seed and boundary
+  budgets.
+- Cross-backend replay matrix for every generated trace and every minimized
+  failing-regression trace through the model replay, SQLite, and Postgres when
+  `LASH_POSTGRES_DATABASE_URL` or Docker bootstrap is available.
+- Scenario-contract slice artifacts with per-contract `generated_shape`,
+  `transition_kind`, required evidence map, and a family negative fixture.
+- Targeted mutation evidence for high-risk direct/model, scheduler, runner, and
+  oracle paths.
+
+Example command shape:
+
+```sh
+LASH_CONFIDENCE_OUT_DIR=target/confidence scripts/confidence-gate.sh broad
 ```
 
 ### Full Lane
@@ -923,12 +1021,14 @@ permutations.
 
 Runs:
 
-- Existing full lane.
+- Existing broad lane semantics.
 - Long randomized simulation.
 - Full provider matrix for migrated providers.
 - SQLite replay corpus.
 - Postgres replay corpus when configured or bootstrapped by the confidence
   gate.
+- Full mutation for critical crates; `scripts/confidence-gate.sh full` rejects
+  non-full mutation scopes.
 - Longer worker topology and lease-contention workloads.
 
 Initial budget:
@@ -943,9 +1043,10 @@ Initial budget:
 Example command shape:
 
 ```sh
-cargo run -p lash-sim -- run --profile full-random --shard "${LASH_SIM_SHARD:-1/1}"
-cargo run -p lash-sim -- replay-suite --backend sqlite --profile full
-cargo run -p lash-sim -- replay-suite --backend postgres --profile full
+LASH_CONFIDENCE_BOOTSTRAP=1 \
+  LASH_CONFIDENCE_OUT_DIR=target/confidence \
+  LASH_CONFIDENCE_MUTATION_SCOPE=full \
+  scripts/confidence-gate.sh full
 ```
 
 All lanes write artifacts under `target/confidence/<lane>/sim/`.
@@ -1260,9 +1361,10 @@ corresponding phase:
 - Should Provider Wire Scripts remain JSON permanently, or should the
   minimized fixture format move to a Rust-native format after v1? Recommendation:
   stay with stable JSON until there is a concrete readability or schema problem.
-- Should direct OpenAI Responses or Anthropic be the second migrated provider?
-  Recommendation: direct OpenAI Responses second, because it shares the
-  OpenAI-compatible crate and exercises Responses reasoning replay.
+- Should Codex OAuth/WebSocket execution move into the provider DST matrix or
+  remain in a separate OAuth/WebSocket harness? Recommendation: keep it as an
+  explicit non-DST exclusion until the full Codex execution boundary can be
+  scripted without reducing it to the SSE fallback path.
 - Which facade Agent Scenarios should be in the first selected replay corpus?
   Recommendation: foreground labeled tool call, durable input suspension,
   nested process start/await, and failed child preserves failure graph.
@@ -1279,11 +1381,17 @@ The Deterministic Simulation Harness reaches the v1 done-line when:
 
 - `lash-sim` exists as an unpublished workspace crate and is not a default
   build member.
-- OpenAI-compatible provider simulation drives a real provider crate through
-  `lash-llm-transport` using Provider Wire Scripts and no live LLM calls.
+- OpenAI-compatible, direct OpenAI Responses, Anthropic, and Google provider
+  simulation drive real provider crates through `lash-llm-transport` using
+  Provider Wire Scripts and no live LLM calls; remaining Codex/OAuth/direct
+  exclusions are manifest-reviewed.
 - The provider transport seam is production-visible and the default production
   transport remains real HTTP through reqwest.
-- The sim runs multi-session workloads from the default generated corpus.
+- The sim runs state-machine generated multi-session workloads from the
+  default generated corpus and checks queueing inputs, triggers, cancellation,
+  observer reconnects, provider failures/mutations, process wakes, tool/exec,
+  durable effects, worker lease/failover, backend choices, retries, and
+  duplicates with named oracles.
 - The scheduler controls boundary completions for provider responses, tool
   results, durable effects, sim clock, worker lifecycle, lease expiry/reclaim,
   trigger delivery, and observer reconnects.
@@ -1297,7 +1405,8 @@ The Deterministic Simulation Harness reaches the v1 done-line when:
   final quiescence.
 - Runtime, Standard Protocol, RLM Protocol, Agent Scenario, provider
   conformance, persistence conformance, and Durable Fault Matrix contracts plug
-  into the sim through narrow oracles/specs.
+  into the sim through production/test-independent metadata and narrow
+  oracles/specs.
 - Every failure produces seed, generator version, script hashes, workload,
   event trace, observed state summary, and oracle failure.
 - A minimized Simulation Replay Script can be promoted to a stable regression

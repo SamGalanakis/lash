@@ -1,0 +1,12 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "operational-coverage-missing-cancellation",
+  "seed": 19,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "remove_kind": "cancellation"
+  },
+  "expected_oracle_id": "sim.oracle.scheduler-owned-runtime-completions.v1",
+  "expected_reason_contains": "Cancellation"
+}

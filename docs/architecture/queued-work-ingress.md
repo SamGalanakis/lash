@@ -39,7 +39,7 @@ Slash commands remain CLI host commands and are never queued as model work. Tool
 
 ## Consequences
 
-- `LashSession::queued_work()` is an admin/introspection view of all pending work classes.
+- `LashSession::queued_work()` is an admin/introspection view of non-user queued work.
 - `LashSession::pending_turn_inputs()` is the user-input view used for queue and active-steer previews.
 - Idle dispatch claims durable pending `NextTurn` inputs. Active checkpoints claim only pending `ActiveTurn` inputs anchored to the live turn and admitted by the checkpoint boundary.
 - Accepted active inputs stay with the interrupted turn and are never re-rendered or sent again. Unaccepted active inputs are deferred to `NextTurn` once during interrupt finalization.

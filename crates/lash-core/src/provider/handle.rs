@@ -69,6 +69,10 @@ impl ProviderHandle {
         Self { components }
     }
 
+    pub fn unconfigured() -> Self {
+        Self::new(UnconfiguredProvider::default().into_components())
+    }
+
     pub fn components(&self) -> &ProviderComponents {
         &self.components
     }
@@ -218,17 +222,9 @@ impl PartialEq for ProviderHandle {
 
 impl Eq for ProviderHandle {}
 
-impl Default for ProviderHandle {
-    fn default() -> Self {
-        Self::new(UnconfiguredProvider::default().into_components())
-    }
-}
-
-/// Placeholder provider used when `SessionPolicy::default()` is
-/// constructed without an explicit provider. Every transport-level
-/// method errors; calling code MUST replace this before executing a
-/// turn. It exists solely so `..Default::default()` shorthand keeps
-/// working in host code that always overrides the provider field.
+/// Placeholder provider used by runtime policy defaults before a host resolver
+/// installs the executable provider. Every transport-level method errors;
+/// calling code MUST replace this before executing a turn.
 #[derive(Clone, Debug, Default)]
 pub struct UnconfiguredProvider {
     options: ProviderOptions,

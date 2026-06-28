@@ -38,6 +38,7 @@ the existing architecture.
   simulation oracles are extracted narrowly instead of importing test modules
   wholesale.
 - Confidence lanes extend `scripts/confidence-gate.sh`: fast gets a tiny fixed
-  replay/generator corpus, default gets broader seeds plus selected SQLite
-  replay, and full gets long randomized simulation plus provider and
-  SQLite/Postgres replay matrices.
+  replay/generator corpus; default adds local conformance, backend contention,
+  coverage, and targeted mutation; broad adds bounded full-profile simulation,
+  scheduled-depth search, and SQLite/Postgres replay evidence without claiming
+  full mutation; full means broad semantics plus full critical-crate mutation.

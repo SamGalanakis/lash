@@ -223,6 +223,9 @@ confidence lane='default':
 confidence-fast:
   bash "{{repo}}/scripts/confidence-gate.sh" fast
 
+confidence-broad:
+  bash "{{repo}}/scripts/confidence-gate.sh" broad
+
 confidence-full:
   bash "{{repo}}/scripts/confidence-gate.sh" full
 

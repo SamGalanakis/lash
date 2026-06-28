@@ -71,10 +71,12 @@ pub fn replay_trace(
         let delivered = scheduler
             .deliver_boundary(&expected.boundary_id, observed)
             .ok_or_else(|| ReplayError::MissingBoundary(expected.boundary_id.clone()))?;
-        if normalize(&delivered.observed) != normalize(&expected.observed) {
+        let actual_observed = normalize(&delivered.observed);
+        let expected_observed = normalize(&expected.observed);
+        if actual_observed != expected_observed {
             return Err(ReplayError::Divergence(format!(
-                "boundary `{}` observed payload changed",
-                expected.boundary_id
+                "boundary `{}` observed payload changed; expected={}; actual={}",
+                expected.boundary_id, expected_observed, actual_observed
             )));
         }
         sequence.push(delivered.boundary_id);
@@ -102,19 +104,30 @@ pub fn replay_trace(
 }
 
 fn normalize(value: &Value) -> Value {
-    value.clone()
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("provider_parser_matrix");
+        object.remove("runtime_effect");
+        object.remove("runtime_effect_outcome");
+        object.remove("runtime_tool_record");
+        object.remove("runtime_queued_work");
+        object.remove("runtime_worker_store");
+        object.remove("runtime_active_lease");
+        object.remove("runtime_stale_completion");
+    }
+    value
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::generator::generate_workload;
-    use crate::runner::run_generated_workload_for_test;
+    use crate::runner::run_generated_workload_for_fixture;
 
     #[tokio::test]
     async fn replay_reproduces_boundary_sequence_and_summary() {
-        let workload = generate_workload(5, "fast-random", 24);
-        let trace = run_generated_workload_for_test(workload, "bundle")
+        let workload = generate_workload(5, "fast-random", 24).expect("workload");
+        let trace = run_generated_workload_for_fixture(workload, "bundle")
             .await
             .expect("trace");
         let report = replay_trace(Path::new("trace.json"), &trace).expect("replay");

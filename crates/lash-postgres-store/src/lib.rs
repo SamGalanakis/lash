@@ -23,11 +23,14 @@ use lash_core::store::{
 };
 use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,
-    DeliveryPolicy, DurabilityTier, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
-    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    RuntimePersistence, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
+    DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope, GcReport, LeaseOwnerIdentity,
+    LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome,
+    ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimePersistence,
+    ScopedEffectController, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
     SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionMeta, SessionNodeRecord,
     SessionReadScope, SessionScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
     StoreError, TokenLedgerEntry, VacuumReport,
@@ -225,6 +228,17 @@ impl PostgresStorage {
             pool: self.pool.clone(),
         }
     }
+
+    pub fn effect_host(&self) -> PostgresEffectHost {
+        PostgresEffectHost::new(self)
+    }
+
+    pub fn runtime_effect_controller(
+        &self,
+        scope: ExecutionScope,
+    ) -> PostgresRuntimeEffectController {
+        PostgresRuntimeEffectController::new(self, scope)
+    }
 }
 
 impl PostgresSessionStoreFactory {
@@ -252,6 +266,7 @@ impl PostgresSessionStore {
 include!("postgres/schema.rs");
 include!("postgres/support.rs");
 include!("postgres/attachments.rs");
+include!("postgres/effect_replay.rs");
 include!("postgres/session_factory.rs");
 include!("postgres/runtime_persistence.rs");
 include!("postgres/process_helpers.rs");

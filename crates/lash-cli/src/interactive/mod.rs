@@ -52,7 +52,9 @@ pub(crate) use self::runtime::injected_image_part_indices;
 #[cfg(test)]
 pub(crate) use self::runtime::make_injected_plugin_message;
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
-use self::runtime::{refresh_queued_work_snapshot, send_user_message, sync_runtime_tool_catalog};
+use self::runtime::{
+    refresh_pending_turn_input_snapshot, send_user_message, sync_runtime_tool_catalog,
+};
 
 use self::input_handling::{
     SessionCtx, dispatch_key_event, handle_mouse_event, handle_surface_input,
@@ -246,8 +248,11 @@ pub(crate) async fn run_app(
     if let Some(message) = startup_system_message {
         push_system_message(&mut app, message);
     }
-    if let Err(err) = refresh_queued_work_snapshot(&mut app, &runtime).await {
-        push_system_message(&mut app, format!("Failed to load durable queue: {err}"));
+    if let Err(err) = refresh_pending_turn_input_snapshot(&mut app, &runtime).await {
+        push_system_message(
+            &mut app,
+            format!("Failed to load pending input preview: {err}"),
+        );
     }
 
     if let Some(filename) = args.resume.as_deref() {
@@ -835,21 +840,22 @@ pub(crate) async fn run_app(
                     &mut app,
                 );
                 if last_ui_sync.elapsed() >= std::time::Duration::from_millis(250) {
-                    if let Err(err) = refresh_queued_work_snapshot(&mut app, &runtime).await {
+                    if let Err(err) = refresh_pending_turn_input_snapshot(&mut app, &runtime).await
+                    {
                         push_system_message(
                             &mut app,
-                            format!("Failed to refresh durable queue: {err}"),
+                            format!("Failed to refresh pending input preview: {err}"),
                         );
                     }
                     let _ = app_tx.send(AppEvent::RequestUiSnapshot);
                     last_ui_sync = tokio::time::Instant::now();
                 }
             }
-            AppEvent::RequestQueuedWorkSnapshot => {
-                if let Err(err) = refresh_queued_work_snapshot(&mut app, &runtime).await {
+            AppEvent::RequestPendingTurnInputSnapshot => {
+                if let Err(err) = refresh_pending_turn_input_snapshot(&mut app, &runtime).await {
                     push_system_message(
                         &mut app,
-                        format!("Failed to refresh durable queue: {err}"),
+                        format!("Failed to refresh pending input preview: {err}"),
                     );
                 }
                 app.dirty = true;

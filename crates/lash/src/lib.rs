@@ -17,6 +17,7 @@ mod plugin_binding;
 mod prompt_layer;
 #[cfg(feature = "rlm")]
 pub mod rlm;
+pub mod scenario_contracts;
 mod session;
 mod support;
 #[cfg(all(test, feature = "rlm"))]
@@ -45,9 +46,10 @@ pub use crate::turn::{
 };
 pub use lash_core::{
     AwaitEventKey, AwaitEventWaitIdentity, ExternalCompletionError, InputItem, ModelLimits,
-    ModelSpec, PendingTurnInputCancelOutcome, PluginStack, Resolution, ResolveOutcome,
-    SessionCommand, SessionCommandReceipt, SessionSpec, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnEvent, TurnInput,
+    ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
+    PendingTurnInputCancelTarget, PendingTurnInputSuffixCancelOutcome, PluginStack, Resolution,
+    ResolveOutcome, SessionCommand, SessionCommandReceipt, SessionSpec, TurnActivity,
+    TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
 };
 /// Cooperative cancellation handle accepted by
 /// [`TurnBuilder::cancel`](crate::TurnBuilder::cancel); re-exported so

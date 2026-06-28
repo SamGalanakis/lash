@@ -183,6 +183,24 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             lease_expires_at_ms BIGINT NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS lash_runtime_effect_replay (
+            scope_id TEXT NOT NULL,
+            replay_key TEXT NOT NULL,
+            envelope_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            outcome_json TEXT,
+            error_json TEXT,
+            lease_owner_id TEXT,
+            lease_token TEXT,
+            lease_expires_at_ms BIGINT NOT NULL DEFAULT 0,
+            due_at_ms BIGINT,
+            created_at_ms BIGINT NOT NULL,
+            updated_at_ms BIGINT NOT NULL,
+            PRIMARY KEY (scope_id, replay_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lash_runtime_effect_replay_lease
+            ON lash_runtime_effect_replay(status, lease_expires_at_ms);
+
         CREATE SEQUENCE IF NOT EXISTS lash_trigger_subscription_seq;
         CREATE TABLE IF NOT EXISTS lash_trigger_subscriptions (
             subscription_id TEXT PRIMARY KEY,

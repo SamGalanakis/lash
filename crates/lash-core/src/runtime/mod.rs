@@ -15,6 +15,7 @@ mod process;
 mod process_work_driver;
 mod process_worker;
 mod queued_work_driver;
+pub mod scenario_contracts;
 mod session_api;
 mod session_execution_lease;
 mod session_manager;
@@ -70,6 +71,11 @@ use turn_driver::*;
 
 pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 30 * 1000;
 pub(crate) const RUNTIME_TURN_LEASE_RENEW_MS: u64 = 10 * 1000;
+const _: () = {
+    assert!(RUNTIME_TURN_LEASE_TTL_MS == 30_000);
+    assert!(RUNTIME_TURN_LEASE_RENEW_MS == 10_000);
+    assert!(RUNTIME_TURN_LEASE_TTL_MS == RUNTIME_TURN_LEASE_RENEW_MS * 3);
+};
 
 pub(super) fn runtime_error_from_store_commit(err: crate::store::StoreError) -> RuntimeError {
     match err {
@@ -136,10 +142,11 @@ pub use process::{
     ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
     ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
     ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver,
-    ProcessWorkSnapshot, SessionScope, SessionScopeId, UnavailableProcessService, WaitKind,
-    WaitState, apply_process_status_projection, current_epoch_ms, epoch_ms_from_system_time,
-    load_process_execution_env, materialize_process_event_semantics, persist_process_execution_env,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeDeliveryRequest, ProcessWakeSpec,
+    ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+    UnavailableProcessService, WaitKind, WaitState, apply_process_status_projection,
+    current_epoch_ms, epoch_ms_from_system_time, load_process_execution_env,
+    materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
@@ -149,6 +156,7 @@ pub use process::{
 pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use queued_work_driver::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest};
+pub use scenario_contracts::{RUNTIME_SCENARIO_CONTRACTS, ScenarioContractSpec};
 pub use session_manager::DirectCompletionClient;
 pub use state::RuntimeSessionState;
 use state::{
@@ -389,10 +397,6 @@ impl LiveTurnInputs {
         self.inputs.contains_key(plugin_id)
     }
 
-    fn is_empty(&self) -> bool {
-        self.inputs.is_empty()
-    }
-
     pub fn plugin_ids(&self) -> Vec<&'static str> {
         self.inputs.keys().copied().collect()
     }
@@ -400,7 +404,7 @@ impl LiveTurnInputs {
     /// Returns an error when live per-turn inputs would make a durable effect
     /// host replay depend on process-local values.
     pub(crate) fn durable_effect_rejection(&self) -> Result<(), RuntimeError> {
-        if self.is_empty() {
+        if self.inputs.is_empty() {
             return Ok(());
         }
         Err(RuntimeError::new(
@@ -458,7 +462,7 @@ impl TurnContext {
     }
 
     pub fn has_live_plugin_inputs(&self) -> bool {
-        !self.plugin_inputs.is_empty()
+        !self.plugin_inputs.inputs.is_empty()
     }
 
     pub fn live_plugin_input_ids(&self) -> Vec<&'static str> {

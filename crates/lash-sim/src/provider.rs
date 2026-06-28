@@ -232,6 +232,13 @@ pub struct ScriptedLlmHttpResponseExchange {
     pub status: Option<u16>,
     pub headers: Vec<ProviderWireHeader>,
     pub event_names: Vec<String>,
+    pub event_schedule: Vec<ProviderWireTimelineEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderWireTimelineEntry {
+    pub event: String,
+    pub at: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -429,6 +436,7 @@ fn scripted_response_exchange(
             status: None,
             headers: Vec::new(),
             event_names: Vec::new(),
+            event_schedule: Vec::new(),
         };
     }
 
@@ -461,6 +469,14 @@ fn scripted_response_exchange(
             .timeline
             .iter()
             .map(|event| event.event_name().to_string())
+            .collect(),
+        event_schedule: script
+            .timeline
+            .iter()
+            .map(|event| ProviderWireTimelineEntry {
+                event: event.event_name().to_string(),
+                at: event.at(),
+            })
             .collect(),
     }
 }

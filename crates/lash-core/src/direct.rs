@@ -324,3 +324,200 @@ fn transport_stream_events_for_direct(
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::types::{LlmOutputPart, LlmTerminalReason, LlmUsage};
+    use crate::provider::{ProviderOptions, ProviderReliability};
+    use crate::testing::TestProvider;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn json_schema_request_preserves_output_schema() {
+        let schema = DirectJsonSchema {
+            name: "answer_shape".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "required": ["answer"]
+            }),
+            strict: true,
+        };
+
+        let request = DirectRequest::json_schema("model-a", "return json", schema.clone());
+
+        assert_eq!(
+            request.output,
+            DirectOutputSpec::JsonSchema(schema),
+            "DirectRequest::json_schema must carry the requested output schema"
+        );
+    }
+
+    #[test]
+    fn direct_client_provider_accessors_expose_owned_provider_handle() {
+        let provider = TestProvider::builder()
+            .kind("direct-accessor-provider")
+            .serialize_config(|| json!({"provider": "owned"}))
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+
+        assert_eq!(client.provider().kind(), "direct-accessor-provider");
+        assert_eq!(
+            client.provider().to_spec().config,
+            json!({"provider": "owned"})
+        );
+
+        let mut options = ProviderOptions::default();
+        options.reliability = ProviderReliability::default().max_attempts(7);
+        options.max_output_tokens = Some(123);
+        client.provider_mut().set_options(options.clone());
+
+        assert_eq!(client.provider().options(), options);
+    }
+
+    #[tokio::test]
+    async fn direct_client_complete_delegates_to_provider_and_returns_response() {
+        let captured_request: Arc<Mutex<Option<LlmRequest>>> = Arc::new(Mutex::new(None));
+        let captured_for_provider = Arc::clone(&captured_request);
+        let provider = TestProvider::builder()
+            .kind("direct-complete-provider")
+            .complete(move |request| {
+                let captured_for_provider = Arc::clone(&captured_for_provider);
+                async move {
+                    *captured_for_provider.lock().expect("capture lock") = Some(request);
+                    Ok(LlmResponse {
+                        full_text: "provider delegated response".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "provider delegated response".to_string(),
+                            response_meta: None,
+                        }],
+                        usage: LlmUsage {
+                            input_tokens: 11,
+                            output_tokens: 3,
+                            ..Default::default()
+                        },
+                        terminal_reason: LlmTerminalReason::Stop,
+                        ..Default::default()
+                    })
+                }
+            })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+        let mut request = DirectRequest::json("direct-model", "answer as json");
+        request.session_id = Some("direct-session".to_string());
+
+        let response = client
+            .complete(request)
+            .await
+            .expect("direct completion should delegate");
+
+        assert_eq!(response.full_text, "provider delegated response");
+        let captured = captured_request
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("provider should receive a request");
+        assert_eq!(captured.model, "direct-model");
+        assert_eq!(captured.session_id.as_deref(), Some("direct-session"));
+        assert!(matches!(
+            captured.output_spec,
+            Some(LlmOutputSpec::JsonObject)
+        ));
+        assert_eq!(captured.messages.len(), 1);
+    }
+
+    #[test]
+    fn build_llm_request_preserves_nonempty_content_and_drops_empty_messages() {
+        let provider = TestProvider::default().into_handle();
+        let request = DirectRequest {
+            model: "input-model".to_string(),
+            messages: vec![
+                DirectMessage {
+                    role: DirectRole::System,
+                    parts: vec![DirectPart::Text(String::new())],
+                },
+                DirectMessage {
+                    role: DirectRole::User,
+                    parts: vec![
+                        DirectPart::Text("hello".to_string()),
+                        DirectPart::Text(String::new()),
+                    ],
+                },
+                DirectMessage {
+                    role: DirectRole::Assistant,
+                    parts: vec![DirectPart::Image(2)],
+                },
+            ],
+            attachments: Vec::new(),
+            output: DirectOutputSpec::Text,
+            generation: crate::GenerationOptions::default(),
+            stream_events: None,
+            session_id: None,
+            model_variant: None,
+            caused_by: None,
+            replay: None,
+        };
+
+        let llm_request = build_llm_request(&provider, request, "transport-model".to_string());
+
+        assert_eq!(llm_request.model, "transport-model");
+        assert_eq!(
+            llm_request.messages.len(),
+            2,
+            "empty normalized messages must be dropped"
+        );
+        assert_eq!(llm_request.messages[0].role, LlmRole::User);
+        assert_eq!(llm_request.messages[0].blocks.len(), 1);
+        assert!(matches!(
+            &llm_request.messages[0].blocks[0],
+            LlmContentBlock::Text { text, .. } if text.as_ref() == "hello"
+        ));
+        assert_eq!(llm_request.messages[1].role, LlmRole::Assistant);
+        assert!(matches!(
+            &llm_request.messages[1].blocks[0],
+            LlmContentBlock::Image { attachment_idx: 2 }
+        ));
+    }
+
+    #[test]
+    fn build_llm_request_preserves_direct_stream_sender_and_adds_required_noop_sender() {
+        let captured_events: Arc<Mutex<Vec<LlmStreamEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_sender = Arc::clone(&captured_events);
+        let requested_sender = LlmEventSender::new(move |event| {
+            captured_for_sender
+                .lock()
+                .expect("stream event lock")
+                .push(event);
+        });
+        let mut request = DirectRequest::text("model", "prompt");
+        request.stream_events = Some(requested_sender);
+        let provider = TestProvider::default().into_handle();
+
+        let llm_request = build_llm_request(&provider, request, "model".to_string());
+        let sender = llm_request
+            .stream_events
+            .expect("explicit direct stream sender must be preserved");
+        sender.send(LlmStreamEvent::Delta("delta".to_string()));
+        assert_eq!(captured_events.lock().expect("stream event lock").len(), 1);
+
+        let streaming_provider = TestProvider::builder()
+            .requires_streaming(true)
+            .build()
+            .into_handle();
+        let llm_request = build_llm_request(
+            &streaming_provider,
+            DirectRequest::text("model", "prompt"),
+            "model".to_string(),
+        );
+        assert!(
+            llm_request.stream_events.is_some(),
+            "providers that require streaming need a no-op sender even when direct caller did not request one"
+        );
+    }
+}

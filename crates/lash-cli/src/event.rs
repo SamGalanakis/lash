@@ -33,7 +33,7 @@ pub enum AppEvent {
         process_ids: Vec<String>,
     },
     RequestUiSnapshot,
-    RequestQueuedWorkSnapshot,
+    RequestPendingTurnInputSnapshot,
     SystemMessage {
         message: String,
     },
@@ -182,7 +182,7 @@ fn lane_for_event(event: &AppEvent) -> EventLane {
         AppEvent::UpdateCheckFinished { .. }
         | AppEvent::UiSnapshot { .. }
         | AppEvent::RequestUiSnapshot
-        | AppEvent::RequestQueuedWorkSnapshot
+        | AppEvent::RequestPendingTurnInputSnapshot
         | AppEvent::FrameRequested
         | AppEvent::Tick
         | AppEvent::FileIndexReady => EventLane::Low,

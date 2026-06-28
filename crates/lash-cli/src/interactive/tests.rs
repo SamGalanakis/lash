@@ -145,7 +145,7 @@ async fn session_observation_bridge_surfaces_gap_and_requests_refresh() {
     );
 
     let mut saw_diagnostic = false;
-    let mut saw_queue_refresh = false;
+    let mut saw_pending_input_refresh = false;
     let mut saw_ui_refresh = false;
     for _ in 0..8 {
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), pump.recv())
@@ -158,16 +158,19 @@ async fn session_observation_bridge_surfaces_gap_and_requests_refresh() {
                 saw_diagnostic |=
                     message.contains("Live session observation skipped buffered events");
             }
-            AppEvent::RequestQueuedWorkSnapshot => saw_queue_refresh = true,
+            AppEvent::RequestPendingTurnInputSnapshot => saw_pending_input_refresh = true,
             AppEvent::RequestUiSnapshot => saw_ui_refresh = true,
             _ => {}
         }
-        if saw_diagnostic && saw_queue_refresh && saw_ui_refresh {
+        if saw_diagnostic && saw_pending_input_refresh && saw_ui_refresh {
             break;
         }
     }
     assert!(saw_diagnostic, "expected live replay gap diagnostic");
-    assert!(saw_queue_refresh, "expected queued-work refresh request");
+    assert!(
+        saw_pending_input_refresh,
+        "expected pending-input snapshot refresh request"
+    );
     assert!(saw_ui_refresh, "expected UI snapshot refresh request");
 }
 

@@ -1,17 +1,21 @@
 #![allow(clippy::result_large_err)]
 
-pub mod effects;
+pub mod backend_contention;
 pub mod generator;
+pub mod minimize;
 pub mod oracles;
+pub mod postgres_replay;
 pub mod provider;
+pub mod provider_mutations;
 pub mod replay;
 pub mod runner;
+pub mod runtime_boundaries;
 pub mod runtime_contracts;
+pub mod runtime_providers;
 pub mod scheduler;
 pub mod sqlite_replay;
 pub mod store;
 pub mod trace;
-pub mod workers;
 
 pub use provider::{
     ProviderWireEndpoint, ProviderWireEvent, ProviderWireRequestMatch, ProviderWireScript,

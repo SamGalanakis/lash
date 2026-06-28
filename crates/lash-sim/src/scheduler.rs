@@ -1,19 +1,27 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const BOUNDARY_EVENT_SCHEMA: &str = "lash.sim.boundary-event.v1";
+pub const PENDING_RUNTIME_BOUNDARY_SCHEMA: &str = "lash.sim.pending-runtime-boundary.v1";
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundaryKind {
     Ingress,
+    QueuedIngress,
     Provider,
     Tool,
+    ExecCode,
     DurableEffect,
+    ProcessWake,
     Worker,
     Observer,
+    Cancellation,
+    Trigger,
+    BackendFailure,
+    ProviderMutation,
     LeaseTime,
 }
 
@@ -52,6 +60,8 @@ impl BoundaryEvent {
 pub struct DeliveredBoundary {
     pub schema: String,
     pub sequence: usize,
+    #[serde(default)]
+    pub scheduler: SchedulerDeliveryEvidence,
     pub boundary_id: String,
     pub actor_alias: String,
     pub kind: BoundaryKind,
@@ -64,10 +74,16 @@ pub struct DeliveredBoundary {
 }
 
 impl DeliveredBoundary {
-    fn from_event(sequence: usize, event: BoundaryEvent, observed: Value) -> Self {
+    fn from_event(
+        sequence: usize,
+        event: BoundaryEvent,
+        observed: Value,
+        scheduler: SchedulerDeliveryEvidence,
+    ) -> Self {
         Self {
             schema: BOUNDARY_EVENT_SCHEMA.to_string(),
             sequence,
+            scheduler,
             boundary_id: event.boundary_id,
             actor_alias: event.actor_alias,
             kind: event.kind,
@@ -90,11 +106,154 @@ impl DeliveredBoundary {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SchedulerDeliveryEvidence {
+    pub scheduler_controlled: bool,
+    pub pending_before: usize,
+    pub min_scheduled_at: u64,
+    pub delivered_at: u64,
+    pub candidate_count_at_tick: usize,
+    pub selected_candidate_index: usize,
+    pub seed_before: u64,
+    pub seed_after: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct BoundaryScheduler {
     pending: Vec<BoundaryEvent>,
     seed: u64,
     sequence: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeCompletionUnit {
+    pub unit: String,
+    pub at: u64,
+}
+
+impl RuntimeCompletionUnit {
+    pub fn new(unit: impl Into<String>, at: u64) -> Self {
+        Self {
+            unit: unit.into(),
+            at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingRuntimeBoundary {
+    pub schema: String,
+    pub pending_id: String,
+    pub boundary_id: String,
+    pub actor_alias: String,
+    pub kind: BoundaryKind,
+    pub completion_family: String,
+    pub original_scheduled_at: u64,
+    pub ready_at: u64,
+    pub registered_after: String,
+    pub registered_after_sequence: usize,
+    pub completion_units: Vec<RuntimeCompletionUnit>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeCompletionQueue {
+    pending: Vec<BoundaryEvent>,
+    registered_ids: BTreeSet<String>,
+    completed_ids: BTreeSet<String>,
+    registrations: Vec<PendingRuntimeBoundary>,
+}
+
+impl RuntimeCompletionQueue {
+    pub fn new(events: impl IntoIterator<Item = BoundaryEvent>) -> Self {
+        Self {
+            pending: events.into_iter().collect(),
+            registered_ids: BTreeSet::new(),
+            completed_ids: BTreeSet::new(),
+            registrations: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn registered_len(&self) -> usize {
+        self.registered_ids.len()
+    }
+
+    pub fn completed_len(&self) -> usize {
+        self.completed_ids.len()
+    }
+
+    pub fn registrations(&self) -> &[PendingRuntimeBoundary] {
+        &self.registrations
+    }
+
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .map(|event| event.boundary_id.clone())
+            .collect()
+    }
+
+    pub fn mark_completed(&mut self, boundary_id: &str) {
+        self.completed_ids.insert(boundary_id.to_string());
+    }
+
+    pub fn take_ready(&mut self, ready: impl Fn(&BoundaryEvent) -> bool) -> Vec<BoundaryEvent> {
+        let mut selected = Vec::new();
+        let mut remaining = Vec::with_capacity(self.pending.len());
+        for event in self.pending.drain(..) {
+            if ready(&event) {
+                selected.push(event);
+            } else {
+                remaining.push(event);
+            }
+        }
+        self.pending = remaining;
+        selected
+    }
+
+    pub fn register(
+        &mut self,
+        scheduler: &mut BoundaryScheduler,
+        mut event: BoundaryEvent,
+        registered_after: &DeliveredBoundary,
+        completion_family: impl Into<String>,
+        completion_units: Vec<RuntimeCompletionUnit>,
+    ) -> PendingRuntimeBoundary {
+        let original_scheduled_at = event.at;
+        let ready_at = original_scheduled_at.max(registered_after.at.saturating_add(1));
+        event.at = ready_at;
+        let pending = PendingRuntimeBoundary {
+            schema: PENDING_RUNTIME_BOUNDARY_SCHEMA.to_string(),
+            pending_id: format!("pending:{}", event.boundary_id),
+            boundary_id: event.boundary_id.clone(),
+            actor_alias: event.actor_alias.clone(),
+            kind: event.kind,
+            completion_family: completion_family.into(),
+            original_scheduled_at,
+            ready_at,
+            registered_after: registered_after.boundary_id.clone(),
+            registered_after_sequence: registered_after.sequence,
+            completion_units,
+        };
+        let mut payload_object = event.payload.as_object().cloned().unwrap_or_default();
+        payload_object.insert(
+            "runtime_completion".to_string(),
+            serde_json::to_value(&pending)
+                .expect("pending runtime boundary evidence is serializable"),
+        );
+        event.payload = Value::Object(payload_object);
+        self.registered_ids.insert(event.boundary_id.clone());
+        self.registrations.push(pending.clone());
+        scheduler.schedule(event);
+        pending
+    }
 }
 
 impl BoundaryScheduler {
@@ -127,17 +286,17 @@ impl BoundaryScheduler {
     }
 
     pub fn deliver_next(&mut self, observed: Value) -> Option<DeliveredBoundary> {
-        let index = self.next_index()?;
-        Some(self.deliver_index(index, observed))
+        let decision = self.next_decision()?;
+        Some(self.deliver_index(decision, observed))
     }
 
     pub fn deliver_next_with(
         &mut self,
         observe: impl FnOnce(&BoundaryEvent) -> Value,
     ) -> Option<DeliveredBoundary> {
-        let index = self.next_index()?;
-        let observed = observe(&self.pending[index]);
-        Some(self.deliver_index(index, observed))
+        let decision = self.next_decision()?;
+        let observed = observe(&self.pending[decision.index]);
+        Some(self.deliver_index(decision, observed))
     }
 
     pub fn deliver_boundary(
@@ -149,7 +308,7 @@ impl BoundaryScheduler {
             .pending
             .iter()
             .position(|event| event.boundary_id == boundary_id)?;
-        Some(self.deliver_index(index, observed))
+        Some(self.deliver_direct(index, observed))
     }
 
     pub fn deliver_boundary_with(
@@ -162,17 +321,47 @@ impl BoundaryScheduler {
             .iter()
             .position(|event| event.boundary_id == boundary_id)?;
         let observed = observe(&self.pending[index]);
-        Some(self.deliver_index(index, observed))
+        Some(self.deliver_direct(index, observed))
     }
 
-    fn deliver_index(&mut self, index: usize, observed: Value) -> DeliveredBoundary {
+    fn deliver_index(&mut self, decision: SchedulerDecision, observed: Value) -> DeliveredBoundary {
+        let event = self.pending.remove(decision.index);
+        let sequence = self.sequence;
+        self.sequence += 1;
+        let scheduler = SchedulerDeliveryEvidence {
+            scheduler_controlled: true,
+            pending_before: decision.pending_before,
+            min_scheduled_at: decision.min_scheduled_at,
+            delivered_at: event.at,
+            candidate_count_at_tick: decision.candidate_count_at_tick,
+            selected_candidate_index: decision.selected_candidate_index,
+            seed_before: decision.seed_before,
+            seed_after: decision.seed_after,
+        };
+        DeliveredBoundary::from_event(sequence, event, observed, scheduler)
+    }
+
+    fn deliver_direct(&mut self, index: usize, observed: Value) -> DeliveredBoundary {
+        let pending_before = self.pending.len();
         let event = self.pending.remove(index);
         let sequence = self.sequence;
         self.sequence += 1;
-        DeliveredBoundary::from_event(sequence, event, observed)
+        let scheduler = SchedulerDeliveryEvidence {
+            scheduler_controlled: false,
+            pending_before,
+            min_scheduled_at: event.at,
+            delivered_at: event.at,
+            candidate_count_at_tick: 1,
+            selected_candidate_index: 0,
+            seed_before: self.seed,
+            seed_after: self.seed,
+        };
+        DeliveredBoundary::from_event(sequence, event, observed, scheduler)
     }
 
-    fn next_index(&mut self) -> Option<usize> {
+    fn next_decision(&mut self) -> Option<SchedulerDecision> {
+        let pending_before = self.pending.len();
+        let seed_before = self.seed;
         let min_at = self.pending.iter().map(|event| event.at).min()?;
         let mut candidates = self
             .pending
@@ -186,24 +375,52 @@ impl BoundaryScheduler {
                 .then_with(|| left.kind_name().cmp(right.kind_name()))
                 .then_with(|| left.boundary_id.cmp(&right.boundary_id))
         });
-        let choice = if candidates.len() == 1 {
+        let candidate_count_at_tick = candidates.len();
+        let selected_candidate_index = if candidate_count_at_tick == 1 {
             0
         } else {
-            (next_seed(&mut self.seed) as usize) % candidates.len()
+            (next_seed(&mut self.seed) as usize) % candidate_count_at_tick
         };
-        Some(candidates[choice].0)
+        let index = candidates[selected_candidate_index].0;
+        Some(SchedulerDecision {
+            index,
+            pending_before,
+            min_scheduled_at: min_at,
+            candidate_count_at_tick,
+            selected_candidate_index,
+            seed_before,
+            seed_after: self.seed,
+        })
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SchedulerDecision {
+    index: usize,
+    pending_before: usize,
+    min_scheduled_at: u64,
+    candidate_count_at_tick: usize,
+    selected_candidate_index: usize,
+    seed_before: u64,
+    seed_after: u64,
 }
 
 impl BoundaryEvent {
     fn kind_name(&self) -> &'static str {
         match self.kind {
             BoundaryKind::Ingress => "ingress",
+            BoundaryKind::QueuedIngress => "queued_ingress",
             BoundaryKind::Provider => "provider",
             BoundaryKind::Tool => "tool",
+            BoundaryKind::ExecCode => "exec_code",
             BoundaryKind::DurableEffect => "durable_effect",
+            BoundaryKind::ProcessWake => "process_wake",
             BoundaryKind::Worker => "worker",
             BoundaryKind::Observer => "observer",
+            BoundaryKind::Cancellation => "cancellation",
+            BoundaryKind::Trigger => "trigger",
+            BoundaryKind::BackendFailure => "backend_failure",
+            BoundaryKind::ProviderMutation => "provider_mutation",
             BoundaryKind::LeaseTime => "lease_time",
         }
     }
@@ -282,6 +499,216 @@ mod tests {
         assert_eq!(first_ids.len(), 4);
         assert_eq!(first_ids.first().map(String::as_str), Some("ingress-a"));
         assert_eq!(first_ids.last().map(String::as_str), Some("lease-time-b"));
+    }
+
+    #[test]
+    fn scheduler_records_delivery_decisions_as_trace_evidence() {
+        let events = [
+            BoundaryEvent::new("a", "session-a", BoundaryKind::Provider, 1, "p", json!({})),
+            BoundaryEvent::new("b", "session-b", BoundaryKind::Provider, 1, "p", json!({})),
+        ];
+        let mut scheduler = BoundaryScheduler::with_events(11, events);
+
+        let delivered = scheduler
+            .deliver_next(json!({"ok": true}))
+            .expect("delivered");
+
+        assert!(delivered.scheduler.scheduler_controlled);
+        assert_eq!(delivered.scheduler.pending_before, 2);
+        assert_eq!(delivered.scheduler.min_scheduled_at, 1);
+        assert_eq!(delivered.scheduler.delivered_at, 1);
+        assert_eq!(delivered.scheduler.candidate_count_at_tick, 2);
+    }
+
+    #[test]
+    fn runtime_completion_queue_registers_pending_boundary_evidence() {
+        let mut scheduler = BoundaryScheduler::new(17);
+        let registered_after = DeliveredBoundary {
+            schema: BOUNDARY_EVENT_SCHEMA.to_string(),
+            sequence: 3,
+            scheduler: SchedulerDeliveryEvidence {
+                scheduler_controlled: true,
+                delivered_at: 10,
+                ..SchedulerDeliveryEvidence::default()
+            },
+            boundary_id: "session-001:queued-ingress:001".to_string(),
+            actor_alias: "session-001".to_string(),
+            kind: BoundaryKind::QueuedIngress,
+            at: 10,
+            label: "queued-ingress.next-turn".to_string(),
+            payload: json!({}),
+            observed: json!({}),
+        };
+        let event = BoundaryEvent::new(
+            "session-001:cancellation:001",
+            "session-001",
+            BoundaryKind::Cancellation,
+            2,
+            "queued-ingress.cancel",
+            json!({"target": "session-001:queued-ingress:001"}),
+        );
+        let mut queue = RuntimeCompletionQueue::new([event]);
+        assert_eq!(queue.registered_len(), 0);
+        let ready = queue.take_ready(|event| event.kind == BoundaryKind::Cancellation);
+        assert_eq!(ready.len(), 1);
+
+        let pending = queue.register(
+            &mut scheduler,
+            ready.into_iter().next().expect("ready event"),
+            &registered_after,
+            "queued_input_cancellation",
+            vec![RuntimeCompletionUnit::new(
+                "runtime:cancel_pending_turn_input",
+                2,
+            )],
+        );
+
+        assert_eq!(pending.schema, PENDING_RUNTIME_BOUNDARY_SCHEMA);
+        assert_eq!(pending.pending_id, "pending:session-001:cancellation:001");
+        assert_eq!(pending.original_scheduled_at, 2);
+        assert_eq!(pending.ready_at, 11);
+        assert_eq!(pending.registered_after, "session-001:queued-ingress:001");
+        assert_eq!(pending.registered_after_sequence, 3);
+        assert_eq!(pending.completion_units.len(), 1);
+        assert_eq!(queue.registered_len(), 1);
+        assert_eq!(queue.registrations(), &[pending]);
+        let delivered = scheduler
+            .deliver_next(json!({"cancelled": true}))
+            .expect("registered completion");
+        assert_eq!(delivered.at, 11);
+        assert!(delivered.payload.get("runtime_completion").is_some());
+        assert_eq!(
+            delivered
+                .payload
+                .pointer("/runtime_completion/completion_family")
+                .and_then(Value::as_str),
+            Some("queued_input_cancellation")
+        );
+        assert_eq!(
+            delivered
+                .payload
+                .pointer("/runtime_completion/ready_at")
+                .and_then(Value::as_u64),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn runtime_completion_queue_registered_len_tracks_multiple_registrations() {
+        let mut scheduler = BoundaryScheduler::new(23);
+        let registered_after = DeliveredBoundary {
+            schema: BOUNDARY_EVENT_SCHEMA.to_string(),
+            sequence: 1,
+            scheduler: SchedulerDeliveryEvidence {
+                scheduler_controlled: true,
+                delivered_at: 5,
+                ..SchedulerDeliveryEvidence::default()
+            },
+            boundary_id: "session-001:provider:001".to_string(),
+            actor_alias: "session-001".to_string(),
+            kind: BoundaryKind::Provider,
+            at: 5,
+            label: "provider.chat.stream".to_string(),
+            payload: json!({}),
+            observed: json!({}),
+        };
+        let mut queue = RuntimeCompletionQueue::new([
+            BoundaryEvent::new(
+                "session-001:tool:001",
+                "session-001",
+                BoundaryKind::Tool,
+                6,
+                "tool.return",
+                json!({}),
+            ),
+            BoundaryEvent::new(
+                "session-001:exec:001",
+                "session-001",
+                BoundaryKind::ExecCode,
+                7,
+                "exec.result",
+                json!({}),
+            ),
+        ]);
+        assert_eq!(queue.registered_len(), 0);
+        let ready = queue.take_ready(|_| true);
+        for event in ready {
+            queue.register(
+                &mut scheduler,
+                event,
+                &registered_after,
+                "runtime_completion",
+                vec![RuntimeCompletionUnit::new("runtime:unit", 6)],
+            );
+        }
+
+        assert_eq!(queue.registered_len(), 2);
+        assert_eq!(queue.registrations().len(), 2);
+        assert_eq!(drain_ids(&mut scheduler).len(), 2);
+    }
+
+    #[test]
+    fn runtime_completion_queue_keeps_unready_boundaries_pending() {
+        let events = [
+            BoundaryEvent::new(
+                "session-001:provider:001",
+                "session-001",
+                BoundaryKind::Provider,
+                4,
+                "provider.chat.stream",
+                json!({"turn_index": 1}),
+            ),
+            BoundaryEvent::new(
+                "session-001:tool:001",
+                "session-001",
+                BoundaryKind::Tool,
+                5,
+                "tool.return",
+                json!({}),
+            ),
+        ];
+        let mut queue = RuntimeCompletionQueue::new(events);
+
+        let ready = queue.take_ready(|event| event.kind == BoundaryKind::Provider);
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].boundary_id, "session-001:provider:001");
+        assert_eq!(queue.pending_ids(), vec!["session-001:tool:001"]);
+        assert_eq!(queue.pending_len(), 1);
+    }
+
+    #[test]
+    fn runtime_completion_queue_tracks_completed_boundary_ids_idempotently() {
+        let mut queue = RuntimeCompletionQueue::new([
+            BoundaryEvent::new(
+                "session-001:provider:001",
+                "session-001",
+                BoundaryKind::Provider,
+                4,
+                "provider.chat.stream",
+                json!({"turn_index": 1}),
+            ),
+            BoundaryEvent::new(
+                "session-001:tool:001",
+                "session-001",
+                BoundaryKind::Tool,
+                5,
+                "tool.return",
+                json!({}),
+            ),
+        ]);
+
+        assert_eq!(queue.completed_len(), 0);
+        queue.mark_completed("session-001:provider:001");
+        assert_eq!(queue.completed_len(), 1);
+        queue.mark_completed("session-001:provider:001");
+        assert_eq!(
+            queue.completed_len(),
+            1,
+            "completed IDs should be idempotent, not double-counted"
+        );
+        queue.mark_completed("session-001:tool:001");
+        assert_eq!(queue.completed_len(), 2);
     }
 
     fn drain_ids(scheduler: &mut BoundaryScheduler) -> Vec<String> {

@@ -2,10 +2,19 @@ use std::collections::BTreeMap;
 
 use super::ProviderHandle;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderBinding {
     pub provider_id: String,
     pub provider: ProviderHandle,
+}
+
+impl Default for ProviderBinding {
+    fn default() -> Self {
+        Self {
+            provider_id: String::new(),
+            provider: ProviderHandle::unconfigured(),
+        }
+    }
 }
 
 impl ProviderBinding {

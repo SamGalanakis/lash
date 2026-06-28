@@ -554,17 +554,17 @@ impl Default for LiveTurnView {
     }
 }
 
-/// Queued and steering turns waiting to dispatch.
+/// Pending user inputs and active-turn steers waiting to dispatch.
 #[derive(Default)]
 pub struct Queues {
-    /// Presentation-only metadata for durable queued batches. The durable
-    /// queue owns ordering and lifecycle; this cache only preserves draft text,
-    /// images, and paste placeholders the runtime cannot reconstruct.
+    /// Presentation-only metadata for durable pending turn inputs. Runtime
+    /// admission owns ordering and lifecycle; this cache only preserves draft
+    /// text, images, and paste placeholders the runtime cannot reconstruct.
     pub draft_presentations: HashMap<String, PreparedTurn>,
-    /// Latest durable queued-work snapshot loaded from `LashSession`.
+    /// Latest durable pending-turn-input snapshot loaded from `LashSession`.
     pub pending_turn_input_snapshot: Vec<PendingTurnInput>,
     /// Input ids that have already been claimed for dispatch locally but may
-    /// still appear in durable queue snapshots until the runtime commits them.
+    /// still appear in pending-input snapshots until the runtime commits them.
     pub suppressed_preview_input_ids: HashSet<String>,
     /// Most recent selection-style prompt response, held briefly so the next
     /// tool result can render it inline if it exposes a question-panel

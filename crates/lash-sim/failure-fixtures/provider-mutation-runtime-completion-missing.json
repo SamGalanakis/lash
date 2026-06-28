@@ -1,0 +1,12 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "provider-mutation-runtime-completion-missing",
+  "seed": 37,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "remove_runtime_completion_for_kind": "provider_mutation"
+  },
+  "expected_oracle_id": "sim.oracle.scheduler-owned-runtime-completions.v1",
+  "expected_reason_contains": "for ProviderMutation"
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "standard-provider-error-missing-parser-matrix",
+  "seed": 47,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "remove_observed_field_for_kind": {
+      "kind": "provider_mutation",
+      "field": "provider_parser_matrix"
+    }
+  },
+  "expected_oracle_id": "sim.oracle.scenario-mini.standard.provider-error-without-checkpoint.v1",
+  "expected_reason_contains": "no scheduler-owned provider failure before checkpoint"
+}
