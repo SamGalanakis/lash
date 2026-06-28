@@ -18,6 +18,7 @@ mod tests {
         let properties = definition
             .contract
             .input_schema
+            .canonical
             .get("properties")
             .and_then(serde_json::Value::as_object)
             .expect("object properties");
@@ -49,10 +50,15 @@ mod tests {
     fn grep_contract_documents_result_shape() {
         let definition = grep_tool_definition();
 
-        assert_eq!(definition.contract.output_schema["type"], json!("object"));
-        assert!(definition.contract.output_schema["properties"]["matches"].is_object());
-        assert!(definition.contract.output_schema["properties"]["count"].is_object());
-        assert!(definition.contract.output_schema["properties"]["cursor"].is_object());
+        assert_eq!(
+            definition.contract.output_schema.canonical["type"],
+            json!("object")
+        );
+        assert!(
+            definition.contract.output_schema.canonical["properties"]["matches"].is_object()
+        );
+        assert!(definition.contract.output_schema.canonical["properties"]["count"].is_object());
+        assert!(definition.contract.output_schema.canonical["properties"]["cursor"].is_object());
         let rendered = definition.compact_contract().render_signature();
         assert!(rendered.contains("matches"), "{rendered}");
         assert!(rendered.contains("count"), "{rendered}");

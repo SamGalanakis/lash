@@ -26,15 +26,15 @@ use base64::Engine;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use crate::schema::{
-    OpenAiSchemaProfile, SchemaProjectionError, project_schema, project_structured_output,
-    project_tool_parameters, responses_error_is_retryable,
-};
-use lash_core::SchemaProjectionOverride;
+use crate::schema::responses_error_is_retryable;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
 use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole, LlmToolChoice,
     LlmUsage, ProviderReasoningReplay, ProviderReplayMeta, ResponseTextMeta,
+};
+use lash_core::{
+    ProviderSchemaCapabilities, SchemaContract, SchemaPurpose, SchemaResolutionError,
+    SchemaResolutionRequest, resolve_schema,
 };
 use lash_llm_transport::{
     frame_sse_payload, merge_usage,
@@ -70,7 +70,7 @@ pub fn tool_choice_value(choice: &LlmToolChoice) -> &'static str {
     }
 }
 
-pub fn projection_error(provider: &str, err: SchemaProjectionError) -> LlmTransportError {
+pub fn projection_error(provider: &str, err: SchemaResolutionError) -> LlmTransportError {
     LlmTransportError::new(format!(
         "{provider} schema projection failed: {}",
         err.first_diagnostic()
@@ -78,7 +78,8 @@ pub fn projection_error(provider: &str, err: SchemaProjectionError) -> LlmTransp
     .with_kind(ProviderFailureKind::Validation)
     .with_raw(
         json!({
-            "profile": format!("{:?}", err.profile),
+            "dialect": err.dialect.map(|dialect| dialect.as_str().to_string()),
+            "purpose": format!("{:?}", err.purpose),
             "diagnostics": err.diagnostics,
         })
         .to_string(),
@@ -87,28 +88,19 @@ pub fn projection_error(provider: &str, err: SchemaProjectionError) -> LlmTransp
 
 pub fn projected_schema(
     provider: &str,
-    canonical: &Value,
-    overrides: &[SchemaProjectionOverride],
-    profile: OpenAiSchemaProfile,
+    contract: &SchemaContract,
+    capabilities: &ProviderSchemaCapabilities,
+    purpose: SchemaPurpose,
 ) -> Result<Value, LlmTransportError> {
-    if let Some(override_schema) = overrides
-        .iter()
-        .find(|projection| projection.profile == profile.projection_id())
-        .map(|projection| projection.schema.clone())
-    {
-        return Ok(override_schema);
-    }
-    match profile {
-        OpenAiSchemaProfile::ToolParameters => {
-            project_tool_parameters(canonical).map(|projection| projection.schema)
-        }
-        OpenAiSchemaProfile::StructuredOutput => {
-            project_structured_output(canonical).map(|projection| projection.schema)
-        }
-        OpenAiSchemaProfile::StrictToolParameters => {
-            project_schema(canonical, profile).map(|projection| projection.schema)
-        }
-    }
+    resolve_schema(
+        contract,
+        SchemaResolutionRequest {
+            provider,
+            purpose,
+            dialects: capabilities.dialects_for(purpose),
+        },
+    )
+    .map(|projection| projection.schema)
     .map_err(|err| projection_error(provider, err))
 }
 
@@ -124,18 +116,24 @@ pub fn build_tools_with_strict(
     req: &lash_core::llm::types::LlmRequest,
     strict_tools: bool,
 ) -> Result<Vec<Value>, LlmTransportError> {
+    let capabilities = ProviderSchemaCapabilities::openai(strict_tools);
+    build_tools_with_capabilities(provider, req, strict_tools, &capabilities)
+}
+
+pub fn build_tools_with_capabilities(
+    provider: &str,
+    req: &lash_core::llm::types::LlmRequest,
+    strict_tools: bool,
+    capabilities: &ProviderSchemaCapabilities,
+) -> Result<Vec<Value>, LlmTransportError> {
     req.tools
         .iter()
         .map(|tool| {
             let parameters = projected_schema(
                 provider,
                 &tool.input_schema,
-                &tool.input_schema_projections,
-                if strict_tools {
-                    OpenAiSchemaProfile::StrictToolParameters
-                } else {
-                    OpenAiSchemaProfile::ToolParameters
-                },
+                &capabilities,
+                SchemaPurpose::ToolInput,
             )?;
             Ok(json!({
                 "type": "function",

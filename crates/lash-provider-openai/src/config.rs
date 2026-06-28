@@ -38,9 +38,11 @@ pub struct OpenAiCompat {
     pub streaming_usage: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub developer_role: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_capabilities: Option<ProviderSchemaCapabilities>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OpenAiResolvedCompat {
     pub(crate) request_fields: bool,
     pub(crate) max_tokens_field: OpenAiCompatMaxTokensField,
@@ -51,6 +53,7 @@ pub(crate) struct OpenAiResolvedCompat {
     pub(crate) store: bool,
     pub(crate) streaming_usage: bool,
     pub(crate) developer_role: bool,
+    pub(crate) schema_capabilities: ProviderSchemaCapabilities,
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +107,9 @@ impl OpenAiCompatibleProvider {
             store: !local,
             streaming_usage: !local,
             developer_role: direct_openai,
+            schema_capabilities: ProviderSchemaCapabilities::openai(false),
         };
+        let strict_tools = self.compat.strict_tools.unwrap_or(defaults.strict_tools);
         OpenAiResolvedCompat {
             request_fields: self
                 .compat
@@ -126,7 +131,7 @@ impl OpenAiCompatibleProvider {
                 .compat
                 .prompt_cache_retention
                 .unwrap_or(defaults.prompt_cache_retention),
-            strict_tools: self.compat.strict_tools.unwrap_or(defaults.strict_tools),
+            strict_tools,
             store: self.compat.store.unwrap_or(defaults.store),
             streaming_usage: self
                 .compat
@@ -136,6 +141,11 @@ impl OpenAiCompatibleProvider {
                 .compat
                 .developer_role
                 .unwrap_or(defaults.developer_role),
+            schema_capabilities: self
+                .compat
+                .schema_capabilities
+                .clone()
+                .unwrap_or_else(|| ProviderSchemaCapabilities::openai(strict_tools)),
         }
     }
 }

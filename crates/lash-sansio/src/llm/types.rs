@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::{AttachmentRef, SchemaProjectionOverride};
+use crate::{AttachmentRef, SchemaContract};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,10 +74,8 @@ impl ResponseTextMeta {
 pub struct LlmToolSpec {
     pub name: String,
     pub description: String,
-    pub input_schema: serde_json::Value,
-    pub output_schema: serde_json::Value,
-    pub input_schema_projections: Vec<SchemaProjectionOverride>,
-    pub output_schema_projections: Vec<SchemaProjectionOverride>,
+    pub input_schema: SchemaContract,
+    pub output_schema: SchemaContract,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -269,7 +267,7 @@ impl LlmAttachment {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmJsonSchema {
     pub name: String,
-    pub schema: serde_json::Value,
+    pub schema: SchemaContract,
     pub strict: bool,
 }
 

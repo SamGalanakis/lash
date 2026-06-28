@@ -320,7 +320,7 @@ mod tests {
     fn ask_contract_documents_prompt_response_variants() {
         let definition = ask_tool_definition();
 
-        assert!(definition.contract.output_schema["anyOf"].is_array());
+        assert!(definition.contract.output_schema.canonical["anyOf"].is_array());
         let rendered = definition.compact_contract().render_signature();
         assert!(
             rendered.contains("selection") || rendered.contains("record"),

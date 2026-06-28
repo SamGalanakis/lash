@@ -165,8 +165,11 @@ mod tests {
     #[test]
     fn glob_contract_documents_result_shape() {
         let definition = glob_tool_definition();
-        assert_eq!(definition.contract.output_schema["type"], json!("object"));
-        assert!(definition.contract.output_schema["properties"]["paths"].is_object());
+        assert_eq!(
+            definition.contract.output_schema.canonical["type"],
+            json!("object")
+        );
+        assert!(definition.contract.output_schema.canonical["properties"]["paths"].is_object());
         assert!(
             definition
                 .compact_contract()

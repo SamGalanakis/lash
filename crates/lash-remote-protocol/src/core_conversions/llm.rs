@@ -513,22 +513,12 @@ impl From<core_llm::LlmToolSpec> for RemoteLlmToolSpec {
             description,
             input_schema,
             output_schema,
-            input_schema_projections,
-            output_schema_projections,
         } = value;
         Self {
             name,
             description,
-            input_schema,
-            output_schema,
-            input_schema_projections: input_schema_projections
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            output_schema_projections: output_schema_projections
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            input_schema: input_schema.into(),
+            output_schema: output_schema.into(),
         }
     }
 }
@@ -540,22 +530,12 @@ impl From<RemoteLlmToolSpec> for core_llm::LlmToolSpec {
             description,
             input_schema,
             output_schema,
-            input_schema_projections,
-            output_schema_projections,
         } = value;
         Self {
             name,
             description,
-            input_schema,
-            output_schema,
-            input_schema_projections: input_schema_projections
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            output_schema_projections: output_schema_projections
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            input_schema: input_schema.into(),
+            output_schema: output_schema.into(),
         }
     }
 }
@@ -590,7 +570,7 @@ impl From<core_llm::LlmOutputSpec> for RemoteLlmOutputSpec {
                 strict,
             }) => Self::JsonSchema {
                 name,
-                schema,
+                schema: schema.into(),
                 strict,
             },
         }
@@ -607,7 +587,7 @@ impl From<RemoteLlmOutputSpec> for core_llm::LlmOutputSpec {
                 strict,
             } => Self::JsonSchema(core_llm::LlmJsonSchema {
                 name,
-                schema,
+                schema: schema.into(),
                 strict,
             }),
         }

@@ -36,7 +36,7 @@ impl LashSchema {
 }
 
 pub fn validate_tool_input(contract: &ToolContract, args: &Value) -> Result<(), String> {
-    LashSchema::new(contract.input_schema.clone()).validate(args)
+    LashSchema::new(contract.input_schema.canonical().clone()).validate(args)
 }
 
 fn validate_schema(path: &str, schema: &Value, value: &Value) -> Result<(), String> {

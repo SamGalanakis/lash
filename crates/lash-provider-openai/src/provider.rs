@@ -21,6 +21,11 @@ impl OpenAiCompatibleProvider {
         self
     }
 
+    pub fn with_schema_capabilities(mut self, capabilities: ProviderSchemaCapabilities) -> Self {
+        self.compat.schema_capabilities = Some(capabilities);
+        self
+    }
+
     pub fn with_transport(mut self, transport: std::sync::Arc<dyn LlmHttpTransport>) -> Self {
         self.transport = transport;
         self

@@ -89,7 +89,7 @@ impl LlmToolsProvider {
 
         let output = DirectOutputSpec::JsonSchema(DirectJsonSchema {
             name: "llm_query_result".to_string(),
-            schema: response_schema.clone(),
+            schema: response_schema.clone().into(),
             strict: true,
         });
 

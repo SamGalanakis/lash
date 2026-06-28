@@ -268,7 +268,7 @@ mod tests {
             schema.clone(),
             json!({}),
         );
-        assert_eq!(definition.contract.input_schema, schema);
+        assert_eq!(definition.contract.input_schema.canonical, schema);
         assert_eq!(definition.parameter_metadata().len(), 3);
     }
 
@@ -385,6 +385,7 @@ mod tests {
             defs[0]
                 .contract
                 .input_schema
+                .canonical
                 .get("properties")
                 .and_then(Value::as_object)
                 .and_then(|props| props.get("query"))
@@ -393,7 +394,7 @@ mod tests {
             Some(json!("string"))
         );
         assert_eq!(
-            defs[0].contract.output_schema,
+            defs[0].contract.output_schema.canonical,
             json!({
                 "type": "object",
                 "properties": {

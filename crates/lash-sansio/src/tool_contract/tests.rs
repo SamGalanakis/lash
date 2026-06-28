@@ -28,11 +28,11 @@ mod tests {
 
         let model_tool = tool.model_tool();
         assert_eq!(
-            model_tool.input_schema["properties"]["limit"]["type"],
+            model_tool.input_schema.canonical["properties"]["limit"]["type"],
             serde_json::json!("integer")
         );
         assert_eq!(
-            model_tool.output_schema["properties"]["hits"]["type"],
+            model_tool.output_schema.canonical["properties"]["hits"]["type"],
             serde_json::json!("array")
         );
     }
@@ -168,13 +168,16 @@ mod tests {
         );
 
         let model_tool = tool.model_tool();
-        assert_eq!(model_tool.input_schema["properties"]["raw"]["const"], "x");
         assert_eq!(
-            model_tool.input_schema_projections[0].schema["properties"]["raw"]["enum"],
+            model_tool.input_schema.canonical["properties"]["raw"]["const"],
+            "x"
+        );
+        assert_eq!(
+            model_tool.input_schema.projection.overrides[0].schema["properties"]["raw"]["enum"],
             serde_json::json!(["x"])
         );
         assert_eq!(
-            model_tool.output_schema_projections[0].profile,
+            model_tool.output_schema.projection.overrides[0].dialect,
             "provider.structured_output"
         );
     }
@@ -226,11 +229,11 @@ mod tests {
                 .any(|param| { param["name"] == "mode" && param["nullable"] == true })
         );
         assert_eq!(
-            tool.contract.output_schema["properties"]["answer"]["type"],
+            tool.contract.output_schema.canonical["properties"]["answer"]["type"],
             "string"
         );
         assert_eq!(
-            tool.contract.output_schema["properties"]["confidence"]["minimum"].as_f64(),
+            tool.contract.output_schema.canonical["properties"]["confidence"]["minimum"].as_f64(),
             Some(0.0)
         );
     }
@@ -262,8 +265,8 @@ mod tests {
             output_schema.clone(),
         );
 
-        assert_eq!(tool.contract.input_schema, input_schema);
-        assert_eq!(tool.contract.output_schema, output_schema);
+        assert_eq!(tool.contract.input_schema.canonical, input_schema);
+        assert_eq!(tool.contract.output_schema.canonical, output_schema);
     }
 
     #[test]
@@ -476,6 +479,7 @@ mod tests {
             "description": "[MCP appworld] Search for songs with a query.",
             "examples": ["search songs by genre"],
             "input_schema": {
+                "canonical": {
                 "type": "object",
                 "properties": {
                     "access_token": {
@@ -502,8 +506,10 @@ mod tests {
                 },
                 "required": ["access_token"],
                 "additionalProperties": false
+                }
             },
             "output_schema": {
+                "canonical": {
                 "anyOf": [
                     {
                         "type": "object",
@@ -587,6 +593,7 @@ mod tests {
                         "required": ["response"]
                     }
                 ]
+                }
             }
         }))
         .unwrap();
@@ -759,6 +766,7 @@ mod tests {
             "description": "[MCP appworld] Search or show a list of albums in your album library.",
             "examples": ["show album library"],
             "input_schema": {
+                "canonical": {
                 "type": "object",
                 "properties": {
                     "access_token": {
@@ -780,8 +788,10 @@ mod tests {
                     }
                 },
                 "required": ["access_token"]
+                }
             },
             "output_schema": {
+                "canonical": {
                 "type": "object",
                 "properties": {
                     "response": {
@@ -831,6 +841,7 @@ mod tests {
                     }
                 },
                 "required": ["response"]
+                }
             }
         }))
         .unwrap();

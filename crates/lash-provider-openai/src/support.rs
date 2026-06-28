@@ -4,18 +4,18 @@ pub(crate) use serde::Deserialize;
 pub(crate) use serde_json::{Value, json};
 pub(crate) use std::collections::HashMap;
 
-pub(crate) use lash_core::SchemaProjectionOverride;
 pub(crate) use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
 pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec,
     LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,
     LlmUsage, ProviderReplayMeta,
 };
+pub(crate) use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 // `ResponseTextMeta` is only referenced by the crate's `#[cfg(test)]`
 // assertions (the request/response shapes that exercise the shared Responses
 // input builder), so gate the re-export to test builds to keep the non-test
 // lib free of unused-import warnings.
-pub(crate) use crate::schema::{OpenAiSchemaProfile, model_id, responses_error_is_retryable};
+pub(crate) use crate::schema::{model_id, responses_error_is_retryable};
 #[cfg(test)]
 pub(crate) use lash_core::llm::types::ResponseTextMeta;
 pub(crate) use lash_core::provider::{

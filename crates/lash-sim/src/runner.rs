@@ -5020,10 +5020,9 @@ fn openai_compatible_request_with_events(stream_events: Option<LlmEventSender>) 
                 "properties": {
                     "q": { "type": "string" }
                 }
-            }),
-            output_schema: json!({}),
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            })
+            .into(),
+            output_schema: json!({}).into(),
         }]),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,

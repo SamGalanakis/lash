@@ -1,3 +1,80 @@
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteSchemaContract {
+    pub canonical: serde_json::Value,
+    #[serde(
+        default,
+        skip_serializing_if = "RemoteSchemaProjectionPolicy::is_default"
+    )]
+    pub projection: RemoteSchemaProjectionPolicy,
+}
+
+impl RemoteSchemaContract {
+    fn new(canonical: serde_json::Value) -> Self {
+        Self {
+            canonical,
+            projection: RemoteSchemaProjectionPolicy::default(),
+        }
+    }
+}
+
+impl Default for RemoteSchemaContract {
+    fn default() -> Self {
+        Self::new(serde_json::Value::Null)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteSchemaProjectionPolicy {
+    #[serde(default, skip_serializing_if = "RemoteProjectionMode::is_auto")]
+    pub mode: RemoteProjectionMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<RemoteSchemaProjectionOverride>,
+}
+
+impl RemoteSchemaProjectionPolicy {
+    fn is_default(&self) -> bool {
+        self.mode == RemoteProjectionMode::Auto && self.overrides.is_empty()
+    }
+}
+
+impl Default for RemoteSchemaProjectionPolicy {
+    fn default() -> Self {
+        Self {
+            mode: RemoteProjectionMode::Auto,
+            overrides: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteProjectionMode {
+    #[default]
+    Auto,
+    ExplicitOnly,
+    Exact,
+}
+
+impl RemoteProjectionMode {
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteSchemaProjectionOverride {
+    pub dialect: String,
+    pub schema: serde_json::Value,
+}
+
+fn default_remote_input_schema() -> RemoteSchemaContract {
+    RemoteSchemaContract::new(serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+    }))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteLlmRequest {
     pub protocol_version: u32,
@@ -319,14 +396,10 @@ pub struct RemoteLlmToolSpec {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default = "default_input_schema")]
-    pub input_schema: serde_json::Value,
+    #[serde(default = "default_remote_input_schema")]
+    pub input_schema: RemoteSchemaContract,
     #[serde(default)]
-    pub output_schema: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub input_schema_projections: Vec<RemoteSchemaProjectionOverride>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output_schema_projections: Vec<RemoteSchemaProjectionOverride>,
+    pub output_schema: RemoteSchemaContract,
 }
 
 impl RemoteLlmToolSpec {
@@ -350,7 +423,7 @@ pub enum RemoteLlmOutputSpec {
     JsonObject,
     JsonSchema {
         name: String,
-        schema: serde_json::Value,
+        schema: RemoteSchemaContract,
         strict: bool,
     },
 }

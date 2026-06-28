@@ -5,14 +5,10 @@ pub struct RemoteToolGrant {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default = "default_input_schema")]
-    pub input_schema: serde_json::Value,
+    #[serde(default = "default_remote_input_schema")]
+    pub input_schema: RemoteSchemaContract,
     #[serde(default)]
-    pub output_schema: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub input_schema_projections: Vec<RemoteSchemaProjectionOverride>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output_schema_projections: Vec<RemoteSchemaProjectionOverride>,
+    pub output_schema: RemoteSchemaContract,
     #[serde(default, skip_serializing_if = "RemoteToolOutputContract::is_static")]
     pub output_contract: RemoteToolOutputContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -175,20 +171,6 @@ fn validate_call_path_binding(
         });
     }
     Ok(())
-}
-
-fn default_input_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {},
-        "additionalProperties": true
-    })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteSchemaProjectionOverride {
-    pub profile: String,
-    pub schema: serde_json::Value,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

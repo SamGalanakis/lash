@@ -161,22 +161,42 @@ impl AnthropicProvider {
         (system_prompt, out)
     }
 
-    fn build_tools(&self, req: &LlmRequest) -> Vec<Value> {
+    fn projection_error(err: SchemaResolutionError) -> LlmTransportError {
+        LlmTransportError::new(format!(
+            "Anthropic schema projection failed: {}",
+            err.first_diagnostic()
+        ))
+        .with_kind(ProviderFailureKind::Validation)
+        .with_raw(
+            json!({
+                "dialect": err.dialect.map(|dialect| dialect.as_str().to_string()),
+                "purpose": format!("{:?}", err.purpose),
+                "diagnostics": err.diagnostics,
+            })
+            .to_string(),
+        )
+    }
+
+    fn build_tools(&self, req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
+        let capabilities = ProviderSchemaCapabilities::anthropic();
         req.tools
             .iter()
             .map(|tool| {
-                let schema = &tool.input_schema;
-                let properties = schema.get("properties").cloned().unwrap_or(json!({}));
-                let required = schema.get("required").cloned().unwrap_or(json!([]));
-                json!({
+                let input_schema = resolve_schema(
+                    &tool.input_schema,
+                    SchemaResolutionRequest {
+                        provider: "Anthropic",
+                        purpose: SchemaPurpose::ToolInput,
+                        dialects: capabilities.dialects_for(SchemaPurpose::ToolInput),
+                    },
+                )
+                .map_err(Self::projection_error)?
+                .schema;
+                Ok(json!({
                     "name": tool.name,
                     "description": tool.description,
-                    "input_schema": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required,
-                    },
-                })
+                    "input_schema": input_schema,
+                }))
             })
             .collect()
     }
@@ -277,7 +297,7 @@ impl AnthropicProvider {
     pub(crate) fn build_request_body(&self, req: &LlmRequest) -> Result<Value, LlmTransportError> {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "Anthropic")?;
         let (system_text, mut messages) = self.build_messages(req);
-        let mut tools = self.build_tools(req);
+        let mut tools = self.build_tools(req)?;
 
         let thinking_config = req
             .model_variant
@@ -362,10 +382,23 @@ impl AnthropicProvider {
                         "additionalProperties": true,
                     },
                 }),
-                LlmOutputSpec::JsonSchema(schema) => json!({
-                    "type": "json_schema",
-                    "schema": schema.schema,
-                }),
+                LlmOutputSpec::JsonSchema(schema) => {
+                    let capabilities = ProviderSchemaCapabilities::anthropic();
+                    let projected = resolve_schema(
+                        &schema.schema,
+                        SchemaResolutionRequest {
+                            provider: "Anthropic",
+                            purpose: SchemaPurpose::StructuredOutput,
+                            dialects: capabilities.dialects_for(SchemaPurpose::StructuredOutput),
+                        },
+                    )
+                    .map_err(Self::projection_error)?
+                    .schema;
+                    json!({
+                        "type": "json_schema",
+                        "schema": projected,
+                    })
+                }
             };
             if !body.get("output_config").is_some_and(Value::is_object) {
                 body["output_config"] = json!({});

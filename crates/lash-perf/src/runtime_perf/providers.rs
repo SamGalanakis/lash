@@ -779,7 +779,8 @@ fn oblique_judge_direct_request(candidate_ids: &[String]) -> DirectRequest {
                     },
                     "rationale": { "type": "string" }
                 }
-            }),
+            })
+            .into(),
         },
     )
 }
@@ -1778,7 +1779,7 @@ mod tests {
                 .expect("valid lashlang binding")
                 .expect("benchmark tool has lashlang binding");
             binding.module_path == vec!["gmail".to_string()]
-                && !def.contract.input_schema["properties"]
+                && !def.contract.input_schema.canonical["properties"]
                     .as_object()
                     .expect("object schema")
                     .is_empty()
@@ -1790,20 +1791,21 @@ mod tests {
         );
         let first = defs.first().expect("fixture tool");
         assert!(
-            first.contract.input_schema["$defs"]["message_part"]["properties"]["parts"]["items"]
+            first.contract.input_schema.canonical["$defs"]["message_part"]["properties"]["parts"]
+                ["items"]
                 ["$ref"]
                 .as_str()
                 == Some("#/$defs/message_part"),
             "fixture should include recursive nested schema refs"
         );
         assert!(
-            first.contract.input_schema["properties"]["payload"]["oneOf"]
+            first.contract.input_schema.canonical["properties"]["payload"]["oneOf"]
                 .as_array()
                 .is_some_and(|variants| variants.len() >= 4),
             "fixture should include provider-style payload unions"
         );
         assert!(
-            first.contract.input_schema["properties"]["projection"]["anyOf"]
+            first.contract.input_schema.canonical["properties"]["projection"]["anyOf"]
                 .as_array()
                 .is_some_and(|variants| variants.len() >= 2),
             "fixture should include output projection unions"
@@ -1873,7 +1875,7 @@ mod tests {
         let search_contract = benchmark_oblique_search_tool_definition().contract;
         assert!(search_contract.output_contract.is_static());
         assert_eq!(
-            search_contract.output_schema,
+            search_contract.output_schema.canonical,
             oblique_search_output_schema()
         );
     }
