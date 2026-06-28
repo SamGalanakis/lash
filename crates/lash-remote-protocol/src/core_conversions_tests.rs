@@ -101,10 +101,18 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         tools: Arc::new(vec![core_llm::LlmToolSpec {
             name: "search".to_string(),
             description: "Search".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
-            output_schema: serde_json::Value::Null,
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            input_schema: lash_core::SchemaContract::new(serde_json::json!({
+                "type": "object",
+                "properties": { "raw": { "const": "x" } }
+            }))
+            .with_override(
+                lash_core::SchemaDialect::OPENAI_TOOL_PARAMETERS,
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "raw": { "type": "string", "enum": ["x"] } }
+                }),
+            ),
+            output_schema: serde_json::Value::Null.into(),
         }]),
         tool_choice: core_llm::LlmToolChoice::Auto,
         model_variant: Some("fast".to_string()),
@@ -125,6 +133,10 @@ fn llm_request_and_response_round_trip_owned_dtos() {
     assert_eq!(core.model, "gpt-test");
     assert_eq!(core.model_variant.as_deref(), Some("fast"));
     assert_eq!(core.attachments[0].data, vec![1, 2, 3]);
+    assert_eq!(
+        core.tools[0].input_schema.projection.overrides[0].dialect,
+        lash_core::SchemaDialect::OPENAI_TOOL_PARAMETERS
+    );
 
     let response = core_llm::LlmResponse {
         full_text: "done".to_string(),
@@ -810,10 +822,8 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         id: format!("remote-tool:{name}"),
         name: name.to_string(),
         description: "demo".to_string(),
-        input_schema: default_input_schema(),
-        output_schema: serde_json::Value::Null,
-        input_schema_projections: Vec::new(),
-        output_schema_projections: Vec::new(),
+        input_schema: default_remote_input_schema(),
+        output_schema: RemoteSchemaContract::default(),
         output_contract: RemoteToolOutputContract::Static,
         examples: Vec::new(),
         activation: None,

@@ -18,6 +18,10 @@ pub(crate) use lash_core::provider::{
     CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy,
     ProviderOptions, resolve_generation_policy,
 };
+pub(crate) use lash_core::{
+    ProviderSchemaCapabilities, SchemaPurpose, SchemaResolutionError, SchemaResolutionRequest,
+    resolve_schema,
+};
 pub(crate) use lash_llm_transport::normalize::{
     merge_usage, serialize_options_tail, terminal_reason_from_parts,
 };

@@ -509,7 +509,8 @@ fn openai_responses_sse_payload(turn_index: usize) -> String {
                 "item_id": message_id.as_str(),
                 "content_index": 0,
                 "delta": delta
-            }),
+            })
+            .into(),
         );
     }
     full_text.push_str("runtime perf benchmark ok");
@@ -674,7 +675,8 @@ fn direct_llm_client_request(turn_index: usize) -> lash::direct::DirectRequest {
                         ]
                     }
                 }
-            }),
+            })
+            .into(),
             strict: true,
         },
     )

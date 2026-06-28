@@ -130,15 +130,15 @@ mod tests {
         let definition = fetch_url_tool_definition();
 
         assert_eq!(
-            definition.contract.output_schema["type"],
+            definition.contract.output_schema.canonical["type"],
             serde_json::json!("object")
         );
         assert_eq!(
-            definition.contract.output_schema["required"],
+            definition.contract.output_schema.canonical["required"],
             serde_json::json!(["url", "content"])
         );
         assert_eq!(
-            definition.contract.output_schema["additionalProperties"],
+            definition.contract.output_schema.canonical["additionalProperties"],
             serde_json::json!(false)
         );
         assert_eq!(

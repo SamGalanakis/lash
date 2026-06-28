@@ -980,7 +980,7 @@ mod tests {
         let definition = apply_patch_tool_definition();
 
         assert_eq!(
-            definition.contract.output_schema["properties"]["files"]["type"],
+            definition.contract.output_schema.canonical["properties"]["files"]["type"],
             serde_json::json!("array")
         );
         let rendered = definition.compact_contract().render_signature();

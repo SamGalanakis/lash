@@ -4,6 +4,7 @@ pub mod llm;
 pub mod plugin;
 pub mod prompt;
 pub mod sansio;
+pub mod schema_contract;
 pub mod session;
 pub mod session_model;
 pub mod tool_catalog;
@@ -34,6 +35,11 @@ pub use sansio::{
     TurnMachine, TurnMachineConfig, TurnProtocol, UnitTurnProtocol, WaitingExecState,
     WaitingLlmState, render_turn_causes_prompt,
 };
+pub use schema_contract::{
+    ProjectionMode, ProviderSchemaCapabilities, ResolvedSchema, SchemaContract, SchemaDialect,
+    SchemaProjectionOverride, SchemaProjectionPolicy, SchemaPurpose, SchemaResolutionError,
+    SchemaResolutionRequest, project_anthropic_bedrock_schema, project_for_dialect, resolve_schema,
+};
 pub use session::{
     CompletedTurn, ExecImage, ExecResponse, PromptUsage, SansIoSessionState,
     TextProjectionMetadata, apply_completed_turn,
@@ -52,9 +58,9 @@ pub use tool_catalog::{
     ToolContractResolver, build_tool_catalog,
 };
 pub use tool_contract::{
-    CompactToolContract, LashSchema, ModelTool, SchemaProjectionOverride, ToolActivation,
-    ToolArgumentProjectionPolicy, ToolContract, ToolDefinition, ToolId, ToolManifest,
-    ToolOutputContract, ToolRetryPolicy, ToolScheduling, schema_for, validate_tool_input,
+    CompactToolContract, LashSchema, ModelTool, ToolActivation, ToolArgumentProjectionPolicy,
+    ToolContract, ToolDefinition, ToolId, ToolManifest, ToolOutputContract, ToolRetryPolicy,
+    ToolScheduling, schema_for, validate_tool_input,
 };
 pub use tool_output::{
     ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolCallOutput, ToolCallRecord,

@@ -1,3 +1,5 @@
+use crate::{SchemaContract, SchemaProjectionOverride};
+
 /// How a tool's invocations should be scheduled relative to other tools in
 /// the same batch of model-produced tool calls.
 ///
@@ -314,14 +316,10 @@ pub struct ToolManifest {
 /// Heavy tool contract resolved only when a prompt or call needs schemas/docs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolContract {
-    #[serde(default = "ToolContract::default_input_schema")]
-    pub input_schema: serde_json::Value,
+    #[serde(default = "ToolContract::default_input_schema_contract")]
+    pub input_schema: SchemaContract,
     #[serde(default)]
-    pub output_schema: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub input_schema_projections: Vec<SchemaProjectionOverride>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output_schema_projections: Vec<SchemaProjectionOverride>,
+    pub output_schema: SchemaContract,
     #[serde(default, skip_serializing_if = "ToolOutputContract::is_static")]
     pub output_contract: ToolOutputContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -331,10 +329,8 @@ pub struct ToolContract {
 impl Default for ToolContract {
     fn default() -> Self {
         Self {
-            input_schema: Self::default_input_schema(),
-            output_schema: serde_json::Value::Null,
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            input_schema: Self::default_input_schema_contract(),
+            output_schema: serde_json::Value::Null.into(),
             output_contract: ToolOutputContract::Static,
             examples: Vec::new(),
         }
@@ -342,6 +338,10 @@ impl Default for ToolContract {
 }
 
 impl ToolContract {
+    fn default_input_schema_contract() -> SchemaContract {
+        Self::default_input_schema().into()
+    }
+
     pub fn default_input_schema() -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -389,7 +389,9 @@ impl ToolContract {
             signature: self.input_signature_with_name(manifest, signature_name),
             returns: self.output_summary(),
             parameters: self.parameter_metadata(),
-            return_fields: self.output_contract.return_fields(&self.output_schema),
+            return_fields: self
+                .output_contract
+                .return_fields(self.output_schema.canonical()),
             description: manifest.description.trim().to_string(),
             examples: compact_examples(&self.examples, example_limit),
         }
@@ -425,7 +427,8 @@ impl ToolContract {
     }
 
     pub fn output_summary(&self) -> String {
-        self.output_contract.return_type_label(&self.output_schema)
+        self.output_contract
+            .return_type_label(self.output_schema.canonical())
     }
 
     pub fn parameter_metadata(&self) -> Vec<serde_json::Value> {
@@ -441,13 +444,11 @@ impl ToolContract {
             description: manifest.description.clone(),
             input_schema: self.input_schema.clone(),
             output_schema: self.output_schema.clone(),
-            input_schema_projections: self.input_schema_projections.clone(),
-            output_schema_projections: self.output_schema_projections.clone(),
         }
     }
 
     fn parameter_docs(&self) -> Vec<ParameterDoc> {
-        let mut params = schema_parameter_docs(&self.input_schema);
+        let mut params = schema_parameter_docs(self.input_schema.canonical());
         self.output_contract
             .apply_type_witness_parameter(&mut params);
         params
@@ -471,16 +472,8 @@ pub struct ToolDefinition {
 pub struct ModelTool {
     pub name: String,
     pub description: String,
-    pub input_schema: serde_json::Value,
-    pub output_schema: serde_json::Value,
-    pub input_schema_projections: Vec<SchemaProjectionOverride>,
-    pub output_schema_projections: Vec<SchemaProjectionOverride>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SchemaProjectionOverride {
-    pub profile: String,
-    pub schema: serde_json::Value,
+    pub input_schema: SchemaContract,
+    pub output_schema: SchemaContract,
 }
 
 const COMPACT_TOOL_EXAMPLE_LIMIT: usize = 2;
@@ -593,8 +586,8 @@ impl ToolDefinition {
                 retry_policy: default_tool_retry_policy(),
             },
             contract: ToolContract {
-                input_schema,
-                output_schema,
+                input_schema: input_schema.into(),
+                output_schema: output_schema.into(),
                 ..ToolContract::default()
             },
         }
@@ -658,11 +651,9 @@ impl ToolDefinition {
     ) -> Self {
         let profile = profile.into();
         self.contract
-            .input_schema_projections
-            .retain(|projection| projection.profile != profile);
-        self.contract
-            .input_schema_projections
-            .push(SchemaProjectionOverride { profile, schema });
+            .input_schema
+            .projection
+            .set_override(SchemaProjectionOverride::new(profile, schema));
         self
     }
 
@@ -673,11 +664,9 @@ impl ToolDefinition {
     ) -> Self {
         let profile = profile.into();
         self.contract
-            .output_schema_projections
-            .retain(|projection| projection.profile != profile);
-        self.contract
-            .output_schema_projections
-            .push(SchemaProjectionOverride { profile, schema });
+            .output_schema
+            .projection
+            .set_override(SchemaProjectionOverride::new(profile, schema));
         self
     }
 
@@ -777,7 +766,7 @@ impl ToolDefinition {
     }
 
     fn parameter_docs(&self) -> Vec<ParameterDoc> {
-        let mut params = schema_parameter_docs(&self.contract.input_schema);
+        let mut params = schema_parameter_docs(self.contract.input_schema.canonical());
         self.contract
             .output_contract
             .apply_type_witness_parameter(&mut params);

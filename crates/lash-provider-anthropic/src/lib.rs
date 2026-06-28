@@ -110,7 +110,8 @@ mod tests {
                 "properties": {
                     "answer": { "type": "string" }
                 }
-            }),
+            })
+            .into(),
         }));
 
         let body = provider.build_request_body(&req).expect("body");
@@ -154,6 +155,69 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn structured_output_strips_bedrock_unsafe_array_constraints() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "rank")]);
+        req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+            name: "rank_result".to_string(),
+            strict: true,
+            schema: json!({
+                "type": "object",
+                "required": ["ranked"],
+                "properties": {
+                    "ranked": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": { "type": "string" }
+                    }
+                }
+            })
+            .into(),
+        }));
+
+        let body = provider.build_request_body(&req).expect("body");
+        let ranked = &body["output_config"]["format"]["schema"]["properties"]["ranked"];
+
+        assert!(ranked.get("minItems").is_none());
+        assert!(ranked.get("maxItems").is_none());
+        assert!(
+            ranked["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("maxItems=2"))
+        );
+    }
+
+    #[test]
+    fn tool_input_schema_uses_anthropic_projection() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "rank")]);
+        req.tools = Arc::new(vec![LlmToolSpec {
+            name: "rank".to_string(),
+            description: "Rank".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": { "type": "string" }
+                    }
+                }
+            })
+            .into(),
+            output_schema: json!({}).into(),
+        }]);
+
+        let body = provider.build_request_body(&req).expect("body");
+        let ids = &body["tools"][0]["input_schema"]["properties"]["ids"];
+
+        assert!(ids.get("minItems").is_none());
+        assert!(ids.get("maxItems").is_none());
     }
 
     #[test]

@@ -11,8 +11,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
 use crate::responses_shared as shared;
-use crate::schema::{OpenAiSchemaProfile, model_id};
-use lash_core::SchemaProjectionOverride;
+use crate::schema::model_id;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash_core::llm::types::{LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash_core::provider::{
@@ -20,6 +19,7 @@ use lash_core::provider::{
     ProviderFactory, ProviderFailureClassifier, ProviderModelPolicy, ProviderOptions,
     ProviderReliability, resolve_generation_policy,
 };
+use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
     build_http_client, header_pairs, read_response_text, request_body_snapshot,
@@ -230,14 +230,6 @@ impl CodexProvider {
         .with_code(code)
     }
 
-    fn projected_schema(
-        canonical: &Value,
-        overrides: &[SchemaProjectionOverride],
-        profile: OpenAiSchemaProfile,
-    ) -> Result<Value, LlmTransportError> {
-        shared::projected_schema(PROVIDER, canonical, overrides, profile)
-    }
-
     fn build_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
         shared::build_tools(PROVIDER, req)
     }
@@ -338,10 +330,12 @@ impl CodexProvider {
             body["text"]["format"] = match output_spec {
                 LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
                 LlmOutputSpec::JsonSchema(schema) => {
-                    let projected = Self::projected_schema(
+                    let capabilities = ProviderSchemaCapabilities::openai(false);
+                    let projected = shared::projected_schema(
+                        PROVIDER,
                         &schema.schema,
-                        &[],
-                        OpenAiSchemaProfile::StructuredOutput,
+                        &capabilities,
+                        SchemaPurpose::StructuredOutput,
                     )?;
                     json!({
                         "type": "json_schema",
@@ -1238,17 +1232,16 @@ mod tests {
         req.tools = Arc::new(vec![LlmToolSpec {
             name: "empty".to_string(),
             description: "Empty".to_string(),
-            input_schema: json!({"type": "object"}),
-            output_schema: json!({}),
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            input_schema: json!({"type": "object"}).into(),
+            output_schema: json!({}).into(),
         }]);
         req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
             name: "result".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": { "summary": { "type": "string" } }
-            }),
+            })
+            .into(),
             strict: true,
         }));
 
@@ -1337,7 +1330,7 @@ mod tests {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
             name: "bad".to_string(),
-            schema: json!({"type": "object", "allOf": []}),
+            schema: json!({"type": "object", "allOf": []}).into(),
             strict: true,
         }));
 

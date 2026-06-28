@@ -815,17 +815,18 @@ mod tests {
         let definition = plan_exit_tool_definition();
 
         assert_eq!(
-            definition.contract.input_schema["additionalProperties"],
+            definition.contract.input_schema.canonical["additionalProperties"],
             serde_json::json!(false)
         );
         assert_eq!(
-            definition.contract.output_schema["required"],
+            definition.contract.output_schema.canonical["required"],
             serde_json::json!(["approved", "plan_path"])
         );
         assert!(
             definition
                 .contract
                 .output_schema
+                .canonical
                 .to_string()
                 .contains("execution_mode")
         );

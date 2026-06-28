@@ -180,7 +180,7 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
 fn spawn_schema_is_strict_and_nameless() {
     let registry = default_registry(&BTreeMap::new());
     let tool = rlm::spawn_agent_tool_definition(&registry.names());
-    let schema = tool.contract.input_schema;
+    let schema = tool.contract.input_schema.canonical;
     let retired_key = ["agent", "_", "name"].concat();
 
     let properties = schema
@@ -277,6 +277,7 @@ fn single_capability_spawn_can_omit_capability_field() {
         !rlm_spawn
             .contract
             .input_schema
+            .canonical
             .get("required")
             .and_then(serde_json::Value::as_array)
             .expect("required fields")

@@ -79,7 +79,7 @@ mod tests {
         let definition = batch_tool_definition();
 
         assert_eq!(
-            definition.contract.output_schema["required"],
+            definition.contract.output_schema.canonical["required"],
             serde_json::json!(["results"])
         );
         let rendered = definition.compact_contract().render_signature();

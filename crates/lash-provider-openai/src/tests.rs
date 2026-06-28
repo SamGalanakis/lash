@@ -254,10 +254,8 @@ fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
     req.tools = Arc::new(vec![LlmToolSpec {
         name: "search".to_string(),
         description: "Search".to_string(),
-        input_schema: json!({"type": "object"}),
-        output_schema: json!({}),
-        input_schema_projections: Vec::new(),
-        output_schema_projections: Vec::new(),
+        input_schema: json!({"type": "object"}).into(),
+        output_schema: json!({}).into(),
     }]);
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
@@ -286,26 +284,24 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
         LlmToolSpec {
             name: "empty".to_string(),
             description: "Empty".to_string(),
-            input_schema: json!({"type": "object"}),
-            output_schema: json!({}),
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            input_schema: json!({"type": "object"}).into(),
+            output_schema: json!({}).into(),
         },
         LlmToolSpec {
             name: "override".to_string(),
             description: "Override".to_string(),
-            input_schema: json!({"type": "object", "properties": {"raw": {"const": "x"}}}),
-            output_schema: json!({}),
-            input_schema_projections: vec![lash_core::SchemaProjectionOverride {
-                profile: OpenAiSchemaProfile::ToolParameters
-                    .projection_id()
-                    .to_string(),
-                schema: json!({
+            input_schema: lash_core::SchemaContract::new(json!({
+                "type": "object",
+                "properties": {"raw": {"const": "x"}}
+            }))
+            .with_override(
+                lash_core::SchemaDialect::OPENAI_TOOL_PARAMETERS,
+                json!({
                     "type": "object",
                     "properties": { "raw": { "type": "string", "enum": ["x"] } }
                 }),
-            }],
-            output_schema_projections: Vec::new(),
+            ),
+            output_schema: json!({}).into(),
         },
         LlmToolSpec {
             name: "schemars".to_string(),
@@ -324,10 +320,9 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
                         ]
                     }
                 }
-            }),
-            output_schema: json!({}),
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            })
+            .into(),
+            output_schema: json!({}).into(),
         },
     ]);
 
@@ -362,7 +357,8 @@ fn structured_output_schema_is_projected_or_rejected_locally() {
         schema: json!({
             "type": "object",
             "properties": { "summary": { "type": "string" } }
-        }),
+        })
+        .into(),
         strict: true,
     }));
 
@@ -380,7 +376,7 @@ fn structured_output_schema_is_projected_or_rejected_locally() {
 
     req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
         name: "bad".to_string(),
-        schema: json!({"type": "object", "allOf": []}),
+        schema: json!({"type": "object", "allOf": []}).into(),
         strict: true,
     }));
     let err = OpenAiProvider::new("key")
@@ -388,6 +384,42 @@ fn structured_output_schema_is_projected_or_rejected_locally() {
         .unwrap_err();
     assert_eq!(err.kind, ProviderFailureKind::Validation);
     assert!(err.message.contains("allOf"));
+}
+
+#[test]
+fn openrouter_can_be_configured_for_bedrock_safe_schema_dialect() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "rank")]);
+    req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+        name: "rank_result".to_string(),
+        schema: json!({
+            "type": "object",
+            "required": ["ranked"],
+            "properties": {
+                "ranked": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": { "type": "string" }
+                }
+            }
+        })
+        .into(),
+        strict: true,
+    }));
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_schema_capabilities(lash_core::ProviderSchemaCapabilities::bedrock_claude())
+        .build_chat_request_body(&req, true)
+        .unwrap();
+    let ranked = &body["response_format"]["json_schema"]["schema"]["properties"]["ranked"];
+
+    assert!(ranked.get("minItems").is_none());
+    assert!(ranked.get("maxItems").is_none());
+    assert!(
+        ranked["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("minItems=2"))
+    );
 }
 
 #[test]
@@ -553,10 +585,9 @@ fn chat_body_honors_compat_max_token_field_streaming_usage_and_strict_tools() {
         input_schema: json!({
             "type": "object",
             "properties": { "q": { "type": "string" } }
-        }),
-        output_schema: json!({}),
-        input_schema_projections: Vec::new(),
-        output_schema_projections: Vec::new(),
+        })
+        .into(),
+        output_schema: json!({}).into(),
     }]);
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
@@ -586,10 +617,8 @@ fn local_openai_compatible_suppresses_optional_openai_fields() {
     req.tools = Arc::new(vec![LlmToolSpec {
         name: "lookup".to_string(),
         description: "Lookup".to_string(),
-        input_schema: json!({"type": "object"}),
-        output_schema: json!({}),
-        input_schema_projections: Vec::new(),
-        output_schema_projections: Vec::new(),
+        input_schema: json!({"type": "object"}).into(),
+        output_schema: json!({}).into(),
     }]);
 
     let local = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1");

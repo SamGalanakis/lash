@@ -316,10 +316,9 @@ mod tests {
                         "type": "object"
                     }
                 }
-            }),
-            output_schema: json!({}),
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            })
+            .into(),
+            output_schema: json!({}).into(),
         }]);
         let legacy_body = GoogleOAuthProvider::build_request(&provider, &legacy, Vec::new(), None);
         let parameters =

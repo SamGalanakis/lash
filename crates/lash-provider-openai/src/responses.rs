@@ -4,14 +4,6 @@ use crate::support::*;
 const PROVIDER: &str = "OpenAI-compatible";
 
 impl OpenAiCompatibleProvider {
-    pub(crate) fn projected_schema(
-        canonical: &Value,
-        overrides: &[SchemaProjectionOverride],
-        profile: OpenAiSchemaProfile,
-    ) -> Result<Value, LlmTransportError> {
-        shared::projected_schema(PROVIDER, canonical, overrides, profile)
-    }
-
     pub(crate) fn build_responses_request_body(
         &self,
         req: &LlmRequest,
@@ -19,7 +11,12 @@ impl OpenAiCompatibleProvider {
     ) -> Result<Value, LlmTransportError> {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI Responses")?;
         let compat = self.resolved_compat(CompletionEndpoint::Responses);
-        let tools = shared::build_tools_with_strict(PROVIDER, req, compat.strict_tools)?;
+        let tools = shared::build_tools_with_capabilities(
+            PROVIDER,
+            req,
+            compat.strict_tools,
+            &compat.schema_capabilities,
+        )?;
         let (instructions, input) =
             shared::build_responses_input(req, shared::ResponsesInputOptions::OPENAI);
         let policy = resolve_generation_policy(
@@ -64,10 +61,11 @@ impl OpenAiCompatibleProvider {
             let format = match output_spec {
                 LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
                 LlmOutputSpec::JsonSchema(schema) => {
-                    let projected = Self::projected_schema(
+                    let projected = shared::projected_schema(
+                        PROVIDER,
                         &schema.schema,
-                        &[],
-                        OpenAiSchemaProfile::StructuredOutput,
+                        &compat.schema_capabilities,
+                        SchemaPurpose::StructuredOutput,
                     )?;
                     json!({
                         "type": "json_schema",
