@@ -2,29 +2,32 @@
 
 ## Status
 
-Planning target for Lash's Deterministic Simulation Harness. The full DST
-end-state is stated explicitly before the implementation phases; phase gates
-and v1 slices are only the path toward that end-state, not the target itself.
+Planning target for Lash's Deterministic Simulation Harness. This document
+states the true wholehog DST end-state first; phase gates and v1 slices are
+only the path toward that end-state, not the target itself.
 
 Current executable evidence in the implementation:
 
-- Google Provider Wire Scripts now run through the production
-  `LlmHttpTransport` seam and are included in the canonical provider matrix.
+- OpenAI-compatible, direct OpenAI Responses, Anthropic, and Google Provider
+  Wire Scripts run through real provider crates via the production
+  `LlmHttpTransport` seam and are included in the canonical provider matrix;
+  Codex/OAuth/auth-flow exclusions are manifest-reviewed instead of accidental.
 - Selected generated traces replay through real Lash SQLite session
   persistence via `SqliteSessionStoreFactory`, with durable peer stores and
   reopened-session evidence in the replay report.
 - Full-lane Postgres trace replay is implemented as `lash-sim replay-postgres
   <trace> --out <artifact-root>`, gated by `LASH_POSTGRES_DATABASE_URL` or the
   confidence gate's Docker bootstrap, and writes replay/divergence artifacts.
-- Generated traces are produced by `lash-sim.generated-workload.v5`, a
+- Generated traces are produced by `lash-sim.generated-workload.v8`, a
   deterministic state-machine generator over sessions, provider scripts,
   queued ingress, cancellation, triggers, observer reconnects, backend
   failure choices, provider mutations, tools, exec-code, durable effects,
   process wakes, worker lease/failover, retries, and duplicates.
-- Generated traces include scheduler-owned delivery evidence, a named
+- Generated traces include scheduler/completion evidence, a named
   `sim.oracle.operational-coverage.v1` oracle for the operational case set,
   and scenario contract oracles for Runtime, Standard, RLM, and Agent coverage
-  without importing scenario test modules.
+  without importing scenario test modules. This is strong deterministic
+  conformance/replay evidence; by itself it is not yet true DST.
 - Runtime, Standard, RLM, and Agent scenario contract metadata is now exported
   from production/test-independent modules and serialized into `lash-sim`
   summaries alongside the generated oracle verdicts.
@@ -41,14 +44,38 @@ Current executable evidence in the implementation:
 - Provider manifests include reviewed non-DST exclusions for remaining
   Codex/OAuth/direct provider paths so direct reqwest/OAuth seams are named
   instead of accidental.
-- `lash-sim minimize <trace>` writes a minimized regression package containing
-  the minimized trace, replay verdict, oracle verdict, final summary, and
-  package manifest; failing minimization preserves the failing oracle id and
-  semantic reason. Failing trace fixture specs live under
+- `lash-sim minimize <trace>` writes a minimized package containing the
+  minimized trace, replay verdict, oracle verdict, final summary, and package
+  manifest; minimization preserves the failing oracle id and semantic reason
+  when the input is a failure. Failing negative fixtures live under
   `crates/lash-sim/failure-fixtures/`.
 - The confidence gate declares sim lane artifacts under
   `target/confidence/<lane>/sim/`, including env-gated Postgres conformance
   evidence when the lane is enabled.
+
+Missing DST substance before the harness can be called done:
+
+- The scheduler must actually interleave work: start at least two sessions'
+  turns concurrently, then have `BoundaryScheduler` resolve scripted-transport
+  provider chunks and final completions in seeded order. Current stable
+  evidence must be treated as operation-level conformance/replay unless the
+  in-progress provider-event scheduler path is landed and verified.
+- Tool and durable-effect coverage must pass through a real turn: a scripted
+  turn calls a tool or awaits a durable effect, the scheduler delivers the
+  completion, and the test proves suspend-to-resume behavior. Isolated runtime
+  boundary execution is not enough.
+- The invariant floor for true DST is graph acyclicity, exactly one active
+  Agent Frame, monotonic usage accounting, and Final Value as a semantic
+  outcome distinct from transcript/prose. Scenario-contract oracles must prove
+  each contract with distinct evidence/semantics or by running the named
+  scenario itself.
+- The docs and confidence summaries must not claim the harness finds bugs that
+  example tests miss until one real discovered regression has been minimized
+  and promoted to a replay fixture under `crates/lash-sim/replays/`.
+- Generator gaps remain done-line blockers: the fast profile must be genuinely
+  random, provider mutations must have distinct executable behaviors,
+  queued-ingress mode must vary, and worker failover must be generated as real
+  failover rather than only stale-completion evidence.
 
 ## Related Documents
 
@@ -70,10 +97,13 @@ Current executable evidence in the implementation:
 
 Build a replayable generated execution mode that drives real Lash runtime,
 protocol, provider, tool, process, and persistence contracts inside a
-deterministic simulated world. The harness should find schedule, failure,
-provider-streaming, lease, replay, and backend-ordering bugs that example-based
-tests miss, while every failure is reproducible from a seed, generator version,
-and event trace and can later be minimized into a Simulation Replay Script.
+deterministic simulated world. In the done state, the harness should find
+schedule, failure, provider-streaming, lease, replay, and backend-ordering bugs
+that example-based tests miss, while every failure is reproducible from a seed,
+generator version, and event trace and can later be minimized into a Simulation
+Replay Script. Until a real discovered regression is promoted to a replay
+fixture, that bug-finding claim remains a design goal rather than current
+evidence.
 
 The highest-value property is not "more random tests". It is one deterministic
 world that can compose the contracts Lash already owns:
@@ -108,6 +138,28 @@ Lash's declared contracts survived deterministic generated workloads,
 boundary-event schedule variation, fault injection, model checking, backend
 replay, provider wire mutation, and regression replay.
 
+The done-line is intentionally higher than a deterministic conformance/replay
+harness. A true Lash DST must satisfy all of these criteria:
+
+- Scheduler interleaving is real: at least two sessions' turns are live at the
+  same time, and `BoundaryScheduler` chooses among scripted-transport provider
+  chunks and turn completions in seeded order.
+- Tools and durable effects run through real turns: a generated/scripted turn
+  calls a tool or awaits a durable effect, the scheduler delivers the result,
+  and the trace proves suspend-to-resume semantics.
+- The invariant floor is executable: graph acyclicity, exactly one active Agent
+  Frame, monotonic usage accounting, and Final Value as a semantic outcome
+  distinct from transcript/prose all have named oracle verdicts.
+- Scenario-contract oracles are per-contract: each Runtime, Standard, RLM, and
+  Agent contract has distinct evidence/semantics or an actual named scenario
+  run, not a generic coverage bucket.
+- At least one real discovered regression has been minimized, replayed, and
+  promoted under `crates/lash-sim/replays/` before the docs or summaries claim
+  the harness finds bugs example tests miss.
+- The generator exercises the state space it names: fast profiles are genuinely
+  random, provider mutations differ semantically, queued-ingress modes vary,
+  and worker failover is generated as failover.
+
 ### Endstate Invariants
 
 The DST owns invariant checks over the observable Lash model. These invariants
@@ -115,8 +167,9 @@ are executable oracles, not prose expectations:
 
 - Session, turn, graph, and transcript invariants: every turn has a single
   coherent lifecycle; final output is emitted once; progress and final values
-  are not duplicated; graph edges reference existing nodes; observer replay and
-  live updates converge on the same state.
+  are not duplicated; the session graph is acyclic; graph edges reference
+  existing nodes; every session has exactly one active Agent Frame; observer
+  replay and live updates converge on the same state.
 - Process invariants: process runs have one owner at a time; lease transitions
   are monotonic; stale completions from prior owners/incarnations are rejected;
   process output and completion state are replay-stable.
@@ -133,7 +186,11 @@ are executable oracles, not prose expectations:
 - Provider invariants: provider request serialization, response parsing,
   streaming fragmentation, non-2xx envelopes, retryability, cancellation,
   timeout handling, and usage/terminal-reason normalization all run through
-  real provider crates and the production transport seam.
+  real provider crates and the production transport seam; token and provider
+  usage are monotonic where streams report incremental usage.
+- Semantic outcome invariants: Final Value is an app/protocol result distinct
+  from transcript text, assistant prose, and raw provider chunks. A transcript
+  can be correct while the Final Value is wrong, and the oracle must catch that.
 - Persistence invariants: the high-volume model store, SQLite replay, and
   Postgres replay agree on observable Lash state for selected and minimized
   traces; any divergence is a first-class failure artifact.
@@ -146,14 +203,18 @@ events become available.
 
 The generated world includes:
 
-- Multi-session workloads with interleaved turns, queued input, active-turn
-  steering, cancellation, process wakes, triggers, observer reconnects, and
-  selected facade replays.
+- Multi-session workloads with genuinely concurrent turns, queued input,
+  active-turn steering, cancellation, process wakes, triggers, observer
+  reconnects, and selected facade replays.
+- Boundary scheduling that chooses among provider response starts, chunks,
+  stream ends, tool results, durable-effect completions, and final turn
+  completions from at least two live sessions in seeded order.
 - Provider Wire Scripts for every migrated provider path: OpenAI-compatible,
   direct OpenAI, Anthropic, Google, and any later Codex/OAuth phase that is
   deliberately brought under this contract.
 - Tool and durable-effect scripts that cover success, failure, delayed
-  completion, cancellation, replay, duplicate completion, and timeout.
+  completion, cancellation, replay, duplicate completion, and timeout through
+  real turn execution, not isolated effect helper calls.
 - A Simulated Worker Topology with worker identities, lease owners,
   incarnations, crash/restart, failover, stale completions, and cross-worker
   contention, all modeled in one process.
@@ -191,7 +252,11 @@ Every interesting or failing run produces a complete reproducibility package:
 boundary sequence, oracle id, and abstract final summary. `lash-sim minimize
 <trace>` must remove events, operations, chunks, workers, and provider scripts
 only while preserving the same oracle class for the same semantic reason.
-Accepted minimized traces become regression fixtures under `crates/lash-sim`.
+Accepted minimized traces become regression fixtures under
+`crates/lash-sim/replays/` only after review confirms they came from a real
+discovered regression or a deliberately named conformance regression. Generated
+coverage packages and negative fixtures are not promoted bug discoveries by
+themselves.
 
 ### Endstate Confidence Gate
 
@@ -202,13 +267,14 @@ extend that contract instead of creating a second gate.
   seed set, and basic oracle set with deterministic artifacts.
 - `default` runs broader generated workloads, selected SQLite replay, and
   enough provider matrix coverage to catch normal PR regressions.
-- `broad` runs a bounded full-profile generated workload, all generated and
-  minimized failing-regression traces through SQLite and Postgres when
-  available, targeted mutation evidence, and failure artifact verification. It
-  is a broad current artifact, not a true full confidence claim.
+- `broad` runs a bounded full-profile generated workload, reviewed replay
+  fixtures, backend-replayable generated packages, targeted mutation evidence,
+  and SQLite/Postgres replay when available. It is broad current evidence, not
+  a true full confidence claim.
 - `full` runs long randomized workloads, full migrated-provider matrix,
   SQLite/Postgres replay, full mutation/property test lanes, and failure
-  artifact verification. A green `full` lane means full mutation actually ran.
+  artifact verification. A green `full` lane means full mutation actually ran
+  and the true DST done-line criteria above are being exercised.
 
 The gate emits machine-readable summaries and reproduction commands under
 `target/confidence/<lane>/sim/`. Bounded broad artifacts report
@@ -558,10 +624,12 @@ Example:
 }
 ```
 
-First vertical slice semantics: `at` values are nondecreasing metadata reserved
-for the future boundary scheduler. The fixed-script runner validates monotonic
-ordering, records the semantics in artifacts, and executes events in document
-order without simulated-time scheduling.
+Fixed-script conformance semantics: `at` values are nondecreasing metadata in
+the provider corpus lane. That lane validates monotonic ordering, records the
+semantics in artifacts, and proves provider parsing/normalization. It does not
+by itself prove scheduler interleaving. The DST scheduler lane must honor those
+events as release points for live scripted transports and choose among chunks
+from concurrent turns in seeded order.
 
 The script language needs these event kinds:
 
@@ -593,7 +661,11 @@ Provider Wire Scripts are hybrid:
 
 ## Boundary-Event Scheduler Model
 
-The scheduler controls boundary completions, not future polling.
+The scheduler controls boundary completions, not future polling. Sequencing
+whole operations is useful conformance evidence, but it is not the wholehog DST
+end-state. The done state requires concurrent pending boundaries from at least
+two sessions, including provider chunk releases and final turn completions, and
+the selected delivery order must come from `BoundaryScheduler`.
 
 ### Boundary Events
 
@@ -602,7 +674,8 @@ Initial v1 event types:
 | Boundary | Examples |
 | --- | --- |
 | Ingress | Open session, submit turn, enqueue next-turn input, enqueue active-turn input, cancel input, emit trigger occurrence. |
-| Provider | Response start, SSE chunk, buffered body, retryable error, timeout, disconnect, stream end. |
+| Provider event | Response start, SSE chunk, buffered body, retryable error, timeout, disconnect, stream end. |
+| Provider turn completion | Terminal provider result after the scheduled provider events unblock the live turn. |
 | Tool | Tool call accepted, result returned, failure returned, cancellation observed. |
 | Durable effect | Sleep complete, direct completion result, exec-code result, replayed effect outcome, durable effect failure. |
 | Store/backend | Reopen model store snapshot, switch selected replay to SQLite/Postgres, inject backend operation failure only where a production backend can return it. |
@@ -615,14 +688,15 @@ Initial v1 event types:
 
 1. The runner builds a workload from a seed and generator version.
 2. The runner starts deterministic actors: sessions, turns, worker topology
-   events, observers, and scripted providers.
+   events, observers, and scripted providers. At least two session turns must be
+   able to remain live concurrently.
 3. Actors use production APIs until they hit a boundary seam and register a
    pending boundary handle with the scheduler.
 4. The scheduler selects the next deliverable boundary according to the
    workload schedule, seeded choices, and causal constraints.
 5. The selected boundary completion is delivered through the normal runtime
-   seam, such as a provider byte stream, effect host result, clock wake, or
-   worker lifecycle transition.
+   seam, such as a provider byte stream chunk, provider terminal completion,
+   tool/effect host result, clock wake, or worker lifecycle transition.
 6. The trace records the delivery, observed outputs, store writes, and oracle
    results with stable aliases for dynamic IDs.
 7. Oracles run after every semantic boundary and after final quiescence.
@@ -634,7 +708,8 @@ Initial v1 event types:
 - All generated choices come from a named generator version plus seed.
 - Simulated time is the only clock visible to sim-controlled components.
 - Simultaneous pending boundaries use deterministic tie-breaking by stable
-  actor alias and boundary sequence.
+  actor alias and boundary sequence, with seeded selection among candidates at
+  the same logical tick.
 - Dynamic runtime IDs such as UUIDs are mapped to stable trace aliases.
   Deterministic raw IDs are not required for v1 unless an oracle depends on the
   literal value.
@@ -672,12 +747,12 @@ Each workload contains:
 | Family | Generated operations |
 | --- | --- |
 | Session/turn | Open sessions, submit turns, run selected facade turns, stream events, start observations, resume observations, close/reopen sessions. |
-| Queued work | Enqueue session commands, next-turn inputs, active-turn inputs, process wakes, duplicate source-key submissions, cancellation. |
+| Queued work | Enqueue session commands, next-turn inputs, active-turn inputs, process wakes, duplicate source-key submissions, cancellation, and generated variation across queued-ingress modes. |
 | Protocol | Standard tool loops, provider error stops, streamed text, RLM Lashlang cells, repair loops, final values. |
 | Tools/processes | Native tool calls, app tools, durable tool effects, process start/await, child session turns, subagents where selected. |
-| Provider | Canonical wire scripts plus timing/chunking/fault mutations. |
+| Provider | Canonical wire scripts plus timing/chunking/fault mutations, with each mutation name mapped to distinct executable behavior. |
 | Persistence | Source-key replay, claim/reclaim, lease fencing, commit failure, reopen and replay through selected backends. |
-| Worker topology | Crash/restart, failover, lease contention, process sweep interleavings, stale owner completion. |
+| Worker topology | Crash/restart, real failover to another generated worker, lease contention, process sweep interleavings, stale owner completion. |
 | Observation | Live replay, cursor resume, live replay gaps, observer drop/reconnect, stale observation after lease reclaim. |
 
 ### Profiles
@@ -687,7 +762,7 @@ Profiles constrain the generator without changing semantics:
 | Profile | Purpose |
 | --- | --- |
 | `tiny-fixed` | Hand-picked replay corpus for PR fast lane and deterministic smoke. |
-| `fast-random` | Small randomized corpus with model store only, no external services. |
+| `fast-random` | Small genuinely randomized corpus with model store only, no external services. |
 | `default-random` | Broader local/CI seed budget with model store plus selected SQLite replay. |
 | `full-random` | Long randomized run with provider matrix, SQLite replay, and Postgres replay where configured. |
 | `minimized-replay` | A Simulation Replay Script promoted to a stable regression fixture. |
@@ -704,7 +779,9 @@ v1 topology is bounded and in-process:
   states.
 - Crash/restart: dropping running worker tasks, preserving durable model-store
   state, restarting with a new incarnation.
-- Failover: another worker claims expired or dead-owner leases and continues.
+- Failover: another generated worker claims expired or dead-owner leases,
+  continues the suspended work, and rejects stale completions from the previous
+  owner.
 - Contention: two workers attempt to claim or complete the same session/process
   lease; only the fenced owner may commit terminal effects.
 - One-process execution: all workers are async actors inside the same test
@@ -836,8 +913,11 @@ Minimization should reduce:
 - Seeded generated sessions/tools not needed for the failure.
 - Boundary deliveries irrelevant to the failing oracle.
 
-The minimized result becomes a Simulation Replay Script under
-`crates/lash-sim/replays/` with a stable test name.
+Only a reviewed minimized failure becomes a Simulation Replay Script under
+`crates/lash-sim/replays/` with a stable test name. A generated trace,
+backend-replayable package, or family negative fixture does not count as a
+promoted real regression until review records the source failure, owned
+invariant, and replay command.
 
 ### Replay And Minimization Acceptance Rules
 
@@ -857,7 +937,10 @@ helpers:
 ## Oracle Model
 
 The first-class oracle is graph/session/runtime invariants. Protocol, provider,
-persistence, and scenario oracles plug into that foundation.
+persistence, and scenario oracles plug into that foundation. True DST requires
+at least four hard invariants with direct evidence: graph acyclicity, exactly
+one active Agent Frame, monotonic usage accounting, and Final Value as a
+semantic outcome distinct from transcript/prose.
 
 ### Runtime/Graph/Session Invariants
 
@@ -911,6 +994,9 @@ Shared extraction rules:
   modules.
 - Keep ownership with the crate that owns the concept.
 - Keep scenario coverage metadata compile-checked as it is today.
+- A scenario-contract oracle is not done because a suite name appears in a
+  summary. Each contract needs distinct generated evidence tied to its
+  semantics, or the sim must run the actual named scenario and record that run.
 - Avoid duplicating provider/protocol parsing logic in `lash-sim`.
 - If an oracle needs private state, expose a narrow testing snapshot instead
   of making production internals public.
@@ -1087,7 +1173,7 @@ scheduler, and backend work into one hard-to-review change.
 | 1. Transport seam vertical slice | Current provider crates and `lash-llm-transport` helpers | Provider Wire Scripts, real-provider simulation, provider matrix | OpenAI-compatible Chat Completions completes one scripted buffered and one scripted streaming response through real provider parsing | Transport seam checklist passes for OpenAI-compatible |
 | 2. `lash-sim` skeleton | Phase 1 request/response types or a stable local draft of them | Runner, scripts, traces, profile commands | `cargo test -p lash-sim fixed_replay` writes a summary under `target/lash-sim/` | Crate is unpublished, not a default member, and has deterministic seed/profile/artifact plumbing |
 | 3. Thin runtime vertical slice | Phases 1 and 2 | Multi-session generator, first sim confidence lane | One Provider Wire Script drives one real provider crate and one simple runtime turn with provider and runtime oracle checks | Failure trace can be replayed exactly for the slice |
-| 4. Boundary scheduler | Phase 3 | Durable effects, worker topology, minimization, randomized search | Two pending provider/tool/time boundaries are delivered in seeded order and recorded in trace | Scheduler controls boundary completions without custom future polling |
+| 4. Boundary scheduler | Phase 3 | Durable effects, worker topology, minimization, randomized search | Two live sessions register pending provider chunks/completions and the scheduler delivers provider/tool/time boundaries in seeded order | Scheduler controls boundary completions without custom future polling or whole-operation sequencing |
 | 5. Model store and storage oracles | Phase 4 scheduler hooks | High-volume randomized search and worker topology | Model-store v1 facet rows needed by current workloads pass their conformance gates | Generator rejects any workload family whose model-store row is incomplete |
 | 6. Shared oracle extraction | Phase 3 thin slice and existing scenario metadata | Scenario-composed workloads and facade replay | One Runtime, one Standard, one RLM, and one Agent oracle are reused from crate-owned testing support | No sim code imports test modules directly |
 | 7. Simulated Worker Topology | Phases 4, 5, and process/lease oracle extraction from Phase 6 | Durable fault workloads and full worker contention runs | Two simulated workers contend for one process/session lease and stale completion is rejected | Process and session lease oracles pass under crash/restart/failover |
@@ -1165,7 +1251,8 @@ PR 3.1: One provider script through one simple turn.
 PR 3.2: First multi-session workload.
 
 - Generate two sessions from the first seed.
-- Interleave one turn per session.
+- Interleave one turn per session at the operation level as a stepping stone
+  toward provider-event interleaving.
 - Prove cross-session isolation in the oracle.
 - Keep schedule simple but already multi-session.
 
@@ -1173,9 +1260,11 @@ PR 3.2: First multi-session workload.
 
 PR 4.1: Pending boundary registry.
 
-- Add pending handles for provider chunks, tool completions, clock sleeps, and
-  oracle checkpoints.
+- Add pending handles for provider chunks, provider turn completions, tool
+  completions, clock sleeps, and oracle checkpoints.
 - Deterministic selection by seed and stable tie-breaker.
+- The proof must include at least two live sessions with pending provider
+  events before the first provider turn completes.
 
 PR 4.2: Sim clock.
 
@@ -1259,7 +1348,8 @@ PR 8.1: Sim effect host.
 
 PR 8.2: Tool and process effect completion scheduling.
 
-- Schedule tool call result/failure/cancellation as boundary events.
+- Schedule tool call result/failure/cancellation as boundary events from a real
+  turn that has suspended awaiting the tool/effect result.
 - Compose with process start/await and queued wakes.
 
 PR 8.3: Durable Fault Matrix integration.
@@ -1308,6 +1398,8 @@ PR 11.1: Hybrid Provider Wire Script mutations.
 
 - Generate timing, chunking, UTF-8/SSE splitting, retries, disconnects, and
   timeout mutations from canonical scripts.
+- Each mutation name must map to a distinct executable behavior in the
+  provider parser/failure matrix.
 
 PR 11.2: Workload minimizer.
 
@@ -1319,7 +1411,9 @@ PR 11.3: Regression fixture promotion.
 
 - Add review workflow for promoting minimized failures to
   `crates/lash-sim/replays/`.
-- Add metadata requiring fixture name, owned invariant, and source failure.
+- Add metadata requiring fixture name, owned invariant, source failure, replay
+  command, and confirmation that at least one promoted fixture came from a real
+  discovered regression before bug-finding claims appear in confidence output.
 
 ### Phase 12: Confidence Gate Integration
 
@@ -1392,9 +1486,14 @@ The Deterministic Simulation Harness reaches the v1 done-line when:
   observer reconnects, provider failures/mutations, process wakes, tool/exec,
   durable effects, worker lease/failover, backend choices, retries, and
   duplicates with named oracles.
-- The scheduler controls boundary completions for provider responses, tool
-  results, durable effects, sim clock, worker lifecycle, lease expiry/reclaim,
-  trigger delivery, and observer reconnects.
+- The scheduler actually interleaves: at least two sessions' turns are live
+  concurrently, and `BoundaryScheduler` resolves scripted-transport provider
+  chunks, final provider completions, tool/effect completions, sim clock,
+  worker lifecycle, lease expiry/reclaim, trigger delivery, and observer
+  reconnects in seeded order.
+- A real generated/scripted turn calls a tool or awaits a durable effect; the
+  scheduler delivers the result and the trace proves suspend-to-resume behavior
+  through the runtime turn rather than isolated boundary helper execution.
 - v1 Simulated Worker Topology covers worker identity, incarnation,
   crash/restart, failover, and cross-worker lease contention in one process.
 - The high-volume model store runs conformance and supports deterministic
@@ -1402,15 +1501,21 @@ The Deterministic Simulation Harness reaches the v1 done-line when:
 - Selected replays run through SQLite, and full/nightly replays run through
   Postgres when configured.
 - Runtime/session/graph invariants are first-class and run after boundaries and
-  final quiescence.
+  final quiescence, including graph acyclicity, single active Agent Frame,
+  usage monotonicity, and Final Value distinct from transcript/prose.
 - Runtime, Standard Protocol, RLM Protocol, Agent Scenario, provider
   conformance, persistence conformance, and Durable Fault Matrix contracts plug
   into the sim through production/test-independent metadata and narrow
-  oracles/specs.
+  oracles/specs, with per-contract evidence/semantics or actual named scenario
+  runs.
 - Every failure produces seed, generator version, script hashes, workload,
   event trace, observed state summary, and oracle failure.
-- A minimized Simulation Replay Script can be promoted to a stable regression
-  fixture and replayed exactly.
+- At least one real discovered regression has been minimized, replayed exactly,
+  and promoted to a stable fixture under `crates/lash-sim/replays/` before the
+  harness claims it finds bugs example tests miss.
+- Generator gaps are closed: fast profiles are genuinely random, provider
+  mutation names have distinct executable behaviors, queued-ingress mode
+  varies, and worker failover is generated as real failover.
 - `scripts/confidence-gate.sh fast`, `default`, and `full` include the
   appropriate sim lanes and write artifacts under `target/confidence/<lane>/sim/`.
 - The plan's non-goals remain true: no live LLM calls, no custom async

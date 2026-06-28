@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use lash_core::SessionStoreFactory;
 use lash_postgres_store::PostgresStorage;
@@ -10,11 +11,14 @@ use serde_json::{Value, json};
 use sqlx::Executor;
 
 use crate::oracles::replay_determinism;
-use crate::provider::{ProviderWireScript, ScriptedLlmHttpTransport};
+use crate::provider::{ProviderWireScript, ScriptedLlmHttpTransport, ScriptedTransportSchedule};
 use crate::provider_mutations::ProviderMutationMatrixCache;
 use crate::replay::{ReplayError, replay_trace};
 use crate::runtime_boundaries::{RuntimeBoundaryHarness, RuntimeEffectReplayStore};
-use crate::runtime_contracts::{RuntimeTurnObservation, require_passed, runtime_turn_contract};
+use crate::runtime_contracts::{
+    RuntimeTurnObservation, require_passed, runtime_agent_frame_invariant_facts,
+    runtime_graph_invariant_facts, runtime_turn_contract, runtime_usage_invariant_facts,
+};
 use crate::runtime_providers::{
     runtime_provider_components, runtime_scripts_for_texts as runtime_provider_scripts_for_texts,
 };
@@ -161,14 +165,16 @@ pub async fn replay_trace_to_postgres(
         .and_then(Path::parent)
         .map(|parent| parent.join("postgres-attachments"))
         .unwrap_or_else(|| PathBuf::from("target/lash-sim/postgres-attachments"));
-    let mut world = PostgresRuntimeReplayWorld::new(storage, attachment_root);
+    let mut world = PostgresRuntimeReplayWorld::new(storage, attachment_root, trace);
     let mut store = ModelStore::default();
     let mut provider_mutation_cache = ProviderMutationMatrixCache::default();
     let mut runtime_replayed_boundary_count = 0;
     let mut replayed_boundary_families = BTreeSet::new();
     for delivered in &trace.events {
         let event = delivered.as_event();
-        let observed = if is_runtime_session_boundary(event.kind) {
+        let observed = if is_suspend_replay_boundary(&event) {
+            store.project_boundary_observation(&event)
+        } else if is_runtime_session_boundary(event.kind) {
             world.deliver_boundary(&event, &delivered.observed).await?
         } else if is_runtime_backed_boundary(event.kind) {
             world.deliver_runtime_boundary(&event).await?
@@ -301,6 +307,7 @@ struct PostgresRuntimeReplayWorld {
     storage: Arc<PostgresStorage>,
     attachment_root: PathBuf,
     sessions: BTreeMap<String, PostgresRuntimeReplaySession>,
+    provider_completion_events: BTreeMap<String, BoundaryEvent>,
     queued_inputs: BTreeMap<String, String>,
     store_factory: Arc<dyn SessionStoreFactory>,
     runtime_boundaries: RuntimeBoundaryHarness,
@@ -310,12 +317,29 @@ struct PostgresRuntimeReplaySession {
     _core: lash::StandardCore,
     session: lash::LashSession,
     transport: Arc<ScriptedLlmHttpTransport>,
+    provider_schedule: ScriptedTransportSchedule,
+    provider_scripts: Vec<ProviderWireScript>,
     provider_kind: String,
+    active_provider_turns: BTreeMap<String, PostgresActiveProviderTurn>,
+}
+
+struct PostgresActiveProviderTurn {
+    handle: tokio::task::JoinHandle<Result<Value, String>>,
 }
 
 impl PostgresRuntimeReplayWorld {
-    fn new(storage: Arc<PostgresStorage>, attachment_root: PathBuf) -> Self {
+    fn new(
+        storage: Arc<PostgresStorage>,
+        attachment_root: PathBuf,
+        trace: &SimulationTrace,
+    ) -> Self {
         let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(storage.session_store_factory());
+        let provider_completion_events = trace
+            .events
+            .iter()
+            .filter(|event| event.kind == BoundaryKind::Provider)
+            .map(|event| (event.boundary_id.clone(), event.as_event()))
+            .collect();
         Self {
             runtime_boundaries: RuntimeBoundaryHarness::new(
                 Arc::clone(&store_factory),
@@ -324,6 +348,7 @@ impl PostgresRuntimeReplayWorld {
             storage,
             attachment_root,
             sessions: BTreeMap::new(),
+            provider_completion_events,
             queued_inputs: BTreeMap::new(),
             store_factory,
         }
@@ -337,7 +362,8 @@ impl PostgresRuntimeReplayWorld {
         match event.kind {
             BoundaryKind::Ingress => self.open_runtime_session(event).await,
             BoundaryKind::QueuedIngress => self.queue_turn_input(event).await,
-            BoundaryKind::Provider => self.run_provider_turn(event, original_observed).await,
+            BoundaryKind::Provider => self.finish_provider_turn(event).await,
+            BoundaryKind::ProviderEvent => self.release_provider_event(event).await,
             BoundaryKind::Observer => self.observe_session(event, original_observed),
             BoundaryKind::Cancellation => self.cancel_queued_input(event).await,
             BoundaryKind::Tool
@@ -405,12 +431,14 @@ impl PostgresRuntimeReplayWorld {
             })?;
         let scripts = runtime_provider_scripts_for_texts(provider_kind, &provider_texts)
             .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?;
+        let provider_schedule = ScriptedTransportSchedule::new();
         let (core, transport, provider_kind) = runtime_core_for_scripts(
             self.storage.as_ref(),
             Arc::clone(&self.store_factory),
             &self.attachment_root,
             provider_kind,
-            scripts,
+            scripts.clone(),
+            Some(provider_schedule.clone()),
         )?;
         let session = core
             .session(event.actor_alias.clone())
@@ -423,7 +451,10 @@ impl PostgresRuntimeReplayWorld {
                 _core: core,
                 session,
                 transport,
+                provider_schedule,
+                provider_scripts: scripts,
                 provider_kind,
+                active_provider_turns: BTreeMap::new(),
             },
         );
         Ok(json!({
@@ -485,20 +516,35 @@ impl PostgresRuntimeReplayWorld {
                 .get("ingress_mode")
                 .and_then(Value::as_str)
                 .unwrap_or("next_turn"),
+            "active_turn_id": event.payload.get("active_turn_id").cloned().unwrap_or(Value::Null),
         }))
     }
 
-    async fn run_provider_turn(
-        &self,
-        event: &BoundaryEvent,
-        original_observed: &Value,
-    ) -> Result<Value, PostgresReplayError> {
-        let runtime_session = self.sessions.get(&event.actor_alias).ok_or_else(|| {
+    async fn ensure_provider_turn_started(
+        &mut self,
+        actor_alias: &str,
+        turn_boundary_id: &str,
+    ) -> Result<(), PostgresReplayError> {
+        let runtime_session = self.sessions.get_mut(actor_alias).ok_or_else(|| {
             PostgresReplayError::Assertion(format!(
-                "provider boundary `{}` ran before ingress for `{}`",
-                event.boundary_id, event.actor_alias
+                "provider turn `{turn_boundary_id}` ran before ingress for `{actor_alias}`"
             ))
         })?;
+        if runtime_session
+            .active_provider_turns
+            .contains_key(turn_boundary_id)
+        {
+            return Ok(());
+        }
+        let event = self
+            .provider_completion_events
+            .get(turn_boundary_id)
+            .cloned()
+            .ok_or_else(|| {
+                PostgresReplayError::Assertion(format!(
+                    "provider event referenced unknown turn `{turn_boundary_id}`"
+                ))
+            })?;
         let expected_text = event
             .payload
             .get("text")
@@ -509,86 +555,264 @@ impl PostgresRuntimeReplayWorld {
             .get("turn_index")
             .and_then(Value::as_u64)
             .unwrap_or(1) as usize;
-        let output = runtime_session
-            .session
-            .turn(lash::TurnInput::text(format!(
-                "Replay generated provider turn {} through Postgres.",
+        let _script = runtime_session
+            .provider_scripts
+            .get(expected_turn_index.saturating_sub(1))
+            .ok_or_else(|| {
+                PostgresReplayError::Assertion(format!(
+                    "provider boundary `{}` had no runtime provider script for turn {}",
+                    event.boundary_id, expected_turn_index
+                ))
+            })?;
+        if expected_text.is_empty() {
+            return Err(PostgresReplayError::Assertion(format!(
+                "provider boundary `{}` missing expected text",
                 event.boundary_id
-            )))
-            .run()
-            .await
-            .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?;
-        let assistant_message = output.assistant_message().unwrap_or_default().to_string();
-        let read_view = output.result.state.read_view();
-        let graph_node_count = output.result.state.session_graph.nodes.len();
-        let transcript_message_count = read_view.messages().len();
-        let provider_exchange_count = runtime_session
+            )));
+        }
+        let session = runtime_session.session.clone();
+        let transport = Arc::clone(&runtime_session.transport);
+        let provider_kind = runtime_session.provider_kind.clone();
+        let handle = tokio::spawn(async move {
+            run_provider_turn_task(session, transport, provider_kind, event)
+                .await
+                .map_err(|err| err.to_string())
+        });
+        runtime_session.active_provider_turns.insert(
+            turn_boundary_id.to_string(),
+            PostgresActiveProviderTurn { handle },
+        );
+        Ok(())
+    }
+
+    async fn release_provider_event(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, PostgresReplayError> {
+        let turn_boundary_id = event
+            .payload
+            .get("turn_boundary_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                PostgresReplayError::Assertion(format!(
+                    "provider event `{}` missing turn_boundary_id",
+                    event.boundary_id
+                ))
+            })?
+            .to_string();
+        self.ensure_provider_turn_started(&event.actor_alias, &turn_boundary_id)
+            .await?;
+        let event_index = event
+            .payload
+            .get("event_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                PostgresReplayError::Assertion(format!(
+                    "provider event `{}` missing event_index",
+                    event.boundary_id
+                ))
+            })? as usize;
+        let exchange_index = event
+            .payload
+            .get("exchange_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                PostgresReplayError::Assertion(format!(
+                    "provider event `{}` missing exchange_index",
+                    event.boundary_id
+                ))
+            })? as usize;
+        let event_name = event
+            .payload
+            .get("event_name")
+            .and_then(Value::as_str)
+            .unwrap_or("provider_event");
+        let runtime_session = self.sessions.get(&event.actor_alias).ok_or_else(|| {
+            PostgresReplayError::Assertion(format!(
+                "provider event `{}` ran before ingress for `{}`",
+                event.boundary_id, event.actor_alias
+            ))
+        })?;
+        let active_turn_pending = runtime_session
+            .active_provider_turns
+            .contains_key(&turn_boundary_id);
+        let release = tokio::time::timeout(
+            Duration::from_secs(5),
+            runtime_session.provider_schedule.release_when_blocked(
+                exchange_index,
+                event_index,
+                event_name,
+                event.at,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            PostgresReplayError::Assertion(format!(
+                "provider event `{}` timed out waiting for turn `{}` exchange {} event {} ({})",
+                event.boundary_id, turn_boundary_id, exchange_index, event_index, event_name
+            ))
+        })?;
+        Ok(json!({
+            "session": event.actor_alias,
+            "provider_event_release": true,
+            "turn_boundary_id": turn_boundary_id,
+            "exchange_index": exchange_index,
+            "event_index": event_index,
+            "event_name": event_name,
+            "provider_kind": runtime_session.provider_kind,
+            "active_turn_pending_before_release": active_turn_pending,
+            "released_while_turn_pending": active_turn_pending && release.blocked_before_release,
+            "scripted_transport_release": {
+                "exchange_index": release.exchange_index,
+                "event_index": release.event_index,
+                "event_name": release.event_name,
+                "at": release.at,
+                "blocked_before_release": release.blocked_before_release,
+            },
+        }))
+    }
+
+    async fn finish_provider_turn(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, PostgresReplayError> {
+        self.ensure_provider_turn_started(&event.actor_alias, &event.boundary_id)
+            .await?;
+        let runtime_session = self.sessions.get_mut(&event.actor_alias).ok_or_else(|| {
+            PostgresReplayError::Assertion(format!(
+                "provider boundary `{}` ran before ingress for `{}`",
+                event.boundary_id, event.actor_alias
+            ))
+        })?;
+        let active_turn = runtime_session
+            .active_provider_turns
+            .remove(&event.boundary_id)
+            .ok_or_else(|| {
+                PostgresReplayError::Assertion(format!(
+                    "provider boundary `{}` was not active",
+                    event.boundary_id
+                ))
+            })?;
+        let release_count = runtime_session.provider_schedule.releases().len();
+        let exchange_count = runtime_session
             .transport
             .exchanges()
             .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?
             .len();
-        let expected_exchange_count = event
-            .payload
-            .get("expected_provider_exchange_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(expected_turn_index as u64) as usize;
-        let runtime_contract = runtime_turn_contract(
-            &RuntimeTurnObservation {
-                session_id: output.result.state.session_id.clone(),
-                turn_index: output.result.state.turn_index,
-                assistant_message: assistant_message.clone(),
-                graph_node_count,
-                transcript_message_count,
-                activity_count: output.activities.len(),
-                provider_exchange_count,
-            },
-            &event.actor_alias,
-            expected_turn_index,
-            expected_text,
-            expected_exchange_count,
-        );
-        if let Err(message) = require_passed(&runtime_contract) {
-            return Err(PostgresReplayError::Assertion(format!(
-                "Postgres runtime invariants failed for `{}`: {message}",
-                event.boundary_id
-            )));
-        }
-        if assistant_message
-            != original_observed
-                .get("provider_output")
-                .and_then(Value::as_str)
-                .unwrap_or(expected_text)
-        {
-            return Err(PostgresReplayError::Divergence(format!(
-                "Postgres runtime provider output changed for `{}`",
-                event.boundary_id
-            )));
-        }
-        Ok(json!({
-            "session": event.actor_alias,
-            "runtime_session_id": event.actor_alias,
-            "turn_index": expected_turn_index,
-            "success": output.is_success(),
-            "provider_output": assistant_message,
-            "provider_script": event.payload.get("script").cloned().unwrap_or(Value::Null),
-            "provider_exchange_count": provider_exchange_count,
-            "graph_node_count": graph_node_count,
-            "transcript_message_count": transcript_message_count,
-            "activity_count_nonzero": !output.activities.is_empty(),
-            "provider_kind": runtime_session.provider_kind,
-            "runtime_invariants": {
-                "session_id": true,
-                "turn_index": true,
-                "graph_non_empty": graph_node_count > 0,
-                "transcript_contains_provider_output": read_view.messages().iter().any(|message| {
-                    message.parts.iter().any(|part| part.content.contains(expected_text))
-                }),
-                "activity_count_nonzero": !output.activities.is_empty(),
-            },
-            "runtime_contract": runtime_contract,
-        }))
+        tokio::time::timeout(Duration::from_secs(5), active_turn.handle)
+            .await
+            .map_err(|_| {
+                PostgresReplayError::Assertion(format!(
+                    "provider boundary `{}` timed out waiting for in-flight turn completion after {} scheduled releases and {} provider exchanges",
+                    event.boundary_id,
+                    release_count,
+                    exchange_count
+                ))
+            })?
+            .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?
+            .map_err(PostgresReplayError::Runtime)
     }
+}
 
+async fn run_provider_turn_task(
+    session: lash::LashSession,
+    transport: Arc<ScriptedLlmHttpTransport>,
+    provider_kind: String,
+    event: BoundaryEvent,
+) -> Result<Value, PostgresReplayError> {
+    let expected_text = event
+        .payload
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let expected_turn_index = event
+        .payload
+        .get("turn_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    let output = session
+        .turn(lash::TurnInput::text(format!(
+            "Replay generated provider turn {} through Postgres.",
+            event.boundary_id
+        )))
+        .turn_id(event.boundary_id.clone())
+        .run()
+        .await
+        .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?;
+    let assistant_message = output.assistant_message().unwrap_or_default().to_string();
+    let read_view = output.result.state.read_view();
+    let graph_node_count = output.result.state.session_graph.nodes.len();
+    let transcript_message_count = read_view.messages().len();
+    let provider_exchange_count = transport
+        .exchanges()
+        .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?
+        .len();
+    let expected_exchange_count = event
+        .payload
+        .get("expected_provider_exchange_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(expected_turn_index as u64) as usize;
+    let graph_invariant = runtime_graph_invariant_facts(&output.result.state.session_graph);
+    let agent_frame_invariant = runtime_agent_frame_invariant_facts(&output.result.state);
+    let usage_invariant = runtime_usage_invariant_facts(&output.result, &output.activities);
+    let runtime_contract = runtime_turn_contract(
+        &RuntimeTurnObservation {
+            session_id: output.result.state.session_id.clone(),
+            turn_index: output.result.state.turn_index,
+            assistant_message: assistant_message.clone(),
+            graph_node_count,
+            transcript_message_count,
+            activity_count: output.activities.len(),
+            provider_exchange_count,
+            graph_invariant: Some(graph_invariant.clone()),
+            agent_frame_invariant: Some(agent_frame_invariant.clone()),
+            usage_invariant: Some(usage_invariant.clone()),
+        },
+        &event.actor_alias,
+        expected_turn_index,
+        expected_text,
+        expected_exchange_count,
+    );
+    if let Err(message) = require_passed(&runtime_contract) {
+        return Err(PostgresReplayError::Assertion(format!(
+            "Postgres runtime invariants failed for `{}`: {message}",
+            event.boundary_id
+        )));
+    }
+    Ok(json!({
+        "session": event.actor_alias,
+        "runtime_session_id": event.actor_alias,
+        "turn_index": expected_turn_index,
+        "success": output.is_success(),
+        "provider_output": assistant_message,
+        "provider_script": event.payload.get("script").cloned().unwrap_or(Value::Null),
+        "provider_exchange_count": provider_exchange_count,
+        "graph_node_count": graph_node_count,
+        "transcript_message_count": transcript_message_count,
+        "activity_count_nonzero": !output.activities.is_empty(),
+        "provider_kind": provider_kind,
+        "runtime_invariants": {
+            "session_id": true,
+            "turn_index": true,
+            "graph_non_empty": graph_node_count > 0,
+            "graph_acyclic": graph_invariant.passed,
+            "single_active_agent_frame": agent_frame_invariant.passed,
+            "usage_monotonic": usage_invariant.passed,
+            "transcript_contains_provider_output": read_view.messages().iter().any(|message| {
+                message.parts.iter().any(|part| part.content.contains(expected_text))
+            }),
+            "activity_count_nonzero": !output.activities.is_empty(),
+        },
+        "runtime_invariant_facts": {
+            "graph": graph_invariant,
+            "agent_frame": agent_frame_invariant,
+            "usage": usage_invariant,
+        },
+        "runtime_contract": runtime_contract,
+    }))
+}
+
+impl PostgresRuntimeReplayWorld {
     fn observe_session(
         &self,
         event: &BoundaryEvent,
@@ -710,6 +934,7 @@ impl PostgresRuntimeReplayWorld {
                 &self.attachment_root,
                 &runtime_session.provider_kind,
                 Vec::new(),
+                None,
             )?;
             let session = core
                 .session(session_id.clone())
@@ -735,8 +960,13 @@ fn runtime_core_for_scripts(
     attachment_root: &Path,
     provider_kind: &str,
     scripts: Vec<ProviderWireScript>,
+    provider_schedule: Option<ScriptedTransportSchedule>,
 ) -> Result<(lash::StandardCore, Arc<ScriptedLlmHttpTransport>, String), PostgresReplayError> {
-    let transport = Arc::new(ScriptedLlmHttpTransport::from_scripts(scripts));
+    let mut transport = ScriptedLlmHttpTransport::from_scripts(scripts);
+    if let Some(schedule) = provider_schedule {
+        transport = transport.with_event_schedule(schedule);
+    }
+    let transport = Arc::new(transport);
     let (provider_handle, model, provider_kind) =
         runtime_provider_components(provider_kind, &transport)
             .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?;
@@ -797,6 +1027,16 @@ async fn reset_postgres_for_replay(storage: &PostgresStorage) -> Result<(), Post
 
 fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
     let mut normalized = value.clone();
+    if let Some(object) = normalized.as_object_mut() {
+        object.remove("runtime_lease_probe");
+        object.remove("runtime_suspend");
+    }
+    if kind == BoundaryKind::Cancellation
+        && let Some(object) = normalized.as_object_mut()
+    {
+        object.remove("cancel_outcome");
+        object.remove("cancelled");
+    }
     if kind == BoundaryKind::QueuedIngress
         && let Some(object) = normalized.as_object_mut()
         && object.get("input_id").and_then(Value::as_str).is_some()
@@ -805,6 +1045,20 @@ fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
             "input_id".to_string(),
             Value::String("<backend-assigned>".to_string()),
         );
+    }
+    if kind == BoundaryKind::Provider
+        && let Some(object) = normalized.as_object_mut()
+    {
+        object.remove("runtime_invariant_facts");
+        object.remove("runtime_final_value_facts");
+        if let Some(runtime_invariants) = object
+            .get_mut("runtime_invariants")
+            .and_then(Value::as_object_mut)
+        {
+            runtime_invariants.remove("graph_acyclic");
+            runtime_invariants.remove("single_active_agent_frame");
+            runtime_invariants.remove("usage_monotonic");
+        }
     }
     if matches!(
         kind,
@@ -849,12 +1103,22 @@ fn write_divergence_artifact(
     Ok(())
 }
 
+fn is_suspend_replay_boundary(event: &crate::scheduler::BoundaryEvent) -> bool {
+    (event.kind == BoundaryKind::Ingress && event.payload.get("suspend_kind").is_some())
+        || event
+            .payload
+            .get("suspend_resume")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn is_runtime_session_boundary(kind: BoundaryKind) -> bool {
     matches!(
         kind,
         BoundaryKind::Ingress
             | BoundaryKind::QueuedIngress
             | BoundaryKind::Provider
+            | BoundaryKind::ProviderEvent
             | BoundaryKind::Observer
             | BoundaryKind::Cancellation
     )
@@ -876,6 +1140,7 @@ fn boundary_family_name(kind: BoundaryKind) -> &'static str {
         BoundaryKind::Ingress => "ingress",
         BoundaryKind::QueuedIngress => "queued_ingress",
         BoundaryKind::Provider => "provider",
+        BoundaryKind::ProviderEvent => "provider_event",
         BoundaryKind::Tool => "tool",
         BoundaryKind::ExecCode => "exec_code",
         BoundaryKind::DurableEffect => "durable_effect",

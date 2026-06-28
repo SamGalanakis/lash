@@ -1,0 +1,28 @@
+{
+  "schema": "lash.sim.promoted-regression-fixture.v1",
+  "fixture_id": "queued-active-turn-cancel-race",
+  "status": "promoted_deterministic_regression_guard",
+  "trace": "trace.json",
+  "source": "generated fast-random DST trace promoted from /tmp/lash-sim-promote on 2026-06-28",
+  "source_trace_sha256": "e1a1cb8956df42b315c755c8a97f705d961a40b8175cf62328fad951e07ae768",
+  "historical_production_regression": false,
+  "regression_contract": "active-turn queued input stays hidden, then cancellation terminalizes the pending row before any later idle claim can surface it",
+  "required_boundary_kinds": [
+    "queued_ingress",
+    "cancellation",
+    "provider"
+  ],
+  "semantic_oracles": [
+    "sim.oracle.state-machine-semantic-invariants.v1",
+    "sim.oracle.scenario-mini.runtime.queued-input-hidden-while-live.v1",
+    "sim.oracle.scenario-mini.runtime.cancellation-prevents-idle-claim.v1"
+  ],
+  "replay_backends": [
+    "model",
+    "sqlite",
+    "postgres_when_available"
+  ],
+  "replay_command": "cargo run -p lash-sim --locked -- replay crates/lash-sim/replays/queued-active-turn-cancel-race/trace.json",
+  "sqlite_replay_command": "cargo run -p lash-sim --locked -- replay-sqlite crates/lash-sim/replays/queued-active-turn-cancel-race/trace.json --out /tmp/lash-sim-queued-cancel-replay",
+  "postgres_replay_command": "LASH_POSTGRES_DATABASE_URL=postgres://... cargo run -p lash-sim --locked -- replay-postgres crates/lash-sim/replays/queued-active-turn-cancel-race/trace.json --out /tmp/lash-sim-queued-cancel-replay"
+}

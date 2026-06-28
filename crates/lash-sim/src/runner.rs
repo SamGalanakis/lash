@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use lash::rlm::RlmTurnBuilderExt as _;
+
 use crate::generator::{
     GENERATOR_VERSION, GeneratedWorkload, WorkloadProfileError, generate_workload,
     validate_workload_profile,
@@ -34,24 +36,32 @@ use crate::generator::{
 use crate::minimize::{MinimizeError, minimize_trace};
 use crate::oracles::{
     backend_failure_observed, cancellation_observed, combine_oracles, cross_session_isolation,
-    durable_effect_exactly_once, exec_code_observed,
+    durable_effect_exactly_once, exec_code_observed, generated_final_value_semantic_channel,
+    generated_suspend_resume,
     generated_runtime_provider_matrix as generated_runtime_provider_matrix_oracle,
     ingress_sessions_opened, lease_time_monotonic, observer_convergence,
-    observer_reconnect_observed, operational_coverage, process_wake_observed,
-    provider_mutation_rejected, queued_ingress_observed, runtime_provider_turn,
-    runtime_session_graph_contract, scenario_contract_mini_oracles, scenario_contract_oracles,
-    scheduler_controlled_delivery, scheduler_owned_runtime_completions,
-    state_machine_semantic_invariants, tool_boundary_observed, trigger_delivery_observed,
-    worker_stale_completion_rejected,
+    observer_reconnect_observed, operational_coverage, peak_concurrent_live_turns,
+    pending_tool_completion, process_wake_observed, provider_mutation_rejected,
+    provider_transport_mutation_classified, provider_turn_interleaving_depth,
+    queued_ingress_observed,
+    runtime_final_value_semantic, runtime_graph_acyclic, runtime_provider_turn,
+    runtime_session_graph_contract, runtime_single_active_agent_frame, runtime_usage_monotonic,
+    scenario_contract_mini_oracles, scenario_contract_oracles, scheduler_controlled_delivery,
+    scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
+    trigger_delivery_observed, worker_stale_completion_rejected,
 };
 use crate::provider::{
     ProviderWireEvent, ProviderWireHeader, ProviderWireScript, ScriptedLlmHttpExchange,
-    ScriptedLlmHttpTransport, ScriptedTransportGate,
+    ScriptedLlmHttpTransport, ScriptedTransportSchedule,
 };
 use crate::provider_mutations::ProviderMutationMatrixCache;
 use crate::replay::{ReplayError, replay_trace};
 use crate::runtime_boundaries::{RuntimeBoundaryHarness, RuntimeEffectReplayStore};
-use crate::runtime_contracts::{RuntimeTurnObservation, require_passed, runtime_turn_contract};
+use crate::runtime_contracts::{
+    RuntimeFinalValueInvariantFacts, RuntimeTurnObservation, require_passed,
+    runtime_agent_frame_invariant_facts, runtime_final_value_invariant_facts,
+    runtime_graph_invariant_facts, runtime_turn_contract, runtime_usage_invariant_facts,
+};
 use crate::runtime_providers::{
     OPENAI_COMPATIBLE, runtime_provider_components, runtime_script_for_text,
     runtime_scripts_for_texts as runtime_provider_scripts_for_texts,
@@ -566,6 +576,14 @@ pub struct GeneratedSimCounts {
     pub oracle_passes: usize,
     pub oracle_failures: usize,
     pub model_store_sessions: usize,
+    /// Largest interleaving highwater observed across every generated seed: how
+    /// many provider turns the scheduler drove concurrently at the busiest
+    /// point of the busiest seed. The broad/full confidence lane fails if this
+    /// never reaches the required interleaving depth.
+    pub interleaving_depth_max: usize,
+    /// Smallest per-seed interleaving highwater, so a single non-interleaving
+    /// seed in an otherwise-deep run is still visible in the artifact.
+    pub interleaving_depth_min: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -579,6 +597,44 @@ pub struct RuntimeFacadeProof {
     pub provider_exchange_count: usize,
     pub runtime_invariant: OracleVerdict,
     pub provider_output_invariant: OracleVerdict,
+    pub pending_tool_completion: PendingToolCompletionProof,
+    pub final_value_semantic_channel: FinalValueSemanticProof,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PendingToolCompletionProof {
+    pub schema: &'static str,
+    pub name: &'static str,
+    pub session_id: String,
+    pub turn_index: usize,
+    pub assistant_message: String,
+    pub tool_name: String,
+    pub completion_boundary_id: String,
+    pub scheduler_controlled: bool,
+    pub scheduler_sequence: usize,
+    pub turn_suspended_before_completion: bool,
+    pub completed_event_count_before_resolution: usize,
+    pub completed_event_count_after_resolution: usize,
+    pub resolved_payload: Value,
+    pub completion_outcome: lash_core::ResolveOutcome,
+    pub duplicate_completion_outcome: lash_core::ResolveOutcome,
+    pub turn_suspension_invariant: OracleVerdict,
+    pub scheduler_resolution_invariant: OracleVerdict,
+    pub final_result_invariant: OracleVerdict,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FinalValueSemanticProof {
+    pub schema: &'static str,
+    pub name: &'static str,
+    pub session_id: String,
+    pub turn_index: usize,
+    pub final_value: Value,
+    pub assistant_output_text: String,
+    pub final_value_event_count: usize,
+    pub assistant_prose_delta_count: usize,
+    pub facts: RuntimeFinalValueInvariantFacts,
+    pub semantic_channel_invariant: OracleVerdict,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1157,7 +1213,7 @@ fn trace_has_duplicate_process_wake_idempotency(lines: &[&TraceEventLine]) -> bo
             .push(*line);
     }
     by_dedupe_key.values().any(|events| {
-        events.len() >= 2
+        let strict_claim_dedupe = events.len() >= 2
             && events.iter().any(|line| {
                 line.event
                     .observed
@@ -1174,7 +1230,24 @@ fn trace_has_duplicate_process_wake_idempotency(lines: &[&TraceEventLine]) -> bo
             && events.iter().all(|line| {
                 line.event.observed.get("runtime_process_wake").is_some()
                     && line.event.observed.get("runtime_queued_work").is_some()
-            })
+            });
+        let in_flight_rejection = events.len() >= 2
+            && events.iter().any(|line| {
+                line.event
+                    .observed
+                    .get("lease_busy")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                    && line
+                        .event
+                        .observed
+                        .pointer("/runtime_queued_work/enqueued")
+                        .and_then(Value::as_bool)
+                        == Some(false)
+                    && line.event.observed.get("runtime_process_wake").is_some()
+                    && line.event.observed.get("runtime_queued_work").is_some()
+            });
+        strict_claim_dedupe || in_flight_rejection
     })
 }
 
@@ -1826,14 +1899,29 @@ fn process_wake_duplicate_fact(
     let events = by_dedupe_key
         .values()
         .find(|events| {
-            events.len() >= 2
+            let strict_claim_dedupe = events.len() >= 2
                 && events.iter().any(|line| {
                     line.event
                         .observed
                         .get("claimed_once")
                         .and_then(Value::as_bool)
                         == Some(true)
-                })
+                });
+            let in_flight_rejection = events.len() >= 2
+                && events.iter().any(|line| {
+                    line.event
+                        .observed
+                        .get("lease_busy")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                        && line
+                            .event
+                            .observed
+                            .pointer("/runtime_queued_work/enqueued")
+                            .and_then(Value::as_bool)
+                            == Some(false)
+                });
+            strict_claim_dedupe || in_flight_rejection
         })
         .cloned()
         .unwrap_or_default();
@@ -1842,13 +1930,17 @@ fn process_wake_duplicate_fact(
             "dedupe_key": dedupe_key,
             "delivery_count": events.len(),
             "claimed_once": events.iter().any(|line| line.event.observed.get("claimed_once").and_then(Value::as_bool) == Some(true)),
+            "lease_busy_rejected": events.iter().any(|line| {
+                line.event.observed.get("lease_busy").and_then(Value::as_bool) == Some(true)
+                    && line.event.observed.pointer("/runtime_queued_work/enqueued").and_then(Value::as_bool) == Some(false)
+            }),
             "boundary_ids": boundary_ids(events),
         })).collect::<Vec<_>>(),
     });
     require_transition_fact(
         contract,
         "duplicate_process_wake_idempotent",
-        "duplicate process wake deliveries share a dedupe key and claim queued work once",
+        "duplicate process wake deliveries share a dedupe key and are terminalized by queued-work claim dedupe or in-flight lease rejection",
         events,
         observed,
     )
@@ -2490,12 +2582,82 @@ fn select_event_lines_for_evidence<'a>(
             })
             .take(2)
             .collect(),
+        "process_wake" => select_process_wake_evidence(event_lines),
+        "durable_effect" => select_durable_effect_evidence(event_lines),
         _ => event_lines
             .iter()
             .filter(|line| event_satisfies_scenario_evidence(&line.event, evidence))
             .take(2)
             .collect(),
     }
+}
+
+fn select_process_wake_evidence(event_lines: &[TraceEventLine]) -> Vec<&TraceEventLine> {
+    let mut by_dedupe_key = BTreeMap::<String, Vec<&TraceEventLine>>::new();
+    for line in event_lines
+        .iter()
+        .filter(|line| event_satisfies_scenario_evidence(&line.event, "process_wake"))
+    {
+        let Some(dedupe_key) = line
+            .event
+            .observed
+            .get("dedupe_key")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        by_dedupe_key
+            .entry(dedupe_key.to_string())
+            .or_default()
+            .push(line);
+    }
+    if let Some((_dedupe_key, events)) = by_dedupe_key
+        .iter()
+        .find(|(_dedupe_key, events)| events.len() >= 2)
+    {
+        return events.iter().copied().take(2).collect();
+    }
+    event_lines
+        .iter()
+        .filter(|line| event_satisfies_scenario_evidence(&line.event, "process_wake"))
+        .take(2)
+        .collect()
+}
+
+fn select_durable_effect_evidence(event_lines: &[TraceEventLine]) -> Vec<&TraceEventLine> {
+    let mut by_durable_key = BTreeMap::<String, Vec<&TraceEventLine>>::new();
+    for line in event_lines
+        .iter()
+        .filter(|line| event_satisfies_scenario_evidence(&line.event, "durable_effect"))
+    {
+        let Some(durable_key) = line
+            .event
+            .observed
+            .get("durable_key")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        by_durable_key
+            .entry(durable_key.to_string())
+            .or_default()
+            .push(line);
+    }
+    if let Some((_durable_key, events)) = by_durable_key.iter().find(|(_durable_key, events)| {
+        events
+            .iter()
+            .any(|line| line.event.observed.get("replayed").and_then(Value::as_bool) == Some(false))
+            && events.iter().any(|line| {
+                line.event.observed.get("replayed").and_then(Value::as_bool) == Some(true)
+            })
+    }) {
+        return events.iter().copied().take(2).collect();
+    }
+    event_lines
+        .iter()
+        .filter(|line| event_satisfies_scenario_evidence(&line.event, "durable_effect"))
+        .take(2)
+        .collect()
 }
 
 fn event_satisfies_scenario_evidence(
@@ -2776,6 +2938,8 @@ pub async fn run_generated_sim_profile(
     let mut model_store_sessions = 0;
     let mut boundary_events = 0;
     let mut runtime_turn_proofs = 0;
+    let mut interleaving_depth_max = 0;
+    let mut interleaving_depth_min = usize::MAX;
 
     for seed_index in 0..seed_count {
         let seed = generated_seed(profile, seed_index);
@@ -2790,6 +2954,9 @@ pub async fn run_generated_sim_profile(
             .iter()
             .filter(|event| event.kind == BoundaryKind::Provider)
             .count();
+        let seed_interleaving_depth = peak_concurrent_live_turns(&trace.events);
+        interleaving_depth_max = interleaving_depth_max.max(seed_interleaving_depth);
+        interleaving_depth_min = interleaving_depth_min.min(seed_interleaving_depth);
         model_store_sessions += trace.final_summary.session_count;
         oracle_verdicts.extend(trace.oracles.iter().cloned());
         for event in trace.events.iter().cloned() {
@@ -2849,6 +3016,30 @@ pub async fn run_generated_sim_profile(
 
     oracle_verdicts.push(runtime_proof.runtime_invariant.clone());
     oracle_verdicts.push(runtime_proof.provider_output_invariant.clone());
+    oracle_verdicts.push(
+        runtime_proof
+            .pending_tool_completion
+            .turn_suspension_invariant
+            .clone(),
+    );
+    oracle_verdicts.push(
+        runtime_proof
+            .pending_tool_completion
+            .scheduler_resolution_invariant
+            .clone(),
+    );
+    oracle_verdicts.push(
+        runtime_proof
+            .pending_tool_completion
+            .final_result_invariant
+            .clone(),
+    );
+    oracle_verdicts.push(
+        runtime_proof
+            .final_value_semantic_channel
+            .semantic_channel_invariant
+            .clone(),
+    );
 
     let events_sha256 = write_event_lines(&artifact_root.join(GENERATED_SIM_EVENTS), &event_lines)?;
     write_failure_artifact_shape(artifact_root)?;
@@ -2914,7 +3105,7 @@ pub async fn run_generated_sim_profile(
             runtime_completion_registrations: scheduler_owned_runtime_completions,
             scheduler_owned_runtime_completions,
             fixed_provider_proofs: fixed_manifest.summary.total_proofs,
-            runtime_proofs: runtime_turn_proofs + 1,
+            runtime_proofs: runtime_turn_proofs + 3,
             replay_reports: seed_count,
             minimized_replays: seed_count,
             backend_replays: seed_count,
@@ -2926,6 +3117,12 @@ pub async fn run_generated_sim_profile(
             oracle_passes,
             oracle_failures,
             model_store_sessions,
+            interleaving_depth_max,
+            interleaving_depth_min: if interleaving_depth_min == usize::MAX {
+                0
+            } else {
+                interleaving_depth_min
+            },
         },
         oracle_verdicts,
         failure_artifact_shape: GENERATED_SIM_FAILURE_SHAPE,
@@ -2954,7 +3151,25 @@ async fn run_generated_workload(
     let mut store = ModelStore::default();
     let mut world = GeneratedRuntimeWorld::new();
     let mut log = BoundaryDeliveryLog::default();
-    while let Some(mut delivered) = scheduler.deliver_next(Value::Null) {
+    let mut suspend_ready_at = 1_000_000u64;
+    loop {
+        let Some(mut delivered) = scheduler.deliver_next(Value::Null) else {
+            world
+                .schedule_finished_provider_turns(&mut scheduler)
+                .await?;
+            suspend_ready_at += 1;
+            world
+                .schedule_parked_suspend_resolutions(&mut scheduler, suspend_ready_at)
+                .await?;
+            world.sample_live_turn_highwater();
+            if world.active_provider_turn_count() > 0 || world.pending_suspend_turn_count() > 0 {
+                continue;
+            }
+            if scheduler.is_empty() {
+                break;
+            }
+            continue;
+        };
         let event = delivered.as_event();
         let observed = world.deliver_boundary(&event).await?;
         store.apply_observed_boundary(&event, &observed);
@@ -2963,10 +3178,20 @@ async fn run_generated_workload(
         completion_queue.mark_completed(&delivered.boundary_id);
         register_ready_runtime_completions(
             &mut completion_queue,
-            &completion_state,
+            &mut completion_state,
             &mut scheduler,
             &delivered,
+            &mut world,
         )?;
+        world.sample_live_turn_highwater();
+        world
+            .schedule_finished_provider_turns(&mut scheduler)
+            .await?;
+        suspend_ready_at += 1;
+        world
+            .schedule_parked_suspend_resolutions(&mut scheduler, suspend_ready_at)
+            .await?;
+        world.sample_live_turn_highwater();
         log.push(delivered);
     }
     if !completion_queue.is_empty() {
@@ -2980,6 +3205,18 @@ async fn run_generated_workload(
     }
     let events = log.into_vec();
     let final_summary = store.summary();
+    // The event-derived interleaving highwater is the canonical, replay-stable
+    // measure (recomputed identically from `events` on every backend). The
+    // runtime world tracks the spawned-future highwater, which can only be equal
+    // or larger; a smaller runtime measure would mean the bookkeeping lost a live
+    // turn, so assert the bound holds before trusting either number.
+    let event_peak = peak_concurrent_live_turns(&events);
+    if event_peak > world.peak_concurrent_live_turns {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "event-derived interleaving highwater {event_peak} exceeded the runtime-observed live turn highwater {}",
+            world.peak_concurrent_live_turns
+        )));
+    }
     let mut oracles = vec![
         scheduler_controlled_delivery(&events),
         scheduler_owned_runtime_completions(&events),
@@ -2992,16 +3229,23 @@ async fn run_generated_workload(
         observer_reconnect_observed(&final_summary),
         backend_failure_observed(&final_summary),
         provider_mutation_rejected(&final_summary),
+        provider_transport_mutation_classified(&events),
         generated_runtime_provider_matrix_oracle(&events),
+        provider_turn_interleaving_depth(&events),
         process_wake_observed(&final_summary),
         tool_boundary_observed(&final_summary),
         exec_code_observed(&final_summary),
         cross_session_isolation(&final_summary),
         observer_convergence(&final_summary),
         runtime_session_graph_contract(&final_summary),
+        runtime_graph_acyclic(&events),
+        runtime_single_active_agent_frame(&events),
+        runtime_usage_monotonic(&events),
         durable_effect_exactly_once(&final_summary),
         worker_stale_completion_rejected(&final_summary),
-        lease_time_monotonic(&final_summary),
+        lease_time_monotonic(&events),
+        generated_suspend_resume(&events),
+        generated_final_value_semantic_channel(&events),
     ];
     oracles.extend(scenario_contract_mini_oracles(&events, &final_summary));
     oracles.extend(scenario_contract_oracles(&events, &final_summary));
@@ -3031,10 +3275,18 @@ struct RuntimeCompletionState {
     opened_sessions: BTreeSet<String>,
     queued_boundaries: BTreeSet<String>,
     provider_completions_by_session: BTreeMap<String, usize>,
+    active_provider_turns_by_session: BTreeMap<String, usize>,
     durable_first_completions: BTreeSet<String>,
 }
 
 impl RuntimeCompletionState {
+    fn provider_started(&mut self, actor_alias: &str) {
+        *self
+            .active_provider_turns_by_session
+            .entry(actor_alias.to_string())
+            .or_default() += 1;
+    }
+
     fn observe(&mut self, event: &crate::scheduler::DeliveredBoundary) {
         match event.kind {
             BoundaryKind::Ingress => {
@@ -3048,6 +3300,12 @@ impl RuntimeCompletionState {
                     .provider_completions_by_session
                     .entry(event.actor_alias.clone())
                     .or_default() += 1;
+                if let Some(active) = self
+                    .active_provider_turns_by_session
+                    .get_mut(&event.actor_alias)
+                {
+                    *active = active.saturating_sub(1);
+                }
             }
             BoundaryKind::DurableEffect => {
                 if event
@@ -3071,7 +3329,18 @@ impl RuntimeCompletionState {
     }
 
     fn provider_completed(&self, actor_alias: &str) -> bool {
+        self.provider_completed_count(actor_alias) > 0
+    }
+
+    fn provider_completed_count(&self, actor_alias: &str) -> usize {
         self.provider_completions_by_session
+            .get(actor_alias)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn provider_active(&self, actor_alias: &str) -> bool {
+        self.active_provider_turns_by_session
             .get(actor_alias)
             .copied()
             .unwrap_or(0)
@@ -3079,7 +3348,7 @@ impl RuntimeCompletionState {
     }
 
     fn next_provider_turn_ready(&self, event: &BoundaryEvent) -> bool {
-        if !self.session_opened(&event.actor_alias) {
+        if !self.session_opened(&event.actor_alias) || self.provider_active(&event.actor_alias) {
             return false;
         }
         let completed = self
@@ -3128,20 +3397,36 @@ fn is_scheduler_owned_runtime_completion(kind: BoundaryKind) -> bool {
             | BoundaryKind::ExecCode
             | BoundaryKind::DurableEffect
             | BoundaryKind::Worker
+            | BoundaryKind::ProcessWake
+            | BoundaryKind::Observer
     )
 }
 
 fn register_ready_runtime_completions(
     queue: &mut RuntimeCompletionQueue,
-    state: &RuntimeCompletionState,
+    state: &mut RuntimeCompletionState,
     scheduler: &mut BoundaryScheduler,
     registered_after: &crate::scheduler::DeliveredBoundary,
+    world: &mut GeneratedRuntimeWorld,
 ) -> Result<(), FixedScriptRunnerError> {
     let ready = queue.take_ready(|event| runtime_completion_ready(event, state));
     for event in ready {
+        if !runtime_completion_ready(&event, state) {
+            queue.defer(event);
+            continue;
+        }
         let family = runtime_completion_family(&event);
         let units = runtime_completion_units(&event)?;
-        queue.register(scheduler, event, registered_after, family, units);
+        if event.kind == BoundaryKind::Provider {
+            let turn_event = event.clone();
+            let actor_alias = event.actor_alias.clone();
+            let (_pending, completion_event) =
+                queue.register_pending_event(event, registered_after, family, units);
+            world.start_provider_turn(turn_event, completion_event, scheduler)?;
+            state.provider_started(&actor_alias);
+        } else {
+            queue.register(scheduler, event, registered_after, family, units);
+        }
     }
     Ok(())
 }
@@ -3149,23 +3434,47 @@ fn register_ready_runtime_completions(
 fn runtime_completion_ready(event: &BoundaryEvent, state: &RuntimeCompletionState) -> bool {
     match event.kind {
         BoundaryKind::Provider => state.next_provider_turn_ready(event),
-        BoundaryKind::BackendFailure | BoundaryKind::ProviderMutation => {
-            state.session_opened(&event.actor_alias)
+        BoundaryKind::Observer => {
+            if !state.session_opened(&event.actor_alias) {
+                return false;
+            }
+            let expected_turn_index = event
+                .payload
+                .get("turn_index")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            state.provider_completed_count(&event.actor_alias) >= expected_turn_index
         }
-        BoundaryKind::Worker => state.session_opened(&completion_session_alias(event)),
+        BoundaryKind::BackendFailure | BoundaryKind::ProviderMutation => {
+            state.session_opened(&event.actor_alias) && !state.provider_active(&event.actor_alias)
+        }
+        BoundaryKind::Worker => {
+            let session = completion_session_alias(event);
+            state.session_opened(&session) && !state.provider_active(&session)
+        }
         BoundaryKind::Cancellation => event
             .payload
             .get("target")
             .and_then(Value::as_str)
             .is_some_and(|target| state.queued_boundary_exists(target)),
-        BoundaryKind::Tool | BoundaryKind::ExecCode => state.provider_completed(&event.actor_alias),
+        BoundaryKind::Tool | BoundaryKind::ExecCode => {
+            state.provider_completed(&event.actor_alias)
+                && !state.provider_active(&event.actor_alias)
+        }
         BoundaryKind::DurableEffect => {
+            if state.provider_active(&event.actor_alias) {
+                return false;
+            }
             if event.label.contains("replay") {
                 durable_key_from_event(event)
                     .is_some_and(|durable_key| state.durable_completed(&durable_key))
             } else {
                 state.session_opened(&event.actor_alias)
             }
+        }
+        BoundaryKind::ProcessWake => {
+            let session = completion_session_alias(event);
+            state.session_opened(&session) && !state.provider_active(&session)
         }
         _ => false,
     }
@@ -3190,6 +3499,8 @@ fn runtime_completion_family(event: &BoundaryEvent) -> &'static str {
         BoundaryKind::ExecCode => "exec_result",
         BoundaryKind::DurableEffect => "durable_effect_completion",
         BoundaryKind::Worker => "worker_lease_completion",
+        BoundaryKind::ProcessWake => "process_wake",
+        BoundaryKind::Observer => "observer_snapshot",
         _ => "runtime_completion",
     }
 }
@@ -3253,6 +3564,8 @@ fn runtime_completion_units(
             }
         }
         BoundaryKind::Worker => "runtime:worker_stale_completion",
+        BoundaryKind::ProcessWake => "runtime:process_wake_delivery",
+        BoundaryKind::Observer => "runtime:observer_snapshot",
         _ => "runtime:completion",
     };
     Ok(vec![RuntimeCompletionUnit::new(unit, event.at)])
@@ -3284,14 +3597,46 @@ struct GeneratedRuntimeWorld {
     trigger_harness: SimTriggerHarness,
     store_factory: Arc<dyn SessionStoreFactory>,
     runtime_boundaries: RuntimeBoundaryHarness,
+    peak_concurrent_live_turns: usize,
+    suspending_turns: BTreeMap<String, SuspendingTurn>,
 }
 
-#[derive(Clone)]
+/// A real generated turn that parks mid-flight on a tool/durable/exec await key
+/// and is resumed only when the boundary scheduler delivers the matching
+/// completion. This generalizes the fixed `prove_pending_tool_completion_through_turn`
+/// proof into the live, interleaved generated search.
+struct SuspendingTurn {
+    core: lash::StandardCore,
+    handle: tokio::task::JoinHandle<Result<lash::TurnResult, FixedScriptRunnerError>>,
+    events: Arc<RuntimeProofRecordingEvents>,
+    key_slot: Arc<tokio::sync::Mutex<Option<lash_core::AwaitEventKey>>>,
+    suspend_kind: BoundaryKind,
+    tool_name: String,
+    resolution: Value,
+    /// `true` once the world has observed the turn parked on its await key
+    /// (the tool registered its completion key and the turn future is not yet
+    /// finished). Recorded before any resolution so the oracle can prove the
+    /// turn suspended rather than running synchronously.
+    suspended_before_completion: Option<bool>,
+    resolution_scheduled: bool,
+    completed_before_resolution: usize,
+}
+
 struct GeneratedRuntimeSession {
     _core: lash::StandardCore,
     session: lash::LashSession,
     transport: Arc<ScriptedLlmHttpTransport>,
+    provider_schedule: ScriptedTransportSchedule,
+    provider_scripts: Vec<ProviderWireScript>,
     provider_kind: String,
+    active_provider_turns: BTreeMap<String, ActiveProviderTurn>,
+    finished_provider_turns: BTreeMap<String, Value>,
+}
+
+struct ActiveProviderTurn {
+    completion_event: BoundaryEvent,
+    handle: tokio::task::JoinHandle<Result<Value, FixedScriptRunnerError>>,
+    final_ready_at: u64,
 }
 
 impl GeneratedRuntimeWorld {
@@ -3310,17 +3655,45 @@ impl GeneratedRuntimeWorld {
                 RuntimeEffectReplayStore::Memory,
             ),
             store_factory,
+            peak_concurrent_live_turns: 0,
+            suspending_turns: BTreeMap::new(),
         }
+    }
+
+    fn pending_suspend_turn_count(&self) -> usize {
+        self.suspending_turns
+            .values()
+            .filter(|turn| !turn.resolution_scheduled)
+            .count()
+    }
+
+    /// Sample the number of provider-turn futures that are spawned and not yet
+    /// joined, tracking the runtime-observed interleaving highwater. This is the
+    /// true count of live turn futures (a superset of the event-derived measure,
+    /// which only counts a turn live once its first provider chunk releases).
+    fn sample_live_turn_highwater(&mut self) {
+        let live = self.active_provider_turn_count();
+        self.peak_concurrent_live_turns = self.peak_concurrent_live_turns.max(live);
     }
 
     async fn deliver_boundary(
         &mut self,
         event: &BoundaryEvent,
     ) -> Result<Value, FixedScriptRunnerError> {
+        if event.payload.get("suspend_resume").and_then(Value::as_bool) == Some(true) {
+            return self.resolve_suspended_turn(event).await;
+        }
         match event.kind {
-            BoundaryKind::Ingress => self.open_runtime_session(event).await,
+            BoundaryKind::Ingress => {
+                if event.payload.get("suspend_kind").is_some() {
+                    self.open_suspending_session(event).await
+                } else {
+                    self.open_runtime_session(event).await
+                }
+            }
             BoundaryKind::QueuedIngress => self.queue_turn_input(event).await,
-            BoundaryKind::Provider => self.run_provider_turn(event).await,
+            BoundaryKind::Provider => self.finish_provider_turn(event).await,
+            BoundaryKind::ProviderEvent => self.release_provider_event(event).await,
             BoundaryKind::Observer => self.observe_session(event),
             BoundaryKind::Cancellation => self.cancel_queued_input(event).await,
             BoundaryKind::Trigger => self.trigger_harness.deliver(event).await,
@@ -3335,7 +3708,7 @@ impl GeneratedRuntimeWorld {
                 .deliver(event)
                 .await
                 .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string())),
-            BoundaryKind::LeaseTime => Ok(self.advance_lease_time(event)),
+            BoundaryKind::LeaseTime => self.advance_lease_time(event).await,
         }
     }
 
@@ -3378,8 +3751,13 @@ impl GeneratedRuntimeWorld {
             })?;
         let scripts = runtime_provider_scripts_for_texts(provider_kind, &provider_texts)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-        let (core, transport, provider_kind) =
-            runtime_core_for_scripts(scripts, Arc::clone(&self.store_factory))?;
+        let provider_scripts = scripts.clone();
+        let provider_schedule = ScriptedTransportSchedule::new();
+        let (core, transport, provider_kind) = runtime_core_for_scripts(
+            scripts,
+            Arc::clone(&self.store_factory),
+            Some(provider_schedule.clone()),
+        )?;
         let session = core
             .session(event.actor_alias.clone())
             .open_fresh()
@@ -3398,7 +3776,11 @@ impl GeneratedRuntimeWorld {
                 _core: core,
                 session,
                 transport,
+                provider_schedule,
+                provider_scripts,
                 provider_kind,
+                active_provider_turns: BTreeMap::new(),
+                finished_provider_turns: BTreeMap::new(),
             },
         );
         Ok(json!({
@@ -3432,11 +3814,14 @@ impl GeneratedRuntimeWorld {
             .session
             .enqueue(lash::TurnInput::text(text.to_string()))
             .id(source_key);
+        let observed_active_turn_id = event
+            .payload
+            .get("active_turn_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if event.payload.get("ingress_mode").and_then(Value::as_str) == Some("active_turn") {
-            let active_turn_id = event
-                .payload
-                .get("active_turn_id")
-                .and_then(Value::as_str)
+            let active_turn_id = observed_active_turn_id
+                .as_deref()
                 .unwrap_or(&event.boundary_id);
             enqueue = enqueue.ingress(lash_core::TurnInputIngress::active_turn(
                 active_turn_id,
@@ -3460,106 +3845,238 @@ impl GeneratedRuntimeWorld {
                 .get("ingress_mode")
                 .and_then(Value::as_str)
                 .unwrap_or("next_turn"),
+            "active_turn_id": observed_active_turn_id,
         }))
     }
 
-    async fn run_provider_turn(
-        &self,
-        event: &BoundaryEvent,
-    ) -> Result<Value, FixedScriptRunnerError> {
-        let runtime_session = self.sessions.get(&event.actor_alias).ok_or_else(|| {
+    fn start_provider_turn(
+        &mut self,
+        event: BoundaryEvent,
+        completion_event: BoundaryEvent,
+        scheduler: &mut BoundaryScheduler,
+    ) -> Result<(), FixedScriptRunnerError> {
+        let runtime_session = self.sessions.get_mut(&event.actor_alias).ok_or_else(|| {
             FixedScriptRunnerError::Assertion(format!(
                 "provider boundary `{}` ran before ingress for `{}`",
                 event.boundary_id, event.actor_alias
             ))
         })?;
-        let expected_text = event
-            .payload
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or("");
         let expected_turn_index = event
             .payload
             .get("turn_index")
             .and_then(Value::as_u64)
             .unwrap_or(1) as usize;
-        let output = runtime_session
-            .session
-            .turn(lash::TurnInput::text(format!(
-                "Run generated provider turn {}.",
-                event.boundary_id
-            )))
-            .run()
-            .await
-            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-        let assistant_message = output.assistant_message().unwrap_or_default().to_string();
-        let read_view = output.result.state.read_view();
-        let graph_node_count = output.result.state.session_graph.nodes.len();
-        let transcript_message_count = read_view.messages().len();
-        let provider_exchange_count =
-            transport_exchanges(runtime_session.transport.as_ref())?.len();
-        if !output.is_success() {
+        let script = runtime_session
+            .provider_scripts
+            .get(expected_turn_index.saturating_sub(1))
+            .cloned()
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "provider boundary `{}` had no runtime provider script for turn {}",
+                    event.boundary_id, expected_turn_index
+                ))
+            })?;
+        let exchange_index = expected_turn_index.saturating_sub(1);
+        if runtime_session
+            .active_provider_turns
+            .contains_key(&event.boundary_id)
+        {
             return Err(FixedScriptRunnerError::Assertion(format!(
-                "runtime turn `{}` did not succeed",
+                "provider boundary `{}` was already active",
                 event.boundary_id
             )));
         }
-        let observation = RuntimeTurnObservation {
-            session_id: output.result.state.session_id.clone(),
-            turn_index: output.result.state.turn_index,
-            assistant_message: assistant_message.clone(),
-            graph_node_count,
-            transcript_message_count,
-            activity_count: output.activities.len(),
-            provider_exchange_count,
-        };
-        let expected_exchange_count = event
-            .payload
-            .get("expected_provider_exchange_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(expected_turn_index as u64) as usize;
-        let runtime_contract = runtime_turn_contract(
-            &observation,
-            &event.actor_alias,
-            expected_turn_index,
-            expected_text,
-            expected_exchange_count,
+
+        let turn_started_at = completion_event.at;
+        let mut final_ready_at = turn_started_at.saturating_add(1);
+        for (event_index, wire_event) in script.timeline.iter().enumerate() {
+            let release_at = turn_started_at.saturating_add(wire_event.at());
+            final_ready_at = final_ready_at.max(release_at.saturating_add(1));
+            scheduler.schedule(provider_release_boundary(
+                &completion_event,
+                &script,
+                exchange_index,
+                event_index,
+                wire_event,
+                release_at,
+            ));
+        }
+
+        let mut completion_event = completion_event;
+        completion_event.at = final_ready_at;
+        set_runtime_completion_ready_at(&mut completion_event, final_ready_at);
+
+        let session = runtime_session.session.clone();
+        let transport = Arc::clone(&runtime_session.transport);
+        let provider_kind = runtime_session.provider_kind.clone();
+        let task_event = event.clone();
+        let handle = tokio::spawn(async move {
+            run_provider_turn_task(session, transport, provider_kind, task_event).await
+        });
+        runtime_session.active_provider_turns.insert(
+            event.boundary_id.clone(),
+            ActiveProviderTurn {
+                completion_event,
+                handle,
+                final_ready_at,
+            },
         );
-        if let Err(message) = require_passed(&runtime_contract) {
-            return Err(FixedScriptRunnerError::Assertion(format!(
-                "runtime invariants failed for `{}`: {message}; success={} session_id={} turn_index={} graph_nodes={} transcript_messages={} activities={}",
-                event.boundary_id,
-                output.is_success(),
-                output.result.state.session_id,
-                output.result.state.turn_index,
-                graph_node_count,
-                transcript_message_count,
-                output.activities.len()
-            )));
-        }
+        Ok(())
+    }
+
+    async fn release_provider_event(
+        &self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, FixedScriptRunnerError> {
+        let turn_boundary_id = event
+            .payload
+            .get("turn_boundary_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "provider event `{}` missing turn_boundary_id",
+                    event.boundary_id
+                ))
+            })?;
+        let event_index = event
+            .payload
+            .get("event_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "provider event `{}` missing event_index",
+                    event.boundary_id
+                ))
+            })? as usize;
+        let exchange_index = event
+            .payload
+            .get("exchange_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "provider event `{}` missing exchange_index",
+                    event.boundary_id
+                ))
+            })? as usize;
+        let event_name = event
+            .payload
+            .get("event_name")
+            .and_then(Value::as_str)
+            .unwrap_or("provider_event");
+        let runtime_session = self.sessions.get(&event.actor_alias).ok_or_else(|| {
+            FixedScriptRunnerError::Assertion(format!(
+                "provider event `{}` ran before ingress for `{}`",
+                event.boundary_id, event.actor_alias
+            ))
+        })?;
+        let active_turn_pending = runtime_session
+            .active_provider_turns
+            .contains_key(turn_boundary_id);
+        let release = runtime_session
+            .provider_schedule
+            .release_when_blocked(exchange_index, event_index, event_name, event.at)
+            .await;
         Ok(json!({
             "session": event.actor_alias,
-            "runtime_session_id": event.actor_alias,
-            "turn_index": expected_turn_index,
-            "success": true,
-            "provider_output": assistant_message,
-            "provider_script": event.payload.get("script").cloned().unwrap_or(Value::Null),
-            "provider_exchange_count": provider_exchange_count,
-            "graph_node_count": graph_node_count,
-            "transcript_message_count": transcript_message_count,
-            "activity_count_nonzero": !output.activities.is_empty(),
+            "provider_event_release": true,
+            "turn_boundary_id": turn_boundary_id,
+            "exchange_index": exchange_index,
+            "event_index": event_index,
+            "event_name": event_name,
             "provider_kind": runtime_session.provider_kind,
-            "runtime_invariants": {
-                "session_id": true,
-                "turn_index": true,
-                "graph_non_empty": graph_node_count > 0,
-                "transcript_contains_provider_output": read_view.messages().iter().any(|message| {
-                    message.parts.iter().any(|part| part.content.contains(expected_text))
-                }),
-                "activity_count_nonzero": !output.activities.is_empty(),
+            "active_turn_pending_before_release": active_turn_pending,
+            "released_while_turn_pending": active_turn_pending && release.blocked_before_release,
+            "scripted_transport_release": {
+                "exchange_index": release.exchange_index,
+                "event_index": release.event_index,
+                "event_name": release.event_name,
+                "at": release.at,
+                "blocked_before_release": release.blocked_before_release,
             },
-            "runtime_contract": runtime_contract,
         }))
+    }
+
+    async fn finish_provider_turn(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, FixedScriptRunnerError> {
+        let runtime_session = self.sessions.get_mut(&event.actor_alias).ok_or_else(|| {
+            FixedScriptRunnerError::Assertion(format!(
+                "provider completion `{}` ran before ingress for `{}`",
+                event.boundary_id, event.actor_alias
+            ))
+        })?;
+        runtime_session
+            .finished_provider_turns
+            .remove(&event.boundary_id)
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "provider completion `{}` was delivered before its turn future completed",
+                    event.boundary_id
+                ))
+            })
+    }
+
+    async fn schedule_finished_provider_turns(
+        &mut self,
+        scheduler: &mut BoundaryScheduler,
+    ) -> Result<(), FixedScriptRunnerError> {
+        tokio::task::yield_now().await;
+        let session_aliases = self.sessions.keys().cloned().collect::<Vec<_>>();
+        for session_alias in session_aliases {
+            let finished_ids = self
+                .sessions
+                .get(&session_alias)
+                .into_iter()
+                .flat_map(|session| {
+                    session
+                        .active_provider_turns
+                        .iter()
+                        .filter(|(_, active)| active.handle.is_finished())
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            for turn_id in finished_ids {
+                let active = self
+                    .sessions
+                    .get_mut(&session_alias)
+                    .and_then(|session| session.active_provider_turns.remove(&turn_id))
+                    .ok_or_else(|| {
+                        FixedScriptRunnerError::Assertion(format!(
+                            "finished provider turn `{turn_id}` disappeared before scheduling completion"
+                        ))
+                    })?;
+                let ActiveProviderTurn {
+                    completion_event,
+                    handle,
+                    final_ready_at,
+                } = active;
+                let observed = handle.await.map_err(|err| {
+                    FixedScriptRunnerError::Runtime(format!(
+                        "provider turn `{turn_id}` task failed to join: {err}"
+                    ))
+                })??;
+                let runtime_session = self.sessions.get_mut(&session_alias).ok_or_else(|| {
+                    FixedScriptRunnerError::Assertion(format!(
+                        "provider turn `{turn_id}` session `{session_alias}` disappeared"
+                    ))
+                })?;
+                runtime_session
+                    .finished_provider_turns
+                    .insert(turn_id, observed);
+                debug_assert_eq!(completion_event.at, final_ready_at);
+                scheduler.schedule(completion_event);
+            }
+        }
+        Ok(())
+    }
+
+    fn active_provider_turn_count(&self) -> usize {
+        self.sessions
+            .values()
+            .map(|session| session.active_provider_turns.len())
+            .sum()
     }
 
     fn observe_session(&self, event: &BoundaryEvent) -> Result<Value, FixedScriptRunnerError> {
@@ -3661,7 +4178,10 @@ impl GeneratedRuntimeWorld {
         }))
     }
 
-    fn advance_lease_time(&mut self, event: &BoundaryEvent) -> Value {
+    async fn advance_lease_time(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, FixedScriptRunnerError> {
         let tick = event
             .payload
             .get("tick")
@@ -3674,14 +4194,418 @@ impl GeneratedRuntimeWorld {
         let monotonic = ticks
             .last()
             .copied()
-            .map_or(true, |previous| previous <= tick);
+            .is_none_or(|previous| previous <= tick);
         ticks.push(tick);
-        json!({
+        // Ground the lease-time tick in a real session-execution-lease fencing
+        // token from the store. This token (not the generator-fed `tick`) is
+        // what the lease-time-monotonic oracle now asserts; the field is
+        // normalized away on cross-backend replay because the abstract model
+        // store cannot reproduce a real lease fence.
+        let lease_fencing_token = self
+            .runtime_boundaries
+            .lease_probe_fencing_token(&event.actor_alias)
+            .await
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+        Ok(json!({
             "session": event.actor_alias,
             "lease_time_tick": tick,
             "monotonic": monotonic,
-        })
+            "runtime_lease_probe": {
+                "session_execution_lease_fencing_token": lease_fencing_token,
+                "real_lease_store": true,
+            },
+        }))
     }
+
+    /// Open a suspend session and spawn its real turn. The turn calls a sim tool
+    /// that registers its await key and returns `ToolResult::pending`, so the
+    /// turn future parks mid-flight and cannot finish until the scheduler later
+    /// delivers the matching completion boundary. The observed masquerades as a
+    /// normal ingress for the abstract store; suspend evidence lives in a
+    /// normalized-away field so cross-backend replay stays green.
+    async fn open_suspending_session(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, FixedScriptRunnerError> {
+        let suspend_kind_label = event
+            .payload
+            .get("suspend_kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "suspend ingress `{}` missing suspend_kind",
+                    event.boundary_id
+                ))
+            })?;
+        let suspend_kind = match suspend_kind_label {
+            "tool" => BoundaryKind::Tool,
+            "durable_effect" => BoundaryKind::DurableEffect,
+            "exec_code" => BoundaryKind::ExecCode,
+            other => {
+                return Err(FixedScriptRunnerError::Assertion(format!(
+                    "suspend ingress `{}` had unknown suspend_kind `{other}`",
+                    event.boundary_id
+                )));
+            }
+        };
+        let session_alias = event.actor_alias.clone();
+        let tool_name = format!("await_{suspend_kind_label}");
+        let resolution = json!({
+            "ok": true,
+            "suspend_kind": suspend_kind_label,
+            "session": session_alias,
+            "resolved_by": "lash-sim-boundary-scheduler",
+        });
+
+        let key_slot = Arc::new(tokio::sync::Mutex::new(None));
+        let events = Arc::new(RuntimeProofRecordingEvents::default());
+        let core = lash::StandardCore::builder()
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+            .process_env_store(Arc::new(
+                lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
+            .store_factory(Arc::new(
+                lash::persistence::InMemorySessionStoreFactory::new(),
+            ))
+            .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
+                as Arc<dyn lash_core::ProcessRegistry>)
+            .provider(suspend_roundtrip_provider(&tool_name))
+            .model(
+                lash_core::ModelSpec::from_token_limits("mock-suspend-model", None, 200_000, None)
+                    .map_err(FixedScriptRunnerError::Assertion)?,
+            )
+            .tools(Arc::new(SuspendToolProvider::new(
+                tool_name.clone(),
+                Arc::clone(&key_slot),
+            )) as Arc<dyn lash_core::ToolProvider>)
+            .build()
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+        let session = core
+            .session(session_alias.clone())
+            .open_fresh()
+            .await
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+        let turn_session = session.clone();
+        let turn_events = Arc::clone(&events);
+        let suspend_label = suspend_kind_label.to_string();
+        let handle = tokio::spawn(async move {
+            turn_session
+                .turn(lash::TurnInput::text(format!(
+                    "await {suspend_label} completion"
+                )))
+                .stream_to(turn_events.as_ref())
+                .await
+                .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))
+        });
+        self.suspending_turns.insert(
+            session_alias.clone(),
+            SuspendingTurn {
+                core,
+                handle,
+                events,
+                key_slot,
+                suspend_kind,
+                tool_name,
+                resolution,
+                suspended_before_completion: None,
+                resolution_scheduled: false,
+                completed_before_resolution: 0,
+            },
+        );
+        Ok(json!({
+            "session": session_alias,
+            "opened": true,
+            "ingress_count": 1,
+            "runtime_suspend": {
+                "suspend_kind": suspend_kind_label,
+                "spawned": true,
+            },
+        }))
+    }
+
+    /// Poll the spawned suspend turns. Once a turn has registered its await key
+    /// (it parked on the tool) and is still in flight, schedule the matching
+    /// completion boundary into the scheduler — mirroring how finished provider
+    /// turns schedule their completion. The completion is the only thing that
+    /// can resume the parked turn.
+    async fn schedule_parked_suspend_resolutions(
+        &mut self,
+        scheduler: &mut BoundaryScheduler,
+        ready_at: u64,
+    ) -> Result<(), FixedScriptRunnerError> {
+        tokio::task::yield_now().await;
+        for (session_alias, turn) in self.suspending_turns.iter_mut() {
+            if turn.resolution_scheduled {
+                continue;
+            }
+            let key_present = turn.key_slot.lock().await.is_some();
+            if !key_present {
+                continue;
+            }
+            // The await key exists, so the tool parked the turn. Record that the
+            // turn suspended before any completion was delivered.
+            let suspended = !turn.handle.is_finished()
+                && turn.events.tool_completed_count().await == 0;
+            turn.suspended_before_completion = Some(suspended);
+            turn.completed_before_resolution = turn.events.tool_completed_count().await;
+            let boundary_id = format!("{session_alias}:suspend-resume:001");
+            let label = format!(
+                "suspend.{}.resume",
+                boundary_kind_label(turn.suspend_kind)
+            );
+            scheduler.schedule(BoundaryEvent::new(
+                boundary_id,
+                session_alias.clone(),
+                turn.suspend_kind,
+                ready_at,
+                label,
+                json!({
+                    "suspend_resume": true,
+                    "tool": turn.tool_name,
+                    "output": turn.resolution,
+                    "session": session_alias,
+                }),
+            ));
+            turn.resolution_scheduled = true;
+        }
+        Ok(())
+    }
+
+    /// Resolve a parked suspend turn via `core.completions().resolve(...)` when
+    /// the scheduler delivers its completion boundary, then await the resumed
+    /// turn to completion. The observed masquerades as the matching runtime
+    /// boundary (tool/exec/durable) for the abstract store, with suspend/resume
+    /// evidence in a normalized-away field.
+    async fn resolve_suspended_turn(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, FixedScriptRunnerError> {
+        let turn = self.suspending_turns.remove(&event.actor_alias).ok_or_else(|| {
+            FixedScriptRunnerError::Assertion(format!(
+                "suspend resume `{}` had no parked turn for `{}`",
+                event.boundary_id, event.actor_alias
+            ))
+        })?;
+        let key = turn.key_slot.lock().await.take().ok_or_else(|| {
+            FixedScriptRunnerError::Assertion(format!(
+                "suspend resume `{}` delivered before the turn registered its await key",
+                event.boundary_id
+            ))
+        })?;
+        let suspended_before_completion = turn.suspended_before_completion.unwrap_or(false);
+        let completed_before = turn.completed_before_resolution;
+        let resolution = turn.resolution.clone();
+        let accepted = turn
+            .core
+            .completions()
+            .resolve(key, lash_core::Resolution::Ok(resolution.clone()))
+            .await
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+        let result = turn
+            .handle
+            .await
+            .map_err(|err| {
+                FixedScriptRunnerError::Runtime(format!(
+                    "suspend turn `{}` task failed to join: {err}",
+                    event.actor_alias
+                ))
+            })??;
+        let completed_after = turn.events.tool_completed_count().await;
+        let assistant_message = result.assistant_message().unwrap_or_default().to_string();
+        let resumed_after_completion = completed_after > completed_before
+            && matches!(
+                &result.outcome,
+                lash_core::TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage { .. })
+            );
+        let resolve_accepted = matches!(accepted, lash_core::ResolveOutcome::Accepted);
+        Ok(json!({
+            "session": event.actor_alias,
+            "tool_output": resolution,
+            "tool_name": turn.tool_name,
+            "tool_call_id": event.boundary_id,
+            "execution_count": 1,
+            "runtime_tool_output": lash_core::ToolCallOutput::success(resolution.clone()),
+            "runtime_suspend": {
+                "suspend_kind": boundary_kind_label(turn.suspend_kind),
+                "turn_suspended_before_completion": suspended_before_completion,
+                "scheduler_delivered_completion": true,
+                "resolve_accepted": resolve_accepted,
+                "resumed_after_completion": resumed_after_completion,
+                "completed_event_count_before_resolution": completed_before,
+                "completed_event_count_after_resolution": completed_after,
+                "final_assistant_message": assistant_message,
+            },
+        }))
+    }
+}
+
+fn boundary_kind_label(kind: BoundaryKind) -> &'static str {
+    match kind {
+        BoundaryKind::Tool => "tool",
+        BoundaryKind::DurableEffect => "durable_effect",
+        BoundaryKind::ExecCode => "exec_code",
+        _ => "unknown",
+    }
+}
+
+fn provider_release_boundary(
+    turn_event: &BoundaryEvent,
+    script: &ProviderWireScript,
+    exchange_index: usize,
+    event_index: usize,
+    wire_event: &ProviderWireEvent,
+    at: u64,
+) -> BoundaryEvent {
+    BoundaryEvent::new(
+        format!(
+            "{}:provider-event:{event_index:03}:{}",
+            turn_event.boundary_id,
+            wire_event.event_name()
+        ),
+        turn_event.actor_alias.clone(),
+        BoundaryKind::ProviderEvent,
+        at,
+        format!("provider.{}", wire_event.event_name()),
+        json!({
+            "turn_boundary_id": turn_event.boundary_id,
+            "provider_kind": turn_event
+                .payload
+                .get("provider_kind")
+                .cloned()
+                .unwrap_or_else(|| json!(script.provider_kind.clone())),
+            "script": turn_event.payload.get("script").cloned().unwrap_or(Value::Null),
+            "script_name": script.name.clone(),
+            "exchange_index": exchange_index,
+            "event_index": event_index,
+            "event_name": wire_event.event_name(),
+            "wire_at": wire_event.at(),
+        }),
+    )
+}
+
+fn set_runtime_completion_ready_at(event: &mut BoundaryEvent, ready_at: u64) {
+    if let Some(completion) = event
+        .payload
+        .get_mut("runtime_completion")
+        .and_then(Value::as_object_mut)
+    {
+        completion.insert("ready_at".to_string(), json!(ready_at));
+    }
+}
+
+async fn run_provider_turn_task(
+    session: lash::LashSession,
+    transport: Arc<ScriptedLlmHttpTransport>,
+    provider_kind: String,
+    event: BoundaryEvent,
+) -> Result<Value, FixedScriptRunnerError> {
+    let expected_text = event
+        .payload
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let expected_turn_index = event
+        .payload
+        .get("turn_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    let output = session
+        .turn(lash::TurnInput::text(format!(
+            "Run generated provider turn {}.",
+            event.boundary_id
+        )))
+        .turn_id(event.boundary_id.clone())
+        .run()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let assistant_message = output.assistant_message().unwrap_or_default().to_string();
+    let read_view = output.result.state.read_view();
+    let graph_node_count = output.result.state.session_graph.nodes.len();
+    let transcript_message_count = read_view.messages().len();
+    let provider_exchange_count = transport_exchanges(transport.as_ref())?.len();
+    let graph_invariant = runtime_graph_invariant_facts(&output.result.state.session_graph);
+    let agent_frame_invariant = runtime_agent_frame_invariant_facts(&output.result.state);
+    let usage_invariant = runtime_usage_invariant_facts(&output.result, &output.activities);
+    let final_value_invariant =
+        runtime_final_value_invariant_facts(&output.result, &output.activities);
+    if !output.is_success() {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "runtime turn `{}` did not succeed; turn_index={} outcome={:?} activities={:?}",
+            event.boundary_id,
+            output.result.state.turn_index,
+            output.result.outcome,
+            output.activities
+        )));
+    }
+    let observation = RuntimeTurnObservation {
+        session_id: output.result.state.session_id.clone(),
+        turn_index: output.result.state.turn_index,
+        assistant_message: assistant_message.clone(),
+        graph_node_count,
+        transcript_message_count,
+        activity_count: output.activities.len(),
+        provider_exchange_count,
+        graph_invariant: Some(graph_invariant.clone()),
+        agent_frame_invariant: Some(agent_frame_invariant.clone()),
+        usage_invariant: Some(usage_invariant.clone()),
+    };
+    let expected_exchange_count = event
+        .payload
+        .get("expected_provider_exchange_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(expected_turn_index as u64) as usize;
+    let runtime_contract = runtime_turn_contract(
+        &observation,
+        &event.actor_alias,
+        expected_turn_index,
+        expected_text,
+        expected_exchange_count,
+    );
+    if let Err(message) = require_passed(&runtime_contract) {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "runtime invariants failed for `{}`: {message}; success={} session_id={} turn_index={} graph_nodes={} transcript_messages={} activities={}",
+            event.boundary_id,
+            output.is_success(),
+            output.result.state.session_id,
+            output.result.state.turn_index,
+            graph_node_count,
+            transcript_message_count,
+            output.activities.len()
+        )));
+    }
+    Ok(json!({
+        "session": event.actor_alias,
+        "runtime_session_id": event.actor_alias,
+        "turn_index": expected_turn_index,
+        "success": true,
+        "provider_output": assistant_message,
+        "provider_script": event.payload.get("script").cloned().unwrap_or(Value::Null),
+        "provider_exchange_count": provider_exchange_count,
+        "graph_node_count": graph_node_count,
+        "transcript_message_count": transcript_message_count,
+        "activity_count_nonzero": !output.activities.is_empty(),
+        "provider_kind": provider_kind,
+        "runtime_invariants": {
+            "session_id": true,
+            "turn_index": true,
+            "graph_non_empty": graph_node_count > 0,
+            "graph_acyclic": graph_invariant.passed,
+            "single_active_agent_frame": agent_frame_invariant.passed,
+            "usage_monotonic": usage_invariant.passed,
+            "transcript_contains_provider_output": read_view.messages().iter().any(|message| {
+                message.parts.iter().any(|part| part.content.contains(expected_text))
+            }),
+            "activity_count_nonzero": !output.activities.is_empty(),
+        },
+        "runtime_invariant_facts": {
+            "graph": graph_invariant,
+            "agent_frame": agent_frame_invariant,
+            "usage": usage_invariant,
+        },
+        "runtime_final_value_facts": final_value_invariant,
+        "runtime_contract": runtime_contract,
+    }))
 }
 
 #[derive(Default)]
@@ -3873,6 +4797,7 @@ fn write_failure_artifact_shape(artifact_root: &Path) -> Result<(), FixedScriptR
 fn runtime_core_for_scripts(
     scripts: Vec<ProviderWireScript>,
     store_factory: Arc<dyn SessionStoreFactory>,
+    provider_schedule: Option<ScriptedTransportSchedule>,
 ) -> Result<(lash::StandardCore, Arc<ScriptedLlmHttpTransport>, String), FixedScriptRunnerError> {
     let provider_kind = scripts
         .first()
@@ -3891,7 +4816,11 @@ fn runtime_core_for_scripts(
             "runtime provider scripts for a session must use one provider kind".to_string(),
         ));
     }
-    let transport = Arc::new(ScriptedLlmHttpTransport::from_scripts(scripts));
+    let mut transport = ScriptedLlmHttpTransport::from_scripts(scripts);
+    if let Some(schedule) = provider_schedule {
+        transport = transport.with_event_schedule(schedule);
+    }
+    let transport = Arc::new(transport);
     let (provider_handle, model, provider_kind) =
         runtime_provider_components(&provider_kind, &transport)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
@@ -3950,6 +4879,8 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
         provider_ok && provider_exchange_count == 1,
         "runtime facade turn did not consume the expected scripted provider output",
     )?;
+    let pending_tool_completion = prove_pending_tool_completion_through_turn().await?;
+    let final_value_semantic_channel = prove_final_value_semantic_channel().await?;
     Ok(RuntimeFacadeProof {
         schema: "lash.sim.runtime-facade-proof.v1",
         name: "standard-facade-openai-compatible-scripted-turn",
@@ -3966,7 +4897,527 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
             provider_ok,
             "provider output matched the scripted OpenAI-compatible stream",
         ),
+        pending_tool_completion,
+        final_value_semantic_channel,
     })
+}
+
+async fn prove_pending_tool_completion_through_turn()
+-> Result<PendingToolCompletionProof, FixedScriptRunnerError> {
+    let (key_tx, key_rx) = tokio::sync::oneshot::channel();
+    let events = Arc::new(RuntimeProofRecordingEvents::default());
+    let core = lash::StandardCore::builder()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .store_factory(Arc::new(
+            lash::persistence::InMemorySessionStoreFactory::new(),
+        ))
+        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
+            as Arc<dyn lash_core::ProcessRegistry>)
+        .provider(pending_tool_roundtrip_provider())
+        .model(
+            lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+                .map_err(FixedScriptRunnerError::Assertion)?,
+        )
+        .tools(Arc::new(PendingToolProvider::new(key_tx)) as Arc<dyn lash_core::ToolProvider>)
+        .build()
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let session = core
+        .session("sim-pending-tool-session")
+        .open_fresh()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let turn_session = session.clone();
+    let turn_events = Arc::clone(&events);
+    let turn = tokio::spawn(async move {
+        turn_session
+            .turn(lash::TurnInput::text("use async tool"))
+            .stream_to(turn_events.as_ref())
+            .await
+    });
+
+    let key = key_rx.await.map_err(|_| {
+        FixedScriptRunnerError::Runtime("pending tool did not send completion key".to_string())
+    })?;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let completed_before = events.tool_completed_count().await;
+    let suspended_before_completion = !turn.is_finished() && completed_before == 0;
+    require(
+        suspended_before_completion,
+        "pending tool turn completed before the scheduler-delivered completion boundary",
+    )?;
+
+    let resolved_payload = json!({
+        "ok": true,
+        "async": true,
+        "resolved_by": "lash-sim-boundary-scheduler",
+    });
+    let completion_boundary_id = "sim-pending-tool-session:tool-completion:001";
+    let mut scheduler = BoundaryScheduler::with_events(
+        0x5eed_7001,
+        [BoundaryEvent::new(
+            completion_boundary_id,
+            "sim-pending-tool-session",
+            BoundaryKind::Tool,
+            1,
+            "tool.pending-completion.resolve",
+            json!({
+                "tool": "app_lookup",
+                "resolution": resolved_payload,
+                "completion_key_observed": true,
+            }),
+        )],
+    );
+    let mut delivered = scheduler.deliver_next(Value::Null).ok_or_else(|| {
+        FixedScriptRunnerError::Assertion(
+            "pending tool completion boundary was not scheduled".to_string(),
+        )
+    })?;
+    let event = delivered.as_event();
+    let resolution = event.payload.get("resolution").cloned().ok_or_else(|| {
+        FixedScriptRunnerError::Assertion(
+            "pending tool boundary missing resolution payload".to_string(),
+        )
+    })?;
+    let accepted = core
+        .completions()
+        .resolve(key.clone(), lash_core::Resolution::Ok(resolution.clone()))
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    delivered.observed = json!({
+        "session": event.actor_alias,
+        "tool": event.payload.get("tool").cloned().unwrap_or(Value::Null),
+        "scheduler_delivered_tool_completion": true,
+        "completion_key_observed": event.payload.get("completion_key_observed").cloned().unwrap_or(Value::Bool(false)),
+        "resolve_outcome": accepted.clone(),
+    });
+
+    let result = turn
+        .await
+        .map_err(|err| {
+            FixedScriptRunnerError::Runtime(format!("pending tool turn task failed: {err}"))
+        })?
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let completed_after = events.tool_completed_count().await;
+    let completed_outputs = events.tool_completed_outputs().await;
+    let assistant_message = result.assistant_message().unwrap_or_default().to_string();
+    let final_ok = matches!(
+        &result.outcome,
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage { .. })
+    ) && assistant_message == "done"
+        && completed_after > completed_before
+        && completed_outputs
+            .iter()
+            .any(|(name, output)| name == "app_lookup" && output == &resolution);
+    require(
+        final_ok,
+        "pending tool completion did not resume the turn to the scripted final answer",
+    )?;
+    let duplicate = core
+        .completions()
+        .resolve(
+            key,
+            lash_core::Resolution::Ok(json!({"ok": false, "duplicate": true})),
+        )
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let session_id = result.state.session_id.clone();
+    let turn_index = result.state.turn_index;
+
+    Ok(PendingToolCompletionProof {
+        schema: "lash.sim.pending-tool-completion-proof.v1",
+        name: "standard-turn-pending-tool-scheduler-resolution",
+        session_id,
+        turn_index,
+        assistant_message,
+        tool_name: "app_lookup".to_string(),
+        completion_boundary_id: delivered.boundary_id.clone(),
+        scheduler_controlled: delivered.scheduler.scheduler_controlled,
+        scheduler_sequence: delivered.sequence,
+        turn_suspended_before_completion: suspended_before_completion,
+        completed_event_count_before_resolution: completed_before,
+        completed_event_count_after_resolution: completed_after,
+        resolved_payload: resolution.clone(),
+        completion_outcome: accepted.clone(),
+        duplicate_completion_outcome: duplicate,
+        turn_suspension_invariant: pending_tool_completion(
+            suspended_before_completion,
+            "pending ToolResult parked the live turn before external resolution",
+        ),
+        scheduler_resolution_invariant: pending_tool_completion(
+            delivered.kind == BoundaryKind::Tool
+                && delivered.scheduler.scheduler_controlled
+                && matches!(accepted, lash_core::ResolveOutcome::Accepted),
+            "BoundaryScheduler delivered the Tool boundary that resolved the await key",
+        ),
+        final_result_invariant: pending_tool_completion(
+            final_ok,
+            "tool completion produced ToolCallCompleted evidence and the second provider response finalized the turn",
+        ),
+    })
+}
+
+#[derive(Default)]
+struct RuntimeProofRecordingEvents {
+    events: tokio::sync::Mutex<Vec<lash::TurnActivity>>,
+}
+
+impl RuntimeProofRecordingEvents {
+    async fn snapshot(&self) -> Vec<lash::TurnActivity> {
+        self.events.lock().await.clone()
+    }
+
+    async fn tool_completed_count(&self) -> usize {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .filter(|activity| matches!(activity.event, lash::TurnEvent::ToolCallCompleted { .. }))
+            .count()
+    }
+
+    async fn tool_completed_outputs(&self) -> Vec<(String, Value)> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .filter_map(|activity| match &activity.event {
+                lash::TurnEvent::ToolCallCompleted { name, output, .. } => {
+                    Some((name.clone(), output.value_for_projection()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn final_value_events(&self) -> Vec<Value> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .filter_map(|activity| match &activity.event {
+                lash::TurnEvent::FinalValue { value } => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn assistant_prose_delta_count(&self) -> usize {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .filter(|activity| {
+                matches!(activity.event, lash::TurnEvent::AssistantProseDelta { .. })
+            })
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl lash::TurnActivitySink for RuntimeProofRecordingEvents {
+    async fn emit(&self, activity: lash::TurnActivity) {
+        self.events.lock().await.push(activity);
+    }
+}
+
+async fn prove_final_value_semantic_channel()
+-> Result<FinalValueSemanticProof, FixedScriptRunnerError> {
+    let events = Arc::new(RuntimeProofRecordingEvents::default());
+    let core = lash::RlmCore::builder()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .store_factory(Arc::new(
+            lash::persistence::InMemorySessionStoreFactory::new(),
+        ))
+        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
+            as Arc<dyn lash_core::ProcessRegistry>)
+        .provider(rlm_final_value_provider())
+        .model(
+            lash_core::ModelSpec::from_token_limits("mock-rlm-final-value", None, 200_000, None)
+                .map_err(FixedScriptRunnerError::Assertion)?,
+        )
+        .build()
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let session = core
+        .session("sim-final-value-session")
+        .open_fresh()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let result = session
+        .turn(lash::TurnInput::text("produce a semantic final value"))
+        .require_finish()
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?
+        .stream_to(events.as_ref())
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let final_value = result.final_value().cloned().ok_or_else(|| {
+        FixedScriptRunnerError::Assertion(format!(
+            "final-value proof finished without TurnFinish::FinalValue: {:?}",
+            result.outcome
+        ))
+    })?;
+    let recorded = events.snapshot().await;
+    let final_value_events = events.final_value_events().await;
+    let assistant_prose_delta_count = events.assistant_prose_delta_count().await;
+    let facts = runtime_final_value_invariant_facts(&result, &recorded);
+    let transcript_text = result
+        .state
+        .read_view()
+        .messages()
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .map(|part| part.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let transcript_contains_final_value =
+        transcript_text.contains("semantic-channel") || transcript_text.contains("\"count\"");
+    let semantic_ok = facts.passed
+        && facts.outcome_kind == "final_value"
+        && facts.semantic_value.as_ref() == Some(&final_value)
+        && final_value_events.iter().any(|value| value == &final_value)
+        && !facts.transcript_inference_required
+        && result.assistant_message().is_none()
+        && !transcript_contains_final_value;
+    require(
+        semantic_ok,
+        "final-value proof did not observe a semantic TurnOutcome and FinalValue event",
+    )?;
+    Ok(FinalValueSemanticProof {
+        schema: "lash.sim.final-value-semantic-proof.v1",
+        name: "rlm-turn-final-value-semantic-channel",
+        session_id: result.state.session_id,
+        turn_index: result.state.turn_index,
+        final_value,
+        assistant_output_text: result.assistant_output.safe_text,
+        final_value_event_count: final_value_events.len(),
+        assistant_prose_delta_count,
+        facts,
+        semantic_channel_invariant: runtime_final_value_semantic(
+            semantic_ok,
+            "final value was read from TurnFinish::FinalValue and TurnEvent::FinalValue, not transcript prose",
+        ),
+    })
+}
+
+fn rlm_final_value_provider() -> ProviderHandle {
+    const RAW_FINAL: &str = "Visible prose before semantic value.\n<lashlang>\nfinish { source: \"semantic-channel\", ok: true, count: 3 }\n</lashlang>";
+    const CHUNKS: &[&str] = &[
+        "Visible prose",
+        " before semantic value.\n<lash",
+        "lang>\nfinish { source: ",
+        "\"semantic-channel\", ok: true, count: 3 }",
+        "\n</lashlang>",
+    ];
+    lash_core::testing::TestProvider::builder()
+        .kind("lash-sim-rlm-final-value")
+        .requires_streaming(true)
+        .complete(|request| async move {
+            let stream = request.stream_events.ok_or_else(|| {
+                LlmTransportError::new("rlm final-value proof requires provider streaming")
+            })?;
+            for chunk in CHUNKS {
+                stream.send(LlmStreamEvent::Delta((*chunk).to_string()));
+            }
+            Ok(LlmResponse {
+                full_text: RAW_FINAL.to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: RAW_FINAL.to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            })
+        })
+        .build()
+        .into_handle()
+}
+
+struct PendingToolProvider {
+    key_tx: Mutex<Option<tokio::sync::oneshot::Sender<lash_core::AwaitEventKey>>>,
+}
+
+impl PendingToolProvider {
+    fn new(key_tx: tokio::sync::oneshot::Sender<lash_core::AwaitEventKey>) -> Self {
+        Self {
+            key_tx: Mutex::new(Some(key_tx)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::ToolProvider for PendingToolProvider {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![pending_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(pending_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        if call.name != "app_lookup" {
+            return lash_core::ToolResult::err_fmt(format_args!("unknown tool {}", call.name));
+        }
+        let key = match call.context.completion_key().await {
+            Ok(key) => key,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        if let Some(tx) = self.key_tx.lock().expect("pending tool key sender").take() {
+            let _ = tx.send(key);
+        }
+        lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
+    }
+}
+
+fn pending_tool_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "tool:app_lookup",
+        "app_lookup",
+        "Look up app state.",
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        json!({ "type": "object" }),
+    )
+}
+
+fn pending_tool_roundtrip_provider() -> ProviderHandle {
+    let responses = Arc::new(tokio::sync::Mutex::new(VecDeque::from([
+        LlmResponse {
+            parts: vec![LlmOutputPart::ToolCall {
+                call_id: "call-1".to_string(),
+                tool_name: "app_lookup".to_string(),
+                input_json: "{}".to_string(),
+                replay: None,
+            }],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            full_text: "done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "done".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        },
+    ])));
+    lash_core::testing::TestProvider::builder()
+        .kind("lash-sim-pending-tool")
+        .complete(move |_request| {
+            let responses = Arc::clone(&responses);
+            async move {
+                responses.lock().await.pop_front().ok_or_else(|| {
+                    LlmTransportError::new("pending tool roundtrip provider exhausted")
+                })
+            }
+        })
+        .build()
+        .into_handle()
+}
+
+/// A sim tool that registers its await key in a shared slot the generated world
+/// can read, then returns `ToolResult::pending` so the calling turn parks until
+/// the scheduler resolves the key. Generalizes `PendingToolProvider` for the
+/// generated suspend sessions (Tool / DurableEffect / ExecCode).
+struct SuspendToolProvider {
+    tool_name: String,
+    key_slot: Arc<tokio::sync::Mutex<Option<lash_core::AwaitEventKey>>>,
+}
+
+impl SuspendToolProvider {
+    fn new(
+        tool_name: String,
+        key_slot: Arc<tokio::sync::Mutex<Option<lash_core::AwaitEventKey>>>,
+    ) -> Self {
+        Self {
+            tool_name,
+            key_slot,
+        }
+    }
+
+    fn definition(&self) -> lash_core::ToolDefinition {
+        lash_core::ToolDefinition::raw(
+            format!("tool:{}", self.tool_name),
+            self.tool_name.clone(),
+            "Await an externally-resolved completion.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            json!({ "type": "object" }),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::ToolProvider for SuspendToolProvider {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![self.definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == self.tool_name).then(|| Arc::new(self.definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        if call.name != self.tool_name {
+            return lash_core::ToolResult::err_fmt(format_args!("unknown tool {}", call.name));
+        }
+        let key = match call.context.completion_key().await {
+            Ok(key) => key,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        *self.key_slot.lock().await = Some(key);
+        lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
+    }
+}
+
+fn suspend_roundtrip_provider(tool_name: &str) -> ProviderHandle {
+    let responses = Arc::new(tokio::sync::Mutex::new(VecDeque::from([
+        LlmResponse {
+            parts: vec![LlmOutputPart::ToolCall {
+                call_id: "suspend-call-1".to_string(),
+                tool_name: tool_name.to_string(),
+                input_json: "{}".to_string(),
+                replay: None,
+            }],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            full_text: "resumed".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "resumed".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        },
+    ])));
+    lash_core::testing::TestProvider::builder()
+        .kind("lash-sim-suspend")
+        .complete(move |_request| {
+            let responses = Arc::clone(&responses);
+            async move {
+                responses.lock().await.pop_front().ok_or_else(|| {
+                    LlmTransportError::new("suspend roundtrip provider exhausted")
+                })
+            }
+        })
+        .build()
+        .into_handle()
 }
 
 fn generated_seed(profile: &str, seed_index: usize) -> u64 {
@@ -4759,10 +6210,10 @@ async fn prove_openai_compatible_stream_chunk_timeout() -> Result<ProofRun, Fixe
 
 async fn prove_openai_compatible_cancel_before_response_start()
 -> Result<ProofRun, FixedScriptRunnerError> {
-    let gate = ScriptedTransportGate::closed();
+    let schedule = ScriptedTransportSchedule::new();
     let transport = Arc::new(
         ScriptedLlmHttpTransport::from_json_str(OPENAI_COMPAT_TOOL_CALL)?
-            .with_response_start_gate(gate.clone()),
+            .with_event_schedule(schedule.clone()),
     );
     let (events, sender) = event_collector();
     let mut provider = OpenAiCompatibleProvider::new("test-key", "https://provider.test")
@@ -4773,7 +6224,7 @@ async fn prove_openai_compatible_cancel_before_response_start()
             .complete(openai_compatible_request_with_events(Some(sender)))
             .await
     });
-    gate.wait_until_blocked().await;
+    schedule.wait_until_blocked(0, 0).await;
     task.abort();
 
     let join_err = task.await.expect_err("cancelled provider task");
@@ -5392,6 +6843,82 @@ mod tests {
         assert_eq!(proof.provider_exchange_count, 1);
         assert!(proof.runtime_invariant.is_passed());
         assert!(proof.provider_output_invariant.is_passed());
+        assert!(
+            proof
+                .pending_tool_completion
+                .turn_suspension_invariant
+                .is_passed()
+        );
+        assert!(
+            proof
+                .pending_tool_completion
+                .scheduler_resolution_invariant
+                .is_passed()
+        );
+        assert!(
+            proof
+                .pending_tool_completion
+                .final_result_invariant
+                .is_passed()
+        );
+        assert!(
+            proof
+                .final_value_semantic_channel
+                .semantic_channel_invariant
+                .is_passed()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_tool_completion_proof_uses_scheduler_delivered_tool_boundary() {
+        let proof = prove_pending_tool_completion_through_turn()
+            .await
+            .expect("pending tool proof");
+
+        assert_eq!(proof.session_id, "sim-pending-tool-session");
+        assert_eq!(proof.turn_index, 1);
+        assert_eq!(proof.assistant_message, "done");
+        assert_eq!(proof.tool_name, "app_lookup");
+        assert!(proof.scheduler_controlled);
+        assert!(proof.turn_suspended_before_completion);
+        assert_eq!(proof.completed_event_count_before_resolution, 0);
+        assert!(proof.completed_event_count_after_resolution > 0);
+        assert!(matches!(
+            proof.completion_outcome,
+            lash_core::ResolveOutcome::Accepted
+        ));
+        assert!(matches!(
+            proof.duplicate_completion_outcome,
+            lash_core::ResolveOutcome::AlreadyResolved {
+                terminal: lash_core::Resolution::Ok(_)
+            }
+        ));
+        assert!(proof.turn_suspension_invariant.is_passed());
+        assert!(proof.scheduler_resolution_invariant.is_passed());
+        assert!(proof.final_result_invariant.is_passed());
+    }
+
+    #[tokio::test]
+    async fn final_value_semantic_channel_proof_uses_runtime_outcome_and_event() {
+        let proof = prove_final_value_semantic_channel()
+            .await
+            .expect("final value proof");
+
+        assert_eq!(proof.session_id, "sim-final-value-session");
+        assert_eq!(proof.turn_index, 1);
+        assert_eq!(proof.facts.outcome_kind, "final_value");
+        assert_eq!(
+            proof.final_value,
+            json!({
+                "source": "semantic-channel",
+                "ok": true,
+                "count": 3,
+            })
+        );
+        assert!(proof.final_value_event_count > 0);
+        assert!(proof.assistant_prose_delta_count > 0);
+        assert!(!proof.facts.transcript_inference_required);
+        assert!(proof.semantic_channel_invariant.is_passed());
     }
 
     #[tokio::test]
@@ -5408,6 +6935,13 @@ mod tests {
         assert_eq!(report.counts.minimized_replays, 2);
         assert!(report.counts.boundary_events >= 4);
         assert_eq!(report.counts.oracle_failures, 0);
+        assert!(
+            report.counts.interleaving_depth_max >= 2,
+            "generated lane must drive >= 2 provider turns concurrently, got {}",
+            report.counts.interleaving_depth_max
+        );
+        assert!(report.counts.interleaving_depth_min >= 1);
+        assert!(report.counts.interleaving_depth_min <= report.counts.interleaving_depth_max);
         assert_eq!(report.scenario_contracts.len(), 4);
         let expected_contract_slices = report
             .scenario_contracts
@@ -5573,7 +7107,7 @@ mod tests {
                 "scenario package {} must include transition facts",
                 package.package_id
             );
-            assert!(artifact["events"].as_array().unwrap().len() > 0);
+            assert!(!artifact["events"].as_array().unwrap().is_empty());
         }
         for slice in &report.scenario_contract_slices {
             assert_eq!(slice.status, "generated_trace_slice_written");
@@ -5634,8 +7168,8 @@ mod tests {
                 "scenario slice {} must include transition facts",
                 slice.test_name
             );
-            assert!(artifact["events"].as_array().unwrap().len() > 0);
-            assert!(artifact["verdicts"].as_array().unwrap().len() > 0);
+            assert!(!artifact["events"].as_array().unwrap().is_empty());
+            assert!(!artifact["verdicts"].as_array().unwrap().is_empty());
         }
         let backend_linked_contracts = report
             .scenario_contract_slices
@@ -5896,7 +7430,7 @@ mod tests {
     }
 
     #[test]
-    fn register_ready_runtime_completions_schedules_only_discovered_boundaries() {
+    fn provider_runtime_completion_registration_does_not_schedule_turn_completion_immediately() {
         let mut state = RuntimeCompletionState::default();
         state.observe(&test_delivered(
             0,
@@ -5938,27 +7472,30 @@ mod tests {
                 }),
             ),
         ]);
-        let mut scheduler = BoundaryScheduler::new(31);
-
-        register_ready_runtime_completions(&mut queue, &state, &mut scheduler, &registered_after)
-            .expect("registered ready completions");
+        let ready = queue.take_ready(|event| runtime_completion_ready(event, &state));
+        assert_eq!(ready.len(), 1);
+        let event = ready.into_iter().next().expect("provider ready");
+        let units = runtime_completion_units(&event).expect("provider completion units");
+        let (_pending, completion_event) = queue.register_pending_event(
+            event,
+            &registered_after,
+            "provider_turn_completion",
+            units,
+        );
 
         assert_eq!(queue.registered_len(), 1);
         assert_eq!(queue.pending_ids(), vec!["session-001:provider:002"]);
-        let delivered = scheduler
-            .deliver_next(json!({"provider_output": "scheduled answer"}))
-            .expect("provider completion");
-        assert_eq!(delivered.boundary_id, "session-001:provider:001");
-        assert!(delivered.payload.get("runtime_completion").is_some());
+        assert_eq!(completion_event.boundary_id, "session-001:provider:001");
+        assert!(completion_event.payload.get("runtime_completion").is_some());
         assert_eq!(
-            delivered
+            completion_event
                 .payload
                 .pointer("/runtime_completion/completion_family")
                 .and_then(Value::as_str),
             Some("provider_turn_completion")
         );
         assert!(
-            delivered
+            completion_event
                 .payload
                 .pointer("/runtime_completion/completion_units")
                 .and_then(Value::as_array)

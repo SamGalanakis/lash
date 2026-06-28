@@ -99,6 +99,14 @@ impl ModelStore {
 
     pub fn apply_observed_boundary(&mut self, event: &BoundaryEvent, observed: &Value) {
         self.total_events += 1;
+        // Suspend sessions are a generated-runtime mechanism (a real turn parked
+        // on an await key), not an abstract runtime session. They are delivered
+        // and counted, but never tracked in the abstract session model, so the
+        // session-shaped oracles do not see a session without provider/observer
+        // structure.
+        if is_suspend_boundary(event) {
+            return;
+        }
         match event.kind {
             BoundaryKind::Ingress => {
                 self.open_session(event.actor_alias.clone());
@@ -148,6 +156,9 @@ impl ModelStore {
                         .transcript_message_counts
                         .push(transcript_message_count);
                 }
+            }
+            BoundaryKind::ProviderEvent => {
+                self.ensure_session(event.actor_alias.clone());
             }
             BoundaryKind::Tool => {
                 let session = self.ensure_session(event.actor_alias.clone());
@@ -270,6 +281,9 @@ impl ModelStore {
     }
 
     pub fn project_boundary_observation(&mut self, event: &BoundaryEvent) -> Value {
+        if let Some(observed) = project_suspend_boundary(event) {
+            return observed;
+        }
         match event.kind {
             BoundaryKind::Ingress => json!({
                 "session": event.actor_alias,
@@ -302,6 +316,7 @@ impl ModelStore {
                     "input_id": format!("recording-ti-{}", *next_seq),
                     "input_state": input_state,
                     "ingress_mode": ingress_mode,
+                    "active_turn_id": event.payload.get("active_turn_id").cloned().unwrap_or(Value::Null),
                 })
             }
             BoundaryKind::Provider => {
@@ -344,6 +359,9 @@ impl ModelStore {
                         transcript_message_count,
                         activity_count: 1,
                         provider_exchange_count,
+                        graph_invariant: None,
+                        agent_frame_invariant: None,
+                        usage_invariant: None,
                     },
                     &event.actor_alias,
                     turn_index,
@@ -376,6 +394,56 @@ impl ModelStore {
                     "runtime_contract": runtime_contract,
                 })
             }
+            BoundaryKind::ProviderEvent => json!({
+                "session": event.actor_alias,
+                "provider_event_release": true,
+                "turn_boundary_id": event
+                    .payload
+                    .get("turn_boundary_id")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "exchange_index": event
+                    .payload
+                    .get("exchange_index")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "event_index": event
+                    .payload
+                    .get("event_index")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "event_name": event
+                    .payload
+                    .get("event_name")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "provider_kind": event
+                    .payload
+                    .get("provider_kind")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "active_turn_pending_before_release": true,
+                "released_while_turn_pending": true,
+                "scripted_transport_release": {
+                    "exchange_index": event
+                        .payload
+                        .get("exchange_index")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "event_index": event
+                        .payload
+                        .get("event_index")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "event_name": event
+                        .payload
+                        .get("event_name")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "at": event.at,
+                    "blocked_before_release": true,
+                },
+            }),
             BoundaryKind::Tool => {
                 let count = self
                     .tool_completions
@@ -675,7 +743,7 @@ impl ModelStore {
                 json!({
                     "session": event.actor_alias,
                     "lease_time_tick": tick,
-                    "monotonic": previous_tick.map_or(true, |previous| previous <= tick),
+                    "monotonic": previous_tick.is_none_or(|previous| previous <= tick),
                 })
             }
         }
@@ -932,6 +1000,59 @@ fn boundary_session_alias(event: &BoundaryEvent) -> String {
         .and_then(Value::as_str)
         .unwrap_or(&event.actor_alias)
         .to_string()
+}
+
+/// A suspend-session ingress or its scheduler-delivered resume completion.
+fn is_suspend_boundary(event: &BoundaryEvent) -> bool {
+    (event.kind == BoundaryKind::Ingress && event.payload.get("suspend_kind").is_some())
+        || event
+            .payload
+            .get("suspend_resume")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// Project the abstract observed for a suspend boundary, matching the
+/// generated-world observed so cross-backend replay stays equal without
+/// modelling the suspend session as a real abstract session.
+fn project_suspend_boundary(event: &BoundaryEvent) -> Option<Value> {
+    if event.kind == BoundaryKind::Ingress && event.payload.get("suspend_kind").is_some() {
+        return Some(json!({
+            "session": event.actor_alias,
+            "opened": true,
+            "ingress_count": 1,
+            "runtime_suspend": {
+                "suspend_kind": event.payload.get("suspend_kind").cloned().unwrap_or(Value::Null),
+                "spawned": true,
+            },
+        }));
+    }
+    if event
+        .payload
+        .get("suspend_resume")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let output = event
+            .payload
+            .get("output")
+            .cloned()
+            .unwrap_or_else(|| json!(""));
+        let tool_name = event
+            .payload
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("await_tool");
+        return Some(json!({
+            "session": event.actor_alias,
+            "tool_output": output,
+            "tool_name": tool_name,
+            "tool_call_id": event.boundary_id,
+            "execution_count": 1,
+            "runtime_tool_output": lash_core::ToolCallOutput::success(output.clone()),
+        }));
+    }
+    None
 }
 
 #[cfg(test)]

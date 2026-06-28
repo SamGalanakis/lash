@@ -425,9 +425,12 @@ artifact = {
         "backend_replayable_regressions": counts.get("backend_replayable_regressions"),
         "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
         "scenario_contract_packages": counts.get("scenario_contract_packages"),
+        "interleaving_depth_max": counts.get("interleaving_depth_max"),
+        "interleaving_depth_min": counts.get("interleaving_depth_min"),
     },
     "semantics": "larger scheduled generated DST run used for schedule/fault search depth; it is separate from the bounded broad primary sim run and does not replace true full mutation evidence",
 }
+required_interleaving_depth = 2
 errors = []
 if counts.get("generated_seeds", 0) < 4:
     errors.append("scheduled-depth run must use at least 4 generated seeds")
@@ -437,6 +440,12 @@ if counts.get("boundary_events", 0) < 512:
     errors.append("scheduled-depth run produced fewer than 512 boundary events")
 if counts.get("oracle_failures", 1) != 0:
     errors.append("scheduled-depth run had oracle failures")
+if counts.get("interleaving_depth_max", 0) < required_interleaving_depth:
+    errors.append(
+        "scheduled-depth run never interleaved >= "
+        f"{required_interleaving_depth} live provider turns "
+        f"(peak {counts.get('interleaving_depth_max', 0)}); the scheduler is not exercising concurrency"
+    )
 if errors:
     artifact["status"] = "failed"
     artifact["errors"] = errors
@@ -457,9 +466,19 @@ summary_path, output_path = sys.argv[1:3]
 with open(summary_path, "r", encoding="utf-8") as handle:
     summary = json.load(handle)
 counts = summary.get("counts") or {}
+required_interleaving_depth = 2
+errors = []
+if counts.get("oracle_failures", 1) != 0:
+    errors.append("full generated lane had oracle failures")
+if counts.get("interleaving_depth_max", 0) < required_interleaving_depth:
+    errors.append(
+        "full generated lane never interleaved >= "
+        f"{required_interleaving_depth} live provider turns "
+        f"(peak {counts.get('interleaving_depth_max', 0)}); the scheduler is not exercising concurrency"
+    )
 artifact = {
     "schema": "lash.confidence.scheduled-depth-generated-run.v1",
-    "status": "passed" if counts.get("oracle_failures", 1) == 0 else "failed",
+    "status": "passed" if not errors else "failed",
     "source": "main_full_generated_lane",
     "profile": summary.get("profile"),
     "summary_path": summary_path,
@@ -471,13 +490,19 @@ artifact = {
         "backend_replayable_regressions": counts.get("backend_replayable_regressions"),
         "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
         "scenario_contract_packages": counts.get("scenario_contract_packages"),
+        "interleaving_depth_max": counts.get("interleaving_depth_max"),
+        "interleaving_depth_min": counts.get("interleaving_depth_min"),
     },
     "semantics": "the full lane generated DST run is already full-random at generator defaults, so the scheduled-depth artifact points at the primary full sim summary rather than duplicating it",
 }
+if errors:
+    artifact["errors"] = errors
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump(artifact, handle, indent=2, sort_keys=True)
     handle.write("\n")
-if artifact["status"] != "passed":
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
     sys.exit(1)
 PY
   fi

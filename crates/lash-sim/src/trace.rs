@@ -233,6 +233,20 @@ impl TraceEventLine {
     }
 }
 
+/// Evidence that replay re-verified the real-runtime invariant facts that the
+/// boundary-equality normalization strips out (session-graph acyclicity, the
+/// single-active-agent-frame invariant, and usage monotonicity). The counts
+/// prove the re-verification actually ran; replay fails before a report is built
+/// if any recorded fact is internally inconsistent or reveals a violation.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeInvariantReverification {
+    pub schema: String,
+    pub reverified_turn_count: usize,
+    pub graph_invariant_checks: usize,
+    pub agent_frame_invariant_checks: usize,
+    pub usage_invariant_checks: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplayReport {
     pub schema: String,
@@ -241,6 +255,8 @@ pub struct ReplayReport {
     pub delivered_event_count: usize,
     pub delivered_boundary_sequence: Vec<String>,
     pub final_summary: AbstractWorldSummary,
+    #[serde(default)]
+    pub runtime_invariant_reverification: RuntimeInvariantReverification,
 }
 
 impl ReplayReport {
@@ -249,6 +265,7 @@ impl ReplayReport {
         terminal_verdict: OracleVerdict,
         delivered_boundary_sequence: Vec<String>,
         final_summary: AbstractWorldSummary,
+        runtime_invariant_reverification: RuntimeInvariantReverification,
     ) -> Self {
         Self {
             schema: REPLAY_REPORT_SCHEMA.to_string(),
@@ -257,6 +274,7 @@ impl ReplayReport {
             delivered_boundary_sequence,
             terminal_verdict,
             final_summary,
+            runtime_invariant_reverification,
         }
     }
 }

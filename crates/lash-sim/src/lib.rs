@@ -19,7 +19,7 @@ pub mod trace;
 
 pub use provider::{
     ProviderWireEndpoint, ProviderWireEvent, ProviderWireRequestMatch, ProviderWireScript,
-    ScriptedLlmHttpTransport, ScriptedTransportGate,
+    ScriptedLlmHttpTransport, ScriptedTransportSchedule,
 };
 pub use runner::{
     FIXED_SCRIPT_PROFILE, FixedScriptManifest, FixedScriptProof, FixedScriptSummary,
