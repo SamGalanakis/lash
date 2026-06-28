@@ -4,8 +4,9 @@ use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, PluginOptions, ProcessExecutionEnvSpec, ProcessExecutionEnvStore,
-    ProcessRegistry, RuntimePersistence, SessionPolicy, SessionStoreFactory, TriggerStore,
+    DurabilityTier, ExecutionScope, PluginOptions, ProcessExecutionEnvSpec,
+    ProcessExecutionEnvStore, ProcessRegistry, RuntimePersistence, SessionPolicy,
+    SessionStoreFactory, TriggerStore,
 };
 use lash_postgres_store::PostgresStorage;
 
@@ -51,6 +52,7 @@ async fn reset(storage: &PostgresStorage) {
             lash_process_wake_acks,
             lash_process_handle_grants,
             lash_process_leases,
+            lash_runtime_effect_replay,
             lash_process_events,
             lash_processes,
             lash_queued_work_items,
@@ -158,6 +160,47 @@ async fn postgres_session_store_factory_satisfies_conformance_when_configured() 
             })
         },
         DurabilityTier::Durable,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_runtime_effect_controller_satisfies_conformance_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
+    let Some(storage) = storage().await else {
+        eprintln!(
+            "skipping Postgres runtime-effect conformance: LASH_POSTGRES_DATABASE_URL is not set"
+        );
+        return;
+    };
+    reset(&storage).await;
+
+    let host = Arc::new(storage.effect_host()) as Arc<dyn lash_core::EffectHost>;
+    lash_core::testing::conformance::effect_host_durable_steps(|| Arc::clone(&host)).await;
+
+    let controller = storage.runtime_effect_controller(ExecutionScope::runtime_operation(
+        "postgres-effect-controller-conformance",
+    ));
+    lash_core::testing::conformance::effect_controller_durable_steps_replay(&controller, || {
+        controller.start_replay()
+    })
+    .await;
+
+    let controller = storage.runtime_effect_controller(ExecutionScope::runtime_operation(
+        "postgres-effect-controller-concurrent-conformance",
+    ));
+    lash_core::testing::conformance::effect_controller_concurrent_replay_deterministic(
+        &controller,
+        || controller.start_replay(),
+    )
+    .await;
+
+    let controller = storage.runtime_effect_controller(ExecutionScope::runtime_operation(
+        "postgres-effect-controller-tool-conformance",
+    ));
+    lash_core::testing::conformance::effect_controller_tool_attempt_fanout_replay_deterministic(
+        &controller,
+        || controller.start_replay(),
     )
     .await;
 }

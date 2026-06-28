@@ -19,55 +19,59 @@ impl GoogleOAuthProvider {
         stream_events: Option<lash_core::llm::types::LlmEventSender>,
         provider_trace: Option<lash_core::llm::types::LlmProviderTraceSender>,
     ) -> Result<LlmResponse, LlmTransportError> {
-        let request_body = serde_json::to_string(&request).ok();
+        let request_body_bytes = serde_json::to_vec(&request).map_err(|err| {
+            LlmTransportError::new(format!("Failed to serialize Cloud Code body: {err}"))
+                .with_kind(lash_core::ProviderFailureKind::Validation)
+        })?;
+        let request_body = Some(String::from_utf8_lossy(&request_body_bytes).into_owned());
         let method = if stream_events.is_some() {
             "streamGenerateContent"
         } else {
             "generateContent"
         };
-        let url = Self::method_url(method);
-        let mut http = self
-            .client
-            .post(&url)
-            .bearer_auth(access_token)
-            .json(&request);
+        let mut url = Self::method_url(method);
         if stream_events.is_some() {
-            http = http.query(&[("alt", "sse")]);
+            url.push_str("?alt=sse");
         }
-        let resp = send_request(
-            http,
-            request_body.clone().map(request_body_snapshot),
-            response_start_timeout(
-                self.options.llm_timeouts().request_timeout,
-                self.options.llm_timeouts().chunk_timeout,
-                stream_events.is_some(),
-            ),
-            "Cloud Code response start timed out",
-        )
-        .await?;
+        let http_request = LlmHttpRequest::post(url.clone(), request_body_bytes)
+            .with_header("Authorization", format!("Bearer {access_token}"))
+            .with_header("Content-Type", "application/json")
+            .with_body_for_error(request_body.clone().unwrap_or_default())
+            .with_response_start_timeout_message("Cloud Code response start timed out");
+        let resp = self
+            .transport
+            .send(
+                http_request,
+                response_start_timeout(
+                    self.options.llm_timeouts().request_timeout,
+                    self.options.llm_timeouts().chunk_timeout,
+                    stream_events.is_some(),
+                ),
+            )
+            .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let headers = resp.headers().clone();
-            let body = read_response_text(
-                resp,
+        if !resp.is_success() {
+            let status = resp.status;
+            let headers = resp.headers;
+            let body = read_http_body_text(
+                resp.body,
                 self.options.llm_timeouts().request_timeout,
                 "Cloud Code response body timed out",
             )
             .await
             .unwrap_or_default();
-            return Err(http_error_envelope(
+            return Err(http_error_envelope_from_pairs(
                 format!("Cloud Code request failed with {}", status),
                 status,
-                &headers,
+                headers,
                 body,
                 request_body,
             ));
         }
 
         if stream_events.is_none() {
-            let text = read_response_text(
-                resp,
+            let text = read_http_body_text(
+                resp.body,
                 self.options.llm_timeouts().request_timeout,
                 "Cloud Code response body timed out",
             )
@@ -113,7 +117,7 @@ impl GoogleOAuthProvider {
             .and_then(Value::as_str)
             .map(str::to_string);
         drive_sse_response(
-            resp,
+            resp.body,
             self.options.llm_timeouts().chunk_timeout,
             "Cloud Code stream chunk timed out",
             |raw| {
@@ -169,7 +173,7 @@ impl GoogleOAuthProvider {
             terminal_diagnostic: None,
             provider_usage: None,
             request_body,
-            http_summary: Some(format!("HTTP POST {}?alt=sse", url)),
+            http_summary: Some(format!("HTTP POST {}", url)),
         })
     }
 
@@ -191,37 +195,52 @@ impl GoogleOAuthProvider {
             "cloudaicompanionProject": project_hint,
             "metadata": metadata,
         });
-        let request_body = serde_json::to_string(&req).ok();
-
+        let request_body_bytes = serde_json::to_vec(&req).map_err(|err| {
+            LlmTransportError::new(format!(
+                "Failed to serialize Cloud Code loadCodeAssist body: {err}"
+            ))
+            .with_kind(lash_core::ProviderFailureKind::Validation)
+        })?;
+        let request_body = Some(String::from_utf8_lossy(&request_body_bytes).into_owned());
+        let http_request =
+            LlmHttpRequest::post(Self::method_url("loadCodeAssist"), request_body_bytes)
+                .with_header("Authorization", format!("Bearer {access_token}"))
+                .with_header("Content-Type", "application/json")
+                .with_body_for_error(request_body.clone().unwrap_or_default())
+                .with_response_start_timeout_message(
+                    "Cloud Code loadCodeAssist response start timed out",
+                );
         let resp = self
-            .client
-            .post(Self::method_url("loadCodeAssist"))
-            .bearer_auth(access_token)
-            .json(&req)
-            .send()
+            .transport
+            .send(http_request, self.options.llm_timeouts().request_timeout)
+            .await?;
+        if !resp.is_success() {
+            let status = resp.status;
+            let headers = resp.headers;
+            let body = read_http_body_text(
+                resp.body,
+                self.options.llm_timeouts().request_timeout,
+                "Cloud Code loadCodeAssist body timed out",
+            )
             .await
-            .map_err(|e| {
-                let error = LlmTransportError::new(format!("HTTP request failed: {e}"));
-                if let Some(request_body) = request_body.clone() {
-                    error.with_request_body(request_body)
-                } else {
-                    error
-                }
-            })?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let headers = resp.headers().clone();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(http_error_envelope(
+            .unwrap_or_default();
+            return Err(http_error_envelope_from_pairs(
                 format!("Cloud Code loadCodeAssist failed with {}", status),
                 status,
-                &headers,
+                headers,
                 body,
                 request_body,
             ));
         }
-        let body: Value = resp.json().await.map_err(|e| {
+        let text = read_http_body_text(
+            resp.body,
+            self.options.llm_timeouts().request_timeout,
+            "Cloud Code loadCodeAssist body timed out",
+        )
+        .await?;
+        let body: Value = serde_json::from_str(&text).map_err(|e| {
             LlmTransportError::new(format!("Invalid Cloud Code loadCodeAssist JSON: {e}"))
+                .with_raw(text.clone())
         })?;
         Ok(body
             .get("cloudaicompanionProject")

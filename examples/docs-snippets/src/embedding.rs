@@ -225,3 +225,72 @@ async fn streamed_turn(
     // docs:end:streamed-turn
     Ok(())
 }
+
+fn render_pending_inputs(_inputs: &[lash::PendingTurnInput]) {}
+
+fn remove_pending_input_preview(_input_id: &str) {}
+
+fn reconcile_pending_input_state(_input_id: Option<&str>) {}
+
+async fn pending_input_reconciliation(session: &LashSession) -> anyhow::Result<()> {
+    // docs:start:pending-input-reconciliation
+    use lash::{
+        PendingTurnInputCancelOutcome, PendingTurnInputCancelTarget,
+        PendingTurnInputSuffixCancelOutcome, TurnInput,
+    };
+
+    session
+        .enqueue(TurnInput::text("first draft"))
+        .id("message:1")
+        .send()
+        .await?;
+    let second = session
+        .enqueue(TurnInput::text("second draft"))
+        .id("message:2")
+        .send()
+        .await?;
+
+    // Queue previews come from runtime admission receipts, not local draft
+    // state. Persist `input_id` or `source_key` beside the product message.
+    let pending = session.pending_turn_inputs().await?;
+    render_pending_inputs(&pending);
+
+    // Before editing a product message, atomically cancel the runtime suffix
+    // rooted at that submitted revision.
+    let anchor = second
+        .source_key
+        .clone()
+        .map(PendingTurnInputCancelTarget::source_key)
+        .unwrap_or_else(|| PendingTurnInputCancelTarget::input_id(second.input_id.clone()));
+    match session.cancel_pending_turn_input_suffix(anchor).await? {
+        PendingTurnInputSuffixCancelOutcome::AnchorNotFound { .. } => {
+            render_pending_inputs(&session.pending_turn_inputs().await?);
+        }
+        PendingTurnInputSuffixCancelOutcome::Outcomes { outcomes, .. } => {
+            for outcome in outcomes {
+                match outcome {
+                    PendingTurnInputCancelOutcome::Cancelled(input)
+                    | PendingTurnInputCancelOutcome::AlreadyCancelled(input) => {
+                        remove_pending_input_preview(&input.input_id);
+                    }
+                    PendingTurnInputCancelOutcome::AlreadyClaimed { input, .. }
+                    | PendingTurnInputCancelOutcome::AlreadyCompleted(input) => {
+                        reconcile_pending_input_state(Some(&input.input_id));
+                    }
+                    PendingTurnInputCancelOutcome::NotFound => {
+                        reconcile_pending_input_state(None);
+                    }
+                }
+            }
+        }
+    }
+
+    let replacement = session
+        .enqueue(TurnInput::text("updated second draft"))
+        .id("message:2:v2")
+        .send()
+        .await?;
+    render_pending_inputs(std::slice::from_ref(&replacement));
+    // docs:end:pending-input-reconciliation
+    Ok(())
+}

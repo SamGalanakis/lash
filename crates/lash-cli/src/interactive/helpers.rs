@@ -56,7 +56,8 @@ impl SessionObservationBridge {
                                 }
                                 SessionObservationEventPayload::QueueChanged { .. } => {
                                     coalescer.flush().await;
-                                    let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
+                                    let _ =
+                                        app_tx.send(AppEvent::RequestPendingTurnInputSnapshot);
                                 }
                                 SessionObservationEventPayload::ProcessChanged {
                                     kind,
@@ -90,7 +91,7 @@ impl SessionObservationBridge {
                                     message: format!("Live session observation ended early: {err}"),
                                 });
                                 let _ = app_tx.send(AppEvent::RequestUiSnapshot);
-                                let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
+                                let _ = app_tx.send(AppEvent::RequestPendingTurnInputSnapshot);
                                 let _ = app_tx.send(AppEvent::SessionObservationFinished { stream_id });
                                 break;
                             }
@@ -194,7 +195,7 @@ fn emit_observation_gap(app_tx: &AppEventTx, gap: &LiveReplayGap) {
         ),
     });
     let _ = app_tx.send(AppEvent::RequestUiSnapshot);
-    let _ = app_tx.send(AppEvent::RequestQueuedWorkSnapshot);
+    let _ = app_tx.send(AppEvent::RequestPendingTurnInputSnapshot);
 }
 
 pub(super) struct UiSnapshotWorker {

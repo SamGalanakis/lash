@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
-use lash_llm_transport::timeouts::build_http_client;
 use lash_llm_transport::util::emit_provider_trace;
+use lash_llm_transport::{LlmHttpTransport, ReqwestLlmHttpTransport};
 
 pub(crate) use lash_llm_transport::{
     merge_usage,
@@ -20,7 +20,8 @@ pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 pub(crate) const OPENROUTER_REASONING_VARIANTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh"];
 
-pub(crate) static DEFAULT_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
+pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
+    LazyLock::new(|| Arc::new(ReqwestLlmHttpTransport::new()));
 
 pub(crate) fn base_url_is_openrouter(base_url: &str) -> bool {
     base_url.trim_end_matches('/') == OPENROUTER_BASE_URL

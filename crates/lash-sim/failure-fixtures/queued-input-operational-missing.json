@@ -1,0 +1,12 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "queued-input-operational-missing",
+  "seed": 53,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "remove_kind": "queued_ingress"
+  },
+  "expected_oracle_id": "sim.oracle.state-machine-semantic-invariants.v1",
+  "expected_reason_contains": "queued active-turn input"
+}

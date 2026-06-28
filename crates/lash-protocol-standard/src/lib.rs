@@ -31,6 +31,7 @@ use lash_core::session_model::{
 };
 
 mod batch;
+pub mod scenario_contracts;
 use batch::batch_tool_definition;
 use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, LlmOutputPart, LlmResponse,
@@ -57,6 +58,7 @@ Example — two independent reads in one `batch` call:
 ```"#;
 
 const BATCH_MAX_TOOL_CALLS: usize = 25;
+const STANDARD_PROTOCOL_PLUGIN_ID: &str = "standard_protocol";
 
 /// Plugin factory that installs the standard-protocol driver,
 /// session plugin, and native tool catalog.
@@ -71,7 +73,7 @@ impl StandardProtocolPluginFactory {
 
 impl PluginFactory for StandardProtocolPluginFactory {
     fn id(&self) -> &'static str {
-        "standard_protocol"
+        STANDARD_PROTOCOL_PLUGIN_ID
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -83,7 +85,7 @@ struct StandardProtocolPlugin;
 
 impl SessionPlugin for StandardProtocolPlugin {
     fn id(&self) -> &'static str {
-        "standard_protocol"
+        STANDARD_PROTOCOL_PLUGIN_ID
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
@@ -748,6 +750,14 @@ mod tests {
             Some("tiny".to_string()),
         )
         .as_ref()
+    }
+
+    #[test]
+    fn standard_protocol_factory_id_is_stable_plugin_contract() {
+        let factory = StandardProtocolPluginFactory::new();
+
+        assert_eq!(factory.id(), STANDARD_PROTOCOL_PLUGIN_ID);
+        assert_eq!(factory.id(), "standard_protocol");
     }
 
     #[derive(Clone, Debug)]

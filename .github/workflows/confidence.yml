@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - default
+          - broad
           - full
   schedule:
     - cron: "29 4 * * 0"

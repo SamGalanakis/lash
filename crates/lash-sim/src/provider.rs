@@ -1,0 +1,1325 @@
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use bytes::{Bytes, BytesMut};
+use lash_core::{LlmTransportError, ProviderFailureKind};
+use lash_llm_transport::{
+    LlmByteStream, LlmHttpBody, LlmHttpRequest, LlmHttpResponse, LlmHttpTransport, run_with_timeout,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+pub const PROVIDER_WIRE_SCRIPT_SCHEMA: &str = "lash.provider-wire-script.v1";
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderWireScript {
+    pub schema: String,
+    pub name: String,
+    pub provider_kind: String,
+    pub endpoint: ProviderWireEndpoint,
+    #[serde(default, rename = "request_match")]
+    pub request_match: ProviderWireRequestMatch,
+    #[serde(default)]
+    pub timeline: Vec<ProviderWireEvent>,
+    #[serde(default)]
+    pub expected_provider: Option<Value>,
+}
+
+impl ProviderWireScript {
+    pub fn from_json_str(input: &str) -> Result<Self, LlmTransportError> {
+        let script: Self = serde_json::from_str(input).map_err(|err| {
+            LlmTransportError::new(format!("Invalid Provider Wire Script JSON: {err}"))
+                .with_kind(ProviderFailureKind::Validation)
+        })?;
+        script.validate()?;
+        Ok(script)
+    }
+
+    fn validate(&self) -> Result<(), LlmTransportError> {
+        if self.schema != PROVIDER_WIRE_SCRIPT_SCHEMA {
+            return Err(script_validation_error(format!(
+                "Provider Wire Script `{}` uses unsupported schema `{}`",
+                self.name, self.schema
+            )));
+        }
+        if self.timeline.is_empty() {
+            return Err(script_validation_error(format!(
+                "Provider Wire Script `{}` has no timeline events",
+                self.name
+            )));
+        }
+        let mut previous_at = 0;
+        for (index, event) in self.timeline.iter().enumerate() {
+            let at = event.at();
+            if index > 0 && at < previous_at {
+                return Err(script_validation_error(format!(
+                    "Provider Wire Script `{}` timeline event `{}` at index {index} moved backward from {previous_at} to {at}",
+                    self.name,
+                    event.event_name()
+                )));
+            }
+            previous_at = at;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderWireEndpoint {
+    pub method: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderWireHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderWireRequestMatch {
+    #[serde(default)]
+    pub body: BTreeMap<String, JsonMatcher>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, HeaderMatcher>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonMatcher {
+    #[serde(default)]
+    pub present: Option<bool>,
+    #[serde(default)]
+    pub equals: Option<Value>,
+    #[serde(default)]
+    pub contains: Option<String>,
+    #[serde(default)]
+    pub contains_role: Option<String>,
+    #[serde(default)]
+    pub min_len: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderMatcher {
+    #[serde(default)]
+    pub present: Option<bool>,
+    #[serde(default)]
+    pub equals: Option<String>,
+    #[serde(default)]
+    pub contains: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderWireEvent {
+    ResponseStart {
+        #[serde(default)]
+        at: u64,
+        status: u16,
+        #[serde(default)]
+        headers: Vec<ProviderWireHeader>,
+    },
+    Body {
+        #[serde(default)]
+        at: u64,
+        data: String,
+    },
+    Chunk {
+        #[serde(default)]
+        at: u64,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        bytes: Option<Vec<u8>>,
+    },
+    Sse {
+        #[serde(default)]
+        at: u64,
+        data: String,
+    },
+    End {
+        #[serde(default)]
+        at: u64,
+    },
+    Disconnect {
+        #[serde(default)]
+        at: u64,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        retryable: Option<bool>,
+    },
+    Timeout {
+        #[serde(default)]
+        at: u64,
+        #[serde(default)]
+        message: Option<String>,
+    },
+    HttpError {
+        #[serde(default)]
+        at: u64,
+        status: u16,
+        #[serde(default)]
+        headers: Vec<ProviderWireHeader>,
+        body: String,
+    },
+    TransportError {
+        #[serde(default)]
+        at: u64,
+        message: String,
+        #[serde(default)]
+        retryable: Option<bool>,
+    },
+}
+
+impl ProviderWireEvent {
+    pub fn at(&self) -> u64 {
+        match self {
+            Self::ResponseStart { at, .. }
+            | Self::Body { at, .. }
+            | Self::Chunk { at, .. }
+            | Self::Sse { at, .. }
+            | Self::End { at }
+            | Self::Disconnect { at, .. }
+            | Self::Timeout { at, .. }
+            | Self::HttpError { at, .. }
+            | Self::TransportError { at, .. } => *at,
+        }
+    }
+
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Self::ResponseStart { .. } => "response_start",
+            Self::Body { .. } => "body",
+            Self::Chunk { .. } => "chunk",
+            Self::Sse { .. } => "sse",
+            Self::End { .. } => "end",
+            Self::Disconnect { .. } => "disconnect",
+            Self::Timeout { .. } => "timeout",
+            Self::HttpError { .. } => "http_error",
+            Self::TransportError { .. } => "transport_error",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScriptedLlmHttpExchange {
+    pub script_name: String,
+    pub provider_kind: String,
+    pub request: ScriptedLlmHttpRequestExchange,
+    pub response: ScriptedLlmHttpResponseExchange,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScriptedLlmHttpRequestExchange {
+    pub method: String,
+    pub url: String,
+    pub path: String,
+    pub headers: Vec<ProviderWireHeader>,
+    pub body_bytes: usize,
+    pub body_shape: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScriptedLlmHttpResponseExchange {
+    pub status: Option<u16>,
+    pub headers: Vec<ProviderWireHeader>,
+    pub event_names: Vec<String>,
+    pub event_schedule: Vec<ProviderWireTimelineEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderWireTimelineEntry {
+    pub event: String,
+    pub at: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptedLlmHttpTransport {
+    scripts: Arc<Mutex<VecDeque<ProviderWireScript>>>,
+    exchanges: Arc<Mutex<Vec<ScriptedLlmHttpExchange>>>,
+    response_start_gate: Option<ScriptedTransportGate>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ScriptedTransportGate {
+    inner: Arc<ScriptedTransportGateInner>,
+}
+
+#[derive(Debug, Default)]
+struct ScriptedTransportGateInner {
+    opened: AtomicBool,
+    blocked: AtomicBool,
+    blocked_notify: tokio::sync::Notify,
+    opened_notify: tokio::sync::Notify,
+}
+
+impl ScriptedTransportGate {
+    pub fn closed() -> Self {
+        Self::default()
+    }
+
+    pub fn open(&self) {
+        self.inner.opened.store(true, Ordering::SeqCst);
+        self.inner.opened_notify.notify_waiters();
+    }
+
+    pub async fn wait_until_blocked(&self) {
+        while !self.inner.blocked.load(Ordering::SeqCst) {
+            self.inner.blocked_notify.notified().await;
+        }
+    }
+
+    async fn wait_before_response_start(&self) {
+        if self.inner.opened.load(Ordering::SeqCst) {
+            return;
+        }
+        self.inner.blocked.store(true, Ordering::SeqCst);
+        self.inner.blocked_notify.notify_waiters();
+        while !self.inner.opened.load(Ordering::SeqCst) {
+            self.inner.opened_notify.notified().await;
+        }
+    }
+}
+
+impl ScriptedLlmHttpTransport {
+    pub fn new(script: ProviderWireScript) -> Self {
+        Self::from_scripts([script])
+    }
+
+    pub fn from_scripts(scripts: impl IntoIterator<Item = ProviderWireScript>) -> Self {
+        Self {
+            scripts: Arc::new(Mutex::new(scripts.into_iter().collect())),
+            exchanges: Arc::new(Mutex::new(Vec::new())),
+            response_start_gate: None,
+        }
+    }
+
+    pub fn from_json_str(input: &str) -> Result<Self, LlmTransportError> {
+        Ok(Self::new(ProviderWireScript::from_json_str(input)?))
+    }
+
+    pub fn with_response_start_gate(mut self, gate: ScriptedTransportGate) -> Self {
+        self.response_start_gate = Some(gate);
+        self
+    }
+
+    pub fn remaining_scripts(&self) -> Result<usize, LlmTransportError> {
+        let scripts = self.scripts.lock().map_err(|_| {
+            LlmTransportError::new("Provider Wire Script queue lock poisoned")
+                .with_kind(ProviderFailureKind::Transport)
+        })?;
+        Ok(scripts.len())
+    }
+
+    pub fn exchanges(&self) -> Result<Vec<ScriptedLlmHttpExchange>, LlmTransportError> {
+        let exchanges = self.exchanges.lock().map_err(|_| {
+            LlmTransportError::new("Provider Wire Script exchange log lock poisoned")
+                .with_kind(ProviderFailureKind::Transport)
+        })?;
+        Ok(exchanges.clone())
+    }
+
+    fn next_script(&self) -> Result<ProviderWireScript, LlmTransportError> {
+        let mut scripts = self.scripts.lock().map_err(|_| {
+            LlmTransportError::new("Provider Wire Script queue lock poisoned")
+                .with_kind(ProviderFailureKind::Transport)
+        })?;
+        scripts.pop_front().ok_or_else(|| {
+            LlmTransportError::new("No Provider Wire Script remained for LLM request")
+                .with_kind(ProviderFailureKind::Transport)
+        })
+    }
+
+    fn record_exchange(&self, exchange: ScriptedLlmHttpExchange) -> Result<(), LlmTransportError> {
+        let mut exchanges = self.exchanges.lock().map_err(|_| {
+            LlmTransportError::new("Provider Wire Script exchange log lock poisoned")
+                .with_kind(ProviderFailureKind::Transport)
+        })?;
+        exchanges.push(exchange);
+        Ok(())
+    }
+
+    fn record_or_replace_pending_exchange(
+        &self,
+        exchange: ScriptedLlmHttpExchange,
+    ) -> Result<(), LlmTransportError> {
+        let mut exchanges = self.exchanges.lock().map_err(|_| {
+            LlmTransportError::new("Provider Wire Script exchange log lock poisoned")
+                .with_kind(ProviderFailureKind::Transport)
+        })?;
+        if let Some(existing) = exchanges.iter_mut().rev().find(|existing| {
+            existing.script_name == exchange.script_name && existing.response.event_names.is_empty()
+        }) {
+            *existing = exchange;
+        } else {
+            exchanges.push(exchange);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LlmHttpTransport for ScriptedLlmHttpTransport {
+    async fn send(
+        &self,
+        request: LlmHttpRequest,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<LlmHttpResponse, LlmTransportError> {
+        let script = self.next_script()?;
+        match_request(&script, &request)?;
+        let mut recorded_pending_exchange = false;
+        if let Some(gate) = &self.response_start_gate {
+            self.record_exchange(scripted_exchange(&script, &request, false))?;
+            recorded_pending_exchange = true;
+            let timeout_message = request
+                .response_start_timeout_message
+                .as_deref()
+                .unwrap_or("LLM HTTP response start timed out");
+            let wait_result = run_with_timeout(
+                async {
+                    gate.wait_before_response_start().await;
+                    Ok(())
+                },
+                timeout,
+                timeout_message,
+            )
+            .await;
+            if let Err(err) = wait_result {
+                return Err(err);
+            }
+        }
+        let result = execute_script(script.clone());
+        let exchange = scripted_exchange(&script, &request, true);
+        if recorded_pending_exchange {
+            self.record_or_replace_pending_exchange(exchange)?;
+        } else {
+            self.record_exchange(exchange)?;
+        }
+        result
+    }
+}
+
+fn scripted_exchange(
+    script: &ProviderWireScript,
+    request: &LlmHttpRequest,
+    include_response: bool,
+) -> ScriptedLlmHttpExchange {
+    ScriptedLlmHttpExchange {
+        script_name: script.name.clone(),
+        provider_kind: script.provider_kind.clone(),
+        request: ScriptedLlmHttpRequestExchange {
+            method: request.method.as_str().to_string(),
+            url: request.url.clone(),
+            path: request_path(&request.url),
+            headers: redacted_http_headers(&request.headers),
+            body_bytes: request.body.len(),
+            body_shape: request_body_shape(&request.body),
+        },
+        response: scripted_response_exchange(script, include_response),
+    }
+}
+
+fn scripted_response_exchange(
+    script: &ProviderWireScript,
+    include_response: bool,
+) -> ScriptedLlmHttpResponseExchange {
+    if !include_response {
+        return ScriptedLlmHttpResponseExchange {
+            status: None,
+            headers: Vec::new(),
+            event_names: Vec::new(),
+            event_schedule: Vec::new(),
+        };
+    }
+
+    let mut status = None;
+    let mut headers = Vec::new();
+    for event in &script.timeline {
+        match event {
+            ProviderWireEvent::ResponseStart {
+                status: next_status,
+                headers: next_headers,
+                ..
+            }
+            | ProviderWireEvent::HttpError {
+                status: next_status,
+                headers: next_headers,
+                ..
+            } => {
+                status = Some(*next_status);
+                headers = redacted_provider_headers(next_headers);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    ScriptedLlmHttpResponseExchange {
+        status,
+        headers,
+        event_names: script
+            .timeline
+            .iter()
+            .map(|event| event.event_name().to_string())
+            .collect(),
+        event_schedule: script
+            .timeline
+            .iter()
+            .map(|event| ProviderWireTimelineEntry {
+                event: event.event_name().to_string(),
+                at: event.at(),
+            })
+            .collect(),
+    }
+}
+
+fn redacted_http_headers(headers: &[(String, String)]) -> Vec<ProviderWireHeader> {
+    headers
+        .iter()
+        .map(|(name, value)| ProviderWireHeader {
+            name: name.clone(),
+            value: redacted_header_value(name, value),
+        })
+        .collect()
+}
+
+fn redacted_provider_headers(headers: &[ProviderWireHeader]) -> Vec<ProviderWireHeader> {
+    headers
+        .iter()
+        .map(|header| ProviderWireHeader {
+            name: header.name.clone(),
+            value: redacted_header_value(&header.name, &header.value),
+        })
+        .collect()
+}
+
+fn redacted_header_value(name: &str, value: &str) -> String {
+    let lower_name = name.to_ascii_lowercase();
+    let lower_value = value.to_ascii_lowercase();
+    if matches!(
+        lower_name.as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+    ) || lower_name.contains("api-key")
+        || lower_name.contains("token")
+        || lower_value.contains("bearer ")
+        || lower_value.contains("sk-")
+    {
+        "[redacted]".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn request_body_shape(body: &Bytes) -> Value {
+    serde_json::from_slice::<Value>(body)
+        .map(|value| json_shape(&value))
+        .unwrap_or_else(|_| {
+            json!({
+                "type": "bytes",
+                "bytes": body.len()
+            })
+        })
+}
+
+fn json_shape(value: &Value) -> Value {
+    match value {
+        Value::Null => json!({ "type": "null" }),
+        Value::Bool(_) => json!({ "type": "bool" }),
+        Value::Number(_) => json!({ "type": "number" }),
+        Value::String(text) => json!({
+            "type": "string",
+            "bytes": text.len()
+        }),
+        Value::Array(items) => {
+            let mut shape = Map::new();
+            shape.insert("type".to_string(), json!("array"));
+            shape.insert("len".to_string(), json!(items.len()));
+            if let Some(first) = items.first() {
+                shape.insert("items".to_string(), json_shape(first));
+            }
+            Value::Object(shape)
+        }
+        Value::Object(fields) => {
+            let mut shaped_fields = Map::new();
+            for (key, value) in fields {
+                shaped_fields.insert(key.clone(), json_shape(value));
+            }
+            json!({
+                "type": "object",
+                "keys": fields.keys().cloned().collect::<Vec<_>>(),
+                "fields": shaped_fields
+            })
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ScriptedByteStream {
+    events: VecDeque<ScriptedByteEvent>,
+}
+
+impl ScriptedByteStream {
+    fn new(events: VecDeque<ScriptedByteEvent>) -> Self {
+        Self { events }
+    }
+}
+
+#[derive(Debug)]
+enum ScriptedByteEvent {
+    Chunk(Bytes),
+    Error(LlmTransportError),
+}
+
+#[async_trait]
+impl LlmByteStream for ScriptedByteStream {
+    async fn next_chunk(&mut self) -> Result<Option<Bytes>, LlmTransportError> {
+        match self.events.pop_front() {
+            Some(ScriptedByteEvent::Chunk(chunk)) => Ok(Some(chunk)),
+            Some(ScriptedByteEvent::Error(error)) => Err(error),
+            None => Ok(None),
+        }
+    }
+}
+
+fn match_request(
+    script: &ProviderWireScript,
+    request: &LlmHttpRequest,
+) -> Result<(), LlmTransportError> {
+    if !script
+        .endpoint
+        .method
+        .eq_ignore_ascii_case(request.method.as_str())
+    {
+        return Err(script_match_error(format!(
+            "Provider Wire Script `{}` expected method `{}`, got `{}`",
+            script.name, script.endpoint.method, request.method
+        )));
+    }
+
+    let request_path = request_path(&request.url);
+    if request_path != script.endpoint.path && !request_path.ends_with(&script.endpoint.path) {
+        return Err(script_match_error(format!(
+            "Provider Wire Script `{}` expected path `{}`, got `{request_path}`",
+            script.name, script.endpoint.path
+        )));
+    }
+
+    for (name, matcher) in &script.request_match.headers {
+        let values = request
+            .headers
+            .iter()
+            .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        matcher.match_values(&script.name, name, &values)?;
+    }
+
+    if !script.request_match.body.is_empty() {
+        let body: Value = serde_json::from_slice(&request.body).map_err(|err| {
+            script_match_error(format!(
+                "Provider Wire Script `{}` could not parse request body JSON: {err}",
+                script.name
+            ))
+        })?;
+        for (path, matcher) in &script.request_match.body {
+            matcher.match_value(&script.name, path, select_path(&body, path)?)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_script(script: ProviderWireScript) -> Result<LlmHttpResponse, LlmTransportError> {
+    let mut status = None;
+    let mut headers = Vec::new();
+    let mut buffered = BytesMut::new();
+    let mut stream_events = VecDeque::new();
+    let mut streamed = false;
+
+    for event in script.timeline {
+        match event {
+            ProviderWireEvent::ResponseStart {
+                status: next_status,
+                headers: next_headers,
+                ..
+            } => {
+                status = Some(next_status);
+                headers = header_vec(next_headers);
+            }
+            ProviderWireEvent::Body { data, .. } => {
+                if streamed {
+                    stream_events.push_back(ScriptedByteEvent::Chunk(Bytes::from(data)));
+                } else {
+                    buffered.extend_from_slice(data.as_bytes());
+                }
+            }
+            ProviderWireEvent::Chunk { data, bytes, .. } => {
+                streamed = true;
+                if !buffered.is_empty() {
+                    stream_events.push_back(ScriptedByteEvent::Chunk(buffered.split().freeze()));
+                }
+                stream_events.push_back(ScriptedByteEvent::Chunk(chunk_bytes(
+                    &script.name,
+                    data,
+                    bytes,
+                )?));
+            }
+            ProviderWireEvent::Sse { data, .. } => {
+                streamed = true;
+                if !buffered.is_empty() {
+                    stream_events.push_back(ScriptedByteEvent::Chunk(buffered.split().freeze()));
+                }
+                stream_events.push_back(ScriptedByteEvent::Chunk(Bytes::from(format!(
+                    "data: {data}\n\n"
+                ))));
+            }
+            ProviderWireEvent::End { .. } => {}
+            ProviderWireEvent::Disconnect {
+                message, retryable, ..
+            } => {
+                streamed = true;
+                if !buffered.is_empty() {
+                    stream_events.push_back(ScriptedByteEvent::Chunk(buffered.split().freeze()));
+                }
+                stream_events.push_back(ScriptedByteEvent::Error(
+                    LlmTransportError::new(format!(
+                        "Stream read failed: {}",
+                        message.unwrap_or_else(|| "scripted disconnect".to_string())
+                    ))
+                    .with_kind(ProviderFailureKind::Stream)
+                    .retryable(retryable.unwrap_or(true)),
+                ));
+            }
+            ProviderWireEvent::Timeout { message, .. } => {
+                let error = LlmTransportError::new(
+                    message.unwrap_or_else(|| "scripted provider timeout".to_string()),
+                )
+                .with_kind(ProviderFailureKind::Timeout)
+                .with_code("timeout")
+                .retryable(true);
+                if status.is_some() {
+                    streamed = true;
+                    if !buffered.is_empty() {
+                        stream_events
+                            .push_back(ScriptedByteEvent::Chunk(buffered.split().freeze()));
+                    }
+                    stream_events.push_back(ScriptedByteEvent::Error(error));
+                } else {
+                    return Err(error);
+                }
+            }
+            ProviderWireEvent::HttpError {
+                status,
+                headers,
+                body,
+                ..
+            } => {
+                return Ok(LlmHttpResponse {
+                    status,
+                    headers: header_vec(headers),
+                    body: LlmHttpBody::buffered(body),
+                });
+            }
+            ProviderWireEvent::TransportError {
+                message, retryable, ..
+            } => {
+                let error = LlmTransportError::new(message)
+                    .with_kind(ProviderFailureKind::Transport)
+                    .retryable(retryable.unwrap_or(true));
+                if status.is_some() {
+                    streamed = true;
+                    if !buffered.is_empty() {
+                        stream_events
+                            .push_back(ScriptedByteEvent::Chunk(buffered.split().freeze()));
+                    }
+                    stream_events.push_back(ScriptedByteEvent::Error(error));
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    let status = status.ok_or_else(|| {
+        script_validation_error(format!(
+            "Provider Wire Script `{}` did not include response_start",
+            script.name
+        ))
+    })?;
+
+    if streamed {
+        Ok(LlmHttpResponse {
+            status,
+            headers,
+            body: LlmHttpBody::streamed(ScriptedByteStream::new(stream_events)),
+        })
+    } else {
+        Ok(LlmHttpResponse {
+            status,
+            headers,
+            body: LlmHttpBody::buffered(buffered.freeze()),
+        })
+    }
+}
+
+impl JsonMatcher {
+    fn match_value(
+        &self,
+        script_name: &str,
+        field: &str,
+        value: Option<&Value>,
+    ) -> Result<(), LlmTransportError> {
+        if let Some(present) = self.present
+            && present != value.is_some()
+        {
+            return Err(script_match_error(format!(
+                "Provider Wire Script `{script_name}` field `{field}` presence mismatch: expected present={present}, actual present={}",
+                value.is_some()
+            )));
+        }
+        if let Some(expected) = &self.equals
+            && value != Some(expected)
+        {
+            return Err(script_match_error(format!(
+                "Provider Wire Script `{script_name}` field `{field}` equality mismatch: expected {}, actual {}",
+                expected,
+                value
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "<missing>".to_string())
+            )));
+        }
+        if let Some(needle) = &self.contains {
+            let contains = value.is_some_and(|value| match value {
+                Value::String(text) => text.contains(needle),
+                other => other.to_string().contains(needle),
+            });
+            if !contains {
+                return Err(script_match_error(format!(
+                    "Provider Wire Script `{script_name}` field `{field}` did not contain `{needle}`; actual {}",
+                    value
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "<missing>".to_string())
+                )));
+            }
+        }
+        if let Some(role) = &self.contains_role {
+            let contains_role = value.and_then(Value::as_array).is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.get("role").and_then(Value::as_str) == Some(role))
+            });
+            if !contains_role {
+                return Err(script_match_error(format!(
+                    "Provider Wire Script `{script_name}` field `{field}` did not contain role `{role}`; actual {}",
+                    value
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "<missing>".to_string())
+                )));
+            }
+        }
+        if let Some(min_len) = self.min_len {
+            let actual_len = value.and_then(Value::as_array).map_or(0, Vec::len);
+            if actual_len < min_len {
+                return Err(script_match_error(format!(
+                    "Provider Wire Script `{script_name}` field `{field}` length {actual_len} < {min_len}; actual {}",
+                    value
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "<missing>".to_string())
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl HeaderMatcher {
+    fn match_values(
+        &self,
+        script_name: &str,
+        name: &str,
+        values: &[&str],
+    ) -> Result<(), LlmTransportError> {
+        let actual_present = !values.is_empty();
+        if let Some(present) = self.present
+            && present != actual_present
+        {
+            return Err(script_match_error(format!(
+                "Provider Wire Script `{script_name}` header `{name}` presence mismatch: expected present={present}, actual values={values:?}"
+            )));
+        }
+        if let Some(expected) = &self.equals
+            && !values.iter().any(|value| *value == expected)
+        {
+            return Err(script_match_error(format!(
+                "Provider Wire Script `{script_name}` header `{name}` equality mismatch: expected `{expected}`, actual values={values:?}"
+            )));
+        }
+        if let Some(needle) = &self.contains
+            && !values.iter().any(|value| value.contains(needle))
+        {
+            return Err(script_match_error(format!(
+                "Provider Wire Script `{script_name}` header `{name}` did not contain `{needle}`; actual values={values:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn request_path(url: &str) -> String {
+    let without_origin = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.find('/').map(|idx| &rest[idx..]))
+        .unwrap_or(url);
+    let path = without_origin.split('?').next().unwrap_or(without_origin);
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn header_vec(headers: Vec<ProviderWireHeader>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .map(|header| (header.name, header.value))
+        .collect()
+}
+
+fn chunk_bytes(
+    script_name: &str,
+    data: Option<String>,
+    bytes: Option<Vec<u8>>,
+) -> Result<Bytes, LlmTransportError> {
+    match (data, bytes) {
+        (Some(data), None) => Ok(Bytes::from(data)),
+        (None, Some(bytes)) => Ok(Bytes::from(bytes)),
+        (Some(_), Some(_)) => Err(script_validation_error(format!(
+            "Provider Wire Script `{script_name}` chunk event must use either `data` or `bytes`, not both"
+        ))),
+        (None, None) => Err(script_validation_error(format!(
+            "Provider Wire Script `{script_name}` chunk event must include `data` or `bytes`"
+        ))),
+    }
+}
+
+fn select_path<'a>(root: &'a Value, path: &str) -> Result<Option<&'a Value>, LlmTransportError> {
+    let mut current = root;
+    for segment in parse_path(path)? {
+        match segment {
+            PathSegment::Key(key) => {
+                let Some(next) = current.get(key.as_str()) else {
+                    return Ok(None);
+                };
+                current = next;
+            }
+            PathSegment::Index(index) => {
+                let Some(next) = current.as_array().and_then(|items| items.get(index)) else {
+                    return Ok(None);
+                };
+                current = next;
+            }
+        }
+    }
+    Ok(Some(current))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn parse_path(path: &str) -> Result<Vec<PathSegment>, LlmTransportError> {
+    if path.trim().is_empty() {
+        return Err(script_validation_error(
+            "Provider Wire Script request matcher path cannot be empty".to_string(),
+        ));
+    }
+
+    let mut segments = Vec::new();
+    for raw_part in path.split('.') {
+        if raw_part.is_empty() {
+            return Err(script_validation_error(format!(
+                "Provider Wire Script request matcher path `{path}` has an empty segment"
+            )));
+        }
+
+        let Some((key, tail)) = raw_part.split_once('[') else {
+            segments.push(PathSegment::Key(raw_part.to_string()));
+            continue;
+        };
+        if !key.is_empty() {
+            segments.push(PathSegment::Key(key.to_string()));
+        }
+
+        let mut rest = tail;
+        loop {
+            let Some((index, tail)) = rest.split_once(']') else {
+                return Err(script_validation_error(format!(
+                    "Provider Wire Script request matcher path `{path}` has an unterminated array index"
+                )));
+            };
+            let index = index.parse::<usize>().map_err(|_| {
+                script_validation_error(format!(
+                    "Provider Wire Script request matcher path `{path}` has invalid array index `{index}`"
+                ))
+            })?;
+            segments.push(PathSegment::Index(index));
+            if tail.is_empty() {
+                break;
+            }
+            let Some(tail) = tail.strip_prefix('[') else {
+                return Err(script_validation_error(format!(
+                    "Provider Wire Script request matcher path `{path}` has invalid bracket syntax"
+                )));
+            };
+            rest = tail;
+        }
+    }
+
+    Ok(segments)
+}
+
+fn script_validation_error(message: String) -> LlmTransportError {
+    LlmTransportError::new(message)
+        .with_kind(ProviderFailureKind::Validation)
+        .with_code("provider_wire_script")
+}
+
+fn script_match_error(message: String) -> LlmTransportError {
+    LlmTransportError::new(message)
+        .with_kind(ProviderFailureKind::Validation)
+        .with_code("provider_wire_script_mismatch")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use lash_core::llm::transport::ProviderFailureKind;
+    use lash_core::llm::types::{
+        LlmEventSender, LlmMessage, LlmOutputPart, LlmRequest, LlmRole, LlmStreamEvent,
+        LlmTerminalReason, LlmToolChoice, LlmToolSpec,
+    };
+    use lash_core::provider::{
+        DefaultProviderFailureClassifier, Provider, ProviderFailureClassifier, ProviderOptions,
+        ProviderReliability, RequestTimeout,
+    };
+    use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
+    use serde_json::json;
+
+    const TOOL_CALL_SPLIT_STREAM_SCRIPT: &str = include_str!(
+        "../provider-scripts/canonical/openai-compatible.chat-tool-call-split-stream.json"
+    );
+    const RATE_LIMIT_SCRIPT: &str =
+        include_str!("../provider-scripts/canonical/openai-compatible.chat-rate-limit-429.json");
+    const VALIDATION_ERROR_SCRIPT: &str =
+        include_str!("../provider-scripts/canonical/openai-compatible.chat-validation-error.json");
+    const MID_STREAM_DISCONNECT_SCRIPT: &str = include_str!(
+        "../provider-scripts/canonical/openai-compatible.chat-mid-stream-disconnect.json"
+    );
+    const OPENAI_RESPONSES_TEXT_SCRIPT: &str =
+        include_str!("../provider-scripts/canonical/openai.responses-text-stream.json");
+    const RATE_LIMIT_BODY: &str = "{\"error\":{\"message\":\"Rate limit reached for requests\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}";
+    const VALIDATION_BODY: &str = "{\"error\":{\"message\":\"Invalid request: tools[0].function.parameters is invalid\",\"type\":\"invalid_request_error\",\"code\":\"invalid_request_error\"}}";
+
+    #[tokio::test]
+    async fn provider_wire_script_openai_compatible_chat_stream_uses_real_provider_parser() {
+        let (events, sender) = event_collector();
+        let mut provider = scripted_provider(TOOL_CALL_SPLIT_STREAM_SCRIPT);
+
+        let response = provider
+            .complete(request(Some(sender)))
+            .await
+            .expect("scripted response");
+
+        assert_eq!(response.terminal_reason, LlmTerminalReason::ToolUse);
+        assert_eq!(response.full_text, "café ");
+        let deltas = text_deltas(&events);
+        assert_eq!(deltas, vec!["café ".to_string()]);
+
+        let tool_call = response
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                LlmOutputPart::ToolCall {
+                    call_id,
+                    tool_name,
+                    input_json,
+                    ..
+                } => Some((call_id, tool_name, input_json)),
+                _ => None,
+            })
+            .expect("tool call part");
+        assert_eq!(tool_call.0, "call_1");
+        assert_eq!(tool_call.1, "lookup");
+        assert_eq!(tool_call.2, "{\"q\":\"x\"}");
+    }
+
+    #[tokio::test]
+    async fn provider_wire_script_openai_compatible_rate_limit_error_preserves_envelope() {
+        let mut provider = scripted_provider(RATE_LIMIT_SCRIPT);
+
+        let err = provider
+            .complete(request(None))
+            .await
+            .expect_err("rate limit error");
+
+        assert_eq!(err.status, Some(429));
+        assert_eq!(err.raw.as_deref(), Some(RATE_LIMIT_BODY));
+        assert_eq!(
+            err.headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+                .count(),
+            2
+        );
+        assert_eq!(err.retry_after, Some(Duration::from_secs(7)));
+        assert_eq!(request_body_json(&err)["model"], "openai/gpt-5.4");
+        assert_eq!(request_body_json(&err)["stream"], false);
+        assert!(!err.retryable);
+
+        let classified = DefaultProviderFailureClassifier.classify(err);
+        assert_eq!(classified.kind, ProviderFailureKind::Http);
+        assert!(classified.retryable);
+        assert_eq!(classified.retry_after, Some(Duration::from_secs(7)));
+    }
+
+    #[tokio::test]
+    async fn provider_wire_script_openai_compatible_validation_error_preserves_envelope() {
+        let mut provider = scripted_provider(VALIDATION_ERROR_SCRIPT);
+
+        let err = provider
+            .complete(request(None))
+            .await
+            .expect_err("validation error");
+
+        assert_eq!(err.status, Some(400));
+        assert_eq!(err.raw.as_deref(), Some(VALIDATION_BODY));
+        assert_eq!(
+            err.headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+                .map(|(_, value)| value.as_str()),
+            Some("req-validation")
+        );
+        assert_eq!(
+            request_body_json(&err)["tools"][0]["function"]["name"],
+            "lookup"
+        );
+        assert!(!err.retryable);
+
+        let classified = DefaultProviderFailureClassifier.classify(err);
+        assert_eq!(classified.kind, ProviderFailureKind::Validation);
+        assert!(!classified.retryable);
+    }
+
+    #[tokio::test]
+    async fn provider_wire_script_openai_compatible_mid_stream_disconnect_surfaces_stream_error() {
+        let (events, sender) = event_collector();
+        let mut provider = scripted_provider(MID_STREAM_DISCONNECT_SCRIPT);
+
+        let err = provider
+            .complete(request(Some(sender)))
+            .await
+            .expect_err("mid-stream disconnect");
+
+        assert_eq!(err.kind, ProviderFailureKind::Stream);
+        assert!(err.retryable);
+        assert!(err.message.contains("scripted socket closed"));
+        assert_eq!(text_deltas(&events), vec!["partial".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn provider_wire_script_direct_openai_responses_uses_real_provider_parser() {
+        let transport = Arc::new(
+            ScriptedLlmHttpTransport::from_json_str(OPENAI_RESPONSES_TEXT_SCRIPT).unwrap(),
+        );
+        let mut provider = OpenAiProvider::new("test-key").with_transport(transport);
+
+        let response = provider
+            .complete(responses_request())
+            .await
+            .expect("scripted OpenAI Responses response");
+
+        assert_eq!(response.terminal_reason, LlmTerminalReason::Stop);
+        assert_eq!(response.full_text, "Direct answer.");
+        assert_eq!(response.usage.input_tokens, 5);
+        assert_eq!(response.usage.output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn provider_wire_script_cancellation_before_response_start_commits_no_output() {
+        let gate = ScriptedTransportGate::closed();
+        let transport = Arc::new(
+            ScriptedLlmHttpTransport::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT)
+                .unwrap()
+                .with_response_start_gate(gate.clone()),
+        );
+        let (events, sender) = event_collector();
+        let mut provider = OpenAiCompatibleProvider::new("test-key", "https://provider.test")
+            .with_transport(transport);
+
+        let task = tokio::spawn(async move { provider.complete(request(Some(sender))).await });
+        gate.wait_until_blocked().await;
+        task.abort();
+
+        let join_err = task.await.expect_err("cancelled provider task");
+        assert!(join_err.is_cancelled());
+        assert!(
+            events.lock().expect("event collector lock").is_empty(),
+            "no stream events should be committed before response start"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_transport_response_start_gate_timeout_uses_production_timeout_envelope() {
+        let gate = ScriptedTransportGate::closed();
+        let transport = Arc::new(
+            ScriptedLlmHttpTransport::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT)
+                .unwrap()
+                .with_response_start_gate(gate),
+        );
+        let provider_transport: Arc<dyn lash_llm_transport::LlmHttpTransport> = transport.clone();
+        let (events, sender) = event_collector();
+        let mut provider = OpenAiCompatibleProvider::new("test-key", "https://provider.test")
+            .with_options(ProviderOptions {
+                reliability: ProviderReliability::default()
+                    .request_timeout(Some(RequestTimeout::Millis(1)))
+                    .stream_chunk_timeout_ms(Some(1)),
+                ..ProviderOptions::default()
+            })
+            .with_transport(provider_transport);
+
+        let err = provider
+            .complete(request(Some(sender)))
+            .await
+            .expect_err("response start gate should time out");
+
+        assert_eq!(err.kind, ProviderFailureKind::Timeout);
+        assert_eq!(err.code.as_deref(), Some("timeout"));
+        assert!(err.retryable);
+        assert!(err.status.is_none());
+        assert!(
+            events.lock().expect("event collector lock").is_empty(),
+            "response-start timeout should not commit stream events"
+        );
+
+        let exchanges = transport.exchanges().expect("exchange log");
+        assert_eq!(exchanges.len(), 1);
+        assert_eq!(exchanges[0].request.path, "/chat/completions");
+        assert!(
+            exchanges[0]
+                .request
+                .headers
+                .iter()
+                .any(|header| header.name.eq_ignore_ascii_case("authorization")
+                    && header.value == "[redacted]")
+        );
+        assert!(exchanges[0].response.event_names.is_empty());
+    }
+
+    #[test]
+    fn provider_wire_script_rejects_non_monotonic_timeline_at_metadata() {
+        let err = ProviderWireScript::from_json_str(
+            r#"{
+              "schema": "lash.provider-wire-script.v1",
+              "name": "non-monotonic",
+              "provider_kind": "openai-compatible",
+              "endpoint": { "method": "POST", "path": "/chat/completions" },
+              "timeline": [
+                { "at": 10, "event": "response_start", "status": 200 },
+                { "at": 5, "event": "end" }
+              ]
+            }"#,
+        )
+        .expect_err("non-monotonic at metadata should fail validation");
+
+        assert_eq!(err.kind, ProviderFailureKind::Validation);
+        assert!(err.message.contains("moved backward"));
+    }
+
+    fn scripted_provider(script: &str) -> OpenAiCompatibleProvider {
+        let transport = Arc::new(ScriptedLlmHttpTransport::from_json_str(script).unwrap());
+        OpenAiCompatibleProvider::new("test-key", "https://provider.test").with_transport(transport)
+    }
+
+    fn event_collector() -> (Arc<Mutex<Vec<LlmStreamEvent>>>, LlmEventSender) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let sender = LlmEventSender::new(move |event| {
+            captured.lock().expect("event collector lock").push(event);
+        });
+        (events, sender)
+    }
+
+    fn text_deltas(events: &Arc<Mutex<Vec<LlmStreamEvent>>>) -> Vec<String> {
+        events
+            .lock()
+            .expect("event collector lock")
+            .iter()
+            .filter_map(|event| match event {
+                LlmStreamEvent::Delta(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn request_body_json(err: &LlmTransportError) -> serde_json::Value {
+        serde_json::from_str(err.request_body.as_deref().expect("request body snapshot"))
+            .expect("request body JSON")
+    }
+
+    fn request(stream_events: Option<LlmEventSender>) -> LlmRequest {
+        LlmRequest {
+            model: "openai/gpt-5.4".to_string(),
+            messages: vec![LlmMessage::text(LlmRole::User, "lookup x")],
+            attachments: Vec::new(),
+            tools: Arc::new(vec![LlmToolSpec {
+                name: "lookup".to_string(),
+                description: "Lookup".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "q": { "type": "string" }
+                    }
+                }),
+                output_schema: json!({}),
+                input_schema_projections: Vec::new(),
+                output_schema_projections: Vec::new(),
+            }]),
+            tool_choice: LlmToolChoice::Auto,
+            model_variant: None,
+            generation: lash_core::GenerationOptions::default(),
+            session_id: Some("session-1".to_string()),
+            output_spec: None,
+            stream_events,
+            provider_trace: None,
+        }
+    }
+
+    fn responses_request() -> LlmRequest {
+        LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![LlmMessage::text(LlmRole::User, "answer directly")],
+            attachments: Vec::new(),
+            tools: Arc::new(Vec::new()),
+            tool_choice: LlmToolChoice::Auto,
+            model_variant: None,
+            generation: lash_core::GenerationOptions::default(),
+            session_id: Some("session-1".to_string()),
+            output_spec: None,
+            stream_events: Some(LlmEventSender::new(|_event| {})),
+            provider_trace: None,
+        }
+    }
+}

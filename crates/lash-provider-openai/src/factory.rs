@@ -36,7 +36,7 @@ impl ProviderFactory for OpenAiProviderFactory {
                 base_url: OPENAI_BASE_URL.to_string(),
                 options: cfg.options,
                 compat: OpenAiCompat::default(),
-                client: build_http_client(),
+                transport: DEFAULT_HTTP_TRANSPORT.clone(),
             },
         }
         .into_components())
@@ -56,7 +56,7 @@ impl ProviderFactory for OpenAiCompatibleProviderFactory {
             base_url: cfg.base_url,
             options: cfg.options,
             compat: cfg.compat,
-            client: build_http_client(),
+            transport: DEFAULT_HTTP_TRANSPORT.clone(),
         }
         .into_components())
     }

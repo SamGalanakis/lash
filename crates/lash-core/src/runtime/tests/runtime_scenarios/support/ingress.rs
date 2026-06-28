@@ -88,6 +88,43 @@ impl RuntimeScenarioContext {
                 );
                 self.enqueued_turn_inputs.insert(*alias, input);
             }
+            RuntimeTurnInputIngress::ConflictNextTurnReplay {
+                text,
+                source_key,
+                expected_alias,
+            } => {
+                let expected = self
+                    .enqueued_turn_inputs
+                    .get(expected_alias)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} source-key conflict expected unknown input alias `{expected_alias}`",
+                            self.name
+                        )
+                    });
+                let err = self
+                    .store()
+                    .enqueue_pending_turn_input(
+                        pending_next_turn_input_draft(self.session_id, text)
+                            .with_source_key(*source_key),
+                    )
+                    .await
+                    .expect_err("changed source-key replay must conflict");
+                assert!(
+                    matches!(
+                        &err,
+                        crate::StoreError::PendingTurnInputSourceKeyConflict {
+                            session_id,
+                            source_key: err_source_key,
+                            existing_input_id,
+                        } if session_id.as_str() == self.session_id
+                            && err_source_key.as_str() == *source_key
+                            && existing_input_id == &expected.input_id
+                    ),
+                    "{} changed source-key replay returned wrong error: {err}",
+                    self.name
+                );
+            }
             RuntimeTurnInputIngress::NextTurnForSession { session_id, text } => {
                 self.store()
                     .enqueue_pending_turn_input(pending_next_turn_input_draft(session_id, text))
@@ -126,7 +163,7 @@ impl RuntimeScenarioContext {
                 self.name
             )
         });
-        let cancelled = self
+        let outcome = self
             .store()
             .cancel_pending_turn_input(self.session_id, &input.input_id)
             .await
@@ -135,13 +172,13 @@ impl RuntimeScenarioContext {
                     "{} failed to cancel {label} turn input `{alias}`: {err}",
                     self.name
                 )
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "{} expected {label} turn input `{alias}` to be cancellable",
-                    self.name
-                )
             });
+        let crate::PendingTurnInputCancelOutcome::Cancelled(cancelled) = outcome else {
+            panic!(
+                "{} expected {label} turn input `{alias}` to be cancellable, got {outcome:?}",
+                self.name,
+            )
+        };
         assert_eq!(cancelled.input_id, input.input_id);
     }
 }

@@ -1,0 +1,46 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "openai-compatible.chat-mid-stream-disconnect",
+  "provider_kind": "openai-compatible",
+  "endpoint": {
+    "method": "POST",
+    "path": "/chat/completions"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "openai/gpt-5.4" },
+      "stream": { "equals": true },
+      "messages[0].role": { "equals": "user" },
+      "tools[0].function.name": { "equals": "lookup" }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "response_start",
+      "status": 200,
+      "headers": [
+        { "name": "content-type", "value": "text/event-stream" },
+        { "name": "x-request-id", "value": "req-disconnect" }
+      ]
+    },
+    {
+      "at": 20,
+      "event": "chunk",
+      "data": "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}"
+    },
+    {
+      "at": 21,
+      "event": "disconnect",
+      "message": "scripted socket closed",
+      "retryable": true
+    }
+  ],
+  "expected_provider": {
+    "stream_error": "scripted socket closed"
+  }
+}

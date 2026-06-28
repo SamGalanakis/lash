@@ -128,6 +128,14 @@ pub enum StoreError {
         session_id: String,
         claim_id: String,
     },
+    #[error(
+        "pending turn input source_key `{source_key}` for session `{session_id}` is already bound to input `{existing_input_id}` with different submitted content"
+    )]
+    PendingTurnInputSourceKeyConflict {
+        session_id: String,
+        source_key: String,
+        existing_input_id: String,
+    },
     #[error("session execution lease for session `{session_id}` is missing or expired")]
     SessionExecutionLeaseExpired { session_id: String },
     #[error(
@@ -220,10 +228,13 @@ pub struct GcReport {
 
 /// Result of a `RuntimePersistence::vacuum()` call.
 /// `removed_node_count` counts the tombstoned graph-node rows that were
-/// physically deleted from the store. Returned so hosts can emit metrics.
+/// physically deleted from the store. `removed_pending_turn_input_tombstone_count`
+/// counts terminal pending-input evidence rows pruned by host-scheduled
+/// retention. Returned so hosts can emit metrics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VacuumReport {
     pub removed_node_count: usize,
+    pub removed_pending_turn_input_tombstone_count: usize,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1141,10 +1152,40 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     /// Cancel an unclaimed pending user input by id.
     async fn cancel_pending_turn_input(
         &self,
+        session_id: &str,
+        input_id: &str,
+    ) -> Result<crate::PendingTurnInputCancelOutcome, StoreError> {
+        let target = crate::PendingTurnInputCancelTarget::input_id(input_id);
+        let targets = vec![target];
+        let mut outcomes = self
+            .cancel_pending_turn_inputs(session_id, &targets)
+            .await?;
+        Ok(outcomes
+            .pop()
+            .map(|result| result.outcome)
+            .unwrap_or(crate::PendingTurnInputCancelOutcome::NotFound))
+    }
+
+    /// Atomically cancel a list of pending user inputs by input id or source key.
+    async fn cancel_pending_turn_inputs(
+        &self,
         _session_id: &str,
-        _input_id: &str,
-    ) -> Result<Option<crate::PendingTurnInput>, StoreError> {
-        Ok(None)
+        _targets: &[crate::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<crate::PendingTurnInputCancelResult>, StoreError> {
+        Err(StoreError::Backend(
+            "pending turn input is not supported by this test store".to_string(),
+        ))
+    }
+
+    /// Atomically cancel the same-session runtime-admission suffix from an anchor.
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        _session_id: &str,
+        anchor: &crate::PendingTurnInputCancelTarget,
+    ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, StoreError> {
+        Err(StoreError::Backend(format!(
+            "pending turn input suffix cancellation is not supported by this test store for anchor `{anchor:?}`"
+        )))
     }
 
     /// Claim active-turn input at a checkpoint for the live turn id.

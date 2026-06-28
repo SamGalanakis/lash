@@ -53,6 +53,6 @@ pub use validation::{
     prepare_process_registration, process_event_payload_hash, require_event_replay,
 };
 pub use wake::{
-    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
-    process_wake_turn_text,
+    ProcessWakeDeliveryRequest, process_wake_delivery, process_wake_input_from_event_payload,
+    process_wake_turn_cause, process_wake_turn_text,
 };

@@ -321,10 +321,11 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
             .collect::<Vec<_>>(),
         vec![pending.input_id.as_str()]
     );
-    session
-        .cancel_pending_turn_input(&pending.input_id)
-        .await?
-        .expect("pending turn input");
+    let cancelled = session.cancel_pending_turn_input(&pending.input_id).await?;
+    assert!(matches!(
+        cancelled,
+        crate::PendingTurnInputCancelOutcome::Cancelled(_)
+    ));
 
     let SessionResume::Replayed { events } = session.observe().resume_from_cursor(&cursor)? else {
         panic!("recent cursor should replay queue observation events");
@@ -340,6 +341,86 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
         lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids }
             if *kind == lash_core::SessionQueueEventKind::Cancelled
                 && batch_ids.as_slice() == std::slice::from_ref(&pending.input_id)
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_turn_input_facade_cancels_bulk_and_suffix_by_source_key() -> Result<()> {
+    let core = explicit_ephemeral_facets(StandardCore::builder())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .disable_queued_work_driver()
+        .build()?;
+    let session = core.session("pending-input-facade-cancel").open().await?;
+    let cursor = session.observe().current_observation().cursor;
+
+    let first = session
+        .enqueue(TurnInput::text("first"))
+        .id("edit:1")
+        .send()
+        .await?;
+    let second = session
+        .enqueue(TurnInput::text("second"))
+        .id("edit:2")
+        .send()
+        .await?;
+    let third = session
+        .enqueue(TurnInput::text("third"))
+        .id("edit:3")
+        .send()
+        .await?;
+
+    let bulk = session
+        .cancel_pending_turn_inputs([
+            lash_core::PendingTurnInputCancelTarget::source_key("host:edit:1"),
+            lash_core::PendingTurnInputCancelTarget::source_key("host:missing"),
+        ])
+        .await?;
+    assert_eq!(bulk.len(), 2);
+    assert!(matches!(
+        &bulk[0].outcome,
+        crate::PendingTurnInputCancelOutcome::Cancelled(input) if input.input_id == first.input_id
+    ));
+    assert!(matches!(
+        bulk[1].outcome,
+        crate::PendingTurnInputCancelOutcome::NotFound
+    ));
+
+    let suffix = session
+        .cancel_pending_turn_input_suffix(lash_core::PendingTurnInputCancelTarget::source_key(
+            "host:edit:2",
+        ))
+        .await?;
+    let lash_core::PendingTurnInputSuffixCancelOutcome::Outcomes { outcomes, .. } = suffix else {
+        panic!("source-key suffix anchor should exist");
+    };
+    assert_eq!(outcomes.len(), 2);
+    assert!(matches!(
+        &outcomes[0],
+        crate::PendingTurnInputCancelOutcome::Cancelled(input) if input.input_id == second.input_id
+    ));
+    assert!(matches!(
+        &outcomes[1],
+        crate::PendingTurnInputCancelOutcome::Cancelled(input) if input.input_id == third.input_id
+    ));
+    assert!(session.pending_turn_inputs().await?.is_empty());
+
+    let SessionResume::Replayed { events } = session.observe().resume_from_cursor(&cursor)? else {
+        panic!("recent cursor should replay queue observation events");
+    };
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids }
+            if *kind == lash_core::SessionQueueEventKind::Cancelled
+                && batch_ids.as_slice() == std::slice::from_ref(&first.input_id)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids }
+            if *kind == lash_core::SessionQueueEventKind::Cancelled
+                && batch_ids == &vec![second.input_id.clone(), third.input_id.clone()]
     )));
     Ok(())
 }

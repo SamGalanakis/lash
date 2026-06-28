@@ -389,10 +389,15 @@ async fn runtime_scenario_observation_replay_keeps_original_turn_input() {
                 })
                 .enqueue_turn_input(RuntimeTurnInputIngress::ReplayNextTurn {
                     alias: "observed-live-input-replay",
-                    text: "replayed payload should not replace the original",
+                    text: "observed live input",
                     source_key: "runtime-scenario:observation",
                     expected_alias: "observed-live-input",
                     expected_text: "observed live input",
+                })
+                .enqueue_turn_input(RuntimeTurnInputIngress::ConflictNextTurnReplay {
+                    text: "changed payload must conflict",
+                    source_key: "runtime-scenario:observation",
+                    expected_alias: "observed-live-input",
                 }),
         )
         .phase(

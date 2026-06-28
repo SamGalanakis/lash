@@ -146,7 +146,10 @@ async fn reconnect_session(
         update_frame(&amp;frame_id).await?;
     }
     SessionObservationEventPayload::QueueChanged { batch_ids, .. } =&gt; {
-        refetch_queue_summaries(&amp;batch_ids).await?;
+        // Queue events cover both pending user input ids and non-user
+        // queued-work batch ids; refresh the surfaces separately.
+        refetch_pending_turn_inputs(&amp;batch_ids).await?;
+        refetch_queued_work_summaries(&amp;batch_ids).await?;
     }
     SessionObservationEventPayload::ProcessChanged { process_ids, .. } =&gt; {
         refetch_process_summaries(&amp;process_ids).await?;

@@ -1,10 +1,15 @@
 //! Provider construction: the [`AnthropicProvider`] struct, its builders, and
 //! the [`AnthropicProviderFactory`] that materializes one from a stored config.
 
+use std::sync::{Arc, LazyLock};
+
 use crate::policy::AnthropicModelPolicy;
 use crate::support::*;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
+    LazyLock::new(|| Arc::new(ReqwestLlmHttpTransport::new()));
 
 /// Anthropic API (Claude) provider state and transport.
 #[derive(Clone, Debug)]
@@ -12,7 +17,7 @@ pub struct AnthropicProvider {
     pub api_key: String,
     pub base_url: Option<String>,
     pub options: ProviderOptions,
-    pub(crate) client: reqwest::Client,
+    pub(crate) transport: Arc<dyn LlmHttpTransport>,
 }
 
 impl AnthropicProvider {
@@ -21,7 +26,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: None,
             options: ProviderOptions::default(),
-            client: build_http_client(),
+            transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
         }
     }
 
@@ -35,16 +40,22 @@ impl AnthropicProvider {
         self
     }
 
-    /// Share an embedder-provided `reqwest::Client` instead of building
-    /// a fresh one. Saves ~42 MB of TLS state per provider when the
-    /// host pools connections across sessions.
-    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
-        self.client = (*client).clone();
+    pub fn with_transport(mut self, transport: Arc<dyn LlmHttpTransport>) -> Self {
+        self.transport = transport;
         self
     }
 
+    /// Share an embedder-provided `reqwest::Client` instead of building
+    /// a fresh one. Saves ~42 MB of TLS state per provider when the
+    /// host pools connections across sessions.
+    pub fn with_client(self, client: Arc<reqwest::Client>) -> Self {
+        self.with_transport(Arc::new(ReqwestLlmHttpTransport::from_client(
+            (*client).clone(),
+        )))
+    }
+
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), std::sync::Arc::new(AnthropicModelPolicy))
+        ProviderComponents::new(Box::new(self), Arc::new(AnthropicModelPolicy))
     }
 }
 
@@ -74,7 +85,7 @@ impl ProviderFactory for AnthropicProviderFactory {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
-            client: build_http_client(),
+            transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
         }
         .into_components())
     }

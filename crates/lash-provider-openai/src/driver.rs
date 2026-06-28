@@ -85,40 +85,49 @@ pub(crate) async fn complete(
     );
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| LlmTransportError::new(format!("{}: {e}", endpoint.serialize_error())))?;
-    let request_body = request_body_snapshot_bytes(body_bytes);
+    let request_body = bytes::Bytes::from(body_bytes);
+    let request_body_for_error = String::from_utf8_lossy(&request_body).into_owned();
     let url = format!(
         "{}/{}",
         provider.base_url.trim_end_matches('/'),
         endpoint.path()
     );
     let compat = provider.resolved_compat(endpoint);
-    let mut request = provider
-        .client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", provider.api_key))
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .body(request_body.clone());
+    let mut headers = vec![
+        (
+            "Authorization".to_string(),
+            format!("Bearer {}", provider.api_key),
+        ),
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("Accept".to_string(), "text/event-stream".to_string()),
+    ];
     if compat.cache_session_affinity
         && let Some(session_id) = req.session_id.as_deref()
     {
-        request = request
-            .header("session_id", session_id)
-            .header("x-client-request-id", session_id);
+        headers.push(("session_id".to_string(), session_id.to_string()));
+        headers.push(("x-client-request-id".to_string(), session_id.to_string()));
     }
-    let resp = send_request(
-        request,
-        Some(request_body.clone()),
-        response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, stream),
-        endpoint.response_start_timeout_error(),
-    )
-    .await?;
+    let http_request = LlmHttpRequest {
+        method: LlmHttpMethod::Post,
+        url: url.clone(),
+        headers,
+        body: request_body.clone(),
+        body_for_error: Some(request_body_for_error.clone()),
+        response_start_timeout_message: Some(endpoint.response_start_timeout_error().to_string()),
+    };
+    let resp = provider
+        .transport
+        .send(
+            http_request,
+            response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, stream),
+        )
+        .await?;
 
-    let status = resp.status();
-    if !status.is_success() {
-        let headers = resp.headers().clone();
-        let text = read_response_text(
-            resp,
+    let status = resp.status;
+    if !resp.is_success() {
+        let headers = resp.headers;
+        let text = read_http_body_text(
+            resp.body,
             timeouts.request_timeout,
             endpoint.response_body_timeout_error(),
         )
@@ -130,39 +139,27 @@ pub(crate) async fn complete(
                 format!(
                     "{} with {}: {}",
                     endpoint.request_failed_prefix(),
-                    status.as_u16(),
+                    status,
                     detail
                 )
             })
-            .unwrap_or_else(|| {
-                format!(
-                    "{} with {}",
-                    endpoint.request_failed_prefix(),
-                    status.as_u16()
-                )
-            });
+            .unwrap_or_else(|| format!("{} with {}", endpoint.request_failed_prefix(), status));
         // Retryability is decided centrally by the provider failure
         // classifier from the attached HTTP status; no inline override here.
         return Err(LlmTransportError::new(message)
-            .with_status(status.as_u16())
-            .with_headers(header_pairs(&headers))
+            .with_status(status)
+            .with_headers(headers)
             .with_raw(text)
-            .with_request_body(String::from_utf8_lossy(&request_body).into_owned()));
+            .with_request_body(request_body_for_error));
     }
-    drop(request_body);
 
-    let is_sse = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.contains("text/event-stream"))
-        .unwrap_or(false);
+    let is_sse = header_contains(&resp.headers, "content-type", "text/event-stream");
 
     if is_sse {
         drive_streaming_response(
             provider,
             endpoint,
-            resp,
+            resp.body,
             stream_events,
             provider_trace,
             url,
@@ -173,7 +170,7 @@ pub(crate) async fn complete(
         complete_buffered_response(
             provider,
             endpoint,
-            resp,
+            resp.body,
             stream_events,
             provider_trace,
             url,
@@ -186,13 +183,13 @@ pub(crate) async fn complete(
 async fn complete_buffered_response(
     provider: &OpenAiCompatibleProvider,
     endpoint: CompletionEndpoint,
-    resp: reqwest::Response,
+    body: LlmHttpBody,
     stream_events: Option<LlmEventSender>,
     provider_trace: Option<LlmProviderTraceSender>,
     url: String,
     timeout: Option<std::time::Duration>,
 ) -> Result<LlmResponse, LlmTransportError> {
-    let text = read_response_text(resp, timeout, endpoint.response_body_timeout_error()).await?;
+    let text = read_http_body_text(body, timeout, endpoint.response_body_timeout_error()).await?;
     emit_provider_trace(provider_trace.as_ref(), "openai_compatible", &text);
     match endpoint {
         CompletionEndpoint::Responses => {
@@ -337,7 +334,7 @@ fn complete_buffered_chat(
 async fn drive_streaming_response(
     provider: &OpenAiCompatibleProvider,
     endpoint: CompletionEndpoint,
-    resp: reqwest::Response,
+    body: LlmHttpBody,
     stream_events: Option<LlmEventSender>,
     provider_trace: Option<LlmProviderTraceSender>,
     url: String,
@@ -347,7 +344,7 @@ async fn drive_streaming_response(
         CompletionEndpoint::Responses => {
             drive_streaming_responses(
                 provider,
-                resp,
+                body,
                 stream_events,
                 provider_trace,
                 url,
@@ -358,7 +355,7 @@ async fn drive_streaming_response(
         CompletionEndpoint::ChatCompletions => {
             drive_streaming_chat(
                 provider,
-                resp,
+                body,
                 stream_events,
                 provider_trace,
                 url,
@@ -371,7 +368,7 @@ async fn drive_streaming_response(
 
 async fn drive_streaming_responses(
     provider: &OpenAiCompatibleProvider,
-    resp: reqwest::Response,
+    body: LlmHttpBody,
     stream_events: Option<LlmEventSender>,
     provider_trace: Option<LlmProviderTraceSender>,
     url: String,
@@ -381,7 +378,7 @@ async fn drive_streaming_responses(
     let mut emitted_parts = Vec::new();
     let expose_thinking = provider.options.expose_thinking;
     drive_sse_response(
-        resp,
+        body,
         chunk_timeout,
         CompletionEndpoint::Responses.stream_chunk_timeout_error(),
         |raw| {
@@ -444,7 +441,7 @@ async fn drive_streaming_responses(
 
 async fn drive_streaming_chat(
     provider: &OpenAiCompatibleProvider,
-    resp: reqwest::Response,
+    body: LlmHttpBody,
     stream_events: Option<LlmEventSender>,
     provider_trace: Option<LlmProviderTraceSender>,
     url: String,
@@ -453,7 +450,7 @@ async fn drive_streaming_chat(
     let mut state = ChatStreamState::default();
     let expose_thinking = provider.options.expose_thinking;
     drive_sse_response(
-        resp,
+        body,
         chunk_timeout,
         CompletionEndpoint::ChatCompletions.stream_chunk_timeout_error(),
         |raw| {

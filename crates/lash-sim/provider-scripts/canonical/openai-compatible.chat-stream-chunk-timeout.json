@@ -1,0 +1,43 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "openai-compatible.chat-stream-chunk-timeout",
+  "provider_kind": "openai-compatible",
+  "endpoint": {
+    "method": "POST",
+    "path": "/chat/completions"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "openai/gpt-5.4" },
+      "stream": { "equals": true },
+      "messages[0].role": { "equals": "user" },
+      "tools[0].function.name": { "equals": "lookup" }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "response_start",
+      "status": 200,
+      "headers": [
+        { "name": "content-type", "value": "text/event-stream" },
+        { "name": "x-request-id", "value": "req-timeout" }
+      ]
+    },
+    {
+      "at": 20,
+      "event": "timeout",
+      "message": "OpenAI-compatible chat stream chunk timed out"
+    }
+  ],
+  "expected_provider": {
+    "kind": "Timeout",
+    "code": "timeout",
+    "retryable": true,
+    "stream_events_committed": 0
+  }
+}

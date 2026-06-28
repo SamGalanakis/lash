@@ -17,6 +17,7 @@ mod plugin_binding;
 mod prompt_layer;
 #[cfg(feature = "rlm")]
 pub mod rlm;
+pub mod scenario_contracts;
 mod session;
 mod support;
 #[cfg(all(test, feature = "rlm"))]
@@ -45,8 +46,10 @@ pub use crate::turn::{
 };
 pub use lash_core::{
     AwaitEventKey, AwaitEventWaitIdentity, ExternalCompletionError, InputItem, ModelLimits,
-    ModelSpec, PluginStack, Resolution, ResolveOutcome, SessionCommand, SessionCommandReceipt,
-    SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+    ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
+    PendingTurnInputCancelTarget, PendingTurnInputSuffixCancelOutcome, PluginStack, Resolution,
+    ResolveOutcome, SessionCommand, SessionCommandReceipt, SessionSpec, TurnActivity,
+    TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
 };
 /// Cooperative cancellation handle accepted by
 /// [`TurnBuilder::cancel`](crate::TurnBuilder::cancel); re-exported so
@@ -59,12 +62,13 @@ pub use tokio_util::sync::CancellationToken;
 pub mod prelude {
     pub use crate::{
         AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, InputItem, LashCore,
-        LashCoreBuilder, LashSession, ModelLimits, ModelSpec, ObservableSession, PluginBinding,
-        PluginOperations, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
-        SessionCommand, SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch,
-        SessionDeleteReport, SessionSpec, SessionTriggerAdmin, StandardCore, StandardCoreBuilder,
-        ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder,
-        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream, message_role, message_text,
+        LashCoreBuilder, LashSession, ModelLimits, ModelSpec, ObservableSession,
+        PendingTurnInputCancelOutcome, PluginBinding, PluginOperations, PluginStack,
+        PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder, SessionCommand,
+        SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch, SessionDeleteReport,
+        SessionSpec, SessionTriggerAdmin, StandardCore, StandardCoreBuilder, ToolAdmin,
+        TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder, TurnEvent,
+        TurnInput, TurnOutput, TurnResult, TurnStream, message_role, message_text,
     };
     #[cfg(feature = "rlm")]
     pub use crate::{RlmCore, RlmCoreBuilder};
@@ -143,9 +147,12 @@ pub mod persistence {
     pub use lash_core::FileAttachmentStore;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
-        QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-        QueuedWorkClass, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
-        RuntimeSessionState, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+        PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
+        PendingTurnInputCancelTarget, PendingTurnInputClaimDiagnostics, PendingTurnInputDraft,
+        PendingTurnInputSuffixCancelOutcome, QueuedWorkBatch, QueuedWorkBatchDraft,
+        QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass, QueuedWorkCompletion,
+        QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState, SessionStoreCreateRequest,
+        SessionStoreFactory, SlotPolicy,
     };
     pub use lash_core::store::queued_work;
     pub use lash_core::store::{

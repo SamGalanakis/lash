@@ -19,7 +19,7 @@ use crate::interactive::helpers::{
     TurnReplayPayload, record_queue_current_turn_input, record_queue_turn,
 };
 use crate::interactive::runtime::{
-    enqueue_prepared_turn, refresh_queued_work_snapshot, send_user_message,
+    enqueue_prepared_turn, refresh_pending_turn_input_snapshot, send_user_message,
 };
 
 use super::SessionCtx;
@@ -78,8 +78,13 @@ async fn enqueue_prepared_turn_for_cli(
                 record_queue_turn(ui_trace, &queued);
             }
             app.cache_draft_presentation(queued);
-            if show_preview && let Err(err) = refresh_queued_work_snapshot(app, runtime).await {
-                push_system_message(app, format!("Failed to refresh durable queue: {err}"));
+            if show_preview
+                && let Err(err) = refresh_pending_turn_input_snapshot(app, runtime).await
+            {
+                push_system_message(
+                    app,
+                    format!("Failed to refresh pending input preview: {err}"),
+                );
             }
             true
         }
@@ -109,7 +114,7 @@ pub(super) async fn restore_last_durable_full_turn(app: &mut App, runtime: &Opti
         return;
     };
     match session.cancel_pending_turn_input(&pending.input_id).await {
-        Ok(Some(cancelled)) => {
+        Ok(lash::PendingTurnInputCancelOutcome::Cancelled(cancelled)) => {
             if let Some(turn) = app.take_prepared_turn_for_pending_input(&cancelled) {
                 app.restore_prepared_turn(turn);
                 app.update_suggestions();
@@ -117,16 +122,28 @@ pub(super) async fn restore_last_durable_full_turn(app: &mut App, runtime: &Opti
                 push_system_message(app, "Queued input was cancelled.".to_string());
             }
         }
-        Ok(None) => {
+        Ok(lash::PendingTurnInputCancelOutcome::AlreadyClaimed { .. }) => {
             push_system_message(
                 app,
                 "Queued input is already being processed; it was not restored.".to_string(),
             );
         }
+        Ok(lash::PendingTurnInputCancelOutcome::AlreadyCompleted(_)) => {
+            push_system_message(app, "Queued input has already completed.".to_string());
+        }
+        Ok(lash::PendingTurnInputCancelOutcome::AlreadyCancelled(_)) => {
+            push_system_message(app, "Queued input was already cancelled.".to_string());
+        }
+        Ok(lash::PendingTurnInputCancelOutcome::NotFound) => {
+            push_system_message(app, "Queued input was no longer found.".to_string());
+        }
         Err(err) => push_system_message(app, format!("Failed to edit queued input: {err}")),
     }
-    if let Err(err) = refresh_queued_work_snapshot(app, runtime).await {
-        push_system_message(app, format!("Failed to refresh durable queue: {err}"));
+    if let Err(err) = refresh_pending_turn_input_snapshot(app, runtime).await {
+        push_system_message(
+            app,
+            format!("Failed to refresh pending input preview: {err}"),
+        );
     }
 }
 

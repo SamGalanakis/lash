@@ -1311,10 +1311,10 @@ async fn active_steer_interrupt_defers_once_and_skips_cancelled_queued_turn() ->
         .id("cancelled-next")
         .send()
         .await?;
-    let cancelled = session
-        .cancel_pending_turn_input(&queued.input_id)
-        .await?
-        .expect("queued input should be cancellable before it is claimed");
+    let cancelled = session.cancel_pending_turn_input(&queued.input_id).await?;
+    let crate::PendingTurnInputCancelOutcome::Cancelled(cancelled) = cancelled else {
+        panic!("queued input should be cancellable before it is claimed: {cancelled:?}");
+    };
     assert_eq!(cancelled.input_id, queued.input_id);
 
     assert_eq!(session.cancel_running_turns(), 1);

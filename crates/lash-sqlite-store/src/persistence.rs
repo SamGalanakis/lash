@@ -321,7 +321,15 @@ impl RuntimePersistence for Store {
                     for completed in &commit.completed_turn_input_claims {
                         for input_id in &completed.input_ids {
                             tx.execute(
-                                "DELETE FROM pending_turn_inputs
+                                "UPDATE pending_turn_inputs
+                                 SET state = ?5,
+                                     claim_id = NULL,
+                                     claim_owner_id = NULL,
+                                     claim_owner_incarnation_id = NULL,
+                                     claim_owner_liveness_json = NULL,
+                                     claim_token = NULL,
+                                     claim_claimed_at_ms = 0,
+                                     claim_expires_at_ms = 0
                                  WHERE session_id = ?1
                                    AND input_id = ?2
                                    AND claim_id = ?3
@@ -330,7 +338,8 @@ impl RuntimePersistence for Store {
                                     completed.session_id,
                                     input_id,
                                     completed.claim_id,
-                                    completed.lease_token
+                                    completed.lease_token,
+                                    lash_core::TurnInputState::Completed.as_str(),
                                 ],
                             )
                             .map_err(sqlite_error)?;
@@ -1340,6 +1349,17 @@ impl RuntimePersistence for Store {
                                     "pending turn input source row disappeared".to_string(),
                                 )
                             })?;
+                            if !draft.submitted_content_matches(&existing).map_err(|err| {
+                                StoreError::Backend(format!(
+                                    "failed to compare pending turn input submission: {err}"
+                                ))
+                            })? {
+                                return Err(StoreError::PendingTurnInputSourceKeyConflict {
+                                    session_id: draft.session_id.clone(),
+                                    source_key: source_key.to_string(),
+                                    existing_input_id: existing.input_id.clone(),
+                                });
+                            }
                             return Ok(existing);
                         }
                     }
@@ -1404,7 +1424,7 @@ impl RuntimePersistence for Store {
                         let mut stmt = conn
                             .prepare(
                                 "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                                        state, input_json, enqueued_at_ms, claim_fencing_token,
+                                        state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                                         claim_owner_id, claim_owner_incarnation_id,
                                         claim_owner_liveness_json, claim_token, claim_expires_at_ms
                                  FROM pending_turn_inputs
@@ -1440,43 +1460,104 @@ impl RuntimePersistence for Store {
         &self,
         session_id: &str,
         input_id: &str,
-    ) -> Result<Option<lash_core::PendingTurnInput>, StoreError> {
+    ) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
+        let target = lash_core::PendingTurnInputCancelTarget::input_id(input_id);
+        let targets = vec![target];
+        let mut outcomes = self
+            .cancel_pending_turn_inputs(session_id, &targets)
+            .await?;
+        Ok(outcomes
+            .pop()
+            .map(|result| result.outcome)
+            .unwrap_or(lash_core::PendingTurnInputCancelOutcome::NotFound))
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        session_id: &str,
+        targets: &[lash_core::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> {
         let session_id = session_id.to_string();
-        let input_id = input_id.to_string();
+        let targets = targets.to_vec();
         self.conn
             .write_flow(move |tx| {
-                let outcome: Result<Option<lash_core::PendingTurnInput>, StoreError> = (|| {
-                    let now = current_epoch_ms();
-                    let row = tx
-                        .query_row(
-                            "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                                    state, input_json, enqueued_at_ms, claim_fencing_token,
-                                    claim_owner_id, claim_owner_incarnation_id,
-                                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
-                             FROM pending_turn_inputs
-                             WHERE session_id = ?1
-                               AND input_id = ?2
-                               AND (claim_token IS NULL OR claim_expires_at_ms <= ?3)",
-                            params![session_id, input_id, now as i64],
-                            pending_turn_input_row_from_sql,
-                        )
-                        .optional()
-                        .map_err(sqlite_error)?;
-                    let Some(row) = row else {
-                        return Ok(None);
-                    };
-                    let input = pending_turn_input_from_row(row)?;
-                    tx.execute(
-                        "DELETE FROM pending_turn_inputs
-                         WHERE session_id = ?1
-                           AND input_id = ?2
-                           AND (claim_token IS NULL OR claim_expires_at_ms <= ?3)",
-                        params![session_id, input_id, now as i64],
-                    )
-                    .map_err(sqlite_error)?;
-                    Ok(Some(input))
-                })(
-                );
+                let outcome: Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> =
+                    (|| {
+                        let now = current_epoch_ms();
+                        let mut results = Vec::with_capacity(targets.len());
+                        for target in targets {
+                            let outcome = match load_pending_turn_input_row_by_target_conn(
+                                tx,
+                                &session_id,
+                                &target,
+                            )? {
+                                Some(row) => cancel_pending_turn_input_row_conn(tx, row, now)?,
+                                None => lash_core::PendingTurnInputCancelOutcome::NotFound,
+                            };
+                            results
+                                .push(lash_core::PendingTurnInputCancelResult { target, outcome });
+                        }
+                        Ok(results)
+                    })();
+                match outcome {
+                    Ok(value) => Ok(TxOutcome::Commit(Ok(value))),
+                    Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+                }
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        session_id: &str,
+        anchor: &lash_core::PendingTurnInputCancelTarget,
+    ) -> Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> {
+        let session_id = session_id.to_string();
+        let anchor = anchor.clone();
+        self.conn
+            .write_flow(move |tx| {
+                let outcome: Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> =
+                    (|| {
+                        let now = current_epoch_ms();
+                        let Some(anchor_row) =
+                            load_pending_turn_input_row_by_target_conn(tx, &session_id, &anchor)?
+                        else {
+                            return Ok(
+                                lash_core::PendingTurnInputSuffixCancelOutcome::AnchorNotFound {
+                                    anchor,
+                                },
+                            );
+                        };
+                        let rows = {
+                            let mut stmt = tx
+                                .prepare(
+                                    "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                                            state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                                            claim_owner_id, claim_owner_incarnation_id,
+                                            claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                                     FROM pending_turn_inputs
+                                     WHERE session_id = ?1 AND enqueue_seq >= ?2
+                                     ORDER BY enqueue_seq ASC",
+                                )
+                                .map_err(sqlite_error)?;
+                            let rows = stmt
+                                .query_map(
+                                    params![session_id, anchor_row.enqueue_seq as i64],
+                                    pending_turn_input_row_from_sql,
+                                )
+                                .map_err(sqlite_error)?;
+                            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+                        };
+                        let mut outcomes = Vec::with_capacity(rows.len());
+                        for row in rows {
+                            outcomes.push(cancel_pending_turn_input_row_conn(tx, row, now)?);
+                        }
+                        Ok(lash_core::PendingTurnInputSuffixCancelOutcome::Outcomes {
+                            anchor,
+                            outcomes,
+                        })
+                    })();
                 match outcome {
                     Ok(value) => Ok(TxOutcome::Commit(Ok(value))),
                     Err(err) => Ok(TxOutcome::Rollback(Err(err))),
@@ -1602,13 +1683,29 @@ impl RuntimePersistence for Store {
     }
 
     async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
-        let removed = self
+        let (removed_node_count, removed_pending_turn_input_tombstone_count) = self
             .conn
-            .write(move |tx| tx.execute("DELETE FROM graph_nodes WHERE tombstoned = 1", []))
+            .write(move |tx| {
+                let removed_node_count =
+                    tx.execute("DELETE FROM graph_nodes WHERE tombstoned = 1", [])?;
+                let removed_pending_turn_input_tombstone_count = tx.execute(
+                    "DELETE FROM pending_turn_inputs
+                     WHERE state IN (?1, ?2)",
+                    params![
+                        lash_core::TurnInputState::Cancelled.as_str(),
+                        lash_core::TurnInputState::Completed.as_str()
+                    ],
+                )?;
+                Ok((
+                    removed_node_count,
+                    removed_pending_turn_input_tombstone_count,
+                ))
+            })
             .await
             .map_err(sqlite_error)?;
         Ok(VacuumReport {
-            removed_node_count: removed,
+            removed_node_count,
+            removed_pending_turn_input_tombstone_count,
         })
     }
 
@@ -1627,6 +1724,57 @@ fn derive_pending_turn_input_id(
         "ti:{:x}",
         Sha256::digest(format!("{session_id}:{source_key:?}:{now_epoch_ms}:{nonce}").as_bytes())
     )
+}
+
+fn cancel_pending_turn_input_row_conn(
+    conn: &Connection,
+    row: PendingTurnInputRow,
+    now_epoch_ms: u64,
+) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
+    let mut input = pending_turn_input_from_row(row.clone())?;
+    match input.state {
+        lash_core::TurnInputState::Cancelled => Ok(
+            lash_core::PendingTurnInputCancelOutcome::AlreadyCancelled(input),
+        ),
+        lash_core::TurnInputState::Completed => Ok(
+            lash_core::PendingTurnInputCancelOutcome::AlreadyCompleted(input),
+        ),
+        lash_core::TurnInputState::Accepted => {
+            Ok(lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                claim: pending_turn_input_claim_diagnostics_from_row(&row, input.state),
+                input,
+            })
+        }
+        lash_core::TurnInputState::PendingActive | lash_core::TurnInputState::DeferredNextTurn => {
+            let live_claim = row.claim_token.is_some() && row.claim_expires_at_ms > now_epoch_ms;
+            if live_claim {
+                return Ok(lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
+                    claim: pending_turn_input_claim_diagnostics_from_row(&row, input.state),
+                    input,
+                });
+            }
+            conn.execute(
+                "UPDATE pending_turn_inputs
+                 SET state = ?3,
+                     claim_id = NULL,
+                     claim_owner_id = NULL,
+                     claim_owner_incarnation_id = NULL,
+                     claim_owner_liveness_json = NULL,
+                     claim_token = NULL,
+                     claim_claimed_at_ms = 0,
+                     claim_expires_at_ms = 0
+                 WHERE session_id = ?1 AND input_id = ?2",
+                params![
+                    row.session_id,
+                    row.input_id,
+                    lash_core::TurnInputState::Cancelled.as_str(),
+                ],
+            )
+            .map_err(sqlite_error)?;
+            input.state = lash_core::TurnInputState::Cancelled;
+            Ok(lash_core::PendingTurnInputCancelOutcome::Cancelled(input))
+        }
+    }
 }
 
 async fn claim_pending_turn_inputs_sqlite(
@@ -1660,7 +1808,7 @@ async fn claim_pending_turn_inputs_sqlite(
                 let mut stmt = tx
                     .prepare(
                         "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                                state, input_json, enqueued_at_ms, claim_fencing_token,
+                                state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                                 claim_owner_id, claim_owner_incarnation_id,
                                 claim_owner_liveness_json, claim_token, claim_expires_at_ms
                          FROM pending_turn_inputs

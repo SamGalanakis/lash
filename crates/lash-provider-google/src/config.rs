@@ -3,13 +3,16 @@
 //! [`GoogleOAuthProviderFactory`].
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use crate::policy::GoogleModelPolicy;
 use crate::support::*;
 
 pub(crate) const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 pub(crate) const CODE_ASSIST_API_VERSION: &str = "v1internal";
+
+pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
+    LazyLock::new(|| Arc::new(ReqwestLlmHttpTransport::new()));
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct UploadedAttachmentCacheKey {
@@ -31,7 +34,7 @@ pub struct GoogleOAuthProvider {
     pub expires_at: u64,
     pub project_id: Option<String>,
     pub options: ProviderOptions,
-    pub(crate) client: reqwest::Client,
+    pub(crate) transport: Arc<dyn LlmHttpTransport>,
 }
 
 impl GoogleOAuthProvider {
@@ -54,7 +57,7 @@ impl GoogleOAuthProvider {
             expires_at,
             project_id: None,
             options: ProviderOptions::default(),
-            client: build_http_client(),
+            transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
         }
     }
 
@@ -68,8 +71,13 @@ impl GoogleOAuthProvider {
         self
     }
 
+    pub fn with_transport(mut self, transport: Arc<dyn LlmHttpTransport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
     pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
-        self.client = (*client).clone();
+        self.transport = Arc::new(ReqwestLlmHttpTransport::from_client((*client).clone()));
         self
     }
 
@@ -116,7 +124,7 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
             expires_at: cfg.expires_at,
             project_id: cfg.project_id,
             options: cfg.options,
-            client: build_http_client(),
+            transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
         }
         .into_components())
     }

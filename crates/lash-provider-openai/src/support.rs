@@ -23,12 +23,13 @@ pub(crate) use lash_core::provider::{
     ProviderOptions, resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
-pub(crate) use lash_llm_transport::timeouts::{
-    build_http_client, header_pairs, read_response_text, request_body_snapshot_bytes,
-    response_start_timeout, send_request,
-};
+pub(crate) use lash_llm_transport::timeouts::response_start_timeout;
 pub(crate) use lash_llm_transport::util::{
     OPENAI_IMAGE_MIMES, emit_provider_trace, extract_error_detail,
+};
+pub(crate) use lash_llm_transport::{
+    LlmHttpBody, LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, header_contains,
+    read_http_body_text,
 };
 
 pub(crate) use crate::chat::*;

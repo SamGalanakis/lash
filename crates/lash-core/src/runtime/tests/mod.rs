@@ -17,6 +17,7 @@ use helpers::*;
 
 mod assembler;
 mod child_sessions;
+mod core_contracts;
 mod effect;
 mod persistence;
 mod projection;

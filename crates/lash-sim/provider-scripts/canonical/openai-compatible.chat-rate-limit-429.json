@@ -1,0 +1,39 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "openai-compatible.chat-rate-limit-429",
+  "provider_kind": "openai-compatible",
+  "endpoint": {
+    "method": "POST",
+    "path": "/chat/completions"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "openai/gpt-5.4" },
+      "stream": { "equals": false },
+      "messages[0].role": { "equals": "user" },
+      "tools[0].function.name": { "equals": "lookup" }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "http_error",
+      "status": 429,
+      "headers": [
+        { "name": "content-type", "value": "application/json" },
+        { "name": "retry-after", "value": "7" },
+        { "name": "x-request-id", "value": "req-429-a" },
+        { "name": "x-request-id", "value": "req-429-b" }
+      ],
+      "body": "{\"error\":{\"message\":\"Rate limit reached for requests\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}"
+    }
+  ],
+  "expected_provider": {
+    "status": 429,
+    "retryable_after_classification": true
+  }
+}

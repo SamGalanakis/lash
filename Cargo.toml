@@ -29,6 +29,7 @@ members = [
     "crates/lash-provider-anthropic",
     "crates/lash-provider-google",
     "crates/lash-provider-openai",
+    "crates/lash-sim",
     "crates/lash-subagents",
     "crates/lash-tui-extensions",
     "crates/lash-tui",

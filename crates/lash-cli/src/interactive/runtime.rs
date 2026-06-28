@@ -123,7 +123,7 @@ pub(super) async fn enqueue_prepared_turn(
         .map_err(|err| err.to_string())
 }
 
-pub(super) async fn refresh_queued_work_snapshot(
+pub(super) async fn refresh_pending_turn_input_snapshot(
     app: &mut App,
     runtime: &Option<LashSession>,
 ) -> Result<(), String> {

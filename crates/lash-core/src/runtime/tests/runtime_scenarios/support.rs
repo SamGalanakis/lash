@@ -580,6 +580,11 @@ pub(crate) enum RuntimeTurnInputIngress {
         expected_alias: &'static str,
         expected_text: &'static str,
     },
+    ConflictNextTurnReplay {
+        text: &'static str,
+        source_key: &'static str,
+        expected_alias: &'static str,
+    },
     NextTurnForSession {
         session_id: &'static str,
         text: &'static str,

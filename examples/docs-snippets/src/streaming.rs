@@ -16,7 +16,11 @@ async fn append_committed_view(_view: &SessionReadView) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn refetch_queue_summaries(_batch_ids: &[String]) -> anyhow::Result<()> {
+async fn refetch_pending_turn_inputs(_ids: &[String]) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn refetch_queued_work_summaries(_ids: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -125,7 +129,10 @@ async fn fold_session_event(event: SessionObservationEvent) -> anyhow::Result<()
             update_frame(&frame_id).await?;
         }
         SessionObservationEventPayload::QueueChanged { batch_ids, .. } => {
-            refetch_queue_summaries(&batch_ids).await?;
+            // Queue events cover both pending user input ids and non-user
+            // queued-work batch ids; refresh the surfaces separately.
+            refetch_pending_turn_inputs(&batch_ids).await?;
+            refetch_queued_work_summaries(&batch_ids).await?;
         }
         SessionObservationEventPayload::ProcessChanged { process_ids, .. } => {
             refetch_process_summaries(&process_ids).await?;

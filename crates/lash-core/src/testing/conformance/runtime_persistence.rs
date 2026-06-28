@@ -111,6 +111,7 @@ where
     queued_wake_delivery_is_source_key_idempotent_and_claimed_once(make()).await;
     queue_completion_and_turn_commit_stamp_are_atomic(make()).await;
     pending_turn_inputs_source_keys_order_cancel_and_cross_session(make()).await;
+    pending_turn_input_bulk_and_suffix_cancellation(make()).await;
     pending_turn_input_claims_reclaim_complete_and_fence(make()).await;
     pending_turn_input_cancel_covers_active_and_deferred_states(make()).await;
     pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(make()).await;
@@ -211,6 +212,20 @@ fn pending_input_text(input: &crate::PendingTurnInput) -> Option<&str> {
     match input.input.items.first()? {
         crate::InputItem::Text { text } => Some(text.as_str()),
         crate::InputItem::ImageRef { .. } => None,
+    }
+}
+
+fn expect_cancelled_pending_input(
+    outcome: crate::PendingTurnInputCancelOutcome,
+    input_id: &str,
+) -> crate::PendingTurnInput {
+    match outcome {
+        crate::PendingTurnInputCancelOutcome::Cancelled(input) => {
+            assert_eq!(input.input_id, input_id);
+            assert_eq!(input.state, crate::TurnInputState::Cancelled);
+            input
+        }
+        other => panic!("expected cancelled pending turn input `{input_id}`, got {other:?}"),
     }
 }
 
@@ -2125,11 +2140,27 @@ async fn pending_turn_inputs_source_keys_order_cancel_and_cross_session(
         .expect("enqueue first pending input");
     let replay = store
         .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "first").with_source_key("source:first"),
+        )
+        .await
+        .expect("replay first pending input");
+    let conflict = store
+        .enqueue_pending_turn_input(
             pending_next_turn_input_draft("root", "different replay payload")
                 .with_source_key("source:first"),
         )
         .await
-        .expect("replay first pending input");
+        .expect_err("same source key with changed content must conflict");
+    assert!(matches!(
+        conflict,
+        StoreError::PendingTurnInputSourceKeyConflict {
+            session_id,
+            source_key,
+            existing_input_id,
+        } if session_id == "root"
+            && source_key == "source:first"
+            && existing_input_id == first.input_id
+    ));
     let second = store
         .enqueue_pending_turn_input(pending_next_turn_input_draft("root", "second"))
         .await
@@ -2165,9 +2196,16 @@ async fn pending_turn_inputs_source_keys_order_cancel_and_cross_session(
     let cancelled = store
         .cancel_pending_turn_input("root", &second.input_id)
         .await
-        .expect("cancel pending turn input")
-        .expect("cancelled input");
-    assert_eq!(cancelled.input_id, second.input_id);
+        .expect("cancel pending turn input");
+    expect_cancelled_pending_input(cancelled, &second.input_id);
+    assert!(matches!(
+        store
+            .cancel_pending_turn_input("root", &second.input_id)
+            .await
+            .expect("cancel pending turn input replay"),
+        crate::PendingTurnInputCancelOutcome::AlreadyCancelled(input)
+            if input.input_id == second.input_id
+    ));
     assert_eq!(
         store
             .list_pending_turn_inputs("root")
@@ -2177,6 +2215,211 @@ async fn pending_turn_inputs_source_keys_order_cancel_and_cross_session(
             .map(|input| input.input_id.as_str())
             .collect::<Vec<_>>(),
         vec![first.input_id.as_str()]
+    );
+
+    let cancelled_first = store
+        .cancel_pending_turn_input("root", &first.input_id)
+        .await
+        .expect("cancel source-keyed pending turn input");
+    expect_cancelled_pending_input(cancelled_first, &first.input_id);
+    let terminal_replay = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "first").with_source_key("source:first"),
+        )
+        .await
+        .expect("exact replay after cancellation");
+    assert_eq!(terminal_replay.input_id, first.input_id);
+    assert_eq!(terminal_replay.state, crate::TurnInputState::Cancelled);
+    assert!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list after terminal replay")
+            .is_empty()
+    );
+    let vacuum = store
+        .vacuum()
+        .await
+        .expect("vacuum pending input tombstones");
+    assert_eq!(vacuum.removed_node_count, 0);
+    assert_eq!(vacuum.removed_pending_turn_input_tombstone_count, 2);
+    assert!(matches!(
+        store
+            .cancel_pending_turn_input("root", &second.input_id)
+            .await
+            .expect("cancel pruned tombstone"),
+        crate::PendingTurnInputCancelOutcome::NotFound
+    ));
+    assert_eq!(
+        store
+            .list_pending_turn_inputs("other")
+            .await
+            .expect("list other session after tombstone vacuum")
+            .len(),
+        1,
+        "vacuum must prune terminal evidence without removing live pending input"
+    );
+}
+
+async fn pending_turn_input_bulk_and_suffix_cancellation(store: Arc<dyn RuntimePersistence>) {
+    let first = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "bulk first").with_source_key("bulk:first"),
+        )
+        .await
+        .expect("enqueue first bulk input");
+    let second = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "bulk second").with_source_key("bulk:second"),
+        )
+        .await
+        .expect("enqueue second bulk input");
+    let third = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft("root", "bulk third"))
+        .await
+        .expect("enqueue third bulk input");
+    let bulk = store
+        .cancel_pending_turn_inputs(
+            "root",
+            &[
+                crate::PendingTurnInputCancelTarget::source_key("bulk:first"),
+                crate::PendingTurnInputCancelTarget::input_id(&third.input_id),
+                crate::PendingTurnInputCancelTarget::source_key("bulk:missing"),
+                crate::PendingTurnInputCancelTarget::source_key("bulk:first"),
+            ],
+        )
+        .await
+        .expect("bulk cancel pending turn inputs");
+    assert_eq!(bulk.len(), 4);
+    expect_cancelled_pending_input(bulk[0].outcome.clone(), &first.input_id);
+    expect_cancelled_pending_input(bulk[1].outcome.clone(), &third.input_id);
+    assert!(matches!(
+        bulk[2].outcome,
+        crate::PendingTurnInputCancelOutcome::NotFound
+    ));
+    assert!(matches!(
+        &bulk[3].outcome,
+        crate::PendingTurnInputCancelOutcome::AlreadyCancelled(input)
+            if input.input_id == first.input_id
+    ));
+    assert_eq!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list after bulk cancellation")
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second.input_id.as_str()]
+    );
+
+    let suffix_anchor = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "suffix anchor").with_source_key("suffix:anchor"),
+        )
+        .await
+        .expect("enqueue suffix anchor");
+    let active_claimed = store
+        .enqueue_pending_turn_input(
+            pending_active_turn_input_draft(
+                "root",
+                "suffix-active-turn",
+                crate::TurnInputCheckpointBoundary::AfterWork,
+                "suffix accepted active",
+            )
+            .with_source_key("suffix:claimed"),
+        )
+        .await
+        .expect("enqueue suffix claimed input");
+    let suffix_later = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "suffix later").with_source_key("suffix:later"),
+        )
+        .await
+        .expect("enqueue suffix later");
+    let lease = claim_session_execution_lease_for_test(&store, "root", "suffix-cancel-owner").await;
+    let active_claim = store
+        .claim_active_turn_inputs(
+            "root",
+            &lease.fence(),
+            &lease_owner("suffix-cancel-owner"),
+            "suffix-active-turn",
+            crate::CheckpointKind::AfterWork,
+            60_000,
+            10,
+        )
+        .await
+        .expect("claim suffix active input")
+        .expect("suffix active input claim");
+
+    let suffix = store
+        .cancel_pending_turn_input_suffix(
+            "root",
+            &crate::PendingTurnInputCancelTarget::source_key("suffix:anchor"),
+        )
+        .await
+        .expect("suffix cancel by source key");
+    let crate::PendingTurnInputSuffixCancelOutcome::Outcomes { outcomes, .. } = suffix else {
+        panic!("expected suffix outcomes, got {suffix:?}");
+    };
+    assert_eq!(outcomes.len(), 3);
+    expect_cancelled_pending_input(outcomes[0].clone(), &suffix_anchor.input_id);
+    match &outcomes[1] {
+        crate::PendingTurnInputCancelOutcome::AlreadyClaimed { input, claim } => {
+            assert_eq!(input.input_id, active_claimed.input_id);
+            assert_eq!(
+                claim.as_ref().and_then(|claim| claim.claim_id.as_deref()),
+                Some(active_claim.claim_id.as_str())
+            );
+        }
+        other => panic!("expected already-claimed suffix outcome, got {other:?}"),
+    }
+    expect_cancelled_pending_input(outcomes[2].clone(), &suffix_later.input_id);
+
+    let suffix_by_id_anchor = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft("root", "suffix by id anchor"))
+        .await
+        .expect("enqueue suffix by id anchor");
+    let suffix_by_id_later = store
+        .enqueue_pending_turn_input(
+            pending_next_turn_input_draft("root", "suffix by id later")
+                .with_source_key("suffix:id-later"),
+        )
+        .await
+        .expect("enqueue suffix by id later");
+    let suffix_by_id = store
+        .cancel_pending_turn_input_suffix(
+            "root",
+            &crate::PendingTurnInputCancelTarget::input_id(&suffix_by_id_anchor.input_id),
+        )
+        .await
+        .expect("suffix cancel by input id");
+    let crate::PendingTurnInputSuffixCancelOutcome::Outcomes { outcomes, .. } = suffix_by_id else {
+        panic!("expected input-id suffix outcomes, got {suffix_by_id:?}");
+    };
+    assert_eq!(outcomes.len(), 2);
+    expect_cancelled_pending_input(outcomes[0].clone(), &suffix_by_id_anchor.input_id);
+    expect_cancelled_pending_input(outcomes[1].clone(), &suffix_by_id_later.input_id);
+
+    assert!(matches!(
+        store
+            .cancel_pending_turn_input_suffix(
+                "root",
+                &crate::PendingTurnInputCancelTarget::source_key("suffix:missing"),
+            )
+            .await
+            .expect("missing suffix anchor"),
+        crate::PendingTurnInputSuffixCancelOutcome::AnchorNotFound { .. }
+    ));
+    assert_eq!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list after suffix cancellation")
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second.input_id.as_str()]
     );
 }
 
@@ -2223,14 +2466,25 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
             .contains_key("next-image"),
         "claimed next-turn input must preserve image blobs"
     );
-    assert!(
-        store
-            .cancel_pending_turn_input("root", &first.input_id)
-            .await
-            .expect("cancel claimed input")
-            .is_none(),
-        "live claimed pending input must not be cancellable"
-    );
+    match store
+        .cancel_pending_turn_input("root", &first.input_id)
+        .await
+        .expect("cancel claimed input")
+    {
+        crate::PendingTurnInputCancelOutcome::AlreadyClaimed {
+            input,
+            claim: diagnostics,
+        } => {
+            assert_eq!(input.input_id, first.input_id);
+            assert_eq!(
+                diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.claim_id.as_deref()),
+                Some(claim.claim_id.as_str())
+            );
+        }
+        other => panic!("live claimed pending input must not be cancellable, got {other:?}"),
+    }
     assert!(
         store
             .list_pending_turn_inputs("root")
@@ -2306,6 +2560,43 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
             .expect("list after valid completion")
             .is_empty()
     );
+    assert!(matches!(
+        store
+            .cancel_pending_turn_input("root", &first.input_id)
+            .await
+            .expect("cancel completed input"),
+        crate::PendingTurnInputCancelOutcome::AlreadyCompleted(input)
+            if input.input_id == first.input_id
+    ));
+    let completed_replay = store
+        .enqueue_pending_turn_input(
+            crate::PendingTurnInputDraft::new(
+                "root",
+                crate::TurnInputIngress::NextTurn,
+                crate::TurnInput::text("first next").with_image_ref("next-image", vec![1, 2, 3]),
+            )
+            .with_source_key("next:first"),
+        )
+        .await
+        .expect("exact replay after completion");
+    assert_eq!(completed_replay.input_id, first.input_id);
+    assert_eq!(completed_replay.state, crate::TurnInputState::Completed);
+    let post_completion_lease =
+        claim_session_execution_lease_for_test(&store, "root", "post-completion-owner").await;
+    assert!(
+        store
+            .claim_next_turn_inputs(
+                "root",
+                &post_completion_lease.fence(),
+                &lease_owner("post-completion-owner"),
+                60_000,
+                10,
+            )
+            .await
+            .expect("claim after completing inputs")
+            .is_none(),
+        "completed pending input tombstones must not be claimable"
+    );
 }
 
 async fn pending_turn_input_cancel_covers_active_and_deferred_states(
@@ -2341,9 +2632,9 @@ async fn pending_turn_input_cancel_covers_active_and_deferred_states(
     let cancelled_active = store
         .cancel_pending_turn_input("root", &active_cancel.input_id)
         .await
-        .expect("cancel active input")
-        .expect("active input should be cancellable before claim");
-    assert_eq!(cancelled_active.input_id, active_cancel.input_id);
+        .expect("cancel active input");
+    let cancelled_active =
+        expect_cancelled_pending_input(cancelled_active, &active_cancel.input_id);
     assert!(matches!(
         cancelled_active.ingress,
         crate::TurnInputIngress::ActiveTurn { .. }
@@ -2351,9 +2642,8 @@ async fn pending_turn_input_cancel_covers_active_and_deferred_states(
     let cancelled_next = store
         .cancel_pending_turn_input("root", &next_cancel.input_id)
         .await
-        .expect("cancel next input")
-        .expect("next input should be cancellable before claim");
-    assert_eq!(cancelled_next.input_id, next_cancel.input_id);
+        .expect("cancel next input");
+    expect_cancelled_pending_input(cancelled_next, &next_cancel.input_id);
 
     let lease = claim_session_execution_lease_for_test(&store, "root", "cancel-input-owner").await;
     let state = RuntimeSessionState {
@@ -2393,9 +2683,8 @@ async fn pending_turn_input_cancel_covers_active_and_deferred_states(
     let cancelled_deferred = store
         .cancel_pending_turn_input("root", &active_keep.input_id)
         .await
-        .expect("cancel deferred input")
-        .expect("deferred input should be cancellable before idle claim");
-    assert_eq!(cancelled_deferred.input_id, active_keep.input_id);
+        .expect("cancel deferred input");
+    expect_cancelled_pending_input(cancelled_deferred, &active_keep.input_id);
     assert!(
         store
             .claim_next_turn_inputs(

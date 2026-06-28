@@ -11,6 +11,7 @@ mod plugin;
 mod projection;
 mod protocol;
 mod rlm_support;
+pub mod scenario_contracts;
 mod stream_mask;
 mod tool_catalog;
 

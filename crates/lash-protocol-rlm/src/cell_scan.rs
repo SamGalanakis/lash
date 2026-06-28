@@ -53,10 +53,14 @@ pub(crate) fn first_lashlang_cell_span(text: &str) -> Option<LashlangCellSpan> {
                 });
             }
         }
-        if !line.has_terminator {
+        if line.has_terminator {
+            if line.next_pos <= pos {
+                break;
+            }
+            pos = line.next_pos;
+        } else {
             break;
         }
-        pos = line.next_pos;
     }
     None
 }

@@ -179,10 +179,43 @@ async fn session_store_factory_delete_removes_store_and_is_idempotent(
         "delete-model",
         crate::SessionRelation::Root,
     );
-    factory
+    let created = factory
         .create_store(&request)
         .await
         .expect("create deleted session");
+    created
+        .enqueue_pending_turn_input(
+            crate::PendingTurnInputDraft::new(
+                &request.session_id,
+                crate::TurnInputIngress::NextTurn,
+                crate::TurnInput::text("pending input before delete"),
+            )
+            .with_source_key("delete-session:pending-input"),
+        )
+        .await
+        .expect("enqueue pending turn input before delete");
+    assert_eq!(
+        created
+            .list_pending_turn_inputs(&request.session_id)
+            .await
+            .expect("list pending input before delete")
+            .len(),
+        1
+    );
+    let initial_lease = created
+        .try_claim_session_execution_lease(
+            &request.session_id,
+            &crate::LeaseOwnerIdentity::opaque("delete-session-owner", "before-delete"),
+            60_000,
+        )
+        .await
+        .expect("claim session execution lease before delete")
+        .acquired()
+        .expect("session execution lease before delete must be acquired");
+    assert_eq!(
+        initial_lease.fencing_token, 1,
+        "newly created session should start with the first execution lease fence"
+    );
     assert!(
         factory
             .open_existing_store(&request)
@@ -218,6 +251,28 @@ async fn session_store_factory_delete_removes_store_and_is_idempotent(
         .create_store(&recreated_request)
         .await
         .expect("recreate deleted session");
+    assert!(
+        recreated
+            .list_pending_turn_inputs(&recreated_request.session_id)
+            .await
+            .expect("list pending turn inputs after recreate")
+            .is_empty(),
+        "delete_session must remove pending turn-input evidence for the deleted session"
+    );
+    let recreated_lease = recreated
+        .try_claim_session_execution_lease(
+            &recreated_request.session_id,
+            &crate::LeaseOwnerIdentity::opaque("delete-session-owner", "after-delete"),
+            60_000,
+        )
+        .await
+        .expect("claim session execution lease after recreate")
+        .acquired()
+        .expect("recreated session must not retain the deleted session's execution lease");
+    assert_eq!(
+        recreated_lease.fencing_token, 1,
+        "delete_session must remove session execution lease state before recreation"
+    );
     let meta = recreated
         .load_session_meta()
         .await
