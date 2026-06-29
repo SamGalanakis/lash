@@ -154,6 +154,15 @@ pub fn generated_suspend_resume(events: &[DeliveredBoundary]) -> OracleVerdict {
         }
         checked += 1;
     }
+    if checked == 0 {
+        // Anti-vacuity: every generated workload plants suspend sessions, so a run
+        // with zero suspend-resume boundaries means the class was dropped — the
+        // oracle must fail rather than pass on an absent class.
+        return OracleVerdict::failed(
+            GENERATED_SUSPEND_RESUME_ORACLE,
+            "no suspend-resume boundary was observed; the suspend/resume class is absent",
+        );
+    }
     OracleVerdict::passed(
         GENERATED_SUSPEND_RESUME_ORACLE,
         format!(
@@ -2948,41 +2957,57 @@ where
 pub const LIVE_PROVIDER_FAILURE_ORACLE: &str = "sim.oracle.live-provider-failure-terminalizes.v1";
 
 /// Observed facts from driving a non-retryable provider failure through a LIVE
-/// runtime turn (a real `session.turn().run()` parked on a scheduler-gated
-/// provider event, not an isolated `provider.complete()`).
+/// runtime turn (a real `session.turn().run()` whose scripted-transport events
+/// are released by a real `BoundaryScheduler`, not an isolated
+/// `provider.complete()`). The fault arrives AFTER one or more valid prose
+/// deltas, so "no committed output" is a non-vacuous assertion that can fail.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LiveProviderFailureFacts {
+    pub provider_kind: String,
     /// The non-retryable fault injected mid-turn (e.g. `malformed_sse_chunk`).
     pub fault_kind: String,
-    /// The turn was observed live and parked on the first scheduler-gated
-    /// provider event before the failure was delivered (proves it is a live turn,
-    /// not a synchronous isolated call).
+    /// How many VALID prose deltas the wire script streamed BEFORE the fault. Must
+    /// be > 0: it is the partial prose a leaky runtime could (wrongly) commit, so
+    /// it makes the "no committed output" assertion meaningful rather than vacuous.
+    pub offered_prose_deltas: usize,
+    /// How many prose deltas the runtime actually emitted to the activity stream
+    /// before failing (diagnostic; proves the partial prose reached the runtime).
+    pub streamed_prose_deltas: usize,
+    /// The turn was observed live and parked on the first scheduler-gated provider
+    /// event before any event was released (proves it is a live turn).
     pub turn_was_live_parked: bool,
     /// The turn ended in a terminal failure (returned an error or a non-success
     /// outcome) rather than finishing successfully.
     pub terminalized_failure: bool,
-    /// Count of assistant prose deltas committed during the failed turn.
-    pub committed_assistant_prose_deltas: usize,
-    /// Count of FinalValue events committed during the failed turn.
-    pub committed_final_values: usize,
-    /// Whether the committed assistant message was non-empty (leaked text).
+    /// The COMMITTED turn result carried a non-empty assistant message (a leak).
     pub committed_assistant_message_nonempty: bool,
+    /// The COMMITTED turn result carried a Final Value (a leak).
+    pub committed_final_values: usize,
+    /// The committed session transcript contains the offered partial prose (a
+    /// leak even if it is not the turn's outcome).
+    pub committed_prose_in_transcript: bool,
 }
 
-/// A live runtime turn that receives a non-retryable provider failure mid-flight
-/// MUST terminalize with a terminal failure and commit NO provider output (no
-/// leaked partial assistant prose, no FinalValue, no assistant message). This is
-/// failing-capable: it fails loudly if the turn instead committed output or
-/// finished successfully.
+/// A live runtime turn that receives a non-retryable provider failure AFTER valid
+/// partial prose MUST terminalize with a terminal failure and commit NONE of that
+/// prose — not as the turn outcome, not as a Final Value, and not in the session
+/// transcript. Failing-capable AND non-vacuous: it requires that real prose was
+/// offered before the fault (`offered_prose_deltas > 0`), so a runtime that leaks
+/// the partial prose, or that finishes successfully, fails the oracle.
 pub fn live_provider_failure_terminalizes(facts: &LiveProviderFailureFacts) -> OracleVerdict {
-    let no_committed_output = facts.committed_assistant_prose_deltas == 0
+    let offered_prose = facts.offered_prose_deltas > 0;
+    let no_committed_output = !facts.committed_assistant_message_nonempty
         && facts.committed_final_values == 0
-        && !facts.committed_assistant_message_nonempty;
-    if facts.turn_was_live_parked && facts.terminalized_failure && no_committed_output {
+        && !facts.committed_prose_in_transcript;
+    if facts.turn_was_live_parked && offered_prose && facts.terminalized_failure && no_committed_output
+    {
         OracleVerdict::passed(
             LIVE_PROVIDER_FAILURE_ORACLE,
             format!(
-                "a live runtime turn parked on a scheduler-gated provider event, received a non-retryable `{}` fault mid-turn, terminalized as a terminal failure, and committed no provider output (0 assistant prose deltas, 0 final values, empty assistant message)",
+                "a live `{}` turn parked on a scheduler-gated provider event, streamed {} of {} offered valid prose delta(s), then a non-retryable `{}` fault terminalized it with NO committed output (no assistant message, no final value, no leaked prose in the transcript)",
+                facts.provider_kind,
+                facts.streamed_prose_deltas,
+                facts.offered_prose_deltas,
                 facts.fault_kind
             ),
         )
@@ -2990,16 +3015,70 @@ pub fn live_provider_failure_terminalizes(facts: &LiveProviderFailureFacts) -> O
         OracleVerdict::failed(
             LIVE_PROVIDER_FAILURE_ORACLE,
             format!(
-                "live provider failure turn did not terminalize cleanly for fault `{}`: live_parked={} terminalized_failure={} committed_assistant_prose_deltas={} committed_final_values={} committed_assistant_message_nonempty={}",
+                "live `{}` provider failure turn did not terminalize cleanly for fault `{}`: live_parked={} offered_prose_deltas={} streamed_prose_deltas={} terminalized_failure={} committed_assistant_message_nonempty={} committed_final_values={} committed_prose_in_transcript={}",
+                facts.provider_kind,
                 facts.fault_kind,
                 facts.turn_was_live_parked,
+                facts.offered_prose_deltas,
+                facts.streamed_prose_deltas,
                 facts.terminalized_failure,
-                facts.committed_assistant_prose_deltas,
+                facts.committed_assistant_message_nonempty,
                 facts.committed_final_values,
-                facts.committed_assistant_message_nonempty
+                facts.committed_prose_in_transcript
             ),
         )
     }
+}
+
+pub const LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE: &str =
+    "sim.oracle.live-provider-failure-coverage.v1";
+
+/// Aggregate the per-combo live-failure facts for a seed: every combo must pass
+/// the per-turn oracle, and the set must exercise more than one provider kind and
+/// more than one fault position, so the oracle cannot pass vacuously on a single
+/// degenerate case.
+pub fn live_provider_failure_coverage(facts: &[LiveProviderFailureFacts]) -> OracleVerdict {
+    if let Some(failed) = facts
+        .iter()
+        .map(live_provider_failure_terminalizes)
+        .find(|verdict| !verdict.is_passed())
+    {
+        return OracleVerdict::failed(
+            LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE,
+            format!("a live provider failure combo failed: {}", failed.message),
+        );
+    }
+    let kinds = facts
+        .iter()
+        .map(|fact| fact.provider_kind.as_str())
+        .collect::<BTreeSet<_>>();
+    let positions = facts
+        .iter()
+        .map(|fact| fact.offered_prose_deltas)
+        .collect::<BTreeSet<_>>();
+    if kinds.len() < 2 || positions.len() < 2 {
+        return OracleVerdict::failed(
+            LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE,
+            format!(
+                "live provider failure coverage was not exercised broadly enough: {} provider kind(s) {:?}, {} fault position(s) {:?} (need >= 2 of each)",
+                kinds.len(),
+                kinds,
+                positions.len(),
+                positions
+            ),
+        );
+    }
+    OracleVerdict::passed(
+        LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE,
+        format!(
+            "{} live provider failure turns terminalized with no committed output across {} provider kinds {:?} and {} fault positions {:?}",
+            facts.len(),
+            kinds.len(),
+            kinds,
+            positions.len(),
+            positions
+        ),
+    )
 }
 
 pub fn combine_oracles(oracles: &[OracleVerdict]) -> OracleVerdict {
@@ -3282,55 +3361,111 @@ mod tests {
         }
     }
 
-    #[test]
-    fn live_provider_failure_oracle_passes_on_clean_terminalization_and_fails_on_committed_output() {
-        // Positive: a live, parked turn that terminalized as a failure and
-        // committed nothing passes.
-        let clean = LiveProviderFailureFacts {
+    fn clean_live_failure_facts() -> LiveProviderFailureFacts {
+        LiveProviderFailureFacts {
+            provider_kind: "openai-compatible".to_string(),
             fault_kind: "malformed_sse_chunk".to_string(),
+            offered_prose_deltas: 1,
+            streamed_prose_deltas: 1,
             turn_was_live_parked: true,
             terminalized_failure: true,
-            committed_assistant_prose_deltas: 0,
-            committed_final_values: 0,
             committed_assistant_message_nonempty: false,
-        };
+            committed_final_values: 0,
+            committed_prose_in_transcript: false,
+        }
+    }
+
+    #[test]
+    fn live_provider_failure_oracle_passes_on_clean_terminalization_and_fails_on_committed_output() {
+        let clean = clean_live_failure_facts();
         assert!(live_provider_failure_terminalizes(&clean).is_passed());
 
         // Negative: the turn finished successfully instead of terminalizing.
-        let succeeded = LiveProviderFailureFacts {
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
             terminalized_failure: false,
             ..clean.clone()
-        };
-        assert!(!live_provider_failure_terminalizes(&succeeded).is_passed());
+        })
+        .is_passed());
 
-        // Negative: the turn leaked a committed partial assistant prose delta.
-        let leaked_prose = LiveProviderFailureFacts {
-            committed_assistant_prose_deltas: 1,
-            ..clean.clone()
-        };
-        assert!(!live_provider_failure_terminalizes(&leaked_prose).is_passed());
-
-        // Negative: the turn committed a FinalValue despite failing.
-        let leaked_final = LiveProviderFailureFacts {
-            committed_final_values: 1,
-            ..clean.clone()
-        };
-        assert!(!live_provider_failure_terminalizes(&leaked_final).is_passed());
-
-        // Negative: a leaked non-empty assistant message.
-        let leaked_message = LiveProviderFailureFacts {
+        // Negative: the committed turn result leaked a non-empty assistant message.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
             committed_assistant_message_nonempty: true,
             ..clean.clone()
-        };
-        assert!(!live_provider_failure_terminalizes(&leaked_message).is_passed());
+        })
+        .is_passed());
 
-        // Negative: the turn was never observed live/parked (could be a
-        // synchronous isolated path rather than a live turn).
-        let not_live = LiveProviderFailureFacts {
+        // Negative: the turn committed a Final Value despite failing.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            committed_final_values: 1,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative: the partial prose leaked into the committed transcript.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            committed_prose_in_transcript: true,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative (anti-vacuity): no valid prose was offered before the fault, so
+        // "no committed output" would be vacuous -> the oracle must NOT pass.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            offered_prose_deltas: 0,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative: the turn was never observed live/parked.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
             turn_was_live_parked: false,
             ..clean
+        })
+        .is_passed());
+    }
+
+    #[test]
+    fn live_provider_failure_coverage_requires_multiple_kinds_and_positions() {
+        let base = clean_live_failure_facts();
+        let combo = |kind: &str, prose: usize| LiveProviderFailureFacts {
+            provider_kind: kind.to_string(),
+            offered_prose_deltas: prose,
+            streamed_prose_deltas: prose,
+            ..base.clone()
         };
-        assert!(!live_provider_failure_terminalizes(&not_live).is_passed());
+
+        // Positive: >= 2 kinds and >= 2 positions, all clean.
+        assert!(
+            live_provider_failure_coverage(&[
+                combo("openai-compatible", 1),
+                combo("anthropic", 2),
+            ])
+            .is_passed()
+        );
+
+        // Negative: only one provider kind.
+        assert!(
+            !live_provider_failure_coverage(&[combo("openai-compatible", 1), combo("openai-compatible", 2)])
+                .is_passed()
+        );
+
+        // Negative: only one fault position.
+        assert!(
+            !live_provider_failure_coverage(&[combo("openai-compatible", 1), combo("anthropic", 1)])
+                .is_passed()
+        );
+
+        // Negative: a single combo that itself leaked output fails the aggregate.
+        assert!(
+            !live_provider_failure_coverage(&[
+                combo("openai-compatible", 1),
+                LiveProviderFailureFacts {
+                    committed_assistant_message_nonempty: true,
+                    ..combo("anthropic", 2)
+                },
+            ])
+            .is_passed()
+        );
     }
 
     #[test]
@@ -4573,9 +4708,13 @@ mod tests {
     }
 
     #[test]
-    fn suspend_resume_oracle_passes_vacuously_without_suspend_boundaries() {
+    fn suspend_resume_oracle_fails_when_the_suspend_class_is_absent() {
+        // Anti-vacuity: with no suspend-resume boundary present, the oracle must
+        // FAIL rather than pass on an absent class.
         let events = vec![provider_completion(0, "session-a", "turn-a")];
-        assert!(generated_suspend_resume(&events).is_passed());
+        let verdict = generated_suspend_resume(&events);
+        assert!(!verdict.is_passed());
+        assert!(verdict.message.contains("class is absent"));
     }
 
 }

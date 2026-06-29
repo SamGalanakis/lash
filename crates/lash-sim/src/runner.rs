@@ -39,7 +39,7 @@ use crate::oracles::{
     durable_effect_exactly_once, exec_code_observed, generated_final_value_semantic_channel,
     generated_suspend_resume,
     generated_runtime_provider_matrix as generated_runtime_provider_matrix_oracle,
-    ingress_sessions_opened, lease_time_monotonic, live_provider_failure_terminalizes,
+    ingress_sessions_opened, lease_time_monotonic, live_provider_failure_coverage,
     LiveProviderFailureFacts, observer_convergence,
     observer_reconnect_observed, operational_coverage, peak_concurrent_live_turns,
     pending_tool_completion, process_wake_observed, provider_mutation_rejected,
@@ -56,7 +56,7 @@ use crate::provider::{
     ProviderWireEvent, ProviderWireHeader, ProviderWireScript, ScriptedLlmHttpExchange,
     ScriptedLlmHttpTransport, ScriptedTransportSchedule,
 };
-use crate::provider_mutations::ProviderMutationMatrixCache;
+use crate::provider_mutations::{ProviderMutationMatrixCache, is_transport_provider_mutation};
 use crate::replay::{ReplayError, replay_trace};
 use crate::runtime_boundaries::{RuntimeBoundaryHarness, RuntimeEffectReplayStore};
 use crate::runtime_contracts::{
@@ -65,9 +65,9 @@ use crate::runtime_contracts::{
     runtime_graph_invariant_facts, runtime_turn_contract, runtime_usage_invariant_facts,
 };
 use crate::runtime_providers::{
-    OPENAI_COMPATIBLE, runtime_malformed_sse_script, runtime_provider_components,
-    runtime_script_for_text, runtime_scripts_for_texts as runtime_provider_scripts_for_texts,
-    suspend_roundtrip_scripts,
+    ANTHROPIC, LIVE_FAILURE_LEAK_PROSE, OPENAI_COMPATIBLE, live_failure_script,
+    runtime_provider_components, runtime_script_for_text,
+    runtime_scripts_for_texts as runtime_provider_scripts_for_texts, suspend_roundtrip_scripts,
 };
 use crate::scheduler::{
     BoundaryDeliveryLog, BoundaryEvent, BoundaryKind, BoundaryScheduler, RuntimeCompletionQueue,
@@ -631,16 +631,6 @@ pub struct RuntimeFacadeProof {
     pub provider_output_invariant: OracleVerdict,
     pub pending_tool_completion: PendingToolCompletionProof,
     pub final_value_semantic_channel: FinalValueSemanticProof,
-    pub live_provider_failure_reaction: LiveProviderFailureProof,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct LiveProviderFailureProof {
-    pub schema: &'static str,
-    pub name: &'static str,
-    pub provider_kind: String,
-    pub facts: LiveProviderFailureFacts,
-    pub terminalization_invariant: OracleVerdict,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2997,6 +2987,12 @@ struct KnownSqliteDivergence {
     /// divergence (model-replayable; SQLite replay quarantined). Empty when no
     /// standalone fixture has been promoted for the seed yet.
     fixture: &'static str,
+    /// The exact self-check signature this divergence is expected to reproduce. If
+    /// the bounded self-check observes a DIFFERENT signature (even another
+    /// divergent one), the lane fails loudly: the failure mode CHANGED and the
+    /// quarantine must be re-characterized. One of `deadlock_within_bounded_budget`
+    /// or `divergence_error`.
+    expected_signature: &'static str,
     rationale: &'static str,
 }
 
@@ -3005,8 +3001,51 @@ const KNOWN_SQLITE_DIVERGENCES: &[KnownSqliteDivergence] = &[KnownSqliteDivergen
     profile: "full-random",
     classification: "lash_sqlite_store_product_bug_repro",
     fixture: "replays/cross-backend-sqlite-active-turn-divergence",
+    expected_signature: "deadlock_within_bounded_budget",
     rationale: "After an active-turn queued-input cancel on turn 1 (cancel succeeds), the lash SQLite store re-executes a subsequent turn on the same session with an extra provider exchange and yields EMPTY assistant output, while the in-memory store produces the correct output; the serial SQLite replay additionally DEADLOCKS on an active-turn enqueue. Confirmed (after the provider-event liveness fix) to be a cross-backend lash-store divergence, NOT a sim-harness gate issue. The divergence class is systemic across the broad/full lane (multiple full-random seeds exhibit the same active-turn-cancel shape), not unique to this seed; this seed is the promoted, characterized repro (see `fixture`). Quarantined so the broad/full lane reports green-except-known instead of an unexplained failure; escalated for a product-vs-harness decision and NOT patched this pass.",
 }];
+
+/// Anti-vacuity: across the whole generated seed set, the interleaving,
+/// suspend/resume, and transport-mutation boundary classes must EACH appear at
+/// least once. Several class oracles pass when their class is absent (you cannot
+/// interleave one session, a run with no suspend boundary has nothing to check,
+/// etc.); this lane-level guard fails loudly if a generator regression silently
+/// drops a class so those oracles can never pass vacuously across the run.
+fn assert_generated_class_coverage(
+    event_lines: &[TraceEventLine],
+    interleaving_depth_max: usize,
+) -> Result<(), FixedScriptRunnerError> {
+    if interleaving_depth_max < 2 {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "no generated seed interleaved >= 2 live provider turns (peak {interleaving_depth_max}); the interleaving class is absent across the seed set"
+        )));
+    }
+    let suspend_resume = event_lines.iter().any(|line| {
+        line.event.observed.get("runtime_suspend").is_some()
+            || line.event.payload.get("suspend_resume").and_then(Value::as_bool) == Some(true)
+    });
+    if !suspend_resume {
+        return Err(FixedScriptRunnerError::Assertion(
+            "no suspend-resume boundary appeared across the generated seed set; the suspend/resume class is absent".to_string(),
+        ));
+    }
+    let transport_mutation = event_lines.iter().any(|line| {
+        line.event.kind == BoundaryKind::ProviderMutation
+            && line
+                .event
+                .observed
+                .get("mutation")
+                .or_else(|| line.event.payload.get("mutation"))
+                .and_then(Value::as_str)
+                .is_some_and(is_transport_provider_mutation)
+    });
+    if !transport_mutation {
+        return Err(FixedScriptRunnerError::Assertion(
+            "no transport provider mutation appeared across the generated seed set; the transport-mutation class is absent".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 fn known_sqlite_divergence(
     seed: u64,
@@ -3038,8 +3077,8 @@ async fn self_check_known_sqlite_divergence(
     trace_path: &Path,
     trace: &SimulationTrace,
     db_path: &Path,
+    budget: u64,
 ) -> KnownDivergenceSelfCheck {
-    let budget = KNOWN_DIVERGENCE_SELF_CHECK_YIELDS;
     let replay_fut = replay_trace_to_sqlite(trace_path, trace, db_path, None);
     tokio::pin!(replay_fut);
     let mut polls = 0u64;
@@ -3159,16 +3198,31 @@ pub async fn run_generated_sim_profile(
         // (an active-turn queued-input enqueue blocks on a gated turn the serial
         // replay cannot advance). Rather than silently SKIP it, the lane RUNS the
         // replay under a bounded deterministic self-check that asserts the
-        // divergence still reproduces (a divergence error or the deadlock
-        // signature), and FAILS LOUDLY if it ever completes cleanly — so a silent
-        // product fix can never go undetected. The budget guarantees no hang.
+        // divergence still reproduces with its EXPECTED signature, and FAILS
+        // LOUDLY if it completes cleanly OR if the failure mode changed — so
+        // neither a silent product fix nor a changed divergence can go undetected.
+        // The budget guarantees no hang.
         if let Some(divergence) = known_sqlite_divergence(seed, profile) {
-            let self_check =
-                self_check_known_sqlite_divergence(&trace_path, &trace, &sqlite_database_path).await;
+            let self_check = self_check_known_sqlite_divergence(
+                &trace_path,
+                &trace,
+                &sqlite_database_path,
+                KNOWN_DIVERGENCE_SELF_CHECK_YIELDS,
+            )
+            .await;
             if !self_check.still_divergent {
                 return Err(FixedScriptRunnerError::Assertion(format!(
                     "known SQLite divergence for seed {seed} ({}) NO LONGER reproduces: {}. The quarantine is stale: re-examine the cross-backend divergence and remove this entry from KNOWN_SQLITE_DIVERGENCES.",
                     divergence.profile, self_check.detail
+                )));
+            }
+            if self_check.signature != divergence.expected_signature {
+                return Err(FixedScriptRunnerError::Assertion(format!(
+                    "known SQLite divergence for seed {seed} ({}) CHANGED failure mode: expected signature `{}`, observed `{}` ({}). Re-characterize the quarantine (update `expected_signature`) and re-confirm it is still the same product divergence.",
+                    divergence.profile,
+                    divergence.expected_signature,
+                    self_check.signature,
+                    self_check.detail
                 )));
             }
             let known = serde_json::json!({
@@ -3179,6 +3233,7 @@ pub async fn run_generated_sim_profile(
                 "fixture": divergence.fixture,
                 "rationale": divergence.rationale,
                 "sqlite_replay": "self_checked_still_divergent",
+                "expected_signature": divergence.expected_signature,
                 "self_check": {
                     "still_divergent": self_check.still_divergent,
                     "signature": self_check.signature,
@@ -3270,13 +3325,8 @@ pub async fn run_generated_sim_profile(
             .semantic_channel_invariant
             .clone(),
     );
-    oracle_verdicts.push(
-        runtime_proof
-            .live_provider_failure_reaction
-            .terminalization_invariant
-            .clone(),
-    );
 
+    assert_generated_class_coverage(&event_lines, interleaving_depth_max)?;
     let events_sha256 = write_event_lines(&artifact_root.join(GENERATED_SIM_EVENTS), &event_lines)?;
     write_failure_artifact_shape(artifact_root)?;
 
@@ -3454,7 +3504,12 @@ async fn run_generated_workload(
             world.peak_concurrent_live_turns
         )));
     }
+    // Per-seed live provider FAILURE turns: real `session.turn().run()`s that
+    // stream valid prose then a non-retryable malformed chunk, released through a
+    // real BoundaryScheduler, across >1 provider kind and >1 fault position.
+    let live_failure_facts = drive_live_provider_failure_turns(workload.seed).await?;
     let mut oracles = vec![
+        live_provider_failure_coverage(&live_failure_facts),
         scheduler_controlled_delivery(&events),
         scheduler_owned_runtime_completions(&events),
         state_machine_semantic_invariants(&events, &final_summary),
@@ -5156,7 +5211,6 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
     )?;
     let pending_tool_completion = prove_pending_tool_completion_through_turn().await?;
     let final_value_semantic_channel = prove_final_value_semantic_channel().await?;
-    let live_provider_failure_reaction = prove_live_provider_failure_turn().await?;
     Ok(RuntimeFacadeProof {
         schema: "lash.sim.runtime-facade-proof.v1",
         name: "standard-facade-openai-compatible-scripted-turn",
@@ -5175,27 +5229,53 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
         ),
         pending_tool_completion,
         final_value_semantic_channel,
-        live_provider_failure_reaction,
     })
 }
 
-/// Drive a NON-RETRYABLE provider failure (a malformed mid-stream SSE chunk)
-/// through a LIVE runtime turn — a real `session.turn().run()`, not the isolated
-/// `provider.complete()` path. The turn parks on a scheduler-gated provider event
-/// (proving it is live), then the gate releases deliver the events to it,
-/// including the malformed chunk that fails the turn mid-stream. We assert the
-/// turn terminalizes with a terminal failure and commits NO provider output.
-async fn prove_live_provider_failure_turn()
--> Result<LiveProviderFailureProof, FixedScriptRunnerError> {
-    let fault_kind = "malformed_sse_chunk";
-    let script = runtime_malformed_sse_script(OPENAI_COMPATIBLE)
-        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+/// The (provider kind, valid-prose-deltas-before-fault) combos exercised for the
+/// live-provider-failure oracle EVERY seed. Covers more than one provider kind
+/// and more than one fault position so `live_provider_failure_coverage` cannot
+/// pass vacuously on a single degenerate case.
+const LIVE_PROVIDER_FAILURE_COMBOS: &[(&str, usize)] =
+    &[(OPENAI_COMPATIBLE, 1), (OPENAI_COMPATIBLE, 2), (ANTHROPIC, 1)];
+
+/// Drive every live-provider-failure combo for a seed, collecting the observed
+/// facts for the per-seed coverage oracle.
+async fn drive_live_provider_failure_turns(
+    seed: u64,
+) -> Result<Vec<LiveProviderFailureFacts>, FixedScriptRunnerError> {
+    let mut facts = Vec::with_capacity(LIVE_PROVIDER_FAILURE_COMBOS.len());
+    for (provider_kind, prose_deltas) in LIVE_PROVIDER_FAILURE_COMBOS.iter().copied() {
+        let script = live_failure_script(provider_kind, prose_deltas)
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+        facts.push(
+            run_live_turn_facts(seed, provider_kind, script, "malformed_sse_chunk", prose_deltas)
+                .await?,
+        );
+    }
+    Ok(facts)
+}
+
+/// Run a real `session.turn().run()` against `script`, releasing its
+/// scripted-transport SSE events through a REAL `BoundaryScheduler` (the same
+/// provider-event release path generated turns use — NOT an ad-hoc index loop),
+/// and record whether the turn terminalized without committing any output.
+/// Shared by the failure driver and by the end-to-end negative test (which feeds
+/// a SUCCESS script to prove the committed-output assertion bites).
+async fn run_live_turn_facts(
+    seed: u64,
+    provider_kind: &str,
+    script: ProviderWireScript,
+    fault_kind: &str,
+    offered_prose_deltas: usize,
+) -> Result<LiveProviderFailureFacts, FixedScriptRunnerError> {
     let schedule = ScriptedTransportSchedule::new();
     let transport = Arc::new(
-        ScriptedLlmHttpTransport::from_scripts([script]).with_event_schedule(schedule.clone()),
+        ScriptedLlmHttpTransport::from_scripts([script.clone()])
+            .with_event_schedule(schedule.clone()),
     );
     let (provider_handle, model, provider_kind) =
-        runtime_provider_components(OPENAI_COMPATIBLE, &transport)
+        runtime_provider_components(provider_kind, &transport)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     let core = lash::StandardCore::builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
@@ -5210,8 +5290,9 @@ async fn prove_live_provider_failure_turn()
         .model(model)
         .build()
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let session_id = format!("sim-live-failure-{provider_kind}-{offered_prose_deltas}");
     let session = core
-        .session("sim-live-provider-failure-session")
+        .session(session_id.clone())
         .open_fresh()
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
@@ -5226,9 +5307,28 @@ async fn prove_live_provider_failure_turn()
             .await
     });
 
-    // Observe the turn LIVE and parked on the first scheduler-gated provider
-    // event before any failure is delivered. Liveness-bounded so it can never
-    // hang if the turn never reaches the gate.
+    // Schedule the provider-event releases as real boundaries and deliver them
+    // through a REAL BoundaryScheduler (seeded), exactly as generated provider
+    // turns do.
+    let turn_event = BoundaryEvent::new(
+        format!("{session_id}:provider:001"),
+        session_id.clone(),
+        BoundaryKind::Provider,
+        0,
+        "provider.chat.stream.live-failure",
+        json!({ "provider_kind": provider_kind, "turn_index": 1 }),
+    );
+    let release_boundaries = script
+        .timeline
+        .iter()
+        .enumerate()
+        .map(|(event_index, wire_event)| {
+            provider_release_boundary(&turn_event, &script, 0, event_index, wire_event, wire_event.at())
+        })
+        .collect::<Vec<_>>();
+    let mut scheduler = BoundaryScheduler::with_events(seed, release_boundaries);
+
+    // Observe the turn live and parked on the first gate before any release.
     let mut turn_was_live_parked = false;
     let mut polls = 0u64;
     loop {
@@ -5243,29 +5343,51 @@ async fn prove_live_provider_failure_turn()
         tokio::task::yield_now().await;
     }
 
-    // The scheduler delivers the gated provider events to the live turn in order;
-    // the malformed (non-retryable) chunk fails the turn mid-stream. Releasing is
-    // liveness-bounded: once the turn terminalizes it parks on no further gate, so
-    // the loop stops instead of blocking forever.
-    let mut event_index = 0usize;
-    let mut idle_polls = 0u64;
+    // Deliver each release boundary through the BoundaryScheduler; release the gate
+    // it names (bounded so it can never hang once the turn terminalizes).
     loop {
         if turn.is_finished() {
             break;
         }
-        if schedule
-            .release_if_blocked(0, event_index, "live_failure_release", event_index as u64)
-            .is_some()
-        {
-            event_index += 1;
-            idle_polls = 0;
-            continue;
-        }
-        idle_polls += 1;
-        if idle_polls >= MAX_PROVIDER_EVENT_POLL_YIELDS {
+        let Some(delivered) = scheduler.deliver_next(Value::Null) else {
+            let mut idle = 0u64;
+            while !turn.is_finished() && idle < MAX_PROVIDER_EVENT_POLL_YIELDS {
+                idle += 1;
+                tokio::task::yield_now().await;
+            }
             break;
+        };
+        let event = delivered.as_event();
+        let exchange_index = event
+            .payload
+            .get("exchange_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let event_index = event
+            .payload
+            .get("event_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let event_name = event
+            .payload
+            .get("event_name")
+            .and_then(Value::as_str)
+            .unwrap_or("provider_event")
+            .to_string();
+        let mut idle = 0u64;
+        loop {
+            if schedule
+                .release_if_blocked(exchange_index, event_index, &event_name, event.at)
+                .is_some()
+            {
+                break;
+            }
+            if turn.is_finished() || idle >= MAX_PROVIDER_EVENT_POLL_YIELDS {
+                break;
+            }
+            idle += 1;
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
     }
 
     let result = turn.await.map_err(|err| {
@@ -5273,40 +5395,46 @@ async fn prove_live_provider_failure_turn()
             "live provider failure turn task failed to join: {err}"
         ))
     })?;
-    let (terminalized_failure, committed_assistant_message_nonempty) = match &result {
-        Ok(output) => (
-            !output.is_success(),
-            !output.assistant_message().unwrap_or_default().is_empty(),
-        ),
-        // A returned error is itself a terminal failure with no committed turn
-        // output surfaced to the caller.
-        Err(_) => (true, false),
-    };
-    let committed_assistant_prose_deltas = events.assistant_prose_delta_count().await;
-    let committed_final_values = events.final_value_events().await.len();
-    let facts = LiveProviderFailureFacts {
+
+    let streamed_prose_deltas = events.assistant_prose_delta_count().await;
+    // COMMITTED output is the durable turn result + session transcript, NOT
+    // transient stream deltas: a correct runtime may STREAM partial prose and then
+    // DISCARD it on terminal failure. We require it commit none of that prose.
+    let (terminalized_failure, committed_assistant_message_nonempty, committed_final_values) =
+        match &result {
+            Ok(turn_result) => (
+                !turn_result.is_success(),
+                turn_result
+                    .assistant_message()
+                    .is_some_and(|message| !message.is_empty()),
+                usize::from(turn_result.final_value().is_some()),
+            ),
+            Err(_) => (true, false, 0),
+        };
+    let committed_prose_in_transcript =
+        committed_transcript_contains(&session, LIVE_FAILURE_LEAK_PROSE);
+    Ok(LiveProviderFailureFacts {
+        provider_kind,
         fault_kind: fault_kind.to_string(),
+        offered_prose_deltas,
+        streamed_prose_deltas,
         turn_was_live_parked,
         terminalized_failure,
-        committed_assistant_prose_deltas,
-        committed_final_values,
         committed_assistant_message_nonempty,
-    };
-    let terminalization_invariant = live_provider_failure_terminalizes(&facts);
-    if let Err(message) = require_passed(&terminalization_invariant) {
-        return Err(FixedScriptRunnerError::Assertion(format!(
-            "live provider failure turn did not terminalize cleanly: {message}; result_is_err={} facts={:?}",
-            result.is_err(),
-            facts
-        )));
-    }
-    Ok(LiveProviderFailureProof {
-        schema: "lash.sim.live-provider-failure-proof.v1",
-        name: "standard-facade-openai-compatible-live-failure-turn",
-        provider_kind,
-        facts,
-        terminalization_invariant,
+        committed_final_values,
+        committed_prose_in_transcript,
     })
+}
+
+/// Whether the session's COMMITTED transcript contains `needle` — used to detect
+/// partial prose leaked into durable state on a terminal failure.
+fn committed_transcript_contains(session: &lash::LashSession, needle: &str) -> bool {
+    let observation = session.observe().current_observation();
+    observation
+        .read_view
+        .messages()
+        .iter()
+        .any(|message| message.parts.iter().any(|part| part.content.contains(needle)))
 }
 
 async fn prove_pending_tool_completion_through_turn()
@@ -7294,6 +7422,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_provider_failure_oracle_bites_on_a_committing_turn() {
+        // END-TO-END NEGATIVE: drive a REAL `session.turn().run()` against a VALID
+        // success script that streams AND COMMITS the leak prose (the same prose a
+        // failure turn must NOT commit). The live-failure oracle MUST fail on it —
+        // proving the "no committed output" assertion bites end-to-end, not just on
+        // synthetic facts.
+        let script = runtime_script_for_text(OPENAI_COMPATIBLE, LIVE_FAILURE_LEAK_PROSE)
+            .expect("valid success control script");
+        let facts = run_live_turn_facts(7, OPENAI_COMPATIBLE, script, "success_control", 1)
+            .await
+            .expect("drive committing control turn");
+
+        // The control turn really did commit the prose (the runtime CAN commit).
+        assert!(
+            facts.committed_assistant_message_nonempty,
+            "the success control turn should have committed the assistant prose: {facts:?}"
+        );
+        assert!(
+            !facts.terminalized_failure,
+            "the success control turn should not terminalize as a failure: {facts:?}"
+        );
+        assert!(
+            facts.committed_prose_in_transcript,
+            "the success control turn should leave the prose in the transcript: {facts:?}"
+        );
+
+        // The oracle catches the committed output.
+        let verdict = crate::oracles::live_provider_failure_terminalizes(&facts);
+        assert!(
+            !verdict.is_passed(),
+            "a turn that commits output MUST fail the live-provider-failure oracle: {}",
+            verdict.message
+        );
+    }
+
+    #[tokio::test]
     async fn known_divergence_self_check_flags_a_clean_replay_as_no_longer_divergent() {
         // The self-check must DETECT a clean replay (no longer divergent), which is
         // exactly the condition under which the quarantine lane fails loudly. A
@@ -7306,8 +7470,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("sqlite-store");
 
-        let check =
-            self_check_known_sqlite_divergence(Path::new("trace.json"), &trace, &db_path).await;
+        let check = self_check_known_sqlite_divergence(
+            Path::new("trace.json"),
+            &trace,
+            &db_path,
+            KNOWN_DIVERGENCE_SELF_CHECK_YIELDS,
+        )
+        .await;
         assert!(
             !check.still_divergent,
             "a clean SQLite replay must be flagged as no-longer-divergent so the quarantine lane fails loudly; got signature={} detail={}",
@@ -7315,6 +7484,38 @@ mod tests {
             check.detail
         );
         assert_eq!(check.signature, "completed_clean_divergence_gone");
+    }
+
+    #[tokio::test]
+    async fn known_divergence_fixture_still_reproduces_under_cargo_test() {
+        // P3(c) positive direction: the promoted divergent trace MUST still
+        // reproduce its expected signature under `cargo test`, not only the
+        // broad/full CI lane. This guards the quarantine's premise.
+        let trace_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("replays/cross-backend-sqlite-active-turn-divergence/trace.json");
+        let trace = crate::trace::read_trace(&trace_path).expect("read divergence fixture");
+        let divergence = known_sqlite_divergence(trace.seed, &trace.profile)
+            .expect("the fixture seed must be a registered known divergence");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("sqlite-store");
+
+        let check = self_check_known_sqlite_divergence(
+            &trace_path,
+            &trace,
+            &db_path,
+            KNOWN_DIVERGENCE_SELF_CHECK_YIELDS,
+        )
+        .await;
+        assert!(
+            check.still_divergent,
+            "the promoted divergence fixture must still reproduce: {}",
+            check.detail
+        );
+        assert_eq!(
+            check.signature, divergence.expected_signature,
+            "the fixture must still reproduce its expected signature: {}",
+            check.detail
+        );
     }
 
     #[tokio::test]

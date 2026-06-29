@@ -94,6 +94,19 @@ pub fn runtime_script_for_text(
     provider_kind: &str,
     text: &str,
 ) -> Result<ProviderWireScript, RuntimeProviderError> {
+    let value = runtime_script_value_for_text(provider_kind, text)?;
+    let encoded = serde_json::to_string(&value)?;
+    Ok(ProviderWireScript::from_json_str(&encoded)?)
+}
+
+/// The runtime provider wire script for `text` as a still-mutable JSON value,
+/// before it is parsed into a `ProviderWireScript`. This lets failure-script
+/// builders reuse the exact happy-path request match and content framing for a
+/// provider kind and then perturb the timeline.
+pub fn runtime_script_value_for_text(
+    provider_kind: &str,
+    text: &str,
+) -> Result<Value, RuntimeProviderError> {
     let mut script: Value = match provider_kind {
         OPENAI_COMPATIBLE => serde_json::from_str(OPENAI_COMPAT_RUNTIME_TEXT)?,
         OPENAI => serde_json::from_str(OPENAI_RESPONSES_TEXT)?,
@@ -211,46 +224,88 @@ pub fn runtime_script_for_text(
     }
 
     script["expected_provider"]["text"] = Value::String(text.to_string());
-    let encoded = serde_json::to_string(&script)?;
-    Ok(ProviderWireScript::from_json_str(&encoded)?)
+    Ok(script)
 }
 
-/// A runtime provider wire script whose mid-stream content chunk is a
-/// non-retryable MALFORMED SSE payload, so a live runtime turn that consumes it
-/// terminalizes with a terminal provider parser failure and commits no output.
-/// The request match is left intact (identical to the happy-path runtime script),
-/// so a real `session.turn().run()` matches it and the failure is delivered
-/// through the real provider wire parser — not an isolated `provider.complete()`.
-pub fn runtime_malformed_sse_script(
-    provider_kind: &str,
-) -> Result<ProviderWireScript, RuntimeProviderError> {
-    // The content SSE chunk index differs per provider; only openai-compatible is
-    // needed for the live-failure proof and its content delta is timeline[1].
-    let (raw, content_index) = match provider_kind {
-        OPENAI_COMPATIBLE => (OPENAI_COMPAT_RUNTIME_TEXT, 1usize),
+/// The distinct, non-vacuous prose a live failure script streams BEFORE its
+/// terminal fault. A correct runtime must NOT commit this text on a mid-stream
+/// terminal failure; if it leaks the partial prose, the live-failure oracle
+/// catches it (it is searched for in the committed transcript).
+pub const LIVE_FAILURE_LEAK_PROSE: &str = "LEAK-PARTIAL-PROSE-MUST-NOT-COMMIT";
+
+/// The timeline index of the first streaming content delta for a provider kind,
+/// matching the `set_sse_data` positions in `runtime_script_value_for_text`.
+fn content_delta_index_for_kind(provider_kind: &str) -> Result<usize, RuntimeProviderError> {
+    Ok(match provider_kind {
+        OPENAI_COMPATIBLE => 1,
+        OPENAI => 2,
+        ANTHROPIC => 3,
+        GOOGLE_OAUTH => 1,
         other => {
             return Err(RuntimeProviderError::new(format!(
-                "malformed runtime script not supported for provider `{other}`"
+                "live failure script not supported for provider `{other}`"
             )));
         }
-    };
-    let mut script: Value = serde_json::from_str(raw)?;
-    let slot = script
-        .get_mut("timeline")
-        .and_then(Value::as_array_mut)
-        .and_then(|timeline| timeline.get_mut(content_index))
-        .and_then(|event| event.get_mut("data"))
-        .ok_or_else(|| {
-            RuntimeProviderError::new(format!(
-                "runtime script missing timeline[{content_index}].data to malform"
-            ))
-        })?;
-    // Invalid JSON SSE chunk: the production provider parser rejects this as a
-    // terminal (non-retryable) parser error mid-stream.
-    *slot = Value::String("{ malformed provider event".to_string());
+    })
+}
+
+/// A runtime provider wire script that streams `prose_deltas` VALID content
+/// deltas (each carrying `LIVE_FAILURE_LEAK_PROSE`) and THEN a non-retryable
+/// malformed SSE chunk, so a live `session.turn().run()` first receives genuine
+/// partial prose and then fails mid-stream. Because real prose is offered before
+/// the fault, the oracle's "no committed output" assertion is non-vacuous: a
+/// runtime that leaks the partial prose on terminal failure WOULD commit it. The
+/// request match is the happy-path match, so a real turn matches it and the fault
+/// is delivered through the real provider wire parser.
+pub fn live_failure_script(
+    provider_kind: &str,
+    prose_deltas: usize,
+) -> Result<ProviderWireScript, RuntimeProviderError> {
+    if prose_deltas == 0 {
+        return Err(RuntimeProviderError::new(
+            "a live failure script must stream at least one valid prose delta before the fault",
+        ));
+    }
+    let content_index = content_delta_index_for_kind(provider_kind)?;
+    let mut script = runtime_script_value_for_text(provider_kind, LIVE_FAILURE_LEAK_PROSE)?;
+    let timeline = script
+        .get("timeline")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RuntimeProviderError::new("runtime script timeline was not an array"))?;
+    if content_index >= timeline.len() {
+        return Err(RuntimeProviderError::new(format!(
+            "runtime script for `{provider_kind}` has no content delta at index {content_index}"
+        )));
+    }
+    // Preamble (everything up to but excluding the first content delta) followed
+    // by `prose_deltas` valid content deltas and then a single malformed chunk.
+    // The success-completion tail is dropped: the turn fails at the malformed
+    // chunk before it would be reached.
+    let content_delta = timeline[content_index].clone();
+    let mut new_timeline = timeline[..content_index].to_vec();
+    let mut at = content_delta
+        .get("at")
+        .and_then(Value::as_u64)
+        .unwrap_or(20);
+    for _ in 0..prose_deltas {
+        let mut delta = content_delta.clone();
+        if let Some(object) = delta.as_object_mut() {
+            object.insert("at".to_string(), json!(at));
+        }
+        new_timeline.push(delta);
+        at += 1;
+    }
+    new_timeline.push(json!({
+        "at": at,
+        "event": "sse",
+        "data": "{ malformed provider event",
+    }));
+    script["timeline"] = Value::Array(new_timeline);
     script["expected_provider"] = json!({
-        "mutation": "malformed_sse_chunk",
-        "expected": "provider parser error",
+        "mutation": "malformed_sse_chunk_after_valid_prose",
+        "prose_deltas": prose_deltas,
+        "leak_prose": LIVE_FAILURE_LEAK_PROSE,
+        "expected": "terminal provider parser error after valid partial prose",
     });
     let encoded = serde_json::to_string(&script)?;
     Ok(ProviderWireScript::from_json_str(&encoded)?)

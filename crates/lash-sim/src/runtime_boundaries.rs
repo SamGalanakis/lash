@@ -979,6 +979,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_failover_continuation_oracle_catches_a_store_that_fails_to_fence() {
+        // END-TO-END NEGATIVE: drive the REAL worker-stale-completion boundary
+        // against a store whose session-execution lease is already held, so the
+        // worker's stale-owner claim is Busy and the real lease store can neither
+        // fence nor continue the work. The failover-continuation oracle MUST catch
+        // this — proving it bites on a real un-fencing path, not just synthetic
+        // facts.
+        let mut harness = harness();
+        let session = "worker-unfenced-session";
+        let store = harness.store_for_session(session).await.expect("store");
+        let blocker = LeaseOwnerIdentity::opaque("blocker-owner", "blocker-owner:001");
+        let blocking = match store
+            .try_claim_session_execution_lease(session, &blocker, LEASE_TTL_MS)
+            .await
+            .expect("blocker claim")
+        {
+            SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
+            other => panic!("expected to acquire the blocking lease: {other:?}"),
+        };
+
+        let worker_event = BoundaryEvent::new(
+            "worker:unfenced:001",
+            session,
+            BoundaryKind::Worker,
+            5,
+            "worker.stale-completion-rejected",
+            json!({ "session": session }),
+        );
+        let observed = harness
+            .run_worker_stale_completion(&worker_event)
+            .await
+            .expect("worker boundary observed");
+
+        // The real store could NOT fence: no rejection, no work continuation.
+        assert_eq!(
+            observed.get("stale_completion_rejected").and_then(Value::as_bool),
+            Some(false),
+            "a busy store must not report a fenced stale completion: {observed}"
+        );
+        assert!(
+            observed
+                .get("runtime_worker_store")
+                .and_then(|store| store.get("worker_owned_work"))
+                .is_none(),
+            "a store that failed to fence must not record worker-owned-work continuation: {observed}"
+        );
+
+        let delivered = crate::scheduler::DeliveredBoundary {
+            schema: "test".to_string(),
+            sequence: 0,
+            scheduler: crate::scheduler::SchedulerDeliveryEvidence::default(),
+            boundary_id: "worker:unfenced:001".to_string(),
+            actor_alias: session.to_string(),
+            kind: BoundaryKind::Worker,
+            at: 5,
+            label: "worker.stale-completion-rejected".to_string(),
+            payload: json!({ "session": session }),
+            observed,
+        };
+        let verdict = crate::oracles::worker_failover_continues_work(std::slice::from_ref(&delivered));
+        assert!(
+            !verdict.is_passed(),
+            "the failover-continuation oracle must catch a store that failed to fence: {}",
+            verdict.message
+        );
+
+        let _ = store
+            .release_session_execution_lease(&blocking.completion())
+            .await;
+    }
+
+    #[tokio::test]
     async fn durable_effect_replays_through_runtime_effect_controller() {
         let mut harness = harness();
         let payload = json!({

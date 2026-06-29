@@ -283,6 +283,7 @@ impl ReplayReport {
 pub enum TraceIoError {
     Io(std::io::Error),
     Json(serde_json::Error),
+    Integrity(String),
 }
 
 impl fmt::Display for TraceIoError {
@@ -290,6 +291,7 @@ impl fmt::Display for TraceIoError {
         match self {
             Self::Io(err) => write!(f, "trace I/O failed: {err}"),
             Self::Json(err) => write!(f, "trace JSON failed: {err}"),
+            Self::Integrity(message) => write!(f, "trace integrity check failed: {message}"),
         }
     }
 }
@@ -318,8 +320,45 @@ pub fn write_trace(path: &Path, trace: &SimulationTrace) -> Result<(), TraceIoEr
 
 pub fn read_trace(path: &Path) -> Result<SimulationTrace, TraceIoError> {
     let body = std::fs::read(path)?;
-    let trace = serde_json::from_slice(&body)?;
+    let trace: SimulationTrace = serde_json::from_slice(&body)?;
+    verify_trace_integrity(&trace)?;
     Ok(trace)
+}
+
+/// At-rest integrity gate for a deserialized trace: the schema must match and the
+/// embedded provenance hashes (`workload_id` and `script_bundle_hash`) must be
+/// well-formed sha256 hex digests. A truncated, corrupted, or hash-stripped trace
+/// is rejected at read time rather than silently replayed.
+fn verify_trace_integrity(trace: &SimulationTrace) -> Result<(), TraceIoError> {
+    if trace.schema != TRACE_SCHEMA {
+        return Err(TraceIoError::Integrity(format!(
+            "expected schema `{TRACE_SCHEMA}`, got `{}`",
+            trace.schema
+        )));
+    }
+    // `workload_id` is always a deterministic sha256 of (seed, profile, generator
+    // version, planned boundaries); a non-hex/wrong-length value means the trace
+    // was truncated or its provenance was stripped/corrupted.
+    if !is_sha256_hex(&trace.workload_id) {
+        return Err(TraceIoError::Integrity(format!(
+            "workload_id `{}` is not a 64-char sha256 hex digest",
+            trace.workload_id
+        )));
+    }
+    // The script bundle hash must be present (a stripped bundle hash is rejected).
+    // It is not required to be a 64-char digest so in-memory fixture traces can
+    // carry a labelled placeholder bundle id.
+    if trace.script_bundle_hash.trim().is_empty() {
+        return Err(TraceIoError::Integrity(
+            "script_bundle_hash is empty; the trace's provider bundle provenance was stripped"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn write_event_lines(path: &Path, events: &[TraceEventLine]) -> Result<String, TraceIoError> {
