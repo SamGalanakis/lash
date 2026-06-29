@@ -2308,9 +2308,10 @@ pub fn scenario_contract_generated_facts_for_semantic(
             process_wake_fact(events, "agent_parallel_spawn_process_wakes")?,
             worker_stale_fact(events, "agent_parallel_spawn_join_worker_order")?,
         ]),
-        "agent.tuple_values_finish_as_json_arrays" => {
-            Ok(vec![agent_tuple_values_finish_as_json_arrays_fact(events)?])
-        }
+        "agent.tuple_values_finish_as_json_arrays" => Ok(vec![agent_contract_execution_fact(
+            events,
+            "agent.tuple_values_finish_as_json_arrays",
+        )?]),
         other => Err(format!(
             "{} scenario contract `{other}` has no per-contract semantic adapter; add distinct evidence instead of a generic fallback",
             other.split('.').next().unwrap_or("unknown")
@@ -3441,6 +3442,35 @@ fn agent_contract_execution_fact(
                 "joined": ["left", "right"],
             })
         }
+        "agent.tuple_values_finish_as_json_arrays" => {
+            let expected = json!({
+                "first": "left",
+                "tail": ["right"],
+                "seen": ["left", "right"],
+                "tuple": ["left", "right"],
+                "nested": { "pair": ["left", "right"] }
+            });
+            require_agent_final_value(result, &expected, contract)?;
+            let final_value = result
+                .get("final_value")
+                .ok_or_else(|| format!("{contract} missing concrete final value"))?;
+            if !(json_array_equals(final_value.pointer("/tuple"), &["left", "right"])
+                && json_array_equals(final_value.pointer("/tail"), &["right"])
+                && json_array_equals(final_value.pointer("/seen"), &["left", "right"])
+                && json_array_equals(final_value.pointer("/nested/pair"), &["left", "right"]))
+            {
+                return Err(format!(
+                    "{contract} did not preserve tuple/tail/seen/nested tuple values as JSON arrays"
+                ));
+            }
+            json!({
+                "final_value": expected,
+                "tuple": final_value.pointer("/tuple").cloned().unwrap_or(Value::Null),
+                "tail": final_value.pointer("/tail").cloned().unwrap_or(Value::Null),
+                "seen": final_value.pointer("/seen").cloned().unwrap_or(Value::Null),
+                "nested_pair": final_value.pointer("/nested/pair").cloned().unwrap_or(Value::Null),
+            })
+        }
         other => {
             return Err(format!(
                 "Agent contract execution fact has no checker for `{other}`"
@@ -3513,6 +3543,11 @@ fn agent_contract_metadata(
             "agent_scenario_parallel_spawn_and_join",
             "agent_parallel_spawn_and_join_execution",
             "Agent facade starts two child processes and joins their concrete final values in order",
+        )),
+        "agent.tuple_values_finish_as_json_arrays" => Ok((
+            "agent_scenario_tuple_values_finish_as_json_arrays",
+            "agent_tuple_values_finish_json_arrays_execution",
+            "Agent facade preserves Lashlang tuple projections as JSON arrays in final-value and runtime outcome evidence",
         )),
         other => Err(format!(
             "no Agent contract metadata registered for `{other}`"
@@ -4685,66 +4720,6 @@ fn standard_max_turns_after_tool_result_fact(
             "done": true,
             "turn_outcomes": result.get("turn_outcomes").cloned().unwrap_or(Value::Null),
             "max_turns": result.get("max_turns").cloned().unwrap_or(Value::Null),
-            "source": execution.get("source").cloned().unwrap_or(Value::Null),
-        }),
-    )
-}
-
-fn agent_tuple_values_finish_as_json_arrays_fact(
-    events: &[DeliveredBoundary],
-) -> Result<ScenarioContractGeneratedFact, String> {
-    let proof_event = contract_execution_event(events, "agent.tuple_values_finish_as_json_arrays")?;
-    let execution = contract_execution_payload_matches_observed(
-        proof_event,
-        "agent.tuple_values_finish_as_json_arrays",
-        "agent_scenario_tuple_values_finish_as_json_arrays",
-    )?;
-    let result = execution
-        .get("result")
-        .ok_or_else(|| "agent tuple JSON-array execution missing result".to_string())?;
-    let expected = json!({
-        "first": "left",
-        "tail": ["right"],
-        "seen": ["left", "right"],
-        "tuple": ["left", "right"],
-        "nested": { "pair": ["left", "right"] }
-    });
-    let final_value = result.get("final_value").ok_or_else(|| {
-        "agent tuple JSON-array execution missing final value evidence".to_string()
-    })?;
-    let tuple_arrays_ok = result.get("done").and_then(Value::as_bool) == Some(true)
-        && final_value == &expected
-        && json_array_equals(final_value.pointer("/tuple"), &["left", "right"])
-        && json_array_equals(final_value.pointer("/tail"), &["right"])
-        && json_array_equals(final_value.pointer("/seen"), &["left", "right"])
-        && json_array_equals(final_value.pointer("/nested/pair"), &["left", "right"])
-        && result
-            .pointer("/runtime_final_value_facts/outcome_kind")
-            .and_then(Value::as_str)
-            == Some("final_value")
-        && result.pointer("/runtime_final_value_facts/semantic_value") == Some(&expected)
-        && result
-            .pointer("/runtime_final_value_facts/semantic_channel_observed")
-            .and_then(Value::as_bool)
-            == Some(true)
-        && result.get("execution_api").and_then(Value::as_str) == Some("lash::RlmCore facade");
-    if !tuple_arrays_ok {
-        return Err(
-            "agent tuple JSON-array execution did not preserve tuple/tail/seen/nested tuple values as JSON arrays in the final value".to_string(),
-        );
-    }
-    generated_fact(
-        "agent_tuple_values_finish_json_arrays",
-        "facade final value preserves tuple projections as JSON arrays for tuple, tail, seen, and nested pair fields",
-        vec![proof_event],
-        json!({
-            "contract_execution_boundary": proof_event.boundary_id,
-            "final_value": final_value.clone(),
-            "tuple": final_value.pointer("/tuple").cloned().unwrap_or(Value::Null),
-            "tail": final_value.pointer("/tail").cloned().unwrap_or(Value::Null),
-            "seen": final_value.pointer("/seen").cloned().unwrap_or(Value::Null),
-            "nested_pair": final_value.pointer("/nested/pair").cloned().unwrap_or(Value::Null),
-            "runtime_final_value_facts": result.get("runtime_final_value_facts").cloned().unwrap_or(Value::Null),
             "source": execution.get("source").cloned().unwrap_or(Value::Null),
         }),
     )
@@ -8226,30 +8201,9 @@ mod tests {
                     "contract_execution": standard_max_turn_execution_fixture()
                 }),
             ),
-            delivered_with_payload(
-                24,
-                "session-001:contract-execution:agent-tuple-json-array-final-value",
-                "session-001",
-                BoundaryKind::Trigger,
-                json!({
-                    "session": "session-001",
-                    "source_key": "contract-execution/session-001/agent-tuple-json-array-final-value",
-                    "started_process": false,
-                    "contract_execution": tuple_json_array_execution_fixture(),
-                }),
-                json!({
-                    "session": "session-001",
-                    "trigger_delivered": true,
-                    "source_key": "contract-execution/session-001/agent-tuple-json-array-final-value",
-                    "occurrence_id": "trigger:contract-execution-agent-tuple-json-array-final-value",
-                    "reservation_count": 1,
-                    "started_process": false,
-                    "contract_execution": tuple_json_array_execution_fixture(),
-                }),
-            ),
         ];
         let mut events: Vec<DeliveredBoundary> = base.into();
-        events.extend(contract_execution_fixture_events(25));
+        events.extend(contract_execution_fixture_events(24));
         events
     }
 
@@ -8271,10 +8225,6 @@ mod tests {
                 }),
             );
         execution
-    }
-
-    fn tuple_json_array_execution_fixture() -> serde_json::Value {
-        replay_contract_execution_fixture("agent.tuple_values_finish_as_json_arrays")
     }
 
     fn replay_contract_execution_fixture(contract: &str) -> serde_json::Value {
@@ -8319,6 +8269,7 @@ mod tests {
             "agent.session_turn_process_child",
             "agent.failed_child_preserves_failure_graph",
             "agent.parallel_spawn_and_join",
+            "agent.tuple_values_finish_as_json_arrays",
         ]
         .into_iter()
         .enumerate()

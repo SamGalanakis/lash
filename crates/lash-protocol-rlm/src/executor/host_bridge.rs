@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,6 +41,9 @@ pub(super) struct HostBridge<'run> {
     deferred_execution_grants: BTreeMap<lash_core::ToolId, ToolExecutionGrant>,
     artifact_store: std::sync::Arc<dyn lashlang::LashlangArtifactStore>,
 }
+
+type HostAbilityFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<AbilityResult, ExecutionHostError>> + Send + 'a>>;
 
 impl<'run> HostBridge<'run> {
     pub(super) fn new(
@@ -649,6 +654,59 @@ impl HostBridge<'_> {
             .map_err(|err| ExecutionHostError::new(err.to_string()))?;
         Ok(FlowValue::Null)
     }
+
+    fn perform_selected_ability<'a>(&'a self, op: AbilityOp) -> HostAbilityFuture<'a> {
+        match op {
+            AbilityOp::ResourceOperation(operation) => Box::pin(async move {
+                let lashlang::ResourceOperation {
+                    operation,
+                    receiver,
+                    args,
+                    call_site,
+                } = operation;
+                self.resource_operation(operation, receiver, args, call_site)
+                    .await
+                    .map(AbilityResult::Value)
+            }),
+            AbilityOp::ResourceOperationBatch(batch) => Box::pin(async move {
+                Ok(AbilityResult::ResourceOperationBatch(
+                    self.resource_operation_batch(batch).await,
+                ))
+            }),
+            AbilityOp::StartProcess(start) => {
+                Box::pin(async move { self.start_process(*start).await.map(AbilityResult::Value) })
+            }
+            AbilityOp::Await(handle) => {
+                Box::pin(async move { self.await_handle(handle).await.map(AbilityResult::Value) })
+            }
+            AbilityOp::Cancel(handle) => {
+                Box::pin(async move { self.cancel_handle(handle).await.map(AbilityResult::Value) })
+            }
+            AbilityOp::Print(value) => Box::pin(async move {
+                self.print(value).await?;
+                Ok(AbilityResult::Unit)
+            }),
+            AbilityOp::Sleep(sleep) => {
+                Box::pin(async move { self.sleep(sleep).await.map(AbilityResult::Value) })
+            }
+            AbilityOp::ProcessEvent(_) => Box::pin(async {
+                Err(ExecutionHostError::new(
+                    "process events are only available inside lashlang process bodies",
+                ))
+            }),
+            AbilityOp::WaitSignal { .. } => Box::pin(async {
+                Err(ExecutionHostError::new(
+                    "`wait_signal` is only available inside lashlang process bodies",
+                ))
+            }),
+            AbilityOp::SignalRun(signal) => {
+                Box::pin(async move { self.signal_run(signal).await.map(AbilityResult::Value) })
+            }
+            AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Box::pin(async move { Ok(AbilityResult::Value(value)) })
+            }
+        }
+    }
 }
 
 fn observation_projection_metadata(original: &str, projected: &str) -> TextProjectionMetadata {
@@ -672,41 +730,11 @@ fn projection_is_lossy(original: &str, projected: &str) -> bool {
 }
 
 impl ExecutionHost for HostBridge<'_> {
-    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
-        match op {
-            AbilityOp::ResourceOperation(operation) => {
-                let lashlang::ResourceOperation {
-                    operation,
-                    receiver,
-                    args,
-                    call_site,
-                } = operation;
-                self.resource_operation(operation, receiver, args, call_site)
-                    .await
-                    .map(AbilityResult::Value)
-            }
-            AbilityOp::ResourceOperationBatch(batch) => Ok(AbilityResult::ResourceOperationBatch(
-                self.resource_operation_batch(batch).await,
-            )),
-            AbilityOp::StartProcess(start) => {
-                self.start_process(*start).await.map(AbilityResult::Value)
-            }
-            AbilityOp::Await(handle) => self.await_handle(handle).await.map(AbilityResult::Value),
-            AbilityOp::Cancel(handle) => self.cancel_handle(handle).await.map(AbilityResult::Value),
-            AbilityOp::Print(value) => {
-                self.print(value).await?;
-                Ok(AbilityResult::Unit)
-            }
-            AbilityOp::Sleep(sleep) => self.sleep(sleep).await.map(AbilityResult::Value),
-            AbilityOp::ProcessEvent(_) => Err(ExecutionHostError::new(
-                "process events are only available inside lashlang process bodies",
-            )),
-            AbilityOp::WaitSignal { .. } => Err(ExecutionHostError::new(
-                "`wait_signal` is only available inside lashlang process bodies",
-            )),
-            AbilityOp::SignalRun(signal) => self.signal_run(signal).await.map(AbilityResult::Value),
-            AbilityOp::Finish(value) | AbilityOp::Fail(value) => Ok(AbilityResult::Value(value)),
-        }
+    fn perform(
+        &self,
+        op: AbilityOp,
+    ) -> impl Future<Output = Result<AbilityResult, ExecutionHostError>> + Send {
+        self.perform_selected_ability(op)
     }
 
     async fn yield_now(&self) {

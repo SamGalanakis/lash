@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -236,6 +238,9 @@ struct LashlangProcessHost<'run> {
     signal_send_sequence: AtomicU64,
     signal_wait_ordinals: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
+
+type ProcessHostAbilityFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<lashlang::AbilityResult, ExecutionHostError>> + Send + 'a>>;
 
 impl LashlangProcessHost<'_> {
     fn resource_payload(
@@ -609,62 +614,77 @@ impl LashlangProcessHost<'_> {
             .map_err(|err| ExecutionHostError::new(err.to_string()))?;
         Ok(lashlang::Value::Null)
     }
-}
 
-impl lashlang::ExecutionHost for LashlangProcessHost<'_> {
-    async fn perform(
-        &self,
+    fn perform_selected_ability<'a>(
+        &'a self,
         op: lashlang::AbilityOp,
-    ) -> Result<lashlang::AbilityResult, ExecutionHostError> {
+    ) -> ProcessHostAbilityFuture<'a> {
         match op {
-            lashlang::AbilityOp::ResourceOperation(operation) => self
-                .resource_operation(
+            lashlang::AbilityOp::ResourceOperation(operation) => Box::pin(async move {
+                self.resource_operation(
                     operation.operation,
                     operation.receiver,
                     operation.args,
                     operation.call_site,
                 )
                 .await
-                .map(lashlang::AbilityResult::Value),
-            lashlang::AbilityOp::ResourceOperationBatch(batch) => {
+                .map(lashlang::AbilityResult::Value)
+            }),
+            lashlang::AbilityOp::ResourceOperationBatch(batch) => Box::pin(async move {
                 Ok(lashlang::AbilityResult::ResourceOperationBatch(
                     self.resource_operation_batch(batch).await,
                 ))
-            }
-            lashlang::AbilityOp::Await(handle) => self
-                .await_handle(handle)
-                .await
-                .map(lashlang::AbilityResult::Value),
-            lashlang::AbilityOp::Cancel(handle) => self
-                .cancel_handle(handle)
-                .await
-                .map(lashlang::AbilityResult::Value),
-            lashlang::AbilityOp::StartProcess(start) => self
-                .start_process(*start)
-                .await
-                .map(lashlang::AbilityResult::Value),
-            lashlang::AbilityOp::ProcessEvent(event) => {
+            }),
+            lashlang::AbilityOp::Await(handle) => Box::pin(async move {
+                self.await_handle(handle)
+                    .await
+                    .map(lashlang::AbilityResult::Value)
+            }),
+            lashlang::AbilityOp::Cancel(handle) => Box::pin(async move {
+                self.cancel_handle(handle)
+                    .await
+                    .map(lashlang::AbilityResult::Value)
+            }),
+            lashlang::AbilityOp::StartProcess(start) => Box::pin(async move {
+                self.start_process(*start)
+                    .await
+                    .map(lashlang::AbilityResult::Value)
+            }),
+            lashlang::AbilityOp::ProcessEvent(event) => Box::pin(async move {
                 self.process_event(event).await?;
                 Ok(lashlang::AbilityResult::Unit)
-            }
+            }),
             lashlang::AbilityOp::Sleep(sleep) => {
-                self.sleep(sleep).await.map(lashlang::AbilityResult::Value)
+                Box::pin(async move { self.sleep(sleep).await.map(lashlang::AbilityResult::Value) })
             }
-            lashlang::AbilityOp::WaitSignal { name } => self
-                .wait_signal(name)
-                .await
-                .map(lashlang::AbilityResult::Value),
-            lashlang::AbilityOp::SignalRun(signal) => self
-                .signal_run(signal)
-                .await
-                .map(lashlang::AbilityResult::Value),
-            lashlang::AbilityOp::Print(_) => Err(ExecutionHostError::new(
-                "`print` is not available inside lashlang process bodies",
-            )),
+            lashlang::AbilityOp::WaitSignal { name } => Box::pin(async move {
+                self.wait_signal(name)
+                    .await
+                    .map(lashlang::AbilityResult::Value)
+            }),
+            lashlang::AbilityOp::SignalRun(signal) => Box::pin(async move {
+                self.signal_run(signal)
+                    .await
+                    .map(lashlang::AbilityResult::Value)
+            }),
+            lashlang::AbilityOp::Print(_) => Box::pin(async {
+                Err(ExecutionHostError::new(
+                    "`print` is not available inside lashlang process bodies",
+                ))
+            }),
             lashlang::AbilityOp::Finish(value) | lashlang::AbilityOp::Fail(value) => {
-                Ok(lashlang::AbilityResult::Value(value))
+                Box::pin(async move { Ok(lashlang::AbilityResult::Value(value)) })
             }
         }
+    }
+}
+
+impl lashlang::ExecutionHost for LashlangProcessHost<'_> {
+    fn perform(
+        &self,
+        op: lashlang::AbilityOp,
+    ) -> impl Future<Output = Result<lashlang::AbilityResult, ExecutionHostError>> + Send {
+        self.perform_selected_ability(op)
     }
 
     fn observe_lashlang_execution(&self, observation: lashlang::LashlangExecutionObservation) {

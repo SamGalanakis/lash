@@ -1821,6 +1821,9 @@ fn scenario_transition_facts(
                 selected_events,
             )?);
         }
+        "runtime.command_only_queue_drain" => {
+            facts.push(command_queue_drain_fact(contract, selected_events)?);
+        }
         "runtime.command_before_turn_work" => {
             facts.push(trigger_wakeup_fact(contract, selected_events)?);
             facts.push(queued_active_turn_fact(contract, selected_events)?);
@@ -1836,6 +1839,12 @@ fn scenario_transition_facts(
         }
         "runtime.dead_lease_reclaim_rejects_stale" => {
             facts.push(worker_dead_lease_reclaim_fact(contract, selected_events)?);
+        }
+        "runtime.observation_replay_preserves_input" => {
+            facts.push(observer_reconnect_transition_fact(
+                contract,
+                selected_events,
+            )?);
         }
         "standard.empty_provider_response_error" | "standard.provider_error_without_checkpoint" => {
             facts.push(provider_terminalization_fact(contract, selected_events)?);
@@ -1874,6 +1883,12 @@ fn scenario_transition_facts(
         _ => {}
     }
     if facts.is_empty() {
+        if contract.suite == "runtime" {
+            return Err(FixedScriptRunnerError::Assertion(format!(
+                "runtime scenario contract `{}` has no contract-owned transition fact; generic selected-event fallback is not allowed for runtime contracts",
+                contract.test_name
+            )));
+        }
         facts.push(generic_transition_fact(contract, selected_events)?);
     }
     Ok(facts)
@@ -2110,6 +2125,66 @@ fn trigger_wakeup_fact(
     )
 }
 
+fn command_queue_drain_fact(
+    contract: &ScenarioContractSpec,
+    selected_events: &[TraceEventLine],
+) -> Result<ScenarioTransitionFact, FixedScriptRunnerError> {
+    let queued_events = selected_events
+        .iter()
+        .filter(|line| {
+            line.event.kind == BoundaryKind::QueuedIngress
+                && line
+                    .event
+                    .observed
+                    .get("source_key")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source_key| !source_key.is_empty())
+        })
+        .collect::<Vec<_>>();
+    let lease_events = selected_events
+        .iter()
+        .filter(|line| {
+            line.event.kind == BoundaryKind::LeaseTime
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_lease_probe/real_lease_store")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_lease_probe/session_execution_lease_fencing_token")
+                    .and_then(Value::as_u64)
+                    .is_some()
+        })
+        .collect::<Vec<_>>();
+    let mut events = Vec::new();
+    events.extend(queued_events.iter().copied());
+    events.extend(lease_events.iter().copied());
+    let observed = json!({
+        "queued_inputs": queued_events.iter().map(|line| json!({
+            "boundary_id": line.event.boundary_id,
+            "source_key": line.event.observed.get("source_key").cloned().unwrap_or(Value::Null),
+            "input_state": line.event.observed.get("input_state").cloned().unwrap_or(Value::Null),
+            "ingress_mode": line.event.observed.get("ingress_mode").cloned().unwrap_or(Value::Null),
+        })).collect::<Vec<_>>(),
+        "lease_fences": lease_events.iter().map(|line| json!({
+            "boundary_id": line.event.boundary_id,
+            "session": line.event.actor_alias,
+            "fencing_token": line.event.observed.pointer("/runtime_lease_probe/session_execution_lease_fencing_token").cloned().unwrap_or(Value::Null),
+            "real_lease_store": true,
+        })).collect::<Vec<_>>(),
+    });
+    require_transition_fact(
+        contract,
+        "command_queue_drains_with_real_lease_fence",
+        "command-only queued work carries scheduler-owned source keys and drains under real session-execution-lease fencing tokens",
+        events,
+        observed,
+    )
+}
+
 fn process_wake_duplicate_fact(
     contract: &ScenarioContractSpec,
     selected_events: &[TraceEventLine],
@@ -2176,6 +2251,65 @@ fn process_wake_duplicate_fact(
         contract,
         "duplicate_process_wake_idempotent",
         "duplicate process wake deliveries share a dedupe key and are terminalized by queued-work claim dedupe or in-flight lease rejection",
+        events,
+        observed,
+    )
+}
+
+fn observer_reconnect_transition_fact(
+    contract: &ScenarioContractSpec,
+    selected_events: &[TraceEventLine],
+) -> Result<ScenarioTransitionFact, FixedScriptRunnerError> {
+    let events = selected_events
+        .iter()
+        .filter(|line| {
+            line.event.kind == BoundaryKind::Observer
+                && line
+                    .event
+                    .observed
+                    .get("reconnected")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .get("turn_index")
+                    .and_then(Value::as_u64)
+                    .is_some()
+                && line
+                    .event
+                    .observed
+                    .pointer("/observer_invariants/session_id")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/observer_invariants/turn_index_converged")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/observer_invariants/transcript_message_count_converged")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+        .collect::<Vec<_>>();
+    let observed = json!({
+        "observer_reconnects": events.iter().map(|line| json!({
+            "boundary_id": line.event.boundary_id,
+            "session": line.event.actor_alias,
+            "turn_index": line.event.observed.get("turn_index").cloned().unwrap_or(Value::Null),
+            "graph_node_count": line.event.observed.get("graph_node_count").cloned().unwrap_or(Value::Null),
+            "transcript_message_count": line.event.observed.get("transcript_message_count").cloned().unwrap_or(Value::Null),
+            "observer_invariants": line.event.observed.get("observer_invariants").cloned().unwrap_or(Value::Null),
+        })).collect::<Vec<_>>(),
+    });
+    require_transition_fact(
+        contract,
+        "observer_reconnect_replays_original_input_state",
+        "observer reconnect boundary reads a concrete session observation with converged session id, turn index, graph, and transcript state",
         events,
         observed,
     )
@@ -3889,7 +4023,6 @@ async fn contract_execution_boundaries(
         )?);
         next_at = next_at.saturating_add(1);
     }
-    proof_events.push(agent_tuple_json_array_execution_boundary(events, next_at).await?);
     Ok(proof_events)
 }
 
@@ -4098,24 +4231,6 @@ fn rlm_protocol_execution_boundary(
         &proof_id,
         at,
         execution,
-    ))
-}
-
-async fn agent_tuple_json_array_execution_boundary(
-    events: &[crate::scheduler::DeliveredBoundary],
-    at: u64,
-) -> Result<BoundaryEvent, FixedScriptRunnerError> {
-    let provider = first_successful_provider(events).ok_or_else(|| {
-        FixedScriptRunnerError::Assertion(
-            "could not anchor agent tuple proof to a successful generated provider boundary"
-                .to_string(),
-        )
-    })?;
-    Ok(contract_execution_boundary(
-        &provider.actor_alias,
-        "agent-tuple-json-array-final-value",
-        at,
-        agent_tuple_json_array_execution().await?,
     ))
 }
 
@@ -4653,7 +4768,6 @@ fn standard_llm_error(message: &str) -> lash_core::LlmCallError {
 
 pub(crate) fn replay_contract_execution(contract: &str) -> Result<Value, FixedScriptRunnerError> {
     match contract {
-        "agent.tuple_values_finish_as_json_arrays" => replay_agent_tuple_json_array_execution(),
         other if other.starts_with("standard.") => standard_protocol_contract_executions()?
             .into_iter()
             .find(|execution| execution.get("contract").and_then(Value::as_str) == Some(other))
@@ -4675,20 +4789,6 @@ pub(crate) fn replay_contract_execution(contract: &str) -> Result<Value, FixedSc
             "contract execution replay is not registered for `{other}`"
         ))),
     }
-}
-
-fn replay_agent_tuple_json_array_execution() -> Result<Value, FixedScriptRunnerError> {
-    run_on_sim_harness_stack(
-        "replay-agent-tuple-contract",
-        SIM_HARNESS_STACK_LIMIT_BYTES,
-        || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(FixedScriptRunnerError::Io)?;
-            runtime.block_on(agent_tuple_json_array_execution())
-        },
-    )
 }
 
 fn replay_agent_contract_execution(contract: &str) -> Result<Value, FixedScriptRunnerError> {
@@ -5617,6 +5717,7 @@ pub const FIXED_AGENT_PRODUCT_CONTRACTS: &[&str] = &[
     "agent.session_turn_process_child",
     "agent.failed_child_preserves_failure_graph",
     "agent.parallel_spawn_and_join",
+    "agent.tuple_values_finish_as_json_arrays",
 ];
 
 pub fn run_agent_contract_product_stack_probe(
@@ -5658,6 +5759,7 @@ fn agent_contract_runner(contract: &str) -> Result<AgentContractRunner, FixedScr
             Ok(run_agent_failed_child_preserves_failure_graph)
         }
         "agent.parallel_spawn_and_join" => Ok(run_agent_parallel_spawn_and_join),
+        "agent.tuple_values_finish_as_json_arrays" => Ok(run_agent_tuple_json_array),
         other => Err(FixedScriptRunnerError::Assertion(format!(
             "no replayable fixed Agent contract execution registered for `{other}`"
         ))),
@@ -5722,6 +5824,12 @@ fn run_agent_parallel_spawn_and_join(
     runtime: &tokio::runtime::Runtime,
 ) -> Result<Value, FixedScriptRunnerError> {
     runtime.block_on(agent_parallel_spawn_and_join_execution())
+}
+
+fn run_agent_tuple_json_array(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_tuple_json_array_execution())
 }
 
 async fn agent_foreground_tool_call_round_trip_execution() -> Result<Value, FixedScriptRunnerError>
@@ -11717,6 +11825,47 @@ mod tests {
             assert!(!artifact["events"].as_array().unwrap().is_empty());
             assert!(!artifact["verdicts"].as_array().unwrap().is_empty());
         }
+        let runtime_transition_facts = report
+            .scenario_contract_slices
+            .iter()
+            .filter(|slice| slice.suite == "runtime")
+            .map(|slice| {
+                (
+                    slice.semantic_oracle,
+                    slice
+                        .generated_shape
+                        .transition_facts
+                        .iter()
+                        .map(|fact| fact.fact.as_str())
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            runtime_transition_facts.len(),
+            9,
+            "every runtime scenario contract must have generated transition facts"
+        );
+        for (semantic_oracle, facts) in &runtime_transition_facts {
+            assert!(
+                !facts.contains("generated_transition_evidence_present"),
+                "runtime contract {semantic_oracle} must not use generic selected-event fallback"
+            );
+        }
+        assert!(
+            runtime_transition_facts
+                .get("runtime.command_only_queue_drain")
+                .is_some_and(|facts| facts.contains("command_queue_drains_with_real_lease_fence")),
+            "command-only runtime contract must assert queued source keys plus real lease fencing"
+        );
+        assert!(
+            runtime_transition_facts
+                .get("runtime.observation_replay_preserves_input")
+                .is_some_and(
+                    |facts| facts.contains("observer_reconnect_replays_original_input_state")
+                ),
+            "observer replay runtime contract must assert concrete reconnect observation state"
+        );
         let backend_linked_contracts = report
             .scenario_contract_slices
             .iter()

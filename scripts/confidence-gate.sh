@@ -19,6 +19,7 @@ case "$lane" in
   *) default_mutation_scope="none" ;;
 esac
 mutation_scope="${LASH_CONFIDENCE_MUTATION_SCOPE:-$default_mutation_scope}"
+coverage_scope="${LASH_CONFIDENCE_COVERAGE_SCOPE:-run}"
 mutation_failures=0
 
 mkdir -p "$out_dir"
@@ -43,10 +44,13 @@ Lanes:
   full     true full confidence: broad semantics plus full cargo-mutants over
            critical crates. The full lane refuses non-full mutation scopes.
 
-Tool policy:
+  Tool policy:
   default/broad/full require cargo-llvm-cov and cargo-mutants for their
            configured mutation scope. Set LASH_CONFIDENCE_MUTATION_SCOPE for
            default/broad only; true full always requires scope=full.
+          Set LASH_CONFIDENCE_COVERAGE_SCOPE=none for bounded default/broad
+          replay/backend lanes that must record coverage as not_run rather than
+          install cargo-llvm-cov. True full always requires coverage.
   Set LASH_CONFIDENCE_BOOTSTRAP=1 to install pinned versions if missing.
   Missing required tools fail the lane; skipped coverage or mutation shards are
   recorded as not_run, never as passed.
@@ -100,6 +104,14 @@ case "$lane" in
     ;;
 esac
 
+case "$coverage_scope" in
+  run|none) ;;
+  *)
+    echo "Unknown LASH_CONFIDENCE_COVERAGE_SCOPE=${coverage_scope}; expected run or none" >&2
+    exit 2
+    ;;
+esac
+
 if [ "$lane" = "full" ] && [ "$mutation_scope" != "full" ]; then
   cat >"${out_dir}/confidence-summary.json" <<EOF
 {
@@ -114,6 +126,23 @@ if [ "$lane" = "full" ] && [ "$mutation_scope" != "full" ]; then
 }
 EOF
   echo "The full lane requires LASH_CONFIDENCE_MUTATION_SCOPE=full. Use the broad lane for bounded targeted evidence." >&2
+  exit 2
+fi
+
+if [ "$lane" = "full" ] && [ "$coverage_scope" != "run" ]; then
+  cat >"${out_dir}/confidence-summary.json" <<EOF
+{
+  "schema": "lash.confidence.summary.v1",
+  "lane": "full",
+  "status": "failed",
+  "failure_kind": "invalid_full_lane_coverage_scope",
+  "coverage_scope": "${coverage_scope}",
+  "reason": "true full confidence must run coverage; LASH_CONFIDENCE_COVERAGE_SCOPE=none is only for bounded default/broad replay/backend lanes",
+  "bounded_alternative": "LASH_CONFIDENCE_COVERAGE_SCOPE=none LASH_CONFIDENCE_MUTATION_SCOPE=none LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh broad",
+  "artifacts_root": "${out_dir}"
+}
+EOF
+  echo "The full lane requires coverage. Use a bounded broad lane for replay/backend evidence without coverage." >&2
   exit 2
 fi
 
@@ -1274,10 +1303,23 @@ PY
 
 run_coverage_blind_spots() {
   step "Coverage blind-spot map"
-  require_tool cargo-llvm-cov cargo-llvm-cov 0.8.7
-  require_llvm_tools
   local coverage_dir="${out_dir}/coverage"
   mkdir -p "$coverage_dir"
+  if [ "$coverage_scope" = "none" ]; then
+    cat >"${coverage_dir}/summary.json" <<EOF
+{
+  "schema": "lash.confidence.coverage-summary.v1",
+  "lane": "${lane}",
+  "status": "not_run",
+  "scope": "none",
+  "reason": "LASH_CONFIDENCE_COVERAGE_SCOPE=none requested a bounded replay/backend lane without cargo-llvm-cov",
+  "full_lane_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full"
+}
+EOF
+    return
+  fi
+  require_tool cargo-llvm-cov cargo-llvm-cov 0.8.7
+  require_llvm_tools
   cargo llvm-cov clean --workspace
   cargo llvm-cov --locked \
     -p lash-core \
@@ -1561,6 +1603,7 @@ write_confidence_summary() {
   "failing_minimizer_fixtures": "sim/failing-minimizer-fixtures.json",
   "confidence_class": "$(case "$lane" in broad) echo "bounded_broad" ;; full) echo "true_full" ;; default) echo "default_targeted" ;; fast) echo "fast" ;; esac)",
   "coverage_summary": "$([ -f "${out_dir}/coverage/summary.json" ] && echo "coverage/summary.json" || echo "not_run")",
+  "coverage_scope": "${coverage_scope}",
   "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_run")",
   "mutation_evidence": "$([ "$lane" = "fast" ] && echo "not_in_fast_lane" || echo "mutation-evidence.json")",
   "mutation_scope": "${mutation_scope}",
