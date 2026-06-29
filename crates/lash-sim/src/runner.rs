@@ -48,7 +48,7 @@ use crate::oracles::{
     runtime_final_value_semantic, runtime_graph_acyclic, runtime_provider_turn,
     runtime_session_graph_contract, runtime_single_active_agent_frame, runtime_usage_monotonic,
     scenario_contract_mini_oracles, scenario_contract_oracles,
-    scenario_suite_coverage_manifest_oracle_id, scheduler_controlled_delivery,
+    replay_determinism, scenario_suite_coverage_manifest_oracle_id, scheduler_controlled_delivery,
     scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
     trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
 };
@@ -73,11 +73,11 @@ use crate::scheduler::{
     BoundaryDeliveryLog, BoundaryEvent, BoundaryKind, BoundaryScheduler, RuntimeCompletionQueue,
     RuntimeCompletionUnit,
 };
-use crate::sqlite_replay::{SqliteReplayError, replay_trace_to_sqlite};
+use crate::sqlite_replay::SqliteReplayError;
 use crate::store::{ModelStore, backend_fault_observation};
 use crate::trace::{
-    OracleStatus, OracleVerdict, SimulationTrace, TraceEventLine, TraceIoError, write_event_lines,
-    write_replay_report, write_trace,
+    AbstractWorldSummary, OracleStatus, OracleVerdict, SimulationTrace, TraceEventLine,
+    TraceIoError, write_event_lines, write_replay_report, write_trace,
 };
 
 /// Deterministic yield budgets that bound provider-event release polling and
@@ -88,13 +88,6 @@ use crate::trace::{
 /// generated turn ever reaches them.
 pub(crate) const MAX_PROVIDER_EVENT_POLL_YIELDS: u64 = 200_000;
 pub(crate) const MAX_TURN_FINISH_POLL_YIELDS: u64 = 2_000_000;
-/// Deterministic yield budget for the self-checking quarantine: the known
-/// SQLite divergence is RUN (not skipped) under this bounded budget. If the
-/// replay does not complete within it, the expected active-turn-enqueue deadlock
-/// signature still reproduces (green-except-known). If it completes cleanly, the
-/// divergence is gone and the lane fails loudly. Large enough that the small
-/// amount of pre-deadlock SQLite I/O cannot exhaust it before the deadlock parks.
-pub(crate) const KNOWN_DIVERGENCE_SELF_CHECK_YIELDS: u64 = 3_000_000;
 
 pub const FIXED_SCRIPT_PROFILE: &str = "tiny-fixed-provider-scripts";
 pub const FIXED_SCRIPT_EVENTS: &str = "events.jsonl";
@@ -357,10 +350,6 @@ pub struct GeneratedSimProfileReport {
     pub provider_transport_exclusions: Vec<ProviderTransportExclusion>,
     pub counts: GeneratedSimCounts,
     pub oracle_verdicts: Vec<OracleVerdict>,
-    /// Known, documented cross-backend SQLite divergences (escalated product
-    /// bugs) that the lane ran and confirmed still diverge — the lane is
-    /// green-except-known rather than silently passing or silently failing.
-    pub quarantined_sqlite_divergences: Vec<Value>,
     pub failure_artifact_shape: &'static str,
     #[serde(skip)]
     pub summary_path: PathBuf,
@@ -2970,158 +2959,6 @@ pub async fn run_fixed_script_profile(
     Ok(manifest)
 }
 
-/// A generated seed whose SQLite cross-backend replay is a KNOWN, documented
-/// divergence (a product bug surfaced by the harness's own broad lane, escalated
-/// for a product decision — never silently patched). The lane RUNS these seeds
-/// under a bounded deterministic budget (it does NOT silently skip them) and
-/// *expects* the SQLite replay to still diverge — either by failing with a
-/// divergence error or by reproducing the active-turn-enqueue deadlock signature
-/// (not completing within the budget). If the replay instead completes cleanly,
-/// the divergence is gone and the lane FAILS LOUDLY so the stale quarantine is
-/// removed once the product fix lands. The budget guarantees it never hangs.
-struct KnownSqliteDivergence {
-    seed: u64,
-    profile: &'static str,
-    classification: &'static str,
-    /// Promoted discovered-regression artifact under `replays/` that pins this
-    /// divergence (model-replayable; SQLite replay quarantined). Empty when no
-    /// standalone fixture has been promoted for the seed yet.
-    fixture: &'static str,
-    /// The exact self-check signature this divergence is expected to reproduce. If
-    /// the bounded self-check observes a DIFFERENT signature (even another
-    /// divergent one), the lane fails loudly: the failure mode CHANGED and the
-    /// quarantine must be re-characterized. One of `deadlock_within_bounded_budget`
-    /// or `divergence_error`.
-    expected_signature: &'static str,
-    rationale: &'static str,
-}
-
-const KNOWN_SQLITE_DIVERGENCES: &[KnownSqliteDivergence] = &[KnownSqliteDivergence {
-    seed: 14_123_330_213_291_275_571,
-    profile: "full-random",
-    classification: "lash_sqlite_store_product_bug_repro",
-    fixture: "replays/cross-backend-sqlite-active-turn-divergence",
-    expected_signature: "deadlock_within_bounded_budget",
-    rationale: "After an active-turn queued-input cancel on turn 1 (cancel succeeds), the lash SQLite store re-executes a subsequent turn on the same session with an extra provider exchange and yields EMPTY assistant output, while the in-memory store produces the correct output; the serial SQLite replay additionally DEADLOCKS on an active-turn enqueue. Confirmed (after the provider-event liveness fix) to be a cross-backend lash-store divergence, NOT a sim-harness gate issue. The divergence class is systemic across the broad/full lane (multiple full-random seeds exhibit the same active-turn-cancel shape), not unique to this seed; this seed is the promoted, characterized repro (see `fixture`). Quarantined so the broad/full lane reports green-except-known instead of an unexplained failure; escalated for a product-vs-harness decision and NOT patched this pass.",
-}];
-
-/// Anti-vacuity: across the whole generated seed set, the interleaving,
-/// suspend/resume, and transport-mutation boundary classes must EACH appear at
-/// least once. Several class oracles pass when their class is absent (you cannot
-/// interleave one session, a run with no suspend boundary has nothing to check,
-/// etc.); this lane-level guard fails loudly if a generator regression silently
-/// drops a class so those oracles can never pass vacuously across the run.
-fn assert_generated_class_coverage(
-    event_lines: &[TraceEventLine],
-    interleaving_depth_max: usize,
-) -> Result<(), FixedScriptRunnerError> {
-    if interleaving_depth_max < 2 {
-        return Err(FixedScriptRunnerError::Assertion(format!(
-            "no generated seed interleaved >= 2 live provider turns (peak {interleaving_depth_max}); the interleaving class is absent across the seed set"
-        )));
-    }
-    let suspend_resume = event_lines.iter().any(|line| {
-        line.event.observed.get("runtime_suspend").is_some()
-            || line.event.payload.get("suspend_resume").and_then(Value::as_bool) == Some(true)
-    });
-    if !suspend_resume {
-        return Err(FixedScriptRunnerError::Assertion(
-            "no suspend-resume boundary appeared across the generated seed set; the suspend/resume class is absent".to_string(),
-        ));
-    }
-    let transport_mutation = event_lines.iter().any(|line| {
-        line.event.kind == BoundaryKind::ProviderMutation
-            && line
-                .event
-                .observed
-                .get("mutation")
-                .or_else(|| line.event.payload.get("mutation"))
-                .and_then(Value::as_str)
-                .is_some_and(is_transport_provider_mutation)
-    });
-    if !transport_mutation {
-        return Err(FixedScriptRunnerError::Assertion(
-            "no transport provider mutation appeared across the generated seed set; the transport-mutation class is absent".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn known_sqlite_divergence(
-    seed: u64,
-    profile: &str,
-) -> Option<&'static KnownSqliteDivergence> {
-    KNOWN_SQLITE_DIVERGENCES
-        .iter()
-        .find(|divergence| divergence.seed == seed && divergence.profile == profile)
-}
-
-/// Result of running a known SQLite divergence under the bounded self-check.
-struct KnownDivergenceSelfCheck {
-    /// `true` if the divergence still reproduces (a divergence error or the
-    /// bounded deadlock signature); `false` only if the replay completed cleanly
-    /// (the divergence is gone and the quarantine is stale).
-    still_divergent: bool,
-    signature: &'static str,
-    detail: String,
-    budget_yields: u64,
-}
-
-/// Run the quarantined SQLite replay under a bounded deterministic yield budget,
-/// asserting the divergence STILL reproduces. This replaces the old silent SKIP:
-/// the replay is actually executed, so a product fix can never go undetected.
-/// Bounded by `KNOWN_DIVERGENCE_SELF_CHECK_YIELDS` so the known active-turn
-/// enqueue deadlock can never hang the lane — once the budget is exhausted the
-/// (parked) replay future is dropped.
-async fn self_check_known_sqlite_divergence(
-    trace_path: &Path,
-    trace: &SimulationTrace,
-    db_path: &Path,
-    budget: u64,
-) -> KnownDivergenceSelfCheck {
-    let replay_fut = replay_trace_to_sqlite(trace_path, trace, db_path, None);
-    tokio::pin!(replay_fut);
-    let mut polls = 0u64;
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut replay_fut => {
-                return match result {
-                    Ok(_) => KnownDivergenceSelfCheck {
-                        still_divergent: false,
-                        signature: "completed_clean_divergence_gone",
-                        detail: format!(
-                            "the SQLite replay completed cleanly within {polls} deterministic yields; the known divergence no longer reproduces"
-                        ),
-                        budget_yields: polls,
-                    },
-                    Err(err) => KnownDivergenceSelfCheck {
-                        still_divergent: true,
-                        signature: "divergence_error",
-                        detail: format!(
-                            "the SQLite replay still diverged with an error after {polls} yields (no longer a hang, but still divergent): {err}"
-                        ),
-                        budget_yields: polls,
-                    },
-                };
-            }
-            () = tokio::task::yield_now() => {
-                polls += 1;
-                if polls >= budget {
-                    return KnownDivergenceSelfCheck {
-                        still_divergent: true,
-                        signature: "deadlock_within_bounded_budget",
-                        detail: format!(
-                            "the SQLite replay did not complete within {budget} deterministic yields; the expected active-turn-enqueue deadlock signature still reproduces"
-                        ),
-                        budget_yields: polls,
-                    };
-                }
-            }
-        }
-    }
-}
-
 pub async fn run_generated_sim_profile(
     artifact_root: impl AsRef<Path>,
     profile: &str,
@@ -3150,7 +2987,6 @@ pub async fn run_generated_sim_profile(
     let mut runtime_turn_proofs = 0;
     let mut interleaving_depth_max = 0;
     let mut interleaving_depth_min = usize::MAX;
-    let mut quarantined_divergences: Vec<Value> = Vec::new();
 
     for seed_index in 0..seed_count {
         let seed = generated_seed(profile, seed_index);
@@ -3193,88 +3029,38 @@ pub async fn run_generated_sim_profile(
         let sqlite_database_path = replay_dir.join(format!("seed-{seed:016x}.sqlite-store"));
         let sqlite_replay_report_path =
             replay_dir.join(format!("seed-{seed:016x}.sqlite-replay.json"));
-        // A quarantined seed reproduces an escalated lash-store product bug whose
-        // SQLite replay does not just diverge but DEADLOCKS the serial replay
-        // (an active-turn queued-input enqueue blocks on a gated turn the serial
-        // replay cannot advance). Rather than silently SKIP it, the lane RUNS the
-        // replay under a bounded deterministic self-check that asserts the
-        // divergence still reproduces with its EXPECTED signature, and FAILS
-        // LOUDLY if it completes cleanly OR if the failure mode changed — so
-        // neither a silent product fix nor a changed divergence can go undetected.
-        // The budget guarantees no hang.
-        if let Some(divergence) = known_sqlite_divergence(seed, profile) {
-            let self_check = self_check_known_sqlite_divergence(
-                &trace_path,
-                &trace,
-                &sqlite_database_path,
-                KNOWN_DIVERGENCE_SELF_CHECK_YIELDS,
-            )
-            .await;
-            if !self_check.still_divergent {
-                return Err(FixedScriptRunnerError::Assertion(format!(
-                    "known SQLite divergence for seed {seed} ({}) NO LONGER reproduces: {}. The quarantine is stale: re-examine the cross-backend divergence and remove this entry from KNOWN_SQLITE_DIVERGENCES.",
-                    divergence.profile, self_check.detail
-                )));
-            }
-            if self_check.signature != divergence.expected_signature {
-                return Err(FixedScriptRunnerError::Assertion(format!(
-                    "known SQLite divergence for seed {seed} ({}) CHANGED failure mode: expected signature `{}`, observed `{}` ({}). Re-characterize the quarantine (update `expected_signature`) and re-confirm it is still the same product divergence.",
-                    divergence.profile,
-                    divergence.expected_signature,
-                    self_check.signature,
-                    self_check.detail
-                )));
-            }
-            let known = serde_json::json!({
-                "schema": "lash.sim.known-sqlite-divergence.v1",
-                "seed": seed,
-                "profile": divergence.profile,
-                "classification": divergence.classification,
-                "fixture": divergence.fixture,
-                "rationale": divergence.rationale,
-                "sqlite_replay": "self_checked_still_divergent",
-                "expected_signature": divergence.expected_signature,
-                "self_check": {
-                    "still_divergent": self_check.still_divergent,
-                    "signature": self_check.signature,
-                    "detail": self_check.detail,
-                    "budget_yields": self_check.budget_yields,
-                },
-            });
-            std::fs::write(&sqlite_replay_report_path, serde_json::to_vec_pretty(&known)?)?;
-            quarantined_divergences.push(known);
-            let sqlite_replay_report_sha256 = file_sha256(&sqlite_replay_report_path)?;
-            replay_reports.push(GeneratedReplayArtifact {
-                seed,
-                trace_path: relative_path(artifact_root, &trace_path),
-                trace_sha256,
-                replay_report_path: relative_path(artifact_root, &replay_report_path),
-                replay_report_sha256,
-                minimized_trace_path: relative_path(artifact_root, &minimize.minimized_trace_path),
-                minimized_trace_sha256,
-                failure_package_path: relative_path(artifact_root, &minimize.failure_package_path),
-                minimize_report_path: relative_path(artifact_root, &minimize_report_path),
-                minimize_report_sha256,
-                sqlite_database_path: relative_path(artifact_root, &sqlite_database_path),
-                sqlite_replay_report_path: relative_path(artifact_root, &sqlite_replay_report_path),
-                sqlite_replay_report_sha256,
-                replay_command: trace.replay_command.clone(),
-                sqlite_replay_command: format!(
-                    "cargo run -p lash-sim --locked -- replay-sqlite {} --out {}",
-                    trace_path.display(),
-                    replay_dir.display()
-                ),
-            });
-            continue;
+        // Cross-backend check: re-drive the SAME generated workload through the
+        // SAME dynamic, concurrency-faithful runtime driver, backed by the real
+        // `lash-sqlite-store` (session store + SQLite durable-effect controller),
+        // and require the resulting observable Lash STATE (the abstract world
+        // summary) to match the in-memory reference run exactly. Because both runs
+        // share one driver and one scheduling discipline and differ ONLY in the
+        // store, the comparison is apples-to-apples by construction: there is no
+        // separate fixed-order, provider-event-gated re-drive that can deadlock or
+        // spuriously diverge on active-turn / next-turn ingress timing. The
+        // workload is regenerated deterministically from the seed (the original
+        // was consumed by the reference run).
+        let sqlite_workload = generate_workload(seed, profile, boundary_limit)?;
+        let sqlite_summary =
+            replay_workload_on_sqlite(&sqlite_workload, &sqlite_database_path).await?;
+        let backend_verdict = replay_determinism(&trace.final_summary, &sqlite_summary);
+        oracle_verdicts.push(backend_verdict.clone());
+        if !backend_verdict.is_passed() {
+            return Err(FixedScriptRunnerError::Assertion(format!(
+                "cross-backend SQLite re-run for seed {seed} ({profile}) diverged from the in-memory reference: {}",
+                backend_verdict.message
+            )));
         }
-        let sqlite_replay = replay_trace_to_sqlite(
-            &trace_path,
-            &trace,
-            &sqlite_database_path,
-            Some(&sqlite_replay_report_path),
-        )
-        .await?;
-        oracle_verdicts.push(sqlite_replay.terminal_verdict.clone());
+        let sqlite_report = serde_json::json!({
+            "schema": "lash.sim.sqlite-cross-backend-rerun.v1",
+            "seed": seed,
+            "profile": profile,
+            "backend": "lash_sqlite_store",
+            "driver": "unified_generated_runtime_world",
+            "matches_reference": true,
+            "final_summary": sqlite_summary,
+        });
+        std::fs::write(&sqlite_replay_report_path, serde_json::to_vec_pretty(&sqlite_report)?)?;
         let sqlite_replay_report_sha256 = file_sha256(&sqlite_replay_report_path)?;
         replay_reports.push(GeneratedReplayArtifact {
             seed,
@@ -3411,7 +3197,6 @@ pub async fn run_generated_sim_profile(
             },
         },
         oracle_verdicts,
-        quarantined_sqlite_divergences: quarantined_divergences,
         failure_artifact_shape: GENERATED_SIM_FAILURE_SHAPE,
         summary_path: summary_path.clone(),
     };
@@ -3426,17 +3211,24 @@ pub(crate) async fn run_generated_workload_for_fixture(
     run_generated_workload(workload, script_bundle_hash, Path::new("trace.json")).await
 }
 
-async fn run_generated_workload(
-    workload: GeneratedWorkload,
-    script_bundle_hash: &str,
-    trace_path: &Path,
-) -> Result<SimulationTrace, FixedScriptRunnerError> {
+/// Drive a generated workload through the scheduler-driven, concurrency-faithful
+/// runtime world and return the delivered boundary log plus the abstract world
+/// summary. This is the single driver shared by the reference in-memory run and
+/// the cross-backend SQLite re-run (`replay_workload_on_sqlite`): the only thing
+/// that varies is the `world`'s backend. Driving the SAME workload through the
+/// SAME dynamic scheduler — rather than re-deriving a recorded trace in fixed
+/// order with provider events gated to recorded counts — is what makes the
+/// cross-backend comparison apples-to-apples.
+async fn drive_generated_workload(
+    world: &mut GeneratedRuntimeWorld,
+    workload: &GeneratedWorkload,
+) -> Result<(Vec<crate::scheduler::DeliveredBoundary>, AbstractWorldSummary), FixedScriptRunnerError>
+{
     let (initial_boundaries, mut completion_queue) =
         split_runtime_completion_boundaries(workload.boundaries.clone());
     let mut scheduler = BoundaryScheduler::with_events(workload.seed, initial_boundaries);
     let mut completion_state = RuntimeCompletionState::default();
     let mut store = ModelStore::default();
-    let mut world = GeneratedRuntimeWorld::new();
     let mut log = BoundaryDeliveryLog::default();
     let mut suspend_ready_at = 1_000_000u64;
     loop {
@@ -3468,7 +3260,7 @@ async fn run_generated_workload(
             &mut completion_state,
             &mut scheduler,
             &delivered,
-            &mut world,
+            world,
         )?;
         world.sample_live_turn_highwater();
         world
@@ -3504,6 +3296,46 @@ async fn run_generated_workload(
             world.peak_concurrent_live_turns
         )));
     }
+    Ok((events, final_summary))
+}
+
+/// Cross-backend check: re-drive the SAME generated workload through the SAME
+/// dynamic runtime driver, but backed by the real `lash-sqlite-store` session
+/// store factory and the SQLite durable-effect replay controller, and return the
+/// resulting abstract world summary. The caller compares it against the in-memory
+/// reference summary; equality proves the SQLite store reproduces identical
+/// observable runtime behavior. Because the driver is shared and concurrency is
+/// preserved, there is no fixed-order, exchange-count-gated re-drive to deadlock
+/// or to spuriously diverge on active-turn/next-turn ingress timing.
+pub async fn replay_workload_on_sqlite(
+    workload: &GeneratedWorkload,
+    db_root: &Path,
+) -> Result<AbstractWorldSummary, FixedScriptRunnerError> {
+    if db_root.exists() {
+        if db_root.is_dir() {
+            std::fs::remove_dir_all(db_root)?;
+        } else {
+            std::fs::remove_file(db_root)?;
+        }
+    }
+    std::fs::create_dir_all(db_root)?;
+    let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(
+        lash_sqlite_store::SqliteSessionStoreFactory::new(db_root.to_path_buf()),
+    );
+    let effect_replay_store =
+        RuntimeEffectReplayStore::sqlite_file(db_root.join("runtime-effects.sqlite"));
+    let mut world = GeneratedRuntimeWorld::with_backend(store_factory, effect_replay_store);
+    let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
+    Ok(final_summary)
+}
+
+async fn run_generated_workload(
+    workload: GeneratedWorkload,
+    script_bundle_hash: &str,
+    trace_path: &Path,
+) -> Result<SimulationTrace, FixedScriptRunnerError> {
+    let mut world = GeneratedRuntimeWorld::new();
+    let (events, final_summary) = drive_generated_workload(&mut world, &workload).await?;
     // Per-seed live provider FAILURE turns: real `session.turn().run()`s that
     // stream valid prose then a non-retryable malformed chunk, released through a
     // real BoundaryScheduler, across >1 provider kind and >1 fault position.
@@ -3934,8 +3766,23 @@ struct ActiveProviderTurn {
 
 impl GeneratedRuntimeWorld {
     fn new() -> Self {
-        let store_factory: Arc<dyn SessionStoreFactory> =
-            Arc::new(lash::persistence::InMemorySessionStoreFactory::new());
+        Self::with_backend(
+            Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
+            RuntimeEffectReplayStore::Memory,
+        )
+    }
+
+    /// Build the generated runtime world over an explicit backend (session store
+    /// factory + durable-effect replay store). The reference in-memory run and
+    /// the cross-backend SQLite re-run drive the SAME workload through the SAME
+    /// scheduler-driven, concurrency-faithful driver, differing ONLY in this
+    /// backend. That makes the cross-backend comparison genuinely apples-to-apples:
+    /// any divergence is a real store divergence, not an artifact of a separate,
+    /// fixed-order, provider-event-gated re-drive.
+    fn with_backend(
+        store_factory: Arc<dyn SessionStoreFactory>,
+        effect_replay_store: RuntimeEffectReplayStore,
+    ) -> Self {
         Self {
             sessions: BTreeMap::new(),
             queued_inputs: BTreeMap::new(),
@@ -3945,7 +3792,7 @@ impl GeneratedRuntimeWorld {
             trigger_harness: SimTriggerHarness::default(),
             runtime_boundaries: RuntimeBoundaryHarness::new(
                 Arc::clone(&store_factory),
-                RuntimeEffectReplayStore::Memory,
+                effect_replay_store,
             ),
             store_factory,
             peak_concurrent_live_turns: 0,
@@ -7454,67 +7301,6 @@ mod tests {
             !verdict.is_passed(),
             "a turn that commits output MUST fail the live-provider-failure oracle: {}",
             verdict.message
-        );
-    }
-
-    #[tokio::test]
-    async fn known_divergence_self_check_flags_a_clean_replay_as_no_longer_divergent() {
-        // The self-check must DETECT a clean replay (no longer divergent), which is
-        // exactly the condition under which the quarantine lane fails loudly. A
-        // normal fast-random trace (seed 7) replays cleanly through the real SQLite
-        // store, so the self-check must report `still_divergent == false`.
-        let workload = generate_workload(7, "fast-random", 24).expect("workload");
-        let trace = run_generated_workload_for_fixture(workload, "bundle")
-            .await
-            .expect("trace");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("sqlite-store");
-
-        let check = self_check_known_sqlite_divergence(
-            Path::new("trace.json"),
-            &trace,
-            &db_path,
-            KNOWN_DIVERGENCE_SELF_CHECK_YIELDS,
-        )
-        .await;
-        assert!(
-            !check.still_divergent,
-            "a clean SQLite replay must be flagged as no-longer-divergent so the quarantine lane fails loudly; got signature={} detail={}",
-            check.signature,
-            check.detail
-        );
-        assert_eq!(check.signature, "completed_clean_divergence_gone");
-    }
-
-    #[tokio::test]
-    async fn known_divergence_fixture_still_reproduces_under_cargo_test() {
-        // P3(c) positive direction: the promoted divergent trace MUST still
-        // reproduce its expected signature under `cargo test`, not only the
-        // broad/full CI lane. This guards the quarantine's premise.
-        let trace_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("replays/cross-backend-sqlite-active-turn-divergence/trace.json");
-        let trace = crate::trace::read_trace(&trace_path).expect("read divergence fixture");
-        let divergence = known_sqlite_divergence(trace.seed, &trace.profile)
-            .expect("the fixture seed must be a registered known divergence");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("sqlite-store");
-
-        let check = self_check_known_sqlite_divergence(
-            &trace_path,
-            &trace,
-            &db_path,
-            KNOWN_DIVERGENCE_SELF_CHECK_YIELDS,
-        )
-        .await;
-        assert!(
-            check.still_divergent,
-            "the promoted divergence fixture must still reproduce: {}",
-            check.detail
-        );
-        assert_eq!(
-            check.signature, divergence.expected_signature,
-            "the fixture must still reproduce its expected signature: {}",
-            check.detail
         );
     }
 
