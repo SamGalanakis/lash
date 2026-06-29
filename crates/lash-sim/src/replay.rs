@@ -416,37 +416,38 @@ mod tests {
         );
     }
 
-    // The discovered cross-backend SQLite divergence (full-random seed
-    // 14123330213291275571), promoted as a documented OPEN finding. This guard
-    // proves the divergence is NOT a sim-harness/model gate issue — the trace
-    // replays cleanly through the abstract model — and pins the active-turn
-    // queued-input cancel + subsequent-turn shape that triggers it. The SQLite
-    // replay is INTENTIONALLY NOT exercised here: it is quarantined in
-    // `KNOWN_SQLITE_DIVERGENCES` because it deadlocks (active-turn enqueue) and
-    // otherwise diverges (empty assistant output / extra provider exchange).
+    // A full-random fixture (seed 14123330213291275571) that pins the active-turn
+    // queued-input cancel + subsequent-turn shape. This shape once *appeared* to
+    // diverge cross-backend, but that was a replay-FIDELITY gap in the harness's
+    // old gated, fixed-exchange-count serial SQLite re-drive — NOT a product bug:
+    // driven directly through one driver, the in-memory and SQLite stores commit
+    // identical output (proved by the backend-equivalence test
+    // `tests/cross_backend_active_turn_divergence.rs`), and the cross-backend lane
+    // now re-runs the workload through the single unified driver. This guard keeps
+    // the trace model-replayable and pins the shape so it stays exercised.
     #[test]
-    fn discovered_cross_backend_sqlite_divergence_model_replays_but_is_quarantined() {
+    fn cross_backend_active_turn_fixture_model_replays_and_pins_shape() {
         let trace_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("replays/cross-backend-sqlite-active-turn-divergence/trace.json");
-        let trace = read_trace(&trace_path).expect("read discovered divergence fixture");
+        let trace = read_trace(&trace_path).expect("read active-turn fixture");
         assert_eq!(trace.seed, 14_123_330_213_291_275_571);
         assert_eq!(trace.profile, "full-random");
 
-        // Model replay must pass: the divergence lives in the SQLite backend, not
-        // in the generated trace or the abstract model.
-        let report = replay_trace(&trace_path, &trace).expect("model-replay divergence fixture");
+        // Model replay must pass: the trace and the abstract model are sound; the
+        // former cross-backend mismatch lived only in the old gated re-drive.
+        let report = replay_trace(&trace_path, &trace).expect("model-replay active-turn fixture");
         assert!(report.terminal_verdict.is_passed());
         assert_eq!(report.delivered_event_count, trace.events.len());
 
-        // Pin the shape that drives the divergence: a session that takes an
-        // active-turn queued-input cancel and then runs subsequent provider turns.
+        // Pin the shape: a session that takes an active-turn queued-input cancel
+        // and then runs subsequent provider turns.
         assert!(
             report.final_summary.sessions.iter().any(|session| {
                 session.queued_ingress_count > 0
                     && session.cancellation_count > 0
                     && session.provider_outputs.len() >= 2
             }),
-            "divergence fixture must retain an active-turn cancel followed by later turns"
+            "fixture must retain an active-turn cancel followed by later turns"
         );
     }
 }

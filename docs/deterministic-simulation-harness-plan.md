@@ -86,9 +86,11 @@ Implemented DST substance (each item below is landed and gated by
   no longer overstates per-contract assurance.
 - One real discovered regression is minimized and promoted: the
   `queued-active-turn-cancel-race` fixture under `crates/lash-sim/replays/` is a
-  deterministic regression guard, and the broad/full lane additionally surfaced
-  an open cross-backend SQLite divergence promoted as
-  `cross-backend-sqlite-active-turn-divergence` (see Known limitations).
+  deterministic regression guard. Separately, the broad/full lane's cross-backend
+  comparison surfaced a behavioral divergence on the active-turn-cancel shape
+  which, on investigation, was a replay-FIDELITY gap in the harness's own SQLite
+  re-drive — NOT a product bug (see Known limitations). It is retained as the
+  `cross-backend-sqlite-active-turn-divergence` regression fixture.
 - Generator substance is real: the fast profile is genuinely seed-random,
   provider mutations have distinct executable behaviors, queued-ingress mode
   varies, and worker failover is generated as REAL failover — a second worker
@@ -101,18 +103,20 @@ Implemented DST substance (each item below is landed and gated by
 
 Known limitations (documented, not silently skipped):
 
-- The open cross-backend SQLite divergence remains the canonical UN-minimized
-  repro. It is scale-dependent (it does not reproduce at lib/fast-random scale),
-  so the model-replay minimizer — which preserves only abstract-model behavior —
-  does not preserve it, and a divergence-preserving shrink would have to re-run
-  the serial SQLite replay per candidate, which DEADLOCKS at the unbounded
-  active-turn enqueue (`sqlite_replay::queue_turn_input`). Bounding that enqueue
-  deterministically would require a clock the sim forbids or the product fix that
-  is intentionally out of scope. The quarantine is therefore SELF-CHECKING: the
-  lane runs the known divergence under a bounded deterministic yield budget and
-  asserts it still reproduces (a divergence error or the deadlock signature),
-  failing loudly if it ever completes cleanly so a silent product fix cannot go
-  undetected.
+- The cross-backend SQLite comparison once appeared to diverge on the
+  active-turn-cancel shape. Investigation (the backend-equivalence test
+  `crates/lash-sim/tests/cross_backend_active_turn_divergence.rs`, which drives
+  two real cores — in-memory vs lash-sqlite-store — over an un-gated transport)
+  showed the real stores commit IDENTICAL output across the active-turn enqueue /
+  cancel / claim / complete orderings. The apparent divergence was a replay-
+  FIDELITY gap in the harness's OWN cross-backend re-drive: the old path re-drove
+  a recorded trace in fixed order with provider exchanges gated to the original
+  in-memory run's recorded exchange counts, which deadlocked on the active-turn
+  enqueue and could surface an extra exchange / empty output. The lane no longer
+  runs that separate gated re-drive; it re-runs the SAME workload through the SAME
+  scheduler-driven driver, parameterized only by the store factory
+  (`replay_workload_on_sqlite`), comparing observable Lash state. No product fix
+  was needed — there was no product bug.
 
 ## Related Documents
 
@@ -138,12 +142,13 @@ deterministic simulated world. In the done state, the harness should find
 schedule, failure, provider-streaming, lease, replay, and backend-ordering bugs
 that example-based tests miss, while every failure is reproducible from a seed,
 generator version, and event trace and can later be minimized into a Simulation
-Replay Script. The bug-finding claim is now backed by current evidence: the
-broad/full lane surfaced a real cross-backend SQLite divergence that the
-example/lib-scale tests do not catch, promoted as the
-`cross-backend-sqlite-active-turn-divergence` fixture and guarded by a
-self-checking quarantine. (It remains the canonical un-minimized repro for the
-reason given under "Known limitations".)
+Replay Script. The cross-backend comparison detects behavioral divergences
+between store backends; the one divergence it surfaced to date (the
+active-turn-cancel shape) turned out to be a replay-fidelity gap in the harness's
+own re-drive rather than a product bug — found, characterized, and fixed in the
+harness, with the real backends proven equivalent by
+`crates/lash-sim/tests/cross_backend_active_turn_divergence.rs`. No product
+regression has been discovered by this lane to date.
 
 The highest-value property is not "more random tests". It is one deterministic
 world that can compose the contracts Lash already owns:
