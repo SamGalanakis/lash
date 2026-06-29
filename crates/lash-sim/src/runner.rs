@@ -2959,6 +2959,48 @@ pub async fn run_fixed_script_profile(
     Ok(manifest)
 }
 
+/// Anti-vacuity: across the whole generated seed set, the interleaving,
+/// suspend/resume, and transport-mutation boundary classes must EACH appear at
+/// least once. Several class oracles pass when their class is absent (you cannot
+/// interleave one session, a run with no suspend boundary has nothing to check,
+/// etc.); this lane-level guard fails loudly if a generator regression silently
+/// drops a class so those oracles can never pass vacuously across the run.
+fn assert_generated_class_coverage(
+    event_lines: &[TraceEventLine],
+    interleaving_depth_max: usize,
+) -> Result<(), FixedScriptRunnerError> {
+    if interleaving_depth_max < 2 {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "no generated seed interleaved >= 2 live provider turns (peak {interleaving_depth_max}); the interleaving class is absent across the seed set"
+        )));
+    }
+    let suspend_resume = event_lines.iter().any(|line| {
+        line.event.observed.get("runtime_suspend").is_some()
+            || line.event.payload.get("suspend_resume").and_then(Value::as_bool) == Some(true)
+    });
+    if !suspend_resume {
+        return Err(FixedScriptRunnerError::Assertion(
+            "no suspend-resume boundary appeared across the generated seed set; the suspend/resume class is absent".to_string(),
+        ));
+    }
+    let transport_mutation = event_lines.iter().any(|line| {
+        line.event.kind == BoundaryKind::ProviderMutation
+            && line
+                .event
+                .observed
+                .get("mutation")
+                .or_else(|| line.event.payload.get("mutation"))
+                .and_then(Value::as_str)
+                .is_some_and(is_transport_provider_mutation)
+    });
+    if !transport_mutation {
+        return Err(FixedScriptRunnerError::Assertion(
+            "no transport provider mutation appeared across the generated seed set; the transport-mutation class is absent".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn run_generated_sim_profile(
     artifact_root: impl AsRef<Path>,
     profile: &str,
