@@ -313,106 +313,126 @@ pub fn observer_convergence(summary: &AbstractWorldSummary) -> OracleVerdict {
     )
 }
 
-pub fn queued_ingress_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.queued_ingress_count > 0)
-    {
-        OracleVerdict::passed(
-            QUEUED_INGRESS_ORACLE,
-            "generated workload queued turn input through an explicit ingress boundary",
-        )
+/// Build a failing-capable coverage verdict: the boundary kind must be present
+/// AND the runtime invariant its reason claims must actually hold in the events.
+/// A present-but-broken boundary fails loudly instead of passing on presence.
+fn coverage_invariant_verdict(
+    oracle_id: &'static str,
+    present: bool,
+    missing_reason: &'static str,
+    invariant_holds: bool,
+    invariant_failed_reason: &'static str,
+    passed_reason: &'static str,
+) -> OracleVerdict {
+    if !present {
+        OracleVerdict::failed(oracle_id, missing_reason)
+    } else if !invariant_holds {
+        OracleVerdict::failed(oracle_id, invariant_failed_reason)
     } else {
-        OracleVerdict::failed(
-            QUEUED_INGRESS_ORACLE,
-            "no queued ingress boundary was observed",
-        )
+        OracleVerdict::passed(oracle_id, passed_reason)
     }
 }
 
-pub fn cancellation_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.cancellation_count > 0)
-    {
-        OracleVerdict::passed(
-            CANCELLATION_ORACLE,
-            "generated workload cancelled a pending boundary explicitly",
-        )
-    } else {
-        OracleVerdict::failed(CANCELLATION_ORACLE, "no cancellation boundary was observed")
-    }
+pub fn queued_ingress_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        QUEUED_INGRESS_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.queued_ingress_count > 0),
+        "no queued ingress boundary was observed",
+        queued_ingress_has_source_keys(events),
+        "queued ingress boundary was observed but it lacked a stable payload/observed source key",
+        "generated workload queued turn input through an explicit ingress boundary carrying a stable source key",
+    )
 }
 
-pub fn trigger_delivery_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.trigger_count > 0)
-    {
-        OracleVerdict::passed(
-            TRIGGER_ORACLE,
-            "generated workload delivered a trigger boundary with stable source identity",
-        )
-    } else {
-        OracleVerdict::failed(TRIGGER_ORACLE, "no trigger boundary was observed")
-    }
+pub fn cancellation_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        CANCELLATION_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.cancellation_count > 0),
+        "no cancellation boundary was observed",
+        cancellation_terminalizes_pending_input(events),
+        "cancellation boundary was observed but it did not terminalize the pending queued input",
+        "generated workload cancelled a pending boundary and terminalized its queued input",
+    )
 }
 
-pub fn observer_reconnect_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.observer_reconnects > 0)
-    {
-        OracleVerdict::passed(
-            OBSERVER_RECONNECT_ORACLE,
-            "observer reconnect boundary converged on the same session state",
-        )
-    } else {
-        OracleVerdict::failed(
-            OBSERVER_RECONNECT_ORACLE,
-            "no observer reconnect boundary was observed",
-        )
-    }
+pub fn trigger_delivery_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        TRIGGER_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.trigger_count > 0),
+        "no trigger boundary was observed",
+        trigger_delivery_runtime_observed(events),
+        "trigger boundary was observed but it did not route through a runtime trigger DTO with a stable source identity",
+        "generated workload delivered a trigger boundary routed through a runtime trigger DTO with stable source identity",
+    )
 }
 
-pub fn backend_failure_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.backend_failure_count > 0)
-    {
-        OracleVerdict::passed(
-            BACKEND_FAILURE_ORACLE,
-            "generated workload injected a backend failure boundary",
-        )
-    } else {
-        OracleVerdict::failed(
-            BACKEND_FAILURE_ORACLE,
-            "no backend failure boundary was observed",
-        )
-    }
+pub fn observer_reconnect_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        OBSERVER_RECONNECT_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.observer_reconnects > 0),
+        "no observer reconnect boundary was observed",
+        observer_reconnect_has_matching_turn(events, summary),
+        "observer reconnect boundary was observed but its replayed snapshot did not converge to the session's final provider turn",
+        "observer reconnect boundary converged on the same session state (final provider turn)",
+    )
 }
 
-pub fn provider_mutation_rejected(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.provider_mutation_count > 0)
-    {
-        OracleVerdict::passed(
-            PROVIDER_MUTATION_ORACLE,
-            "provider/script mutation boundary was rejected without changing runtime state",
-        )
-    } else {
-        OracleVerdict::failed(
-            PROVIDER_MUTATION_ORACLE,
-            "no provider/script mutation boundary was observed",
-        )
-    }
+pub fn backend_failure_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        BACKEND_FAILURE_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.backend_failure_count > 0),
+        "no backend failure boundary was observed",
+        backend_retry_terminalization_semantics(events),
+        "backend failure boundary was observed but it did not terminalize through the retry/terminalization path",
+        "generated workload injected a backend failure boundary that terminalized through the retry path",
+    )
+}
+
+pub fn provider_mutation_rejected(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        PROVIDER_MUTATION_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.provider_mutation_count > 0),
+        "no provider/script mutation boundary was observed",
+        provider_mutation_parser_matrix_observed(events),
+        "provider/script mutation boundary was observed but it did not run through the real provider parser matrix",
+        "provider/script mutation boundary was rejected through the real provider parser matrix without changing runtime state",
+    )
 }
 
 pub fn generated_runtime_provider_matrix(events: &[DeliveredBoundary]) -> OracleVerdict {
@@ -610,49 +630,55 @@ pub fn provider_transport_mutation_classified(events: &[DeliveredBoundary]) -> O
     )
 }
 
-pub fn process_wake_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.process_wake_count > 0)
-    {
-        OracleVerdict::passed(
-            PROCESS_WAKE_ORACLE,
-            "process wake boundary was delivered exactly once in the abstract model",
-        )
-    } else {
-        OracleVerdict::failed(PROCESS_WAKE_ORACLE, "no process wake boundary was observed")
-    }
+pub fn process_wake_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        PROCESS_WAKE_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.process_wake_count > 0),
+        "no process wake boundary was observed",
+        process_wake_runtime_dto_observed(events) && duplicate_process_wake_rejected(events),
+        "process wake boundary was observed but it did not materialize a runtime DTO with a deduped duplicate wake",
+        "process wake boundary materialized a runtime DTO and the duplicate wake was rejected (delivered exactly once)",
+    )
 }
 
-pub fn exec_code_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| !session.exec_code_outputs.is_empty())
-    {
-        OracleVerdict::passed(
-            EXEC_CODE_ORACLE,
-            "exec-code boundary produced a captured result",
-        )
-    } else {
-        OracleVerdict::failed(EXEC_CODE_ORACLE, "no exec-code boundary was observed")
-    }
+pub fn exec_code_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        EXEC_CODE_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| !session.exec_code_outputs.is_empty()),
+        "no exec-code boundary was observed",
+        exec_runtime_outcome_observed(events),
+        "exec-code boundary was observed but it did not produce a captured RuntimeEffectOutcome",
+        "exec-code boundary produced a captured RuntimeEffectOutcome result",
+    )
 }
 
-pub fn tool_boundary_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| !session.tool_outputs.is_empty())
-    {
-        OracleVerdict::passed(
-            TOOL_BOUNDARY_ORACLE,
-            "tool boundary produced a captured result",
-        )
-    } else {
-        OracleVerdict::failed(TOOL_BOUNDARY_ORACLE, "no tool boundary was observed")
-    }
+pub fn tool_boundary_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        TOOL_BOUNDARY_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| !session.tool_outputs.is_empty()),
+        "no tool boundary was observed",
+        tool_runtime_output_observed(events),
+        "tool boundary was observed but it did not produce a captured runtime tool-output DTO",
+        "tool boundary produced a captured runtime tool-output DTO",
+    )
 }
 
 pub fn runtime_session_graph_contract(summary: &AbstractWorldSummary) -> OracleVerdict {
@@ -1309,20 +1335,140 @@ pub fn state_machine_semantic_invariants(
     }
 }
 
+/// Scenario-contract oracle vector. The RUNTIME suite is genuinely exercised
+/// per-contract by the generated runtime state machine, so each runtime contract
+/// emits its OWN distinct, failing-capable verdict. The STANDARD/RLM/AGENT
+/// protocol suites are NOT distinctly exercised per-contract by the generated
+/// workload (extending it to per-contract evidence is out of scope this pass), so
+/// rather than stamp ~36 shared-bucket verdicts and overstate the oracle count,
+/// each of those suites collapses to ONE explicit, failing-capable SUITE-LEVEL
+/// coverage-manifest verdict (see `scenario_suite_coverage_manifest`). The real
+/// per-behavior failing oracles for those suites are the mini-oracles
+/// (`scenario_contract_mini_oracles`); the per-contract protocol semantics are
+/// validated upstream by each protocol crate's own unit tests.
 pub fn scenario_contract_oracles(
     events: &[DeliveredBoundary],
     summary: &AbstractWorldSummary,
 ) -> Vec<OracleVerdict> {
-    [
-        RUNTIME_SCENARIO_CONTRACTS,
+    let mut verdicts = RUNTIME_SCENARIO_CONTRACTS
+        .iter()
+        .map(|contract| scenario_contract_oracle(contract, events, summary))
+        .collect::<Vec<_>>();
+    verdicts.push(scenario_suite_coverage_manifest(
         STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+        events,
+        summary,
+    ));
+    verdicts.push(scenario_suite_coverage_manifest(
         RLM_PROTOCOL_SCENARIO_CONTRACTS,
+        events,
+        summary,
+    ));
+    verdicts.push(scenario_suite_coverage_manifest(
         AGENT_SCENARIO_CONTRACTS,
-    ]
-    .into_iter()
-    .flat_map(|contracts| contracts.iter())
-    .map(|contract| scenario_contract_oracle(contract, events, summary))
-    .collect()
+        events,
+        summary,
+    ));
+    verdicts
+}
+
+/// The suite-level coverage-manifest oracle id for a protocol suite (e.g.
+/// `sim.oracle.scenario.standard-contract.v1:coverage-manifest`). Stable so the
+/// generated slice/package machinery can attach this verdict to every contract
+/// in the suite as its coverage backing.
+pub fn scenario_suite_coverage_manifest_oracle_id(contract: &ScenarioContractSpec) -> String {
+    format!("{}:coverage-manifest", contract.oracle_id)
+}
+
+/// One failing-capable, suite-level coverage manifest for a protocol suite. This
+/// is explicitly a COVERAGE MANIFEST, not a per-contract oracle: it enumerates
+/// the protocol contracts the generated lane covers at the suite level and
+/// asserts the suite-level evidence the generated workload genuinely produces. If
+/// that evidence regresses the manifest fails loudly; the per-contract semantics
+/// remain validated upstream by the protocol crate and by the suite mini-oracles.
+fn scenario_suite_coverage_manifest(
+    contracts: &'static [ScenarioContractSpec],
+    events: &[DeliveredBoundary],
+    summary: &AbstractWorldSummary,
+) -> OracleVerdict {
+    let first = contracts
+        .first()
+        .expect("protocol suite must declare at least one contract");
+    let suite = first.suite;
+    let oracle_id = scenario_suite_coverage_manifest_oracle_id(first);
+    let covered = contracts
+        .iter()
+        .map(|contract| contract.test_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let evidence = suite_coverage_evidence(suite, events, summary);
+    if evidence.passed {
+        OracleVerdict::passed(
+            oracle_id,
+            format!(
+                "{suite} suite coverage manifest: the generated lane covers {} protocol contracts [{covered}] at the suite level; suite evidence held ({}). Per-contract semantics are validated upstream by the {suite} protocol crate's own tests and by the {suite} mini-oracles; not re-derived per-contract here.",
+                contracts.len(),
+                evidence.reason
+            ),
+        )
+    } else {
+        OracleVerdict::failed(
+            oracle_id,
+            format!(
+                "{suite} suite coverage manifest FAILED: suite-level evidence missing ({}) while covering contracts [{covered}]",
+                evidence.reason
+            ),
+        )
+    }
+}
+
+/// Suite-level evidence the generated workload must produce for a protocol suite,
+/// expressed as the conjunction of the distinct runtime DTO/projection facts the
+/// suite's contracts depend on (no `|`-grouped per-contract stamping, no global
+/// `any-session>0` presence bucket). Failing-capable: a regressed fact fails the
+/// suite coverage manifest.
+fn suite_coverage_evidence(
+    suite: &str,
+    events: &[DeliveredBoundary],
+    summary: &AbstractWorldSummary,
+) -> ScenarioSemanticVerdict {
+    match suite {
+        "standard" => assert_semantic(
+            provider_mutation_parser_matrix_observed(events)
+                && tool_provider_reentry_observed(events, summary)
+                && tool_runtime_output_observed(events)
+                && tool_effects_execute_once(events)
+                && duplicate_free_stream_finalization(events, summary)
+                && provider_exchange_counts_are_turn_indexed(summary)
+                && observer_convergence(summary).is_passed(),
+            "provider parser matrix, tool-loop re-entry + single tool effect, duplicate-free streamed finalization, and turn-indexed exchanges with observer convergence",
+        ),
+        "rlm" => assert_semantic(
+            exec_runtime_outcome_observed(events)
+                && exec_effects_execute_once(events)
+                && exec_outcome_has_no_tool_call_replay(events)
+                && trigger_delivery_runtime_observed(events)
+                && provider_mutation_parser_matrix_observed(events)
+                && provider_mutation_classes_observed(events)
+                && provider_exchange_counts_are_turn_indexed(summary)
+                && observer_convergence(summary).is_passed(),
+            "exec-code RuntimeEffectOutcome (single execution, no replayed tool calls), trigger delivery, provider mutation parser matrix + classes, and turn-indexed exchanges with observer convergence",
+        ),
+        "agent" => assert_semantic(
+            process_wake_runtime_dto_observed(events)
+                && durable_runtime_effect_observed(events)
+                && exec_runtime_outcome_observed(events)
+                && tool_runtime_output_observed(events)
+                && observer_reconnect_has_matching_turn(events, summary)
+                && provider_exchange_counts_are_turn_indexed(summary)
+                && observer_convergence(summary).is_passed()
+                && summary.session_count >= 2,
+            "process wake DTO, durable effect, exec + tool facade outputs, observer reconnect convergence, turn-indexed exchanges, and a multi-session graph",
+        ),
+        other => ScenarioSemanticVerdict::failed(format!(
+            "unknown protocol suite `{other}` has no suite coverage evidence"
+        )),
+    }
 }
 
 pub fn scenario_contract_mini_oracles(
@@ -1891,6 +2037,9 @@ impl ScenarioSemanticVerdict {
     }
 }
 
+/// Per-contract semantic adapter. Only the RUNTIME suite emits per-contract
+/// oracles (the STANDARD/RLM/AGENT suites collapse to suite coverage manifests in
+/// `scenario_contract_oracles`), so only runtime contracts reach this dispatcher.
 fn scenario_contract_semantics(
     contract: &ScenarioContractSpec,
     events: &[DeliveredBoundary],
@@ -1898,10 +2047,9 @@ fn scenario_contract_semantics(
 ) -> ScenarioSemanticVerdict {
     match contract.suite {
         "runtime" => runtime_contract_semantics(contract.semantic_oracle, events, summary),
-        "standard" => standard_contract_semantics(contract.semantic_oracle, events, summary),
-        "rlm" => rlm_contract_semantics(contract.semantic_oracle, events, summary),
-        "agent" => agent_contract_semantics(contract.semantic_oracle, events, summary),
-        other => ScenarioSemanticVerdict::failed(format!("unknown contract suite `{other}`")),
+        other => ScenarioSemanticVerdict::failed(format!(
+            "suite `{other}` does not emit per-contract oracles; it is covered by a suite coverage manifest"
+        )),
     }
 }
 
@@ -1970,129 +2118,6 @@ fn runtime_contract_semantics(
             "observer reconnect replay converged to the final provider turn",
         ),
         other => unmapped_scenario_semantic("runtime", other),
-    }
-}
-
-fn standard_contract_semantics(
-    semantic_oracle: &str,
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> ScenarioSemanticVerdict {
-    match semantic_oracle {
-        "standard.empty_provider_response_error" | "standard.provider_error_without_checkpoint" => {
-            assert_semantic(
-                provider_mutation_parser_matrix_observed(events),
-                "provider failure/mutation executed through real provider parser matrix",
-            )
-        }
-        "standard.native_tool_loop_reenters_model"
-        | "standard.tool_failure_feedback_reenters_model"
-        | "standard.max_turns_after_tool_result" => assert_semantic(
-            tool_provider_reentry_observed(events, summary),
-            "tool output DTO was captured and provider graph advanced after tool lane",
-        ),
-        "standard.parallel_tool_results_checkpoint_once" => assert_semantic(
-            tool_runtime_output_observed(events) && tool_effects_execute_once(events),
-            "tool effect boundary executed once and produced a single captured record",
-        ),
-        "standard.streamed_text_finalizes_once" => assert_semantic(
-            duplicate_free_stream_finalization(events, summary),
-            "streamed provider turns finalized once without duplicate observer deltas",
-        ),
-        "standard.initial_request_projection" => assert_semantic(
-            provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "streamed provider turns preserved exchange counts and observer convergence",
-        ),
-        other => unmapped_scenario_semantic("standard", other),
-    }
-}
-
-fn rlm_contract_semantics(
-    semantic_oracle: &str,
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> ScenarioSemanticVerdict {
-    match semantic_oracle {
-        "rlm.lashlang_cell_exec_continues" => assert_semantic(
-            exec_runtime_outcome_observed(events) && trigger_delivery_runtime_observed(events),
-            "exec-code RuntimeEffectOutcome and trigger delivery were observed",
-        ),
-        "rlm.exec_error_max_turn_stop"
-        | "rlm.exec_tool_control_frame_switch_terminal"
-        | "rlm.exec_tool_control_fail_terminal" => assert_semantic(
-            exec_runtime_outcome_observed(events) && exec_effects_execute_once(events),
-            "exec-code RuntimeEffectOutcome executed once and remained terminal data",
-        ),
-        "rlm.exec_result_no_tool_call_replay" => assert_semantic(
-            exec_outcome_has_no_tool_call_replay(events),
-            "exec feedback contained no stored tool-call ids or synthetic replayed tool events",
-        ),
-        "rlm.typed_schema_mismatch_repair_loop" | "rlm.typed_schema_any_of_mismatch" => {
-            assert_semantic(
-                provider_mutation_parser_matrix_observed(events)
-                    && provider_mutation_classes_observed(events),
-                "provider mutation parser matrix supplied malformed/repair evidence",
-            )
-        }
-        "rlm.natural_prose_finalizes"
-        | "rlm.typed_prose_requires_finish"
-        | "rlm.finish_required_max_turn_stop"
-        | "rlm.finish_required_diagnostic_counts"
-        | "rlm.natural_diagnostic_counts"
-        | "rlm.cell_diagnostic_counts"
-        | "rlm.retired_marker_plain_lashlang_text"
-        | "rlm.empty_options_natural_default"
-        | "rlm.typed_finish_emits_outcome_and_done"
-        | "rlm.natural_allows_finish_value" => assert_semantic(
-            provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "RLM provider turns and observation diagnostics converged",
-        ),
-        other => unmapped_scenario_semantic("rlm", other),
-    }
-}
-
-fn agent_contract_semantics(
-    semantic_oracle: &str,
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> ScenarioSemanticVerdict {
-    match semantic_oracle {
-        "agent.started_process_tool_call_graph"
-        | "agent.started_process_subagent_spawn"
-        | "agent.nested_process_start_await"
-        | "agent.session_turn_process_child"
-        | "agent.failed_child_preserves_failure_graph"
-        | "agent.parallel_spawn_and_join" => assert_semantic(
-            process_wake_runtime_dto_observed(events)
-                && durable_runtime_effect_observed(events)
-                && summary.session_count >= 2,
-            "process wake DTO, durable effect, and multi-session graph evidence were observed",
-        ),
-        "agent.shell_results_are_data" | "agent.shell_output_print_projection_survives" => {
-            assert_semantic(
-                exec_runtime_outcome_observed(events) && tool_runtime_output_observed(events),
-                "shell/exec outcomes and tool facade results remained data",
-            )
-        }
-        "agent.foreground_tool_call_round_trip" => assert_semantic(
-            tool_runtime_output_observed(events)
-                && observer_reconnect_has_matching_turn(events, summary),
-            "tool-call facade output and observer reconnect semantics held",
-        ),
-        "agent.durable_input_suspension_resolution" => assert_semantic(
-            durable_runtime_effect_observed(events)
-                && process_wake_runtime_dto_observed(events)
-                && observer_reconnect_has_matching_turn(events, summary),
-            "durable input, process wake, and observer replay semantics held",
-        ),
-        "agent.tuple_values_finish_as_json_arrays" => assert_semantic(
-            provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "facade final-value provider turn and observer convergence semantics held",
-        ),
-        other => unmapped_scenario_semantic("agent", other),
     }
 }
 
@@ -2896,33 +2921,42 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn unmapped_scenario_contract_semantics_fail_loudly() {
+    fn unmapped_runtime_semantic_fails_loudly_and_protocol_suites_route_to_coverage_manifests() {
         let summary = AbstractWorldSummary::with_digest(0, 0, vec![], vec![], vec![]);
-        for (suite, verdict) in [
-            (
-                "runtime",
-                runtime_contract_semantics("runtime.brand_new_contract", &[], &summary),
-            ),
-            (
-                "standard",
-                standard_contract_semantics("standard.brand_new_contract", &[], &summary),
-            ),
-            (
-                "rlm",
-                rlm_contract_semantics("rlm.brand_new_contract", &[], &summary),
-            ),
-            (
-                "agent",
-                agent_contract_semantics("agent.brand_new_contract", &[], &summary),
-            ),
+
+        // A brand-new RUNTIME contract with no per-contract adapter fails loudly
+        // (the runtime suite is genuinely per-contract; there is no decorative
+        // shared fallback).
+        let runtime = runtime_contract_semantics("runtime.brand_new_contract", &[], &summary);
+        assert!(
+            !runtime.passed,
+            "an unmapped runtime contract must fail loudly, not pass via a fallback"
+        );
+        assert!(
+            runtime.reason.contains("no per-contract semantic adapter"),
+            "runtime failure reason should explain the missing adapter, got: {}",
+            runtime.reason
+        );
+
+        // The STANDARD/RLM/AGENT suites do NOT emit per-contract oracles: the
+        // per-contract dispatcher routes them to the coverage-manifest path
+        // instead of stamping a shared-bucket fallback verdict.
+        for contracts in [
+            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            RLM_PROTOCOL_SCENARIO_CONTRACTS,
+            AGENT_SCENARIO_CONTRACTS,
         ] {
+            let contract = contracts.first().expect("suite has a contract");
+            let verdict = scenario_contract_semantics(contract, &[], &summary);
             assert!(
                 !verdict.passed,
-                "{suite} unmapped contract should fail loudly, not pass via a fallback"
+                "protocol suite `{}` must not produce a passing per-contract verdict",
+                contract.suite
             );
             assert!(
-                verdict.reason.contains("no per-contract semantic adapter"),
-                "{suite} failure reason should explain the missing adapter, got: {}",
+                verdict.reason.contains("suite coverage manifest"),
+                "protocol suite `{}` should route to the coverage manifest, got: {}",
+                contract.suite,
                 verdict.reason
             );
         }
@@ -3001,34 +3035,60 @@ mod tests {
 
         let events = semantic_events();
         let verdicts = scenario_contract_oracles(&events, &summary);
-        let expected_count = RUNTIME_SCENARIO_CONTRACTS.len()
-            + STANDARD_PROTOCOL_SCENARIO_CONTRACTS.len()
-            + RLM_PROTOCOL_SCENARIO_CONTRACTS.len()
-            + AGENT_SCENARIO_CONTRACTS.len();
+
+        // RUNTIME is genuinely per-contract; STANDARD/RLM/AGENT collapse to one
+        // failing-capable suite coverage manifest each (no shared-bucket
+        // per-contract stamping that would overstate the oracle count).
+        let expected_count = RUNTIME_SCENARIO_CONTRACTS.len() + 3;
         assert_eq!(verdicts.len(), expected_count);
         assert!(verdicts.iter().all(OracleVerdict::is_passed));
+
         let ids = verdicts
             .iter()
             .map(|verdict| verdict.oracle_id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(ids.len(), verdicts.len());
-        assert!(ids.iter().any(|id| {
-            id.starts_with(SCENARIO_RUNTIME_CONTRACT_ORACLE) && id.contains("runtime_scenario_")
-        }));
-        assert!(ids.iter().any(|id| {
-            id.starts_with(SCENARIO_STANDARD_CONTRACT_ORACLE)
-                && id.contains("standard_protocol_scenario_")
-        }));
-        assert!(
-            ids.iter()
-                .any(|id| id.starts_with(SCENARIO_RLM_CONTRACT_ORACLE)
-                    && id.contains("rlm_protocol_scenario_"))
-        );
-        assert!(
-            ids.iter()
-                .any(|id| id.starts_with(SCENARIO_AGENT_CONTRACT_ORACLE)
-                    && id.contains("agent_scenario_"))
-        );
+
+        // Exactly the runtime contracts get distinct per-contract oracle ids.
+        let runtime_per_contract = verdicts
+            .iter()
+            .filter(|verdict| {
+                verdict.oracle_id.starts_with(SCENARIO_RUNTIME_CONTRACT_ORACLE)
+                    && verdict.oracle_id.contains("runtime_scenario_")
+            })
+            .count();
+        assert_eq!(runtime_per_contract, RUNTIME_SCENARIO_CONTRACTS.len());
+
+        // Each protocol suite emits exactly ONE coverage manifest, and that
+        // manifest enumerates every contract it covers (so the coverage is
+        // explicit and auditable rather than hidden behind a shared bucket).
+        for (base, contracts) in [
+            (
+                SCENARIO_STANDARD_CONTRACT_ORACLE,
+                STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            ),
+            (SCENARIO_RLM_CONTRACT_ORACLE, RLM_PROTOCOL_SCENARIO_CONTRACTS),
+            (SCENARIO_AGENT_CONTRACT_ORACLE, AGENT_SCENARIO_CONTRACTS),
+        ] {
+            let suite_verdicts = verdicts
+                .iter()
+                .filter(|verdict| verdict.oracle_id.starts_with(base))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                suite_verdicts.len(),
+                1,
+                "suite `{base}` must emit exactly one coverage manifest, not per-contract oracles"
+            );
+            let manifest = suite_verdicts[0];
+            assert_eq!(manifest.oracle_id, format!("{base}:coverage-manifest"));
+            for contract in contracts {
+                assert!(
+                    manifest.message.contains(contract.test_name),
+                    "coverage manifest for `{base}` must enumerate covered contract `{}`",
+                    contract.test_name
+                );
+            }
+        }
     }
 
     #[test]
@@ -3065,6 +3125,87 @@ mod tests {
         let verdict = state_machine_semantic_invariants(&retry_not_terminal, &summary);
         assert_eq!(verdict.status, crate::trace::OracleStatus::Failed);
         assert!(verdict.message.contains("backend retry terminalization"));
+    }
+
+    #[test]
+    fn coverage_oracles_are_failing_capable_not_presence_only() {
+        let summary = semantic_summary();
+        let events = semantic_events();
+
+        // Positive: a workload that genuinely satisfies the per-boundary runtime
+        // invariants passes every strengthened coverage oracle.
+        for verdict in [
+            queued_ingress_observed(&summary, &events),
+            cancellation_observed(&summary, &events),
+            trigger_delivery_observed(&summary, &events),
+            observer_reconnect_observed(&summary, &events),
+            backend_failure_observed(&summary, &events),
+            provider_mutation_rejected(&summary, &events),
+            process_wake_observed(&summary, &events),
+            tool_boundary_observed(&summary, &events),
+            exec_code_observed(&summary, &events),
+        ] {
+            assert!(
+                verdict.is_passed(),
+                "{} should pass on a valid workload: {}",
+                verdict.oracle_id,
+                verdict.message
+            );
+        }
+
+        // Failing-capable: the boundary kinds remain PRESENT in the summary, but
+        // with the runtime DTO/projection evidence stripped (empty events) every
+        // oracle FAILS loudly instead of passing on presence alone.
+        for verdict in [
+            queued_ingress_observed(&summary, &[]),
+            cancellation_observed(&summary, &[]),
+            trigger_delivery_observed(&summary, &[]),
+            observer_reconnect_observed(&summary, &[]),
+            backend_failure_observed(&summary, &[]),
+            provider_mutation_rejected(&summary, &[]),
+            process_wake_observed(&summary, &[]),
+            tool_boundary_observed(&summary, &[]),
+            exec_code_observed(&summary, &[]),
+        ] {
+            assert!(
+                !verdict.is_passed(),
+                "{} must fail when its invariant evidence is missing (presence is not enough)",
+                verdict.oracle_id
+            );
+            assert!(
+                verdict.message.contains("observed but"),
+                "{} should explain the violated invariant, got: {}",
+                verdict.oracle_id,
+                verdict.message
+            );
+        }
+    }
+
+    #[test]
+    fn suite_coverage_manifest_is_failing_capable() {
+        // Missing suite-level evidence => the coverage manifest fails loudly
+        // (it is a real, failing-capable oracle, not a decorative label).
+        let empty = AbstractWorldSummary::with_digest(0, 0, vec![], vec![], vec![]);
+        for contracts in [
+            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            RLM_PROTOCOL_SCENARIO_CONTRACTS,
+            AGENT_SCENARIO_CONTRACTS,
+        ] {
+            let verdict = scenario_suite_coverage_manifest(contracts, &[], &empty);
+            assert!(!verdict.is_passed());
+            assert!(verdict.message.contains("FAILED: suite-level evidence missing"));
+        }
+
+        // On a workload that produces the suite evidence it passes.
+        let summary = semantic_summary();
+        let events = semantic_events();
+        for contracts in [
+            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            RLM_PROTOCOL_SCENARIO_CONTRACTS,
+            AGENT_SCENARIO_CONTRACTS,
+        ] {
+            assert!(scenario_suite_coverage_manifest(contracts, &events, &summary).is_passed());
+        }
     }
 
     #[test]

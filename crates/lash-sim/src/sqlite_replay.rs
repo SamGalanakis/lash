@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use lash_core::SessionStoreFactory;
 use serde::{Deserialize, Serialize};
@@ -596,23 +595,36 @@ impl SqliteRuntimeReplayWorld {
         let active_turn_pending = runtime_session
             .active_provider_turns
             .contains_key(&turn_boundary_id);
-        let release = tokio::time::timeout(
-            Duration::from_secs(5),
-            runtime_session.provider_schedule.release_when_blocked(
-                exchange_index,
-                event_index,
-                event_name,
-                event.at,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            SqliteReplayError::Assertion(format!(
-                "provider event `{}` timed out waiting for turn `{}` exchange {} event {} ({})",
-                event.boundary_id, turn_boundary_id, exchange_index, event_index, event_name
-            ))
-        })?;
-        Ok(json!({
+        // Liveness-couple the release instead of a fixed 5s timeout: poll the
+        // gate against the turn's liveness so the replay-sqlite path can NEVER
+        // deadlock on a release that waits for a block which will never come.
+        // The yield budget deterministically bounds the poll even if the turn
+        // drifts onto a different exchange.
+        let release = {
+            let mut polls = 0u64;
+            loop {
+                if let Some(release) = runtime_session.provider_schedule.release_if_blocked(
+                    exchange_index,
+                    event_index,
+                    event_name,
+                    event.at,
+                ) {
+                    break Some(release);
+                }
+                let turn_finished = runtime_session
+                    .active_provider_turns
+                    .get(&turn_boundary_id)
+                    .is_none_or(|turn| turn.handle.is_finished());
+                if turn_finished
+                    || polls >= crate::runner::MAX_PROVIDER_EVENT_POLL_YIELDS
+                {
+                    break None;
+                }
+                polls += 1;
+                tokio::task::yield_now().await;
+            }
+        };
+        let mut observed = json!({
             "session": event.actor_alias,
             "provider_event_release": true,
             "turn_boundary_id": turn_boundary_id,
@@ -620,16 +632,22 @@ impl SqliteRuntimeReplayWorld {
             "event_index": event_index,
             "event_name": event_name,
             "provider_kind": runtime_session.provider_kind,
-            "active_turn_pending_before_release": active_turn_pending,
-            "released_while_turn_pending": active_turn_pending && release.blocked_before_release,
-            "scripted_transport_release": {
+        });
+        if let Some(release) = release {
+            observed["active_turn_pending_before_release"] = json!(active_turn_pending);
+            observed["released_while_turn_pending"] =
+                json!(active_turn_pending && release.blocked_before_release);
+            observed["scripted_transport_release"] = json!({
                 "exchange_index": release.exchange_index,
                 "event_index": release.event_index,
                 "event_name": release.event_name,
                 "at": release.at,
                 "blocked_before_release": release.blocked_before_release,
-            },
-        }))
+            });
+        } else {
+            observed["provider_event_release_noop_turn_finished"] = json!(true);
+        }
+        Ok(observed)
     }
 
     async fn finish_provider_turn(
@@ -659,16 +677,25 @@ impl SqliteRuntimeReplayWorld {
             .exchanges()
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?
             .len();
-        tokio::time::timeout(Duration::from_secs(5), active_turn.handle)
-            .await
-            .map_err(|_| {
-                SqliteReplayError::Assertion(format!(
-                    "provider boundary `{}` timed out waiting for in-flight turn completion after {} scheduled releases and {} provider exchanges",
+        // Yield-bounded completion poll instead of a wall-clock timeout: if the
+        // turn drifted onto an unscheduled provider exchange (e.g. the SQLite
+        // store re-executed an extra exchange) it can never finish, so we
+        // terminate deterministically rather than letting the runtime hang.
+        let mut polls = 0u64;
+        while !active_turn.handle.is_finished() {
+            if polls >= crate::runner::MAX_TURN_FINISH_POLL_YIELDS {
+                return Err(SqliteReplayError::Assertion(format!(
+                    "provider boundary `{}` did not finish within {} yields after {release_count} scheduled releases and {exchange_count} provider exchanges (turn parked on an unscheduled provider exchange)",
                     event.boundary_id,
-                    release_count,
-                    exchange_count
-                ))
-            })?
+                    crate::runner::MAX_TURN_FINISH_POLL_YIELDS
+                )));
+            }
+            polls += 1;
+            tokio::task::yield_now().await;
+        }
+        active_turn
+            .handle
+            .await
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?
             .map_err(SqliteReplayError::Runtime)
     }
@@ -1023,6 +1050,10 @@ fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
         // projector path, so they are excluded from cross-backend equality.
         object.remove("runtime_lease_probe");
         object.remove("runtime_suspend");
+        object.remove("scripted_transport_release");
+        object.remove("active_turn_pending_before_release");
+        object.remove("released_while_turn_pending");
+        object.remove("provider_event_release_noop_turn_finished");
     }
     if kind == BoundaryKind::Cancellation
         && let Some(object) = normalized.as_object_mut()

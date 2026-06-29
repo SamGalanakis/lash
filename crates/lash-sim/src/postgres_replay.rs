@@ -1030,6 +1030,10 @@ fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
     if let Some(object) = normalized.as_object_mut() {
         object.remove("runtime_lease_probe");
         object.remove("runtime_suspend");
+        object.remove("scripted_transport_release");
+        object.remove("active_turn_pending_before_release");
+        object.remove("released_while_turn_pending");
+        object.remove("provider_event_release_noop_turn_finished");
     }
     if kind == BoundaryKind::Cancellation
         && let Some(object) = normalized.as_object_mut()

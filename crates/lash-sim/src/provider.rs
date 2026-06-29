@@ -306,6 +306,42 @@ impl ScriptedTransportSchedule {
         let event_name = event_name.into();
         let gate = self.gate(exchange_index, event_index);
         gate.wait_until_blocked().await;
+        self.open_gate(&gate, exchange_index, event_index, event_name, at)
+    }
+
+    /// Whether the turn future is currently parked on this gate. Lets the
+    /// boundary harness couple gate release to turn liveness (poll until either
+    /// the gate blocks or the turn finishes) instead of blocking forever.
+    pub fn is_blocked(&self, exchange_index: usize, event_index: usize) -> bool {
+        self.gate(exchange_index, event_index).is_blocked()
+    }
+
+    /// Release the gate only if the turn is already parked on it; otherwise
+    /// return `None` without blocking. The caller polls this against the turn's
+    /// liveness so a release can never deadlock waiting for a block that will
+    /// never come (e.g. a turn that finished or drifted to a different exchange).
+    pub fn release_if_blocked(
+        &self,
+        exchange_index: usize,
+        event_index: usize,
+        event_name: impl Into<String>,
+        at: u64,
+    ) -> Option<ScriptedProviderEventRelease> {
+        let gate = self.gate(exchange_index, event_index);
+        if !gate.is_blocked() {
+            return None;
+        }
+        Some(self.open_gate(&gate, exchange_index, event_index, event_name.into(), at))
+    }
+
+    fn open_gate(
+        &self,
+        gate: &ScriptedTransportEventGate,
+        exchange_index: usize,
+        event_index: usize,
+        event_name: String,
+        at: u64,
+    ) -> ScriptedProviderEventRelease {
         let release = ScriptedProviderEventRelease {
             exchange_index,
             event_index,
