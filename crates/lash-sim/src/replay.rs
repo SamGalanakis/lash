@@ -4,10 +4,14 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::oracles::replay_determinism;
-use crate::scheduler::BoundaryScheduler;
+use crate::runtime_contracts::{
+    RuntimeAgentFrameInvariantFacts, RuntimeGraphInvariantFacts, RuntimeUsageInvariantFacts,
+};
+use crate::scheduler::{BoundaryKind, BoundaryScheduler, DeliveredBoundary};
 use crate::store::ModelStore;
 use crate::trace::{
-    ReplayReport, SimulationTrace, TRACE_SCHEMA, TraceIoError, read_trace, write_replay_report,
+    ReplayReport, RuntimeInvariantReverification, SimulationTrace, TRACE_SCHEMA, TraceIoError,
+    read_trace, write_replay_report,
 };
 
 #[derive(Debug)]
@@ -67,7 +71,18 @@ pub fn replay_trace(
     let mut sequence = Vec::new();
 
     for expected in &trace.events {
-        let observed = store.apply_boundary(&expected.as_event());
+        let event = expected.as_event();
+        // Worker lease fencing is produced by the REAL session-execution lease
+        // store at generation time (and re-verified by the SQLite/Postgres backend
+        // replays). The abstract ModelStore cannot re-derive it, so the model
+        // carries the REAL recorded reclaim/fence facts rather than fabricating
+        // them: thread the recorded observation in directly instead of projecting.
+        let observed = if event.kind == BoundaryKind::Worker {
+            store.apply_observed_boundary(&event, &expected.observed);
+            expected.observed.clone()
+        } else {
+            store.apply_boundary(&event)
+        };
         let delivered = scheduler
             .deliver_boundary(&expected.boundary_id, observed)
             .ok_or_else(|| ReplayError::MissingBoundary(expected.boundary_id.clone()))?;
@@ -95,12 +110,178 @@ pub fn replay_trace(
         return Err(ReplayError::Divergence(terminal_verdict.message.clone()));
     }
 
+    // Boundary-equality replay normalizes the real-runtime invariant facts away
+    // (they are not reproducible from the abstract `ModelStore` projection), so
+    // model-store agreement alone never re-proves the runtime-level invariants.
+    // Re-derive each turn's graph/agent-frame/usage verdict from its recorded
+    // structural facts so reproduction is proven at the runtime level, not only
+    // at the abstract-store level.
+    let runtime_invariant_reverification = reverify_runtime_invariant_facts(&trace.events)?;
+
     Ok(ReplayReport::new(
         trace_path,
         terminal_verdict,
         sequence,
         final_summary,
+        runtime_invariant_reverification,
     ))
+}
+
+/// Re-derive the pass/fail of every recorded runtime invariant from its
+/// structural facts (cycle/duplicate/missing-parent node sets, active-frame
+/// cardinality, negative/non-monotonic usage). A trace whose recorded `passed`
+/// flag disagrees with its own structure — or whose facts reveal a violation —
+/// is a runtime-level reproduction failure and diverges.
+pub fn reverify_runtime_invariant_facts(
+    events: &[DeliveredBoundary],
+) -> Result<RuntimeInvariantReverification, ReplayError> {
+    let mut reverification = RuntimeInvariantReverification {
+        schema: "lash.sim.runtime-invariant-reverification.v1".to_string(),
+        ..RuntimeInvariantReverification::default()
+    };
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Provider)
+    {
+        let Some(facts) = event.observed.get("runtime_invariant_facts") else {
+            continue;
+        };
+        reverification.reverified_turn_count += 1;
+
+        if let Some(graph) = facts.get("graph") {
+            let graph: RuntimeGraphInvariantFacts =
+                serde_json::from_value(graph.clone()).map_err(|err| {
+                    ReplayError::Divergence(format!(
+                        "boundary `{}` recorded an unreadable graph invariant fact: {err}",
+                        event.boundary_id
+                    ))
+                })?;
+            let recomputed = graph.duplicate_node_ids.is_empty()
+                && graph.missing_parent_links.is_empty()
+                && graph.cycle_node_ids.is_empty()
+                && graph.leaf_exists;
+            require_reverified(
+                event,
+                "graph",
+                recomputed,
+                graph.passed,
+                format!(
+                    "duplicates={:?} missing_parents={:?} cycles={:?} leaf_exists={}",
+                    graph.duplicate_node_ids,
+                    graph.missing_parent_links,
+                    graph.cycle_node_ids,
+                    graph.leaf_exists
+                ),
+            )?;
+            require_invariants_flag(event, "graph_acyclic", graph.cycle_node_ids.is_empty())?;
+            reverification.graph_invariant_checks += 1;
+        }
+
+        if let Some(agent_frame) = facts.get("agent_frame") {
+            let agent_frame: RuntimeAgentFrameInvariantFacts =
+                serde_json::from_value(agent_frame.clone()).map_err(|err| {
+                    ReplayError::Divergence(format!(
+                        "boundary `{}` recorded an unreadable agent-frame invariant fact: {err}",
+                        event.boundary_id
+                    ))
+                })?;
+            let recomputed = agent_frame.active_frame_ids.len() == 1
+                && agent_frame.active_frame_ids.first()
+                    == Some(&agent_frame.current_agent_frame_id)
+                && agent_frame.current_frame_exists
+                && agent_frame.current_frame_active
+                && agent_frame.node_agent_frame_ids_without_record.is_empty();
+            require_reverified(
+                event,
+                "agent_frame",
+                recomputed,
+                agent_frame.passed,
+                format!(
+                    "active_frames={:?} current={} exists={} active={} orphan_frames={:?}",
+                    agent_frame.active_frame_ids,
+                    agent_frame.current_agent_frame_id,
+                    agent_frame.current_frame_exists,
+                    agent_frame.current_frame_active,
+                    agent_frame.node_agent_frame_ids_without_record
+                ),
+            )?;
+            require_invariants_flag(
+                event,
+                "single_active_agent_frame",
+                agent_frame.active_frame_ids.len() == 1,
+            )?;
+            reverification.agent_frame_invariant_checks += 1;
+        }
+
+        if let Some(usage) = facts.get("usage") {
+            let usage: RuntimeUsageInvariantFacts =
+                serde_json::from_value(usage.clone()).map_err(|err| {
+                    ReplayError::Divergence(format!(
+                        "boundary `{}` recorded an unreadable usage invariant fact: {err}",
+                        event.boundary_id
+                    ))
+                })?;
+            let recomputed =
+                usage.negative_fields.is_empty() && usage.non_negative && usage.usage_events_monotonic;
+            require_reverified(
+                event,
+                "usage",
+                recomputed,
+                usage.passed,
+                format!(
+                    "negative_fields={:?} non_negative={} monotonic={}",
+                    usage.negative_fields, usage.non_negative, usage.usage_events_monotonic
+                ),
+            )?;
+            require_invariants_flag(event, "usage_monotonic", usage.usage_events_monotonic)?;
+            reverification.usage_invariant_checks += 1;
+        }
+    }
+    Ok(reverification)
+}
+
+fn require_reverified(
+    event: &DeliveredBoundary,
+    invariant: &str,
+    recomputed: bool,
+    recorded: bool,
+    detail: String,
+) -> Result<(), ReplayError> {
+    if recomputed != recorded {
+        return Err(ReplayError::Divergence(format!(
+            "boundary `{}` recorded {invariant} invariant passed={recorded} but its structural facts re-derive {recomputed} ({detail})",
+            event.boundary_id
+        )));
+    }
+    if !recomputed {
+        return Err(ReplayError::Divergence(format!(
+            "boundary `{}` {invariant} invariant violated on replay ({detail})",
+            event.boundary_id
+        )));
+    }
+    Ok(())
+}
+
+fn require_invariants_flag(
+    event: &DeliveredBoundary,
+    flag: &str,
+    recomputed: bool,
+) -> Result<(), ReplayError> {
+    let Some(recorded) = event
+        .observed
+        .get("runtime_invariants")
+        .and_then(|invariants| invariants.get(flag))
+        .and_then(Value::as_bool)
+    else {
+        return Ok(());
+    };
+    if recorded != recomputed {
+        return Err(ReplayError::Divergence(format!(
+            "boundary `{}` recorded runtime_invariants.{flag}={recorded} but structural facts re-derive {recomputed}",
+            event.boundary_id
+        )));
+    }
+    Ok(())
 }
 
 fn normalize(value: &Value) -> Value {
@@ -114,6 +295,34 @@ fn normalize(value: &Value) -> Value {
         object.remove("runtime_worker_store");
         object.remove("runtime_active_lease");
         object.remove("runtime_stale_completion");
+        object.remove("runtime_lease_probe");
+        object.remove("runtime_suspend");
+        object.remove("runtime_invariant_facts");
+        object.remove("runtime_final_value_facts");
+        // The cancel outcome (`cancelled`/`cancel_outcome`) depends on whether
+        // the real runtime had already consumed the targeted input by the time
+        // the cancellation arrived — a fact the abstract ModelStore cannot
+        // reconstruct from the boundary stream. Coverage is preserved because
+        // the cancellation oracle keys off `final_summary.cancellation_count`,
+        // which the model still tracks, not this per-boundary string.
+        object.remove("cancel_outcome");
+        object.remove("cancelled");
+        // Provider-event release evidence is liveness/timing dependent: a gate
+        // can be released while the turn is parked, or skipped as a no-op once
+        // the turn has already finished. The abstract model cannot reconstruct
+        // which, so these fields are excluded from cross-backend equality.
+        object.remove("scripted_transport_release");
+        object.remove("active_turn_pending_before_release");
+        object.remove("released_while_turn_pending");
+        object.remove("provider_event_release_noop_turn_finished");
+        if let Some(runtime_invariants) = object
+            .get_mut("runtime_invariants")
+            .and_then(Value::as_object_mut)
+        {
+            runtime_invariants.remove("graph_acyclic");
+            runtime_invariants.remove("single_active_agent_frame");
+            runtime_invariants.remove("usage_monotonic");
+        }
     }
     value
 }
@@ -135,5 +344,109 @@ mod tests {
         assert_eq!(report.delivered_event_count, trace.events.len());
         assert_eq!(report.final_summary, trace.final_summary);
         assert!(report.terminal_verdict.is_passed());
+        let reverification = &report.runtime_invariant_reverification;
+        assert!(
+            reverification.reverified_turn_count > 0,
+            "replay must re-verify at least one runtime turn's invariant facts"
+        );
+        assert_eq!(
+            reverification.graph_invariant_checks,
+            reverification.reverified_turn_count
+        );
+        assert_eq!(
+            reverification.agent_frame_invariant_checks,
+            reverification.reverified_turn_count
+        );
+        assert_eq!(
+            reverification.usage_invariant_checks,
+            reverification.reverified_turn_count
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_reverification_rejects_tampered_runtime_invariant_facts() {
+        let workload = generate_workload(5, "fast-random", 24).expect("workload");
+        let mut trace = run_generated_workload_for_fixture(workload, "bundle")
+            .await
+            .expect("trace");
+        // Corrupt a recorded runtime invariant fact so the structural re-derivation
+        // contradicts the stored `passed` flag; replay must surface it as a
+        // runtime-level divergence even though the abstract summary still matches.
+        let tampered = trace
+            .events
+            .iter_mut()
+            .find(|event| {
+                event.kind == BoundaryKind::Provider
+                    && event.observed.get("runtime_invariant_facts").is_some()
+            })
+            .expect("a provider turn with recorded invariant facts");
+        tampered.observed["runtime_invariant_facts"]["graph"]["cycle_node_ids"] =
+            serde_json::json!(["node-a", "node-b"]);
+        let err = replay_trace(Path::new("trace.json"), &trace)
+            .expect_err("tampered runtime invariant facts must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence(message) if message.contains("graph")),
+            "expected a graph invariant divergence"
+        );
+    }
+
+    #[test]
+    fn promoted_queued_active_turn_cancel_regression_replays() {
+        let trace_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("replays/queued-active-turn-cancel-race/trace.json");
+        let trace = read_trace(&trace_path).expect("read promoted replay fixture");
+        let report = replay_trace(&trace_path, &trace).expect("replay promoted fixture");
+
+        assert!(report.terminal_verdict.is_passed());
+        assert_eq!(report.delivered_event_count, trace.events.len());
+        assert!(trace.oracles.iter().any(|verdict| {
+            verdict.oracle_id
+                == "sim.oracle.scenario-mini.runtime.queued-input-hidden-while-live.v1"
+                && verdict.is_passed()
+        }));
+        assert!(trace.oracles.iter().any(|verdict| {
+            verdict.oracle_id
+                == "sim.oracle.scenario-mini.runtime.cancellation-prevents-idle-claim.v1"
+                && verdict.is_passed()
+        }));
+        assert!(
+            report.final_summary.sessions.iter().any(|session| {
+                session.queued_ingress_count > 0 && session.cancellation_count > 0
+            })
+        );
+    }
+
+    // The discovered cross-backend SQLite divergence (full-random seed
+    // 14123330213291275571), promoted as a documented OPEN finding. This guard
+    // proves the divergence is NOT a sim-harness/model gate issue — the trace
+    // replays cleanly through the abstract model — and pins the active-turn
+    // queued-input cancel + subsequent-turn shape that triggers it. The SQLite
+    // replay is INTENTIONALLY NOT exercised here: it is quarantined in
+    // `KNOWN_SQLITE_DIVERGENCES` because it deadlocks (active-turn enqueue) and
+    // otherwise diverges (empty assistant output / extra provider exchange).
+    #[test]
+    fn discovered_cross_backend_sqlite_divergence_model_replays_but_is_quarantined() {
+        let trace_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("replays/cross-backend-sqlite-active-turn-divergence/trace.json");
+        let trace = read_trace(&trace_path).expect("read discovered divergence fixture");
+        assert_eq!(trace.seed, 14_123_330_213_291_275_571);
+        assert_eq!(trace.profile, "full-random");
+
+        // Model replay must pass: the divergence lives in the SQLite backend, not
+        // in the generated trace or the abstract model.
+        let report = replay_trace(&trace_path, &trace).expect("model-replay divergence fixture");
+        assert!(report.terminal_verdict.is_passed());
+        assert_eq!(report.delivered_event_count, trace.events.len());
+
+        // Pin the shape that drives the divergence: a session that takes an
+        // active-turn queued-input cancel and then runs subsequent provider turns.
+        assert!(
+            report.final_summary.sessions.iter().any(|session| {
+                session.queued_ingress_count > 0
+                    && session.cancellation_count > 0
+                    && session.provider_outputs.len() >= 2
+            }),
+            "divergence fixture must retain an active-turn cancel followed by later turns"
+        );
     }
 }

@@ -15,7 +15,7 @@ publish = false
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
-lash = { workspace = true }
+lash = { workspace = true, features = ["rlm"] }
 lash-core = { workspace = true, features = ["testing"] }
 lash-llm-transport = { workspace = true }
 lash-provider-anthropic = { workspace = true }

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lash_core::runtime::{
-    QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload, RuntimeReplay, RuntimeScope,
-    RuntimeSubject,
+    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkPayload, RuntimeReplay,
+    RuntimeScope, RuntimeSubject,
 };
 use lash_core::{
     DeliveryPolicy, ExecResponse, ExecutionScope, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
@@ -106,6 +106,49 @@ impl RuntimeBoundaryHarness {
             durable_entries: BTreeMap::new(),
             process_wake_claimed_batches: BTreeSet::new(),
         }
+    }
+
+    /// Read a real session-execution-lease fencing token from the store for a
+    /// per-session probe scope. Each reading claims the probe lease and then
+    /// releases it; because the in-memory store keeps the per-scope fencing
+    /// counter across a release, the very next claim acquires a strictly higher
+    /// token. The returned token is the ground truth the lease-time-monotonic
+    /// oracle checks — unlike a generator-fed tick, it can actually regress if
+    /// the lease store's fencing is broken. Deterministic: a single owner on a
+    /// dedicated per-session scope, no wall-clock reads.
+    pub async fn lease_probe_fencing_token(
+        &mut self,
+        session: &str,
+    ) -> Result<u64, RuntimeBoundaryError> {
+        let probe_scope = format!("{session}::lease-probe");
+        let store = self.store_for_session(&probe_scope).await?;
+        let owner = LeaseOwnerIdentity::opaque(
+            "lash-sim-lease-probe",
+            format!("{probe_scope}:probe-owner"),
+        );
+        let lease = match store
+            .try_claim_session_execution_lease(&probe_scope, &owner, LEASE_TTL_MS)
+            .await
+            .map_err(|err| RuntimeBoundaryError::new(format!("claim lease probe failed: {err}")))?
+        {
+            SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
+            SessionExecutionLeaseClaimOutcome::Busy { holder } => {
+                return Err(RuntimeBoundaryError::new(format!(
+                    "lease probe claim unexpectedly busy for `{probe_scope}`; holder fence={}",
+                    holder.fencing_token
+                )));
+            }
+        };
+        let fencing_token = lease.fencing_token;
+        // Release so the next probe re-acquires at a higher fencing token rather
+        // than renewing the same one (a same-owner live claim would not advance).
+        store
+            .release_session_execution_lease(&lease.completion())
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("release lease probe failed: {err}"))
+            })?;
+        Ok(fencing_token)
     }
 
     pub async fn deliver(&mut self, event: &BoundaryEvent) -> Result<Value, RuntimeBoundaryError> {
@@ -420,6 +463,39 @@ impl RuntimeBoundaryHarness {
         })
         .map_err(|err| RuntimeBoundaryError::new(format!("process wake failed: {err}")))?;
         let store = self.store_for_session(&session).await?;
+        let owner = LeaseOwnerIdentity::opaque(
+            "lash-sim-process-wake-driver",
+            format!("{}:process-wake-driver", session),
+        );
+        let lease = match store
+            .try_claim_session_execution_lease(&session, &owner, LEASE_TTL_MS)
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("claim session lease failed: {err}"))
+            })? {
+            SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
+            SessionExecutionLeaseClaimOutcome::Busy { holder } => {
+                return Ok(json!({
+                    "session": session,
+                    "process_wake": true,
+                    "process_id": process_id,
+                    "sequence": wake.sequence,
+                    "wake_id": wake.wake_id,
+                    "dedupe_key": wake.dedupe_key,
+                    "claimed_once": false,
+                    "lease_busy": true,
+                    "busy_holder": owner_json(&holder.owner),
+                    "runtime_process_wake": wake,
+                    "runtime_queued_work": {
+                        "source_key": dedupe_key,
+                        "work_class": "ProcessWake",
+                        "enqueued": false,
+                        "claimed": false,
+                        "claim_id_present": false,
+                    },
+                }));
+            }
+        };
         let batch = store
             .enqueue_queued_work(
                 QueuedWorkBatchDraft::new(
@@ -433,24 +509,6 @@ impl RuntimeBoundaryHarness {
             )
             .await
             .map_err(|err| RuntimeBoundaryError::new(format!("enqueue wake failed: {err}")))?;
-        let owner = LeaseOwnerIdentity::opaque(
-            "lash-sim-process-wake-driver",
-            format!("{}:process-wake-driver", session),
-        );
-        let lease = match store
-            .try_claim_session_execution_lease(&session, &owner, LEASE_TTL_MS)
-            .await
-            .map_err(|err| {
-                RuntimeBoundaryError::new(format!("claim session lease failed: {err}"))
-            })? {
-            SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
-            SessionExecutionLeaseClaimOutcome::Busy { holder } => {
-                return Err(RuntimeBoundaryError::new(format!(
-                    "process wake session lease busy for `{session}`; holder={}",
-                    holder.owner.owner_id
-                )));
-            }
-        };
         let claim = store
             .claim_ready_queued_work_by_batch_ids(
                 &session,
@@ -522,19 +580,36 @@ impl RuntimeBoundaryHarness {
                 "live-process",
             ),
         };
+        // Worker one (the doomed incarnation) acquires the session execution lease
+        // and starts a real unit of worker-owned queued work.
         let stale_lease = match store
             .try_claim_session_execution_lease(&session, &stale_owner, LEASE_TTL_MS)
             .await
             .map_err(|err| RuntimeBoundaryError::new(format!("claim stale lease failed: {err}")))?
         {
             SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
-            SessionExecutionLeaseClaimOutcome::Busy { holder } => {
-                return Err(RuntimeBoundaryError::new(format!(
-                    "worker stale lease setup busy for `{session}`; holder={}",
-                    holder.owner.owner_id
-                )));
+            SessionExecutionLeaseClaimOutcome::Busy { .. } => {
+                return Ok(json!({
+                    "worker_alias": event.actor_alias,
+                    "session": session,
+                    "initial_owner": owner_json(&stale_owner),
+                    "active_owner": owner_json(&live_owner),
+                    "stale_completion_rejected": false,
+                    "lease_busy": true,
+                    "runtime_worker_store": {
+                        "session_execution_lease_reclaimed": false,
+                        "stale_completion_left_live_lease_renewable": false,
+                        "busy_during_in_flight_turn": true,
+                    },
+                }));
             }
         };
+        let work = self
+            .start_worker_owned_work(store.as_ref(), &session, &stale_owner, &stale_lease, event.at)
+            .await?;
+
+        // Worker one crashes mid-flight: worker two fences it out by reclaiming
+        // the session execution lease at a higher fencing token.
         let live_lease = match store
             .reclaim_session_execution_lease(
                 &session,
@@ -554,6 +629,13 @@ impl RuntimeBoundaryHarness {
                 )));
             }
         };
+
+        // Worker two resumes the crashed worker's in-flight work under its own
+        // lease and rejects the dead owner's stale completion attempt.
+        let failover = self
+            .resume_crashed_worker_work(store.as_ref(), &session, &live_owner, &live_lease, &work)
+            .await?;
+
         let stale_completion = stale_lease.completion();
         store
             .release_session_execution_lease(&stale_completion)
@@ -598,8 +680,129 @@ impl RuntimeBoundaryHarness {
             "runtime_worker_store": {
                 "session_execution_lease_reclaimed": true,
                 "stale_completion_left_live_lease_renewable": true,
+                "worker_owned_work": {
+                    "batch_id_present": !work.batch_id.is_empty(),
+                    "source_key": work.source_key,
+                    "first_owner_claim_fencing_token": work.claim_fencing_token,
+                    "first_owner_claimed_work": true,
+                    "second_owner_resumed_work": failover.resumed_by_second_owner,
+                    "second_owner_claim_fencing_token": failover.resumed_claim_fencing_token,
+                    "second_owner_outranks_first": failover.resumed_claim_fencing_token
+                        > work.claim_fencing_token,
+                    "stale_work_completion_rejected": failover.stale_work_completion_rejected,
+                },
             },
         }))
+    }
+
+    /// Worker one claims a real unit of queued work under its session execution
+    /// lease, modelling a worker-owned turn that is in flight when the worker
+    /// crashes.
+    async fn start_worker_owned_work(
+        &self,
+        store: &dyn RuntimePersistence,
+        session: &str,
+        owner: &LeaseOwnerIdentity,
+        lease: &lash_core::SessionExecutionLease,
+        occurred_at_ms: u64,
+    ) -> Result<WorkerOwnedWork, RuntimeBoundaryError> {
+        let source_key = format!("worker-failover/{session}/work");
+        let wake = worker_failover_work(session, occurred_at_ms)?;
+        let batch = store
+            .enqueue_queued_work(
+                QueuedWorkBatchDraft::new(
+                    session.to_string(),
+                    DeliveryPolicy::EarliestSafeBoundary,
+                    SlotPolicy::Exclusive,
+                    vec![QueuedWorkPayload::process_wake(wake)],
+                )
+                .with_source_key(source_key.clone())
+                .with_merge_key(MergeKey::Never),
+            )
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("enqueue worker-owned work failed: {err}"))
+            })?;
+        let claim = store
+            .claim_ready_queued_work_by_batch_ids(
+                session,
+                &lease.fence(),
+                owner,
+                QueuedWorkClaimBoundary::Idle,
+                LEASE_TTL_MS,
+                std::slice::from_ref(&batch.batch_id),
+            )
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("first worker claim of work failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                RuntimeBoundaryError::new(
+                    "first worker could not claim its own queued work".to_string(),
+                )
+            })?;
+        Ok(WorkerOwnedWork {
+            batch_id: batch.batch_id,
+            source_key,
+            claim_fencing_token: claim.fencing_token,
+            claim,
+        })
+    }
+
+    /// Worker two reclaims the crashed worker's in-flight work, resumes it, and
+    /// proves the dead owner's stale work completion is rejected.
+    async fn resume_crashed_worker_work(
+        &self,
+        store: &dyn RuntimePersistence,
+        session: &str,
+        owner: &LeaseOwnerIdentity,
+        lease: &lash_core::SessionExecutionLease,
+        work: &WorkerOwnedWork,
+    ) -> Result<WorkerFailover, RuntimeBoundaryError> {
+        // The crashed worker's claim is released on takeover so the work is
+        // reclaimable by the new lease owner.
+        store
+            .abandon_queued_work_claim(&work.claim)
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("release crashed worker claim failed: {err}"))
+            })?;
+        let resumed = store
+            .claim_ready_queued_work_by_batch_ids(
+                session,
+                &lease.fence(),
+                owner,
+                QueuedWorkClaimBoundary::Idle,
+                LEASE_TTL_MS,
+                std::slice::from_ref(&work.batch_id),
+            )
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("second worker claim of work failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                RuntimeBoundaryError::new(
+                    "second worker could not resume the crashed worker's queued work".to_string(),
+                )
+            })?;
+        // The dead owner's late completion (a renewal of its now-superseded
+        // claim) must be rejected as expired, never silently accepted.
+        let stale_work_completion_rejected = matches!(
+            store
+                .renew_queued_work_claim(&work.claim, LEASE_TTL_MS)
+                .await,
+            Err(lash_core::StoreError::QueuedWorkClaimExpired { .. })
+        );
+        if !stale_work_completion_rejected {
+            return Err(RuntimeBoundaryError::new(
+                "crashed worker's stale work completion was not rejected after failover".to_string(),
+            ));
+        }
+        Ok(WorkerFailover {
+            resumed_by_second_owner: true,
+            resumed_claim_fencing_token: resumed.fencing_token,
+            stale_work_completion_rejected,
+        })
     }
 
     async fn ensure_effect_controller(
@@ -679,6 +882,52 @@ impl RuntimeBoundaryHarness {
     }
 }
 
+struct WorkerOwnedWork {
+    batch_id: String,
+    source_key: String,
+    claim_fencing_token: u64,
+    claim: QueuedWorkClaim,
+}
+
+struct WorkerFailover {
+    resumed_by_second_owner: bool,
+    resumed_claim_fencing_token: u64,
+    stale_work_completion_rejected: bool,
+}
+
+fn worker_failover_work(
+    session: &str,
+    occurred_at_ms: u64,
+) -> Result<lash_core::ProcessWakeDelivery, RuntimeBoundaryError> {
+    let process_id = format!("sim-worker-{session}");
+    let dedupe_key = format!("worker-failover/{session}/work");
+    lash_core::process_wake_delivery(lash_core::ProcessWakeDeliveryRequest {
+        target_scope: SessionScope::new(session.to_string()),
+        process_id: process_id.clone(),
+        sequence: 1,
+        event_type: "process.wake".to_string(),
+        event_invocation: RuntimeInvocation {
+            scope: RuntimeScope::new(session.to_string()),
+            subject: RuntimeSubject::ProcessEvent {
+                process_id,
+                sequence: 1,
+                event_type: "process.wake".to_string(),
+            },
+            caused_by: None,
+            replay: Some(RuntimeReplay {
+                key: format!("worker-failover:{session}:work"),
+            }),
+        },
+        process_caused_by: None,
+        wake: lash_core::ProcessWake {
+            input: format!("worker-owned work for {session}"),
+            dedupe_key,
+        },
+        occurred_at: std::time::UNIX_EPOCH + std::time::Duration::from_millis(occurred_at_ms),
+    })
+    .map_err(|err| RuntimeBoundaryError::new(format!("build worker-owned work failed: {err}")))
+}
+
 fn boundary_session_alias(event: &BoundaryEvent) -> String {
     event
         .payload
@@ -700,6 +949,7 @@ fn boundary_kind_name(kind: BoundaryKind) -> &'static str {
         BoundaryKind::Ingress => "ingress",
         BoundaryKind::QueuedIngress => "queued_ingress",
         BoundaryKind::Provider => "provider",
+        BoundaryKind::ProviderEvent => "provider_event",
         BoundaryKind::Tool => "tool",
         BoundaryKind::ExecCode => "exec_code",
         BoundaryKind::DurableEffect => "durable_effect",
@@ -726,6 +976,78 @@ mod tests {
         let factory: Arc<dyn SessionStoreFactory> =
             Arc::new(lash_core::InMemorySessionStoreFactory::new());
         RuntimeBoundaryHarness::new(factory, RuntimeEffectReplayStore::Memory)
+    }
+
+    #[tokio::test]
+    async fn worker_failover_continuation_oracle_catches_a_store_that_fails_to_fence() {
+        // END-TO-END NEGATIVE: drive the REAL worker-stale-completion boundary
+        // against a store whose session-execution lease is already held, so the
+        // worker's stale-owner claim is Busy and the real lease store can neither
+        // fence nor continue the work. The failover-continuation oracle MUST catch
+        // this — proving it bites on a real un-fencing path, not just synthetic
+        // facts.
+        let mut harness = harness();
+        let session = "worker-unfenced-session";
+        let store = harness.store_for_session(session).await.expect("store");
+        let blocker = LeaseOwnerIdentity::opaque("blocker-owner", "blocker-owner:001");
+        let blocking = match store
+            .try_claim_session_execution_lease(session, &blocker, LEASE_TTL_MS)
+            .await
+            .expect("blocker claim")
+        {
+            SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
+            other => panic!("expected to acquire the blocking lease: {other:?}"),
+        };
+
+        let worker_event = BoundaryEvent::new(
+            "worker:unfenced:001",
+            session,
+            BoundaryKind::Worker,
+            5,
+            "worker.stale-completion-rejected",
+            json!({ "session": session }),
+        );
+        let observed = harness
+            .run_worker_stale_completion(&worker_event)
+            .await
+            .expect("worker boundary observed");
+
+        // The real store could NOT fence: no rejection, no work continuation.
+        assert_eq!(
+            observed.get("stale_completion_rejected").and_then(Value::as_bool),
+            Some(false),
+            "a busy store must not report a fenced stale completion: {observed}"
+        );
+        assert!(
+            observed
+                .get("runtime_worker_store")
+                .and_then(|store| store.get("worker_owned_work"))
+                .is_none(),
+            "a store that failed to fence must not record worker-owned-work continuation: {observed}"
+        );
+
+        let delivered = crate::scheduler::DeliveredBoundary {
+            schema: "test".to_string(),
+            sequence: 0,
+            scheduler: crate::scheduler::SchedulerDeliveryEvidence::default(),
+            boundary_id: "worker:unfenced:001".to_string(),
+            actor_alias: session.to_string(),
+            kind: BoundaryKind::Worker,
+            at: 5,
+            label: "worker.stale-completion-rejected".to_string(),
+            payload: json!({ "session": session }),
+            observed,
+        };
+        let verdict = crate::oracles::worker_failover_continues_work(std::slice::from_ref(&delivered));
+        assert!(
+            !verdict.is_passed(),
+            "the failover-continuation oracle must catch a store that failed to fence: {}",
+            verdict.message
+        );
+
+        let _ = store
+            .release_session_execution_lease(&blocking.completion())
+            .await;
     }
 
     #[tokio::test]
@@ -868,5 +1190,14 @@ mod tests {
             true
         );
         assert!(observed["runtime_active_lease"].is_object());
+        let work = &observed["runtime_worker_store"]["worker_owned_work"];
+        assert_eq!(work["first_owner_claimed_work"], true);
+        assert_eq!(work["second_owner_resumed_work"], true);
+        assert_eq!(work["second_owner_outranks_first"], true);
+        assert_eq!(work["stale_work_completion_rejected"], true);
+        assert!(
+            work["second_owner_claim_fencing_token"].as_u64().unwrap()
+                > work["first_owner_claim_fencing_token"].as_u64().unwrap()
+        );
     }
 }

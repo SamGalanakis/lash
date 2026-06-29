@@ -6,6 +6,10 @@ use lash_protocol_rlm::scenario_contracts::RLM_PROTOCOL_SCENARIO_CONTRACTS;
 use lash_protocol_standard::scenario_contracts::STANDARD_PROTOCOL_SCENARIO_CONTRACTS;
 use serde_json::Value;
 
+use crate::runtime_contracts::{
+    RuntimeAgentFrameInvariantFacts, RuntimeGraphInvariantFacts, RuntimeUsageInvariantFacts,
+};
+use crate::provider_mutations::is_transport_provider_mutation;
 use crate::runtime_providers::MIGRATED_RUNTIME_PROVIDER_KINDS;
 use crate::scheduler::{BoundaryKind, DeliveredBoundary};
 use crate::trace::{AbstractWorldSummary, OracleVerdict};
@@ -25,8 +29,20 @@ pub const PROVIDER_MUTATION_ORACLE: &str = "sim.oracle.provider-mutation-rejecte
 pub const QUEUED_INGRESS_ORACLE: &str = "sim.oracle.queued-ingress-observed.v1";
 pub const REPLAY_DETERMINISM_ORACLE: &str = "sim.oracle.replay-determinism.v1";
 pub const RUNTIME_PROVIDER_TURN_ORACLE: &str = "sim.oracle.runtime-provider-turn.v1";
+pub const PENDING_TOOL_COMPLETION_ORACLE: &str =
+    "sim.oracle.pending-tool-completion-through-turn.v1";
+pub const RUNTIME_GRAPH_ACYCLIC_ORACLE: &str = "sim.oracle.runtime-graph-acyclic.v1";
+pub const RUNTIME_SINGLE_ACTIVE_AGENT_FRAME_ORACLE: &str =
+    "sim.oracle.runtime-single-active-agent-frame.v1";
+pub const RUNTIME_USAGE_MONOTONIC_ORACLE: &str = "sim.oracle.runtime-usage-monotonic.v1";
+pub const RUNTIME_FINAL_VALUE_SEMANTIC_ORACLE: &str =
+    "sim.oracle.runtime-final-value-semantic-channel.v1";
 pub const GENERATED_PROVIDER_MATRIX_ORACLE: &str =
     "sim.oracle.generated-runtime-provider-matrix.v1";
+pub const PROVIDER_TURN_INTERLEAVING_ORACLE: &str =
+    "sim.oracle.provider-turn-interleaving-depth.v1";
+pub const PROVIDER_TRANSPORT_MUTATION_ORACLE: &str =
+    "sim.oracle.provider-transport-mutation-classified.v1";
 pub const RUNTIME_SESSION_GRAPH_ORACLE: &str = "sim.oracle.runtime-session-graph.v1";
 pub const SCHEDULER_CONTROLLED_DELIVERY_ORACLE: &str =
     "sim.oracle.scheduler-controlled-delivery.v1";
@@ -67,6 +83,152 @@ pub const SCENARIO_MINI_AGENT_PARALLEL_JOIN_ORACLE: &str =
 pub const TOOL_BOUNDARY_ORACLE: &str = "sim.oracle.tool-boundary-observed.v1";
 pub const TRIGGER_ORACLE: &str = "sim.oracle.trigger-delivery-observed.v1";
 pub const WORKER_STALE_COMPLETION_ORACLE: &str = "sim.oracle.worker-stale-completion-rejected.v1";
+pub const GENERATED_SUSPEND_RESUME_ORACLE: &str = "sim.oracle.generated-suspend-resume.v1";
+pub const GENERATED_FINAL_VALUE_ORACLE: &str =
+    "sim.oracle.generated-final-value-semantic-channel.v1";
+
+fn is_suspend_resume(event: &DeliveredBoundary) -> bool {
+    event
+        .payload
+        .get("suspend_resume")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Assert that every generated suspend turn genuinely parked mid-flight and was
+/// resumed only by the scheduler-delivered completion boundary — never ran
+/// synchronously. This generalizes the fixed pending-tool proof into the live
+/// generated search. Workloads with no suspend boundary (e.g. minimized
+/// fixtures) pass vacuously.
+pub fn generated_suspend_resume(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut checked = 0usize;
+    for event in events.iter().filter(|event| is_suspend_resume(event)) {
+        let Some(suspend) = event.observed.get("runtime_suspend") else {
+            return OracleVerdict::failed(
+                GENERATED_SUSPEND_RESUME_ORACLE,
+                format!(
+                    "suspend resume `{}` recorded no runtime_suspend evidence",
+                    event.boundary_id
+                ),
+            );
+        };
+        let suspended_before = suspend
+            .get("turn_suspended_before_completion")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let scheduler_delivered = suspend
+            .get("scheduler_delivered_completion")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let resolve_accepted = suspend
+            .get("resolve_accepted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let resumed_after = suspend
+            .get("resumed_after_completion")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let before = suspend
+            .get("completed_event_count_before_resolution")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX);
+        let after = suspend
+            .get("completed_event_count_after_resolution")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if !(suspended_before
+            && scheduler_delivered
+            && resolve_accepted
+            && resumed_after
+            && before == 0
+            && after > before)
+        {
+            return OracleVerdict::failed(
+                GENERATED_SUSPEND_RESUME_ORACLE,
+                format!(
+                    "suspend `{}` ({}) did not park-then-resume: suspended_before={suspended_before} scheduler_delivered={scheduler_delivered} resolve_accepted={resolve_accepted} resumed_after={resumed_after} completed_before={before} completed_after={after}",
+                    event.boundary_id,
+                    suspend.get("suspend_kind").and_then(Value::as_str).unwrap_or("?")
+                ),
+            );
+        }
+        checked += 1;
+    }
+    if checked == 0 {
+        // Anti-vacuity: every generated workload plants suspend sessions, so a run
+        // with zero suspend-resume boundaries means the class was dropped — the
+        // oracle must fail rather than pass on an absent class.
+        return OracleVerdict::failed(
+            GENERATED_SUSPEND_RESUME_ORACLE,
+            "no suspend-resume boundary was observed; the suspend/resume class is absent",
+        );
+    }
+    OracleVerdict::passed(
+        GENERATED_SUSPEND_RESUME_ORACLE,
+        format!(
+            "{checked} generated suspend turn(s) parked mid-flight and resumed only after a scheduler-delivered completion"
+        ),
+    )
+}
+
+/// Run the final-value (semantic-channel / distinct-from-transcript) invariant
+/// on every generated provider turn, not just the fixed RLM proof. Generated
+/// turns are assistant-message turns, so the invariant asserts the dual of the
+/// proof: the assistant prose was NOT mis-projected as a semantic final value —
+/// `outcome_kind` is `assistant_message`, no `semantic_value` leaked, and no
+/// terminal FinalValue/ToolValue event was emitted. A turn that smuggled a
+/// final value through transcript inference would fail.
+pub fn generated_final_value_semantic_channel(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut checked = 0usize;
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Provider)
+    {
+        let Some(facts) = event.observed.get("runtime_final_value_facts") else {
+            return OracleVerdict::failed(
+                GENERATED_FINAL_VALUE_ORACLE,
+                format!(
+                    "provider turn `{}` recorded no runtime_final_value_facts",
+                    event.boundary_id
+                ),
+            );
+        };
+        let outcome_kind = facts.get("outcome_kind").and_then(Value::as_str).unwrap_or("");
+        let has_semantic_value = facts
+            .get("semantic_value")
+            .map(|value| !value.is_null())
+            .unwrap_or(false);
+        let terminal_event_count = facts
+            .get("terminal_event_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let semantic_channel_observed = facts
+            .get("semantic_channel_observed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if outcome_kind != "assistant_message"
+            || has_semantic_value
+            || terminal_event_count != 0
+            || semantic_channel_observed
+        {
+            return OracleVerdict::failed(
+                GENERATED_FINAL_VALUE_ORACLE,
+                format!(
+                    "provider turn `{}` leaked a semantic final value: outcome_kind={outcome_kind} has_semantic_value={has_semantic_value} terminal_events={terminal_event_count} semantic_channel_observed={semantic_channel_observed}",
+                    event.boundary_id
+                ),
+            );
+        }
+        checked += 1;
+    }
+    OracleVerdict::passed(
+        GENERATED_FINAL_VALUE_ORACLE,
+        format!(
+            "{checked} generated assistant-message turn(s) kept the semantic final-value channel empty (no transcript-inferred final values)"
+        ),
+    )
+}
+
 
 pub fn cross_session_isolation(summary: &AbstractWorldSummary) -> OracleVerdict {
     if summary.session_count < 2 {
@@ -160,106 +322,126 @@ pub fn observer_convergence(summary: &AbstractWorldSummary) -> OracleVerdict {
     )
 }
 
-pub fn queued_ingress_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.queued_ingress_count > 0)
-    {
-        OracleVerdict::passed(
-            QUEUED_INGRESS_ORACLE,
-            "generated workload queued turn input through an explicit ingress boundary",
-        )
+/// Build a failing-capable coverage verdict: the boundary kind must be present
+/// AND the runtime invariant its reason claims must actually hold in the events.
+/// A present-but-broken boundary fails loudly instead of passing on presence.
+fn coverage_invariant_verdict(
+    oracle_id: &'static str,
+    present: bool,
+    missing_reason: &'static str,
+    invariant_holds: bool,
+    invariant_failed_reason: &'static str,
+    passed_reason: &'static str,
+) -> OracleVerdict {
+    if !present {
+        OracleVerdict::failed(oracle_id, missing_reason)
+    } else if !invariant_holds {
+        OracleVerdict::failed(oracle_id, invariant_failed_reason)
     } else {
-        OracleVerdict::failed(
-            QUEUED_INGRESS_ORACLE,
-            "no queued ingress boundary was observed",
-        )
+        OracleVerdict::passed(oracle_id, passed_reason)
     }
 }
 
-pub fn cancellation_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.cancellation_count > 0)
-    {
-        OracleVerdict::passed(
-            CANCELLATION_ORACLE,
-            "generated workload cancelled a pending boundary explicitly",
-        )
-    } else {
-        OracleVerdict::failed(CANCELLATION_ORACLE, "no cancellation boundary was observed")
-    }
+pub fn queued_ingress_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        QUEUED_INGRESS_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.queued_ingress_count > 0),
+        "no queued ingress boundary was observed",
+        queued_ingress_has_source_keys(events),
+        "queued ingress boundary was observed but it lacked a stable payload/observed source key",
+        "generated workload queued turn input through an explicit ingress boundary carrying a stable source key",
+    )
 }
 
-pub fn trigger_delivery_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.trigger_count > 0)
-    {
-        OracleVerdict::passed(
-            TRIGGER_ORACLE,
-            "generated workload delivered a trigger boundary with stable source identity",
-        )
-    } else {
-        OracleVerdict::failed(TRIGGER_ORACLE, "no trigger boundary was observed")
-    }
+pub fn cancellation_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        CANCELLATION_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.cancellation_count > 0),
+        "no cancellation boundary was observed",
+        cancellation_terminalizes_pending_input(events),
+        "cancellation boundary was observed but it did not terminalize the pending queued input",
+        "generated workload cancelled a pending boundary and terminalized its queued input",
+    )
 }
 
-pub fn observer_reconnect_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.observer_reconnects > 0)
-    {
-        OracleVerdict::passed(
-            OBSERVER_RECONNECT_ORACLE,
-            "observer reconnect boundary converged on the same session state",
-        )
-    } else {
-        OracleVerdict::failed(
-            OBSERVER_RECONNECT_ORACLE,
-            "no observer reconnect boundary was observed",
-        )
-    }
+pub fn trigger_delivery_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        TRIGGER_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.trigger_count > 0),
+        "no trigger boundary was observed",
+        trigger_delivery_runtime_observed(events),
+        "trigger boundary was observed but it did not route through a runtime trigger DTO with a stable source identity",
+        "generated workload delivered a trigger boundary routed through a runtime trigger DTO with stable source identity",
+    )
 }
 
-pub fn backend_failure_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.backend_failure_count > 0)
-    {
-        OracleVerdict::passed(
-            BACKEND_FAILURE_ORACLE,
-            "generated workload injected a backend failure boundary",
-        )
-    } else {
-        OracleVerdict::failed(
-            BACKEND_FAILURE_ORACLE,
-            "no backend failure boundary was observed",
-        )
-    }
+pub fn observer_reconnect_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        OBSERVER_RECONNECT_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.observer_reconnects > 0),
+        "no observer reconnect boundary was observed",
+        observer_reconnect_has_matching_turn(events, summary),
+        "observer reconnect boundary was observed but its replayed snapshot did not converge to the session's final provider turn",
+        "observer reconnect boundary converged on the same session state (final provider turn)",
+    )
 }
 
-pub fn provider_mutation_rejected(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| session.provider_mutation_count > 0)
-    {
-        OracleVerdict::passed(
-            PROVIDER_MUTATION_ORACLE,
-            "provider/script mutation boundary was rejected without changing runtime state",
-        )
-    } else {
-        OracleVerdict::failed(
-            PROVIDER_MUTATION_ORACLE,
-            "no provider/script mutation boundary was observed",
-        )
-    }
+pub fn backend_failure_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        BACKEND_FAILURE_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.backend_failure_count > 0),
+        "no backend failure boundary was observed",
+        backend_retry_terminalization_semantics(events),
+        "backend failure boundary was observed but it did not terminalize through the retry/terminalization path",
+        "generated workload injected a backend failure boundary that terminalized through the retry path",
+    )
+}
+
+pub fn provider_mutation_rejected(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        PROVIDER_MUTATION_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.provider_mutation_count > 0),
+        "no provider/script mutation boundary was observed",
+        provider_mutation_parser_matrix_observed(events),
+        "provider/script mutation boundary was observed but it did not run through the real provider parser matrix",
+        "provider/script mutation boundary was rejected through the real provider parser matrix without changing runtime state",
+    )
 }
 
 pub fn generated_runtime_provider_matrix(events: &[DeliveredBoundary]) -> OracleVerdict {
@@ -308,49 +490,204 @@ pub fn generated_runtime_provider_matrix(events: &[DeliveredBoundary]) -> Oracle
     )
 }
 
-pub fn process_wake_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
+/// Peak number of provider turns that were simultaneously live during the run,
+/// derived purely from the delivered boundary stream so the value is identical
+/// on the generation path and on cross-backend replay.
+///
+/// A provider turn is "live" in the delivered event stream from the first
+/// `ProviderEvent` released for its turn (the turn future is parked on the
+/// scripted transport gate at that point) until its `Provider` completion
+/// boundary is delivered. The number of distinct turns simultaneously in that
+/// window is the interleaving depth; its maximum is the highwater.
+pub fn peak_concurrent_live_turns(events: &[DeliveredBoundary]) -> usize {
+    let mut live = BTreeSet::<String>::new();
+    let mut peak = 0usize;
+    for event in events {
+        match event.kind {
+            BoundaryKind::ProviderEvent => {
+                if let Some(turn_boundary_id) = event
+                    .payload
+                    .get("turn_boundary_id")
+                    .and_then(Value::as_str)
+                {
+                    live.insert(turn_boundary_id.to_string());
+                    peak = peak.max(live.len());
+                }
+            }
+            BoundaryKind::Provider => {
+                live.remove(&event.boundary_id);
+            }
+            _ => {}
+        }
+    }
+    peak
+}
+
+/// Count of distinct sessions that ran at least one provider turn. Interleaving
+/// is structurally impossible below two such sessions, so the interleaving
+/// oracle treats those workloads as vacuously satisfied.
+fn provider_turn_session_count(events: &[DeliveredBoundary]) -> usize {
+    events
         .iter()
-        .any(|session| session.process_wake_count > 0)
-    {
+        .filter(|event| event.kind == BoundaryKind::Provider)
+        .map(|event| event.actor_alias.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+/// Make interleaving load-bearing: whenever a workload runs provider turns in at
+/// least two sessions, the scheduler must actually drive at least two of those
+/// turns concurrently. A multi-session workload that never interleaves is a real
+/// scheduling regression and fails this oracle; single-session workloads (and
+/// minimized fixtures that collapse to one session) pass vacuously.
+pub fn provider_turn_interleaving_depth(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let peak = peak_concurrent_live_turns(events);
+    let sessions = provider_turn_session_count(events);
+    if sessions < 2 {
+        return OracleVerdict::passed(
+            PROVIDER_TURN_INTERLEAVING_ORACLE,
+            format!(
+                "interleaving not required: only {sessions} session(s) ran provider turns (peak concurrent live turns {peak})"
+            ),
+        );
+    }
+    if peak >= 2 {
         OracleVerdict::passed(
-            PROCESS_WAKE_ORACLE,
-            "process wake boundary was delivered exactly once in the abstract model",
+            PROVIDER_TURN_INTERLEAVING_ORACLE,
+            format!(
+                "scheduler drove {peak} provider turns concurrently across {sessions} sessions"
+            ),
         )
     } else {
-        OracleVerdict::failed(PROCESS_WAKE_ORACLE, "no process wake boundary was observed")
+        OracleVerdict::failed(
+            PROVIDER_TURN_INTERLEAVING_ORACLE,
+            format!(
+                "{sessions} sessions ran provider turns but peak concurrent live turns was {peak}; the scheduler never interleaved live provider turns"
+            ),
+        )
     }
 }
 
-pub fn exec_code_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
+/// Each generator-driven transport/HTTP mutation must land on its own named
+/// failure path through the real provider: a mid-stream disconnect classifies
+/// as a retryable stream fault, response-start and chunk timeouts as retryable
+/// timeouts, and a 5xx as a retryable HTTP status carrying its status code.
+/// This proves the new mutation classes drive distinct, executable behaviors
+/// rather than collapsing into a single generic parser error. Workloads that
+/// happen to contain no transport mutation pass vacuously (the class is still
+/// covered by the seeded anchor in every full run).
+pub fn provider_transport_mutation_classified(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut observed_classes = BTreeSet::new();
+    for event in events
         .iter()
-        .any(|session| !session.exec_code_outputs.is_empty())
+        .filter(|event| event.kind == BoundaryKind::ProviderMutation)
     {
-        OracleVerdict::passed(
-            EXEC_CODE_ORACLE,
-            "exec-code boundary produced a captured result",
-        )
-    } else {
-        OracleVerdict::failed(EXEC_CODE_ORACLE, "no exec-code boundary was observed")
+        let Some(mutation) = event
+            .observed
+            .get("mutation")
+            .or_else(|| event.payload.get("mutation"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if !is_transport_provider_mutation(mutation) {
+            continue;
+        }
+        let Some(proof) = event
+            .observed
+            .pointer("/provider_parser_matrix/matrix/proofs")
+            .and_then(Value::as_array)
+            .and_then(|proofs| proofs.first())
+        else {
+            return OracleVerdict::failed(
+                PROVIDER_TRANSPORT_MUTATION_ORACLE,
+                format!(
+                    "transport mutation `{mutation}` on `{}` recorded no real provider parser proof",
+                    event.boundary_id
+                ),
+            );
+        };
+        let raw_kind = proof.get("kind").and_then(Value::as_str).unwrap_or("");
+        let retryable = proof
+            .pointer("/classification/retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = proof.get("status").and_then(Value::as_u64);
+        let classified = match mutation {
+            "mid_stream_disconnect" => raw_kind == "Stream" && retryable,
+            "response_start_timeout" | "stream_chunk_timeout" => raw_kind == "Timeout" && retryable,
+            "retryable_server_error_sequence" => status == Some(503) && retryable,
+            _ => false,
+        };
+        if !classified {
+            return OracleVerdict::failed(
+                PROVIDER_TRANSPORT_MUTATION_ORACLE,
+                format!(
+                    "transport mutation `{mutation}` on `{}` classified incorrectly: raw_kind={raw_kind} retryable={retryable} status={status:?}",
+                    event.boundary_id
+                ),
+            );
+        }
+        observed_classes.insert(mutation.to_string());
     }
+    OracleVerdict::passed(
+        PROVIDER_TRANSPORT_MUTATION_ORACLE,
+        format!(
+            "transport mutation classes classified on distinct failure paths: {:?}",
+            observed_classes
+        ),
+    )
 }
 
-pub fn tool_boundary_observed(summary: &AbstractWorldSummary) -> OracleVerdict {
-    if summary
-        .sessions
-        .iter()
-        .any(|session| !session.tool_outputs.is_empty())
-    {
-        OracleVerdict::passed(
-            TOOL_BOUNDARY_ORACLE,
-            "tool boundary produced a captured result",
-        )
-    } else {
-        OracleVerdict::failed(TOOL_BOUNDARY_ORACLE, "no tool boundary was observed")
-    }
+pub fn process_wake_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        PROCESS_WAKE_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| session.process_wake_count > 0),
+        "no process wake boundary was observed",
+        process_wake_runtime_dto_observed(events) && duplicate_process_wake_rejected(events),
+        "process wake boundary was observed but it did not materialize a runtime DTO with a deduped duplicate wake",
+        "process wake boundary materialized a runtime DTO and the duplicate wake was rejected (delivered exactly once)",
+    )
+}
+
+pub fn exec_code_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        EXEC_CODE_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| !session.exec_code_outputs.is_empty()),
+        "no exec-code boundary was observed",
+        exec_runtime_outcome_observed(events),
+        "exec-code boundary was observed but it did not produce a captured RuntimeEffectOutcome",
+        "exec-code boundary produced a captured RuntimeEffectOutcome result",
+    )
+}
+
+pub fn tool_boundary_observed(
+    summary: &AbstractWorldSummary,
+    events: &[DeliveredBoundary],
+) -> OracleVerdict {
+    coverage_invariant_verdict(
+        TOOL_BOUNDARY_ORACLE,
+        summary
+            .sessions
+            .iter()
+            .any(|session| !session.tool_outputs.is_empty()),
+        "no tool boundary was observed",
+        tool_runtime_output_observed(events),
+        "tool boundary was observed but it did not produce a captured runtime tool-output DTO",
+        "tool boundary produced a captured runtime tool-output DTO",
+    )
 }
 
 pub fn runtime_session_graph_contract(summary: &AbstractWorldSummary) -> OracleVerdict {
@@ -420,6 +757,162 @@ pub fn runtime_session_graph_contract(summary: &AbstractWorldSummary) -> OracleV
     )
 }
 
+pub fn runtime_graph_acyclic(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut checked = 0;
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Provider)
+    {
+        let Some(facts) = runtime_observed_fact::<RuntimeGraphInvariantFacts>(event, "graph")
+        else {
+            return OracleVerdict::failed(
+                RUNTIME_GRAPH_ACYCLIC_ORACLE,
+                format!(
+                    "provider boundary `{}` did not expose real graph invariant facts",
+                    event.boundary_id
+                ),
+            );
+        };
+        checked += 1;
+        if !facts.passed {
+            return OracleVerdict::failed(
+                RUNTIME_GRAPH_ACYCLIC_ORACLE,
+                format!(
+                    "provider boundary `{}` observed graph duplicates={:?} missing_parents={:?} cycles={:?} leaf_exists={}",
+                    event.boundary_id,
+                    facts.duplicate_node_ids,
+                    facts.missing_parent_links,
+                    facts.cycle_node_ids,
+                    facts.leaf_exists
+                ),
+            );
+        }
+    }
+    if checked == 0 {
+        return OracleVerdict::failed(
+            RUNTIME_GRAPH_ACYCLIC_ORACLE,
+            "no provider turn exposed runtime graph invariant facts",
+        );
+    }
+    OracleVerdict::passed(
+        RUNTIME_GRAPH_ACYCLIC_ORACLE,
+        format!(
+            "{checked} real provider turn graphs had unique nodes, valid parents, and no cycles"
+        ),
+    )
+}
+
+pub fn runtime_single_active_agent_frame(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut checked = 0;
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Provider)
+    {
+        let Some(facts) =
+            runtime_observed_fact::<RuntimeAgentFrameInvariantFacts>(event, "agent_frame")
+        else {
+            return OracleVerdict::failed(
+                RUNTIME_SINGLE_ACTIVE_AGENT_FRAME_ORACLE,
+                format!(
+                    "provider boundary `{}` did not expose real Agent Frame facts",
+                    event.boundary_id
+                ),
+            );
+        };
+        checked += 1;
+        if !facts.passed {
+            return OracleVerdict::failed(
+                RUNTIME_SINGLE_ACTIVE_AGENT_FRAME_ORACLE,
+                format!(
+                    "provider boundary `{}` observed current_frame=`{}` active={:?} current_exists={} current_active={} unknown_node_frames={:?}",
+                    event.boundary_id,
+                    facts.current_agent_frame_id,
+                    facts.active_frame_ids,
+                    facts.current_frame_exists,
+                    facts.current_frame_active,
+                    facts.node_agent_frame_ids_without_record
+                ),
+            );
+        }
+    }
+    if checked == 0 {
+        return OracleVerdict::failed(
+            RUNTIME_SINGLE_ACTIVE_AGENT_FRAME_ORACLE,
+            "no provider turn exposed runtime Agent Frame facts",
+        );
+    }
+    OracleVerdict::passed(
+        RUNTIME_SINGLE_ACTIVE_AGENT_FRAME_ORACLE,
+        format!(
+            "{checked} real provider turn snapshots had exactly one active current Agent Frame"
+        ),
+    )
+}
+
+pub fn runtime_usage_monotonic(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut checked = 0;
+    let mut last_context_total_by_session = BTreeMap::<String, i64>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Provider)
+    {
+        let Some(facts) = runtime_observed_fact::<RuntimeUsageInvariantFacts>(event, "usage")
+        else {
+            return OracleVerdict::failed(
+                RUNTIME_USAGE_MONOTONIC_ORACLE,
+                format!(
+                    "provider boundary `{}` did not expose real usage facts",
+                    event.boundary_id
+                ),
+            );
+        };
+        checked += 1;
+        if !facts.non_negative {
+            return OracleVerdict::failed(
+                RUNTIME_USAGE_MONOTONIC_ORACLE,
+                format!(
+                    "provider boundary `{}` observed negative token fields {:?}",
+                    event.boundary_id, facts.negative_fields
+                ),
+            );
+        }
+        if !facts.usage_events_monotonic {
+            return OracleVerdict::failed(
+                RUNTIME_USAGE_MONOTONIC_ORACLE,
+                format!(
+                    "provider boundary `{}` emitted non-monotonic usage activity cumulatives",
+                    event.boundary_id
+                ),
+            );
+        }
+        let current = facts.token_ledger_total.context_total_tokens;
+        if let Some(previous) =
+            last_context_total_by_session.insert(event.actor_alias.clone(), current)
+            && current < previous
+        {
+            return OracleVerdict::failed(
+                RUNTIME_USAGE_MONOTONIC_ORACLE,
+                format!(
+                    "session `{}` token ledger context total regressed from {previous} to {current} at `{}`",
+                    event.actor_alias, event.boundary_id
+                ),
+            );
+        }
+    }
+    if checked == 0 {
+        return OracleVerdict::failed(
+            RUNTIME_USAGE_MONOTONIC_ORACLE,
+            "no provider turn exposed runtime usage facts",
+        );
+    }
+    OracleVerdict::passed(
+        RUNTIME_USAGE_MONOTONIC_ORACLE,
+        format!(
+            "{checked} real provider turns had non-negative usage and non-decreasing session ledger totals"
+        ),
+    )
+}
+
 pub fn durable_effect_exactly_once(summary: &AbstractWorldSummary) -> OracleVerdict {
     if summary.durable_effects.is_empty() {
         return OracleVerdict::failed(
@@ -468,25 +961,94 @@ pub fn worker_stale_completion_rejected(summary: &AbstractWorldSummary) -> Oracl
     )
 }
 
-pub fn lease_time_monotonic(summary: &AbstractWorldSummary) -> OracleVerdict {
-    for session in &summary.sessions {
-        if session
-            .lease_time_ticks
-            .windows(2)
-            .any(|ticks| ticks[0] > ticks[1])
+pub const WORKER_FAILOVER_CONTINUATION_ORACLE: &str =
+    "sim.oracle.worker-failover-continues-work.v1";
+
+/// Real worker FAILOVER CONTINUATION: a second worker incarnation reclaimed the
+/// crashed first owner's session-execution lease at a strictly higher fencing
+/// token and COMMITTED (continued) the queued work the dead owner could not,
+/// while the dead owner's stale work completion was rejected. These facts are
+/// produced by the real lease/queued-work store in
+/// `runtime_boundaries::run_worker_stale_completion` (start_worker_owned_work +
+/// resume_crashed_worker_work), so this oracle can only pass when a real
+/// successor actually continued real work — not merely when stale-completion
+/// evidence was observed.
+pub fn worker_failover_continues_work(events: &[DeliveredBoundary]) -> OracleVerdict {
+    if events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Worker)
+        .any(worker_owned_work_continued_by_successor)
+    {
+        return OracleVerdict::passed(
+            WORKER_FAILOVER_CONTINUATION_ORACLE,
+            "a second worker incarnation reclaimed the dead owner's lease at a strictly higher fence and committed (continued) the queued work the crashed first owner could not, rejecting its stale completion",
+        );
+    }
+    OracleVerdict::failed(
+        WORKER_FAILOVER_CONTINUATION_ORACLE,
+        "no worker boundary proved second-owner failover CONTINUATION of the first owner's in-flight work (claimed -> reclaimed at higher fence -> continued -> stale rejected)",
+    )
+}
+
+fn worker_owned_work_continued_by_successor(event: &DeliveredBoundary) -> bool {
+    let Some(work) = event
+        .observed
+        .get("runtime_worker_store")
+        .and_then(|store| store.get("worker_owned_work"))
+    else {
+        return false;
+    };
+    let flag = |key: &str| work.get(key).and_then(Value::as_bool).unwrap_or(false);
+    flag("first_owner_claimed_work")
+        && flag("second_owner_resumed_work")
+        && flag("second_owner_outranks_first")
+        && flag("stale_work_completion_rejected")
+}
+
+/// Assert that the real session-execution-lease fencing tokens recorded by the
+/// lease-time boundaries strictly increase per session. Unlike the old
+/// generator-fed tick (which was monotonic by construction and could never
+/// fail), this reads the ground-truth fencing token the in-memory/SQLite lease
+/// store handed back, so a broken fencing implementation that reissued or
+/// regressed a token would fail this oracle.
+pub fn lease_time_monotonic(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut last_by_session: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut grounded = 0usize;
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::LeaseTime)
+    {
+        let Some(fencing_token) = event
+            .observed
+            .pointer("/runtime_lease_probe/session_execution_lease_fencing_token")
+            .and_then(Value::as_u64)
+        else {
+            return OracleVerdict::failed(
+                LEASE_TIME_MONOTONIC_ORACLE,
+                format!(
+                    "lease-time boundary `{}` recorded no real lease fencing token",
+                    event.boundary_id
+                ),
+            );
+        };
+        grounded += 1;
+        if let Some(previous) = last_by_session.insert(event.actor_alias.as_str(), fencing_token)
+            && fencing_token <= previous
         {
             return OracleVerdict::failed(
                 LEASE_TIME_MONOTONIC_ORACLE,
                 format!(
-                    "session `{}` lease/time ticks moved backwards",
-                    session.alias
+                    "session `{}` lease fencing token did not advance: {previous} -> {fencing_token}",
+                    event.actor_alias
                 ),
             );
         }
     }
     OracleVerdict::passed(
         LEASE_TIME_MONOTONIC_ORACLE,
-        "lease/time boundary ticks were monotonic per session",
+        format!(
+            "{grounded} lease-time boundaries advanced a real session-execution-lease fencing token monotonically per session"
+        ),
     )
 }
 
@@ -574,7 +1136,10 @@ pub fn scheduler_owned_runtime_completions(events: &[DeliveredBoundary]) -> Orac
         BoundaryKind::Worker,
     ] {
         let mut saw_kind = false;
-        for event in events.iter().filter(|event| event.kind == kind) {
+        for event in events
+            .iter()
+            .filter(|event| event.kind == kind && !is_suspend_resume(event))
+        {
             saw_kind = true;
             let Some(completion) = event.payload.get("runtime_completion") else {
                 return OracleVerdict::failed(
@@ -823,20 +1388,140 @@ pub fn state_machine_semantic_invariants(
     }
 }
 
+/// Scenario-contract oracle vector. The RUNTIME suite is genuinely exercised
+/// per-contract by the generated runtime state machine, so each runtime contract
+/// emits its OWN distinct, failing-capable verdict. The STANDARD/RLM/AGENT
+/// protocol suites are NOT distinctly exercised per-contract by the generated
+/// workload (extending it to per-contract evidence is out of scope this pass), so
+/// rather than stamp ~36 shared-bucket verdicts and overstate the oracle count,
+/// each of those suites collapses to ONE explicit, failing-capable SUITE-LEVEL
+/// coverage-manifest verdict (see `scenario_suite_coverage_manifest`). The real
+/// per-behavior failing oracles for those suites are the mini-oracles
+/// (`scenario_contract_mini_oracles`); the per-contract protocol semantics are
+/// validated upstream by each protocol crate's own unit tests.
 pub fn scenario_contract_oracles(
     events: &[DeliveredBoundary],
     summary: &AbstractWorldSummary,
 ) -> Vec<OracleVerdict> {
-    [
-        RUNTIME_SCENARIO_CONTRACTS,
+    let mut verdicts = RUNTIME_SCENARIO_CONTRACTS
+        .iter()
+        .map(|contract| scenario_contract_oracle(contract, events, summary))
+        .collect::<Vec<_>>();
+    verdicts.push(scenario_suite_coverage_manifest(
         STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+        events,
+        summary,
+    ));
+    verdicts.push(scenario_suite_coverage_manifest(
         RLM_PROTOCOL_SCENARIO_CONTRACTS,
+        events,
+        summary,
+    ));
+    verdicts.push(scenario_suite_coverage_manifest(
         AGENT_SCENARIO_CONTRACTS,
-    ]
-    .into_iter()
-    .flat_map(|contracts| contracts.iter())
-    .map(|contract| scenario_contract_oracle(contract, events, summary))
-    .collect()
+        events,
+        summary,
+    ));
+    verdicts
+}
+
+/// The suite-level coverage-manifest oracle id for a protocol suite (e.g.
+/// `sim.oracle.scenario.standard-contract.v1:coverage-manifest`). Stable so the
+/// generated slice/package machinery can attach this verdict to every contract
+/// in the suite as its coverage backing.
+pub fn scenario_suite_coverage_manifest_oracle_id(contract: &ScenarioContractSpec) -> String {
+    format!("{}:coverage-manifest", contract.oracle_id)
+}
+
+/// One failing-capable, suite-level coverage manifest for a protocol suite. This
+/// is explicitly a COVERAGE MANIFEST, not a per-contract oracle: it enumerates
+/// the protocol contracts the generated lane covers at the suite level and
+/// asserts the suite-level evidence the generated workload genuinely produces. If
+/// that evidence regresses the manifest fails loudly; the per-contract semantics
+/// remain validated upstream by the protocol crate and by the suite mini-oracles.
+fn scenario_suite_coverage_manifest(
+    contracts: &'static [ScenarioContractSpec],
+    events: &[DeliveredBoundary],
+    summary: &AbstractWorldSummary,
+) -> OracleVerdict {
+    let first = contracts
+        .first()
+        .expect("protocol suite must declare at least one contract");
+    let suite = first.suite;
+    let oracle_id = scenario_suite_coverage_manifest_oracle_id(first);
+    let covered = contracts
+        .iter()
+        .map(|contract| contract.test_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let evidence = suite_coverage_evidence(suite, events, summary);
+    if evidence.passed {
+        OracleVerdict::passed(
+            oracle_id,
+            format!(
+                "{suite} suite coverage manifest: the generated lane covers {} protocol contracts [{covered}] at the suite level; suite evidence held ({}). Per-contract semantics are validated upstream by the {suite} protocol crate's own tests and by the {suite} mini-oracles; not re-derived per-contract here.",
+                contracts.len(),
+                evidence.reason
+            ),
+        )
+    } else {
+        OracleVerdict::failed(
+            oracle_id,
+            format!(
+                "{suite} suite coverage manifest FAILED: suite-level evidence missing ({}) while covering contracts [{covered}]",
+                evidence.reason
+            ),
+        )
+    }
+}
+
+/// Suite-level evidence the generated workload must produce for a protocol suite,
+/// expressed as the conjunction of the distinct runtime DTO/projection facts the
+/// suite's contracts depend on (no `|`-grouped per-contract stamping, no global
+/// `any-session>0` presence bucket). Failing-capable: a regressed fact fails the
+/// suite coverage manifest.
+fn suite_coverage_evidence(
+    suite: &str,
+    events: &[DeliveredBoundary],
+    summary: &AbstractWorldSummary,
+) -> ScenarioSemanticVerdict {
+    match suite {
+        "standard" => assert_semantic(
+            provider_mutation_parser_matrix_observed(events)
+                && tool_provider_reentry_observed(events, summary)
+                && tool_runtime_output_observed(events)
+                && tool_effects_execute_once(events)
+                && duplicate_free_stream_finalization(events, summary)
+                && provider_exchange_counts_are_turn_indexed(summary)
+                && observer_convergence(summary).is_passed(),
+            "provider parser matrix, tool-loop re-entry + single tool effect, duplicate-free streamed finalization, and turn-indexed exchanges with observer convergence",
+        ),
+        "rlm" => assert_semantic(
+            exec_runtime_outcome_observed(events)
+                && exec_effects_execute_once(events)
+                && exec_outcome_has_no_tool_call_replay(events)
+                && trigger_delivery_runtime_observed(events)
+                && provider_mutation_parser_matrix_observed(events)
+                && provider_mutation_classes_observed(events)
+                && provider_exchange_counts_are_turn_indexed(summary)
+                && observer_convergence(summary).is_passed(),
+            "exec-code RuntimeEffectOutcome (single execution, no replayed tool calls), trigger delivery, provider mutation parser matrix + classes, and turn-indexed exchanges with observer convergence",
+        ),
+        "agent" => assert_semantic(
+            process_wake_runtime_dto_observed(events)
+                && durable_runtime_effect_observed(events)
+                && exec_runtime_outcome_observed(events)
+                && tool_runtime_output_observed(events)
+                && observer_reconnect_has_matching_turn(events, summary)
+                && provider_exchange_counts_are_turn_indexed(summary)
+                && observer_convergence(summary).is_passed()
+                && summary.session_count >= 2,
+            "process wake DTO, durable effect, exec + tool facade outputs, observer reconnect convergence, turn-indexed exchanges, and a multi-session graph",
+        ),
+        other => ScenarioSemanticVerdict::failed(format!(
+            "unknown protocol suite `{other}` has no suite coverage evidence"
+        )),
+    }
 }
 
 pub fn scenario_contract_mini_oracles(
@@ -953,7 +1638,7 @@ fn mini_runtime_cancellation_prevents_idle_claim(events: &[DeliveredBoundary]) -
 }
 
 fn mini_runtime_process_wake_duplicate_rejected(events: &[DeliveredBoundary]) -> OracleVerdict {
-    let mut dedupe_claims: BTreeMap<String, Vec<bool>> = BTreeMap::new();
+    let mut dedupe_events: BTreeMap<String, Vec<&DeliveredBoundary>> = BTreeMap::new();
     for event in events
         .iter()
         .filter(|event| event.kind == BoundaryKind::ProcessWake)
@@ -965,24 +1650,37 @@ fn mini_runtime_process_wake_duplicate_rejected(events: &[DeliveredBoundary]) ->
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let claimed = event
-            .observed
-            .get("claimed_once")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        dedupe_claims.entry(key).or_default().push(claimed);
+        dedupe_events.entry(key).or_default().push(event);
     }
-    if dedupe_claims.values().any(|claims| {
-        claims.iter().filter(|claimed| **claimed).count() == 1 && claims.contains(&false)
+    if dedupe_events.values().any(|events| {
+        let claims = events
+            .iter()
+            .filter_map(|event| event.observed.get("claimed_once").and_then(Value::as_bool))
+            .collect::<Vec<_>>();
+        let strict_claim_dedupe =
+            claims.iter().filter(|claimed| **claimed).count() == 1 && claims.contains(&false);
+        let in_flight_rejection = events.iter().any(|event| {
+            event
+                .observed
+                .get("lease_busy")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && event
+                    .observed
+                    .pointer("/runtime_queued_work/enqueued")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+        }) && claims.contains(&false);
+        strict_claim_dedupe || in_flight_rejection
     }) {
         OracleVerdict::passed(
             SCENARIO_MINI_RUNTIME_PROCESS_WAKE_DEDUPE_ORACLE,
-            "duplicate process wake used the same dedupe key and was rejected by runtime queued-work claims",
+            "duplicate process wake used the same dedupe key and was rejected by runtime queued-work claims or by an in-flight session lease",
         )
     } else {
         OracleVerdict::failed(
             SCENARIO_MINI_RUNTIME_PROCESS_WAKE_DEDUPE_ORACLE,
-            "no process wake dedupe key showed exactly one claim and one rejected duplicate",
+            "no process wake dedupe key showed a claim/rejection pair or in-flight lease rejection",
         )
     }
 }
@@ -1392,6 +2090,9 @@ impl ScenarioSemanticVerdict {
     }
 }
 
+/// Per-contract semantic adapter. Only the RUNTIME suite emits per-contract
+/// oracles (the STANDARD/RLM/AGENT suites collapse to suite coverage manifests in
+/// `scenario_contract_oracles`), so only runtime contracts reach this dispatcher.
 fn scenario_contract_semantics(
     contract: &ScenarioContractSpec,
     events: &[DeliveredBoundary],
@@ -1399,10 +2100,9 @@ fn scenario_contract_semantics(
 ) -> ScenarioSemanticVerdict {
     match contract.suite {
         "runtime" => runtime_contract_semantics(contract.semantic_oracle, events, summary),
-        "standard" => standard_contract_semantics(contract.semantic_oracle, events, summary),
-        "rlm" => rlm_contract_semantics(contract.semantic_oracle, events, summary),
-        "agent" => agent_contract_semantics(contract.semantic_oracle, events, summary),
-        other => ScenarioSemanticVerdict::failed(format!("unknown contract suite `{other}`")),
+        other => ScenarioSemanticVerdict::failed(format!(
+            "suite `{other}` does not emit per-contract oracles; it is covered by a suite coverage manifest"
+        )),
     }
 }
 
@@ -1411,184 +2111,76 @@ fn runtime_contract_semantics(
     events: &[DeliveredBoundary],
     summary: &AbstractWorldSummary,
 ) -> ScenarioSemanticVerdict {
+    // Each runtime contract owns a DISTINCT semantic adapter keyed on the
+    // specific runtime boundary it governs — no `|`-grouped shared arms and no
+    // single global condition standing in for per-contract evidence.
     match semantic_oracle {
         "runtime.process_wake_claim" => assert_semantic(
             process_wake_runtime_dto_observed(events) && duplicate_process_wake_rejected(events),
-            "process wake DTO materialized and duplicate dedupe was rejected",
+            "process wake DTO materialized and the duplicate wake was deduped/rejected",
         ),
-        "runtime.lease_release_rejects_commit" | "runtime.dead_lease_reclaim_rejects_stale" => {
-            assert_semantic(
-                worker_runtime_lease_dto_observed(events)
-                    && summary.workers.iter().any(|worker| {
-                        worker.active_fencing_token > 1
-                            && worker.lease_owner_changes > 0
-                            && worker.stale_completion_rejections > 0
-                    }),
-                "worker lease fence advanced and stale completion was rejected",
-            )
-        }
+        // The dead owner's lease release/completion is rejected (commit fenced out).
+        "runtime.lease_release_rejects_commit" => assert_semantic(
+            worker_runtime_lease_dto_observed(events)
+                && summary
+                    .workers
+                    .iter()
+                    .any(|worker| worker.stale_completion_rejections > 0),
+            "the stale lease holder's completion was rejected by the live fence",
+        ),
+        // A new incarnation reclaims the dead lease and the fence strictly advances.
+        "runtime.dead_lease_reclaim_rejects_stale" => assert_semantic(
+            worker_runtime_lease_dto_observed(events)
+                && summary
+                    .workers
+                    .iter()
+                    .any(|worker| worker.lease_owner_changes > 0 && worker.active_fencing_token > 1),
+            "a second incarnation reclaimed the dead lease at a strictly higher fence",
+        ),
         "runtime.checkpoint_redrive_cancel" => assert_semantic(
             queued_inputs_have_cancel_targets(events) && observer_convergence(summary).is_passed(),
             "queued input cancellation targeted a source key and observers converged",
         ),
-        "runtime.queued_work_keeps_pending_input" | "runtime.queued_turn_input_completion" => {
-            assert_semantic(
-                queued_ingress_has_source_keys(events) && provider_turns_after_queue(summary),
-                "queued ingress had stable source keys and provider turns continued",
-            )
-        }
-        "runtime.command_only_queue_drain" | "runtime.command_before_turn_work" => assert_semantic(
-            queued_ingress_has_source_keys(events) && lease_time_monotonic(summary).is_passed(),
-            "command queue source keys and monotonic lease ticks were observed",
+        // The queued (next-turn) input stays pending/hidden while the live turn runs.
+        "runtime.queued_work_keeps_pending_input" => assert_semantic(
+            queued_ingress_has_source_keys(events) && provider_turns_after_queue(summary),
+            "queued ingress kept a stable source key while live provider turns continued",
+        ),
+        // A queued turn input is eventually completed into a subsequent turn.
+        "runtime.queued_turn_input_completion" => assert_semantic(
+            queued_ingress_has_source_keys(events)
+                && summary.sessions.iter().any(|session| {
+                    session.queued_ingress_count > 0 && session.provider_outputs.len() >= 2
+                }),
+            "a queued turn input source key was followed by a completed subsequent turn",
+        ),
+        // A command-only queue drains against monotonic lease fencing tokens.
+        "runtime.command_only_queue_drain" => assert_semantic(
+            queued_ingress_has_source_keys(events) && lease_time_monotonic(events).is_passed(),
+            "command queue source keys drained against monotonically advancing lease fences",
+        ),
+        // A command applied before turn work still lets later provider turns run.
+        "runtime.command_before_turn_work" => assert_semantic(
+            queued_ingress_has_source_keys(events)
+                && provider_turns_after_queue(summary)
+                && lease_time_monotonic(events).is_passed(),
+            "a command queued before turn work preserved later turns and lease ordering",
         ),
         "runtime.observation_replay_preserves_input" => assert_semantic(
             observer_reconnect_has_matching_turn(events, summary),
             "observer reconnect replay converged to the final provider turn",
         ),
-        _ => assert_semantic(
-            queued_ingress_has_source_keys(events)
-                && queued_inputs_have_cancel_targets(events)
-                && worker_runtime_lease_dto_observed(events),
-            "runtime queue, cancellation, and worker-fence DTO semantics held",
-        ),
+        other => unmapped_scenario_semantic("runtime", other),
     }
 }
 
-fn standard_contract_semantics(
-    semantic_oracle: &str,
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> ScenarioSemanticVerdict {
-    match semantic_oracle {
-        "standard.empty_provider_response_error" | "standard.provider_error_without_checkpoint" => {
-            assert_semantic(
-                provider_mutation_parser_matrix_observed(events),
-                "provider failure/mutation executed through real provider parser matrix",
-            )
-        }
-        "standard.native_tool_loop_reenters_model"
-        | "standard.tool_failure_feedback_reenters_model"
-        | "standard.max_turns_after_tool_result" => assert_semantic(
-            tool_provider_reentry_observed(events, summary),
-            "tool output DTO was captured and provider graph advanced after tool lane",
-        ),
-        "standard.parallel_tool_results_checkpoint_once" => assert_semantic(
-            tool_runtime_output_observed(events) && tool_effects_execute_once(events),
-            "tool effect boundary executed once and produced a single captured record",
-        ),
-        "standard.streamed_text_finalizes_once" => assert_semantic(
-            duplicate_free_stream_finalization(events, summary),
-            "streamed provider turns finalized once without duplicate observer deltas",
-        ),
-        "standard.initial_request_projection" => assert_semantic(
-            provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "streamed provider turns preserved exchange counts and observer convergence",
-        ),
-        _ => assert_semantic(
-            runtime_session_graph_contract(summary).is_passed()
-                && tool_runtime_output_observed(events),
-            "standard protocol graph and tool-result semantics held",
-        ),
-    }
-}
-
-fn rlm_contract_semantics(
-    semantic_oracle: &str,
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> ScenarioSemanticVerdict {
-    match semantic_oracle {
-        "rlm.lashlang_cell_exec_continues" => assert_semantic(
-            exec_runtime_outcome_observed(events) && trigger_delivery_runtime_observed(events),
-            "exec-code RuntimeEffectOutcome and trigger delivery were observed",
-        ),
-        "rlm.exec_error_max_turn_stop"
-        | "rlm.exec_tool_control_frame_switch_terminal"
-        | "rlm.exec_tool_control_fail_terminal" => assert_semantic(
-            exec_runtime_outcome_observed(events) && exec_effects_execute_once(events),
-            "exec-code RuntimeEffectOutcome executed once and remained terminal data",
-        ),
-        "rlm.exec_result_no_tool_call_replay" => assert_semantic(
-            exec_outcome_has_no_tool_call_replay(events),
-            "exec feedback contained no stored tool-call ids or synthetic replayed tool events",
-        ),
-        "rlm.typed_schema_mismatch_repair_loop" | "rlm.typed_schema_any_of_mismatch" => {
-            assert_semantic(
-                provider_mutation_parser_matrix_observed(events)
-                    && provider_mutation_classes_observed(events),
-                "provider mutation parser matrix supplied malformed/repair evidence",
-            )
-        }
-        "rlm.natural_prose_finalizes"
-        | "rlm.typed_prose_requires_finish"
-        | "rlm.finish_required_max_turn_stop"
-        | "rlm.finish_required_diagnostic_counts"
-        | "rlm.natural_diagnostic_counts"
-        | "rlm.cell_diagnostic_counts"
-        | "rlm.retired_marker_plain_lashlang_text"
-        | "rlm.empty_options_natural_default"
-        | "rlm.typed_finish_emits_outcome_and_done"
-        | "rlm.natural_allows_finish_value" => assert_semantic(
-            provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "RLM provider turns and observation diagnostics converged",
-        ),
-        _ => assert_semantic(
-            exec_runtime_outcome_observed(events)
-                && durable_runtime_effect_observed(events)
-                && trigger_delivery_runtime_observed(events),
-            "RLM exec, durable effect, and trigger semantics held",
-        ),
-    }
-}
-
-fn agent_contract_semantics(
-    semantic_oracle: &str,
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> ScenarioSemanticVerdict {
-    match semantic_oracle {
-        "agent.started_process_tool_call_graph"
-        | "agent.started_process_subagent_spawn"
-        | "agent.nested_process_start_await"
-        | "agent.session_turn_process_child"
-        | "agent.failed_child_preserves_failure_graph"
-        | "agent.parallel_spawn_and_join" => assert_semantic(
-            process_wake_runtime_dto_observed(events)
-                && durable_runtime_effect_observed(events)
-                && summary.session_count >= 2,
-            "process wake DTO, durable effect, and multi-session graph evidence were observed",
-        ),
-        "agent.shell_results_are_data" | "agent.shell_output_print_projection_survives" => {
-            assert_semantic(
-                exec_runtime_outcome_observed(events) && tool_runtime_output_observed(events),
-                "shell/exec outcomes and tool facade results remained data",
-            )
-        }
-        "agent.foreground_tool_call_round_trip" => assert_semantic(
-            tool_runtime_output_observed(events)
-                && observer_reconnect_has_matching_turn(events, summary),
-            "tool-call facade output and observer reconnect semantics held",
-        ),
-        "agent.durable_input_suspension_resolution" => assert_semantic(
-            durable_runtime_effect_observed(events)
-                && process_wake_runtime_dto_observed(events)
-                && observer_reconnect_has_matching_turn(events, summary),
-            "durable input, process wake, and observer replay semantics held",
-        ),
-        "agent.tuple_values_finish_as_json_arrays" => assert_semantic(
-            provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "facade final-value provider turn and observer convergence semantics held",
-        ),
-        _ => assert_semantic(
-            summary.session_count >= 2
-                && observer_reconnect_has_matching_turn(events, summary)
-                && durable_runtime_effect_observed(events),
-            "agent multi-session observer and durable/process evidence held",
-        ),
-    }
+/// An unmapped scenario-contract semantic oracle. Each contract must own a
+/// distinct semantic adapter; a new or renamed contract that reaches here fails
+/// loudly rather than passing through a decorative shared fallback.
+fn unmapped_scenario_semantic(suite: &str, semantic_oracle: &str) -> ScenarioSemanticVerdict {
+    ScenarioSemanticVerdict::failed(format!(
+        "{suite} scenario contract `{semantic_oracle}` has no per-contract semantic adapter; add distinct evidence instead of a generic fallback"
+    ))
 }
 
 fn assert_semantic(condition: bool, reason: &'static str) -> ScenarioSemanticVerdict {
@@ -1623,22 +2215,47 @@ fn queued_active_turn_input_hidden_semantics(events: &[DeliveredBoundary]) -> bo
                 && source_key.is_some()
                 && source_key == observed_source_key
                 && queued
-                    .payload
+                    .observed
                     .get("active_turn_id")
+                    .or_else(|| queued.payload.get("active_turn_id"))
                     .and_then(Value::as_str)
                     .is_some_and(|turn_id| !turn_id.is_empty());
+            let active_turn_id = queued
+                .observed
+                .get("active_turn_id")
+                .or_else(|| queued.payload.get("active_turn_id"))
+                .and_then(Value::as_str);
             if !active_turn_queued {
                 return false;
             }
-            let live_turn_preceded_queue = events.iter().any(|event| {
-                event.kind == BoundaryKind::Provider
-                    && event.actor_alias == queued.actor_alias
-                    && event.sequence < queued.sequence
-                    && event
-                        .observed
-                        .get("success")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
+            let live_turn_in_flight = active_turn_id.is_some_and(|turn_id| {
+                let provider_completed_after_queue = events.iter().any(|event| {
+                    event.kind == BoundaryKind::Provider
+                        && event.boundary_id == turn_id
+                        && event.actor_alias == queued.actor_alias
+                        && event.sequence > queued.sequence
+                        && event
+                            .observed
+                            .get("success")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                });
+                let provider_release_after_queue = events.iter().any(|event| {
+                    event.kind == BoundaryKind::ProviderEvent
+                        && event.actor_alias == queued.actor_alias
+                        && event.sequence > queued.sequence
+                        && event
+                            .payload
+                            .get("turn_boundary_id")
+                            .and_then(Value::as_str)
+                            == Some(turn_id)
+                        && event
+                            .observed
+                            .get("released_while_turn_pending")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                });
+                provider_completed_after_queue && provider_release_after_queue
             });
             let leaked = events.iter().any(|event| {
                 event.kind == BoundaryKind::Provider
@@ -1650,7 +2267,7 @@ fn queued_active_turn_input_hidden_semantics(events: &[DeliveredBoundary]) -> bo
                         .and_then(Value::as_str)
                         .is_some_and(|output| !text.is_empty() && output.contains(text))
             });
-            live_turn_preceded_queue && !leaked
+            live_turn_in_flight && !leaked
         })
 }
 
@@ -1841,10 +2458,29 @@ fn duplicate_process_wake_claim_semantics(events: &[DeliveredBoundary]) -> bool 
                     .and_then(Value::as_bool)
             })
             .collect::<Vec<_>>();
-        claims.iter().filter(|claimed| **claimed).count() == 1
+        let strict_claim_dedupe = claims.iter().filter(|claimed| **claimed).count() == 1
             && claims.contains(&false)
             && queued_claims.iter().filter(|claimed| **claimed).count() == 1
-            && queued_claims.contains(&false)
+            && queued_claims.contains(&false);
+        let in_flight_rejection = events
+            .iter()
+            .filter(|event| {
+                event
+                    .observed
+                    .get("lease_busy")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    && event.observed.get("runtime_process_wake").is_some()
+                    && event
+                        .observed
+                        .pointer("/runtime_queued_work/enqueued")
+                        .and_then(Value::as_bool)
+                        == Some(false)
+            })
+            .count()
+            > 0
+            && claims.contains(&false);
+        strict_claim_dedupe || in_flight_rejection
     })
 }
 
@@ -2288,6 +2924,163 @@ pub fn runtime_provider_turn(ok: bool, message: impl Into<String>) -> OracleVerd
     }
 }
 
+pub fn pending_tool_completion(ok: bool, message: impl Into<String>) -> OracleVerdict {
+    if ok {
+        OracleVerdict::passed(PENDING_TOOL_COMPLETION_ORACLE, message)
+    } else {
+        OracleVerdict::failed(PENDING_TOOL_COMPLETION_ORACLE, message)
+    }
+}
+
+pub fn runtime_final_value_semantic(ok: bool, message: impl Into<String>) -> OracleVerdict {
+    if ok {
+        OracleVerdict::passed(RUNTIME_FINAL_VALUE_SEMANTIC_ORACLE, message)
+    } else {
+        OracleVerdict::failed(RUNTIME_FINAL_VALUE_SEMANTIC_ORACLE, message)
+    }
+}
+
+fn runtime_observed_fact<T>(event: &DeliveredBoundary, key: &str) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(
+        event
+            .observed
+            .get("runtime_invariant_facts")?
+            .get(key)?
+            .clone(),
+    )
+    .ok()
+}
+
+pub const LIVE_PROVIDER_FAILURE_ORACLE: &str = "sim.oracle.live-provider-failure-terminalizes.v1";
+
+/// Observed facts from driving a non-retryable provider failure through a LIVE
+/// runtime turn (a real `session.turn().run()` whose scripted-transport events
+/// are released by a real `BoundaryScheduler`, not an isolated
+/// `provider.complete()`). The fault arrives AFTER one or more valid prose
+/// deltas, so "no committed output" is a non-vacuous assertion that can fail.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LiveProviderFailureFacts {
+    pub provider_kind: String,
+    /// The non-retryable fault injected mid-turn (e.g. `malformed_sse_chunk`).
+    pub fault_kind: String,
+    /// How many VALID prose deltas the wire script streamed BEFORE the fault. Must
+    /// be > 0: it is the partial prose a leaky runtime could (wrongly) commit, so
+    /// it makes the "no committed output" assertion meaningful rather than vacuous.
+    pub offered_prose_deltas: usize,
+    /// How many prose deltas the runtime actually emitted to the activity stream
+    /// before failing (diagnostic; proves the partial prose reached the runtime).
+    pub streamed_prose_deltas: usize,
+    /// The turn was observed live and parked on the first scheduler-gated provider
+    /// event before any event was released (proves it is a live turn).
+    pub turn_was_live_parked: bool,
+    /// The turn ended in a terminal failure (returned an error or a non-success
+    /// outcome) rather than finishing successfully.
+    pub terminalized_failure: bool,
+    /// The COMMITTED turn result carried a non-empty assistant message (a leak).
+    pub committed_assistant_message_nonempty: bool,
+    /// The COMMITTED turn result carried a Final Value (a leak).
+    pub committed_final_values: usize,
+    /// The committed session transcript contains the offered partial prose (a
+    /// leak even if it is not the turn's outcome).
+    pub committed_prose_in_transcript: bool,
+}
+
+/// A live runtime turn that receives a non-retryable provider failure AFTER valid
+/// partial prose MUST terminalize with a terminal failure and commit NONE of that
+/// prose — not as the turn outcome, not as a Final Value, and not in the session
+/// transcript. Failing-capable AND non-vacuous: it requires that real prose was
+/// offered before the fault (`offered_prose_deltas > 0`), so a runtime that leaks
+/// the partial prose, or that finishes successfully, fails the oracle.
+pub fn live_provider_failure_terminalizes(facts: &LiveProviderFailureFacts) -> OracleVerdict {
+    let offered_prose = facts.offered_prose_deltas > 0;
+    let no_committed_output = !facts.committed_assistant_message_nonempty
+        && facts.committed_final_values == 0
+        && !facts.committed_prose_in_transcript;
+    if facts.turn_was_live_parked && offered_prose && facts.terminalized_failure && no_committed_output
+    {
+        OracleVerdict::passed(
+            LIVE_PROVIDER_FAILURE_ORACLE,
+            format!(
+                "a live `{}` turn parked on a scheduler-gated provider event, streamed {} of {} offered valid prose delta(s), then a non-retryable `{}` fault terminalized it with NO committed output (no assistant message, no final value, no leaked prose in the transcript)",
+                facts.provider_kind,
+                facts.streamed_prose_deltas,
+                facts.offered_prose_deltas,
+                facts.fault_kind
+            ),
+        )
+    } else {
+        OracleVerdict::failed(
+            LIVE_PROVIDER_FAILURE_ORACLE,
+            format!(
+                "live `{}` provider failure turn did not terminalize cleanly for fault `{}`: live_parked={} offered_prose_deltas={} streamed_prose_deltas={} terminalized_failure={} committed_assistant_message_nonempty={} committed_final_values={} committed_prose_in_transcript={}",
+                facts.provider_kind,
+                facts.fault_kind,
+                facts.turn_was_live_parked,
+                facts.offered_prose_deltas,
+                facts.streamed_prose_deltas,
+                facts.terminalized_failure,
+                facts.committed_assistant_message_nonempty,
+                facts.committed_final_values,
+                facts.committed_prose_in_transcript
+            ),
+        )
+    }
+}
+
+pub const LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE: &str =
+    "sim.oracle.live-provider-failure-coverage.v1";
+
+/// Aggregate the per-combo live-failure facts for a seed: every combo must pass
+/// the per-turn oracle, and the set must exercise more than one provider kind and
+/// more than one fault position, so the oracle cannot pass vacuously on a single
+/// degenerate case.
+pub fn live_provider_failure_coverage(facts: &[LiveProviderFailureFacts]) -> OracleVerdict {
+    if let Some(failed) = facts
+        .iter()
+        .map(live_provider_failure_terminalizes)
+        .find(|verdict| !verdict.is_passed())
+    {
+        return OracleVerdict::failed(
+            LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE,
+            format!("a live provider failure combo failed: {}", failed.message),
+        );
+    }
+    let kinds = facts
+        .iter()
+        .map(|fact| fact.provider_kind.as_str())
+        .collect::<BTreeSet<_>>();
+    let positions = facts
+        .iter()
+        .map(|fact| fact.offered_prose_deltas)
+        .collect::<BTreeSet<_>>();
+    if kinds.len() < 2 || positions.len() < 2 {
+        return OracleVerdict::failed(
+            LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE,
+            format!(
+                "live provider failure coverage was not exercised broadly enough: {} provider kind(s) {:?}, {} fault position(s) {:?} (need >= 2 of each)",
+                kinds.len(),
+                kinds,
+                positions.len(),
+                positions
+            ),
+        );
+    }
+    OracleVerdict::passed(
+        LIVE_PROVIDER_FAILURE_COVERAGE_ORACLE,
+        format!(
+            "{} live provider failure turns terminalized with no committed output across {} provider kinds {:?} and {} fault positions {:?}",
+            facts.len(),
+            kinds.len(),
+            kinds,
+            positions.len(),
+            positions
+        ),
+    )
+}
+
 pub fn combine_oracles(oracles: &[OracleVerdict]) -> OracleVerdict {
     if let Some(failure) = oracles.iter().find(|oracle| !oracle.is_passed()) {
         return failure.clone();
@@ -2306,6 +3099,48 @@ mod tests {
         DurableEffectAbstractSummary, SessionAbstractSummary, WorkerAbstractSummary,
     };
     use serde_json::json;
+
+    #[test]
+    fn unmapped_runtime_semantic_fails_loudly_and_protocol_suites_route_to_coverage_manifests() {
+        let summary = AbstractWorldSummary::with_digest(0, 0, vec![], vec![], vec![]);
+
+        // A brand-new RUNTIME contract with no per-contract adapter fails loudly
+        // (the runtime suite is genuinely per-contract; there is no decorative
+        // shared fallback).
+        let runtime = runtime_contract_semantics("runtime.brand_new_contract", &[], &summary);
+        assert!(
+            !runtime.passed,
+            "an unmapped runtime contract must fail loudly, not pass via a fallback"
+        );
+        assert!(
+            runtime.reason.contains("no per-contract semantic adapter"),
+            "runtime failure reason should explain the missing adapter, got: {}",
+            runtime.reason
+        );
+
+        // The STANDARD/RLM/AGENT suites do NOT emit per-contract oracles: the
+        // per-contract dispatcher routes them to the coverage-manifest path
+        // instead of stamping a shared-bucket fallback verdict.
+        for contracts in [
+            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            RLM_PROTOCOL_SCENARIO_CONTRACTS,
+            AGENT_SCENARIO_CONTRACTS,
+        ] {
+            let contract = contracts.first().expect("suite has a contract");
+            let verdict = scenario_contract_semantics(contract, &[], &summary);
+            assert!(
+                !verdict.passed,
+                "protocol suite `{}` must not produce a passing per-contract verdict",
+                contract.suite
+            );
+            assert!(
+                verdict.reason.contains("suite coverage manifest"),
+                "protocol suite `{}` should route to the coverage manifest, got: {}",
+                contract.suite,
+                verdict.reason
+            );
+        }
+    }
 
     #[test]
     fn scenario_contract_oracles_emit_one_named_verdict_per_contract() {
@@ -2380,34 +3215,60 @@ mod tests {
 
         let events = semantic_events();
         let verdicts = scenario_contract_oracles(&events, &summary);
-        let expected_count = RUNTIME_SCENARIO_CONTRACTS.len()
-            + STANDARD_PROTOCOL_SCENARIO_CONTRACTS.len()
-            + RLM_PROTOCOL_SCENARIO_CONTRACTS.len()
-            + AGENT_SCENARIO_CONTRACTS.len();
+
+        // RUNTIME is genuinely per-contract; STANDARD/RLM/AGENT collapse to one
+        // failing-capable suite coverage manifest each (no shared-bucket
+        // per-contract stamping that would overstate the oracle count).
+        let expected_count = RUNTIME_SCENARIO_CONTRACTS.len() + 3;
         assert_eq!(verdicts.len(), expected_count);
         assert!(verdicts.iter().all(OracleVerdict::is_passed));
+
         let ids = verdicts
             .iter()
             .map(|verdict| verdict.oracle_id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(ids.len(), verdicts.len());
-        assert!(ids.iter().any(|id| {
-            id.starts_with(SCENARIO_RUNTIME_CONTRACT_ORACLE) && id.contains("runtime_scenario_")
-        }));
-        assert!(ids.iter().any(|id| {
-            id.starts_with(SCENARIO_STANDARD_CONTRACT_ORACLE)
-                && id.contains("standard_protocol_scenario_")
-        }));
-        assert!(
-            ids.iter()
-                .any(|id| id.starts_with(SCENARIO_RLM_CONTRACT_ORACLE)
-                    && id.contains("rlm_protocol_scenario_"))
-        );
-        assert!(
-            ids.iter()
-                .any(|id| id.starts_with(SCENARIO_AGENT_CONTRACT_ORACLE)
-                    && id.contains("agent_scenario_"))
-        );
+
+        // Exactly the runtime contracts get distinct per-contract oracle ids.
+        let runtime_per_contract = verdicts
+            .iter()
+            .filter(|verdict| {
+                verdict.oracle_id.starts_with(SCENARIO_RUNTIME_CONTRACT_ORACLE)
+                    && verdict.oracle_id.contains("runtime_scenario_")
+            })
+            .count();
+        assert_eq!(runtime_per_contract, RUNTIME_SCENARIO_CONTRACTS.len());
+
+        // Each protocol suite emits exactly ONE coverage manifest, and that
+        // manifest enumerates every contract it covers (so the coverage is
+        // explicit and auditable rather than hidden behind a shared bucket).
+        for (base, contracts) in [
+            (
+                SCENARIO_STANDARD_CONTRACT_ORACLE,
+                STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            ),
+            (SCENARIO_RLM_CONTRACT_ORACLE, RLM_PROTOCOL_SCENARIO_CONTRACTS),
+            (SCENARIO_AGENT_CONTRACT_ORACLE, AGENT_SCENARIO_CONTRACTS),
+        ] {
+            let suite_verdicts = verdicts
+                .iter()
+                .filter(|verdict| verdict.oracle_id.starts_with(base))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                suite_verdicts.len(),
+                1,
+                "suite `{base}` must emit exactly one coverage manifest, not per-contract oracles"
+            );
+            let manifest = suite_verdicts[0];
+            assert_eq!(manifest.oracle_id, format!("{base}:coverage-manifest"));
+            for contract in contracts {
+                assert!(
+                    manifest.message.contains(contract.test_name),
+                    "coverage manifest for `{base}` must enumerate covered contract `{}`",
+                    contract.test_name
+                );
+            }
+        }
     }
 
     #[test]
@@ -2444,6 +3305,275 @@ mod tests {
         let verdict = state_machine_semantic_invariants(&retry_not_terminal, &summary);
         assert_eq!(verdict.status, crate::trace::OracleStatus::Failed);
         assert!(verdict.message.contains("backend retry terminalization"));
+    }
+
+    #[test]
+    fn coverage_oracles_are_failing_capable_not_presence_only() {
+        let summary = semantic_summary();
+        let events = semantic_events();
+
+        // Positive: a workload that genuinely satisfies the per-boundary runtime
+        // invariants passes every strengthened coverage oracle.
+        for verdict in [
+            queued_ingress_observed(&summary, &events),
+            cancellation_observed(&summary, &events),
+            trigger_delivery_observed(&summary, &events),
+            observer_reconnect_observed(&summary, &events),
+            backend_failure_observed(&summary, &events),
+            provider_mutation_rejected(&summary, &events),
+            process_wake_observed(&summary, &events),
+            tool_boundary_observed(&summary, &events),
+            exec_code_observed(&summary, &events),
+        ] {
+            assert!(
+                verdict.is_passed(),
+                "{} should pass on a valid workload: {}",
+                verdict.oracle_id,
+                verdict.message
+            );
+        }
+
+        // Failing-capable: the boundary kinds remain PRESENT in the summary, but
+        // with the runtime DTO/projection evidence stripped (empty events) every
+        // oracle FAILS loudly instead of passing on presence alone.
+        for verdict in [
+            queued_ingress_observed(&summary, &[]),
+            cancellation_observed(&summary, &[]),
+            trigger_delivery_observed(&summary, &[]),
+            observer_reconnect_observed(&summary, &[]),
+            backend_failure_observed(&summary, &[]),
+            provider_mutation_rejected(&summary, &[]),
+            process_wake_observed(&summary, &[]),
+            tool_boundary_observed(&summary, &[]),
+            exec_code_observed(&summary, &[]),
+        ] {
+            assert!(
+                !verdict.is_passed(),
+                "{} must fail when its invariant evidence is missing (presence is not enough)",
+                verdict.oracle_id
+            );
+            assert!(
+                verdict.message.contains("observed but"),
+                "{} should explain the violated invariant, got: {}",
+                verdict.oracle_id,
+                verdict.message
+            );
+        }
+    }
+
+    fn clean_live_failure_facts() -> LiveProviderFailureFacts {
+        LiveProviderFailureFacts {
+            provider_kind: "openai-compatible".to_string(),
+            fault_kind: "malformed_sse_chunk".to_string(),
+            offered_prose_deltas: 1,
+            streamed_prose_deltas: 1,
+            turn_was_live_parked: true,
+            terminalized_failure: true,
+            committed_assistant_message_nonempty: false,
+            committed_final_values: 0,
+            committed_prose_in_transcript: false,
+        }
+    }
+
+    #[test]
+    fn live_provider_failure_oracle_passes_on_clean_terminalization_and_fails_on_committed_output() {
+        let clean = clean_live_failure_facts();
+        assert!(live_provider_failure_terminalizes(&clean).is_passed());
+
+        // Negative: the turn finished successfully instead of terminalizing.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            terminalized_failure: false,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative: the committed turn result leaked a non-empty assistant message.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            committed_assistant_message_nonempty: true,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative: the turn committed a Final Value despite failing.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            committed_final_values: 1,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative: the partial prose leaked into the committed transcript.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            committed_prose_in_transcript: true,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative (anti-vacuity): no valid prose was offered before the fault, so
+        // "no committed output" would be vacuous -> the oracle must NOT pass.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            offered_prose_deltas: 0,
+            ..clean.clone()
+        })
+        .is_passed());
+
+        // Negative: the turn was never observed live/parked.
+        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+            turn_was_live_parked: false,
+            ..clean
+        })
+        .is_passed());
+    }
+
+    #[test]
+    fn live_provider_failure_coverage_requires_multiple_kinds_and_positions() {
+        let base = clean_live_failure_facts();
+        let combo = |kind: &str, prose: usize| LiveProviderFailureFacts {
+            provider_kind: kind.to_string(),
+            offered_prose_deltas: prose,
+            streamed_prose_deltas: prose,
+            ..base.clone()
+        };
+
+        // Positive: >= 2 kinds and >= 2 positions, all clean.
+        assert!(
+            live_provider_failure_coverage(&[
+                combo("openai-compatible", 1),
+                combo("anthropic", 2),
+            ])
+            .is_passed()
+        );
+
+        // Negative: only one provider kind.
+        assert!(
+            !live_provider_failure_coverage(&[combo("openai-compatible", 1), combo("openai-compatible", 2)])
+                .is_passed()
+        );
+
+        // Negative: only one fault position.
+        assert!(
+            !live_provider_failure_coverage(&[combo("openai-compatible", 1), combo("anthropic", 1)])
+                .is_passed()
+        );
+
+        // Negative: a single combo that itself leaked output fails the aggregate.
+        assert!(
+            !live_provider_failure_coverage(&[
+                combo("openai-compatible", 1),
+                LiveProviderFailureFacts {
+                    committed_assistant_message_nonempty: true,
+                    ..combo("anthropic", 2)
+                },
+            ])
+            .is_passed()
+        );
+    }
+
+    #[test]
+    fn worker_stale_completion_oracle_requires_real_fencing() {
+        // Negative: the real store did NOT fence (no incarnation change, no stale
+        // rejection, fence not advanced) -> the oracle must FAIL. With the
+        // fabrication deleted, this is the ONLY way the summary can look.
+        let not_fenced = AbstractWorldSummary::with_digest(
+            1,
+            1,
+            vec![],
+            vec![],
+            vec![WorkerAbstractSummary {
+                worker_alias: "worker-001".to_string(),
+                session_alias: "session-001".to_string(),
+                active_incarnation_id: String::new(),
+                active_fencing_token: 1,
+                lease_owner_changes: 0,
+                stale_completion_rejections: 0,
+            }],
+        );
+        assert!(!worker_stale_completion_rejected(&not_fenced).is_passed());
+
+        // Positive: the real store fenced (incarnation change, stale rejection,
+        // monotonic fence advance) -> the oracle passes.
+        let fenced = AbstractWorldSummary::with_digest(
+            1,
+            1,
+            vec![],
+            vec![],
+            vec![WorkerAbstractSummary {
+                worker_alias: "worker-001".to_string(),
+                session_alias: "session-001".to_string(),
+                active_incarnation_id: "worker-001:incarnation-002".to_string(),
+                active_fencing_token: 2,
+                lease_owner_changes: 1,
+                stale_completion_rejections: 1,
+            }],
+        );
+        assert!(worker_stale_completion_rejected(&fenced).is_passed());
+    }
+
+    #[test]
+    fn worker_failover_continuation_oracle_requires_successor_commit() {
+        let worker_event = |work: serde_json::Value| {
+            delivered_with_payload(
+                0,
+                "worker-001:worker:001",
+                "worker-001",
+                BoundaryKind::Worker,
+                json!({ "session": "session-001" }),
+                json!({ "runtime_worker_store": { "worker_owned_work": work } }),
+            )
+        };
+        let full = json!({
+            "first_owner_claimed_work": true,
+            "second_owner_resumed_work": true,
+            "second_owner_outranks_first": true,
+            "stale_work_completion_rejected": true,
+        });
+
+        // Positive: a successor reclaimed and continued the work.
+        assert!(worker_failover_continues_work(&[worker_event(full.clone())]).is_passed());
+
+        // Negative: no worker boundary at all.
+        assert!(!worker_failover_continues_work(&[]).is_passed());
+
+        // Negative: the successor did not resume the dead owner's work.
+        let mut not_resumed = full.clone();
+        not_resumed["second_owner_resumed_work"] = json!(false);
+        assert!(!worker_failover_continues_work(&[worker_event(not_resumed)]).is_passed());
+
+        // Negative: the dead owner's stale completion was NOT rejected.
+        let mut stale_not_rejected = full.clone();
+        stale_not_rejected["stale_work_completion_rejected"] = json!(false);
+        assert!(!worker_failover_continues_work(&[worker_event(stale_not_rejected)]).is_passed());
+
+        // Negative: the successor did not outrank the first owner's fence.
+        let mut not_outranked = full;
+        not_outranked["second_owner_outranks_first"] = json!(false);
+        assert!(!worker_failover_continues_work(&[worker_event(not_outranked)]).is_passed());
+    }
+
+    #[test]
+    fn suite_coverage_manifest_is_failing_capable() {
+        // Missing suite-level evidence => the coverage manifest fails loudly
+        // (it is a real, failing-capable oracle, not a decorative label).
+        let empty = AbstractWorldSummary::with_digest(0, 0, vec![], vec![], vec![]);
+        for contracts in [
+            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            RLM_PROTOCOL_SCENARIO_CONTRACTS,
+            AGENT_SCENARIO_CONTRACTS,
+        ] {
+            let verdict = scenario_suite_coverage_manifest(contracts, &[], &empty);
+            assert!(!verdict.is_passed());
+            assert!(verdict.message.contains("FAILED: suite-level evidence missing"));
+        }
+
+        // On a workload that produces the suite evidence it passes.
+        let summary = semantic_summary();
+        let events = semantic_events();
+        for contracts in [
+            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
+            RLM_PROTOCOL_SCENARIO_CONTRACTS,
+            AGENT_SCENARIO_CONTRACTS,
+        ] {
+            assert!(scenario_suite_coverage_manifest(contracts, &events, &summary).is_passed());
+        }
     }
 
     #[test]
@@ -3044,7 +4174,7 @@ mod tests {
                 "session-001",
                 BoundaryKind::QueuedIngress,
                 json!({
-                    "active_turn_id": "session-001:active-turn:001",
+                    "active_turn_id": "session-001:provider:002",
                     "ingress_mode": "active_turn",
                     "source_key": "queue/session-001/001",
                     "text": "queued follow-up hidden from live turn",
@@ -3056,6 +4186,23 @@ mod tests {
                     "queued_ingress": true,
                     "session": "session-001",
                     "source_key": "queue/session-001/001",
+                    "active_turn_id": "session-001:provider:002",
+                }),
+            ),
+            delivered_with_payload(
+                2,
+                "session-001:provider:002:provider-event:001:sse",
+                "session-001",
+                BoundaryKind::ProviderEvent,
+                json!({
+                    "turn_boundary_id": "session-001:provider:002",
+                    "event_index": 1,
+                    "event_name": "sse",
+                }),
+                json!({
+                    "provider_event_release": true,
+                    "released_while_turn_pending": true,
+                    "turn_boundary_id": "session-001:provider:002",
                 }),
             ),
             delivered_with_payload(
@@ -3457,4 +4604,117 @@ mod tests {
             }
         })
     }
+
+    fn provider_event(sequence: usize, actor: &str, turn_boundary_id: &str) -> DeliveredBoundary {
+        delivered_with_payload(
+            sequence,
+            &format!("{turn_boundary_id}:event:{sequence}"),
+            actor,
+            BoundaryKind::ProviderEvent,
+            json!({ "turn_boundary_id": turn_boundary_id }),
+            json!({}),
+        )
+    }
+
+    fn provider_completion(sequence: usize, actor: &str, turn_boundary_id: &str) -> DeliveredBoundary {
+        delivered_with_payload(
+            sequence,
+            turn_boundary_id,
+            actor,
+            BoundaryKind::Provider,
+            json!({ "provider_kind": "openai" }),
+            json!({ "provider_kind": "openai" }),
+        )
+    }
+
+    #[test]
+    fn interleaving_oracle_passes_when_two_sessions_overlap() {
+        // Turn A and turn B are both live (each has released a provider event)
+        // before either completes.
+        let events = vec![
+            provider_event(0, "session-a", "turn-a"),
+            provider_event(1, "session-b", "turn-b"),
+            provider_completion(2, "session-a", "turn-a"),
+            provider_completion(3, "session-b", "turn-b"),
+        ];
+        assert_eq!(peak_concurrent_live_turns(&events), 2);
+        assert!(provider_turn_interleaving_depth(&events).is_passed());
+    }
+
+    #[test]
+    fn interleaving_oracle_fails_when_multi_session_turns_never_overlap() {
+        // Two sessions each run a turn, but each turn completes before the next
+        // one releases an event, so peak concurrency is 1.
+        let events = vec![
+            provider_event(0, "session-a", "turn-a"),
+            provider_completion(1, "session-a", "turn-a"),
+            provider_event(2, "session-b", "turn-b"),
+            provider_completion(3, "session-b", "turn-b"),
+        ];
+        assert_eq!(peak_concurrent_live_turns(&events), 1);
+        let verdict = provider_turn_interleaving_depth(&events);
+        assert!(!verdict.is_passed());
+        assert_eq!(verdict.oracle_id, PROVIDER_TURN_INTERLEAVING_ORACLE);
+    }
+
+    #[test]
+    fn interleaving_oracle_passes_vacuously_for_single_session() {
+        let events = vec![
+            provider_event(0, "session-a", "turn-a"),
+            provider_completion(1, "session-a", "turn-a"),
+        ];
+        assert_eq!(peak_concurrent_live_turns(&events), 1);
+        assert!(provider_turn_interleaving_depth(&events).is_passed());
+    }
+
+    fn suspend_resume_event(suspended_before: bool, before: u64, after: u64) -> DeliveredBoundary {
+        delivered_with_payload(
+            0,
+            "suspend-tool:suspend-resume:001",
+            "suspend-tool",
+            BoundaryKind::Tool,
+            json!({ "suspend_resume": true, "tool": "await_tool", "output": {"ok": true} }),
+            json!({
+                "session": "suspend-tool",
+                "tool_output": {"ok": true},
+                "runtime_suspend": {
+                    "suspend_kind": "tool",
+                    "turn_suspended_before_completion": suspended_before,
+                    "scheduler_delivered_completion": true,
+                    "resolve_accepted": true,
+                    "resumed_after_completion": after > before,
+                    "completed_event_count_before_resolution": before,
+                    "completed_event_count_after_resolution": after,
+                    "final_assistant_message": "resumed",
+                },
+            }),
+        )
+    }
+
+    #[test]
+    fn suspend_resume_oracle_passes_when_turn_parked_then_resumed() {
+        let events = vec![suspend_resume_event(true, 0, 1)];
+        assert!(generated_suspend_resume(&events).is_passed());
+    }
+
+    #[test]
+    fn suspend_resume_oracle_fails_when_turn_ran_synchronously() {
+        // The tool completed before the scheduler delivered the completion
+        // boundary: the turn never actually parked.
+        let events = vec![suspend_resume_event(false, 1, 1)];
+        let verdict = generated_suspend_resume(&events);
+        assert!(!verdict.is_passed());
+        assert_eq!(verdict.oracle_id, GENERATED_SUSPEND_RESUME_ORACLE);
+    }
+
+    #[test]
+    fn suspend_resume_oracle_fails_when_the_suspend_class_is_absent() {
+        // Anti-vacuity: with no suspend-resume boundary present, the oracle must
+        // FAIL rather than pass on an absent class.
+        let events = vec![provider_completion(0, "session-a", "turn-a")];
+        let verdict = generated_suspend_resume(&events);
+        assert!(!verdict.is_passed());
+        assert!(verdict.message.contains("class is absent"));
+    }
+
 }

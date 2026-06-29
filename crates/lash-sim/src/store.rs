@@ -71,7 +71,6 @@ pub struct ModelStore {
     workers: BTreeMap<String, ModelWorker>,
     #[allow(clippy::struct_field_names)]
     durable_projection_entries: BTreeMap<String, ModelDurableProjectionEntry>,
-    session_execution_fencing_tokens: BTreeMap<String, u64>,
     backend_attempts_by_operation: BTreeMap<String, usize>,
     tool_completions: BTreeMap<String, usize>,
     exec_executions: BTreeMap<String, usize>,
@@ -99,6 +98,14 @@ impl ModelStore {
 
     pub fn apply_observed_boundary(&mut self, event: &BoundaryEvent, observed: &Value) {
         self.total_events += 1;
+        // Suspend sessions are a generated-runtime mechanism (a real turn parked
+        // on an await key), not an abstract runtime session. They are delivered
+        // and counted, but never tracked in the abstract session model, so the
+        // session-shaped oracles do not see a session without provider/observer
+        // structure.
+        if is_suspend_boundary(event) {
+            return;
+        }
         match event.kind {
             BoundaryKind::Ingress => {
                 self.open_session(event.actor_alias.clone());
@@ -148,6 +155,9 @@ impl ModelStore {
                         .transcript_message_counts
                         .push(transcript_message_count);
                 }
+            }
+            BoundaryKind::ProviderEvent => {
+                self.ensure_session(event.actor_alias.clone());
             }
             BoundaryKind::Tool => {
                 let session = self.ensure_session(event.actor_alias.clone());
@@ -270,6 +280,9 @@ impl ModelStore {
     }
 
     pub fn project_boundary_observation(&mut self, event: &BoundaryEvent) -> Value {
+        if let Some(observed) = project_suspend_boundary(event) {
+            return observed;
+        }
         match event.kind {
             BoundaryKind::Ingress => json!({
                 "session": event.actor_alias,
@@ -302,11 +315,10 @@ impl ModelStore {
                     "input_id": format!("recording-ti-{}", *next_seq),
                     "input_state": input_state,
                     "ingress_mode": ingress_mode,
+                    "active_turn_id": event.payload.get("active_turn_id").cloned().unwrap_or(Value::Null),
                 })
             }
             BoundaryKind::Provider => {
-                let _turn_lease_token =
-                    self.next_session_execution_fencing_token(&event.actor_alias);
                 let turn_index = self
                     .sessions
                     .get(&event.actor_alias)
@@ -344,6 +356,9 @@ impl ModelStore {
                         transcript_message_count,
                         activity_count: 1,
                         provider_exchange_count,
+                        graph_invariant: None,
+                        agent_frame_invariant: None,
+                        usage_invariant: None,
                     },
                     &event.actor_alias,
                     turn_index,
@@ -376,6 +391,56 @@ impl ModelStore {
                     "runtime_contract": runtime_contract,
                 })
             }
+            BoundaryKind::ProviderEvent => json!({
+                "session": event.actor_alias,
+                "provider_event_release": true,
+                "turn_boundary_id": event
+                    .payload
+                    .get("turn_boundary_id")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "exchange_index": event
+                    .payload
+                    .get("exchange_index")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "event_index": event
+                    .payload
+                    .get("event_index")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "event_name": event
+                    .payload
+                    .get("event_name")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "provider_kind": event
+                    .payload
+                    .get("provider_kind")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "active_turn_pending_before_release": true,
+                "released_while_turn_pending": true,
+                "scripted_transport_release": {
+                    "exchange_index": event
+                        .payload
+                        .get("exchange_index")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "event_index": event
+                        .payload
+                        .get("event_index")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "event_name": event
+                        .payload
+                        .get("event_name")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "at": event.at,
+                    "blocked_before_release": true,
+                },
+            }),
             BoundaryKind::Tool => {
                 let count = self
                     .tool_completions
@@ -458,40 +523,25 @@ impl ModelStore {
                 self.project_durable_effect(event, durable_key, result)
             }
             BoundaryKind::Worker => {
-                let session_alias = boundary_session_alias(event);
-                let stale_owner = json!({
-                    "owner_id": event.actor_alias,
-                    "incarnation_id": format!("{}:incarnation-001", event.actor_alias),
-                });
-                let active_owner = json!({
-                    "owner_id": event.actor_alias,
-                    "incarnation_id": format!("{}:incarnation-002", event.actor_alias),
-                });
-                let stale_token = self.next_session_execution_fencing_token(&session_alias);
-                let active_token = self.next_session_execution_fencing_token(&session_alias);
+                // Worker lease fencing (incarnation change, monotonic fencing
+                // token, stale-completion rejection, and second-owner work
+                // continuation) is produced by the REAL session-execution lease
+                // store in `runtime_boundaries::run_worker_stale_completion`, and
+                // is NOT abstractly derivable from the boundary stream. The model
+                // carries the REAL reclaim/fence facts, threaded from the
+                // recorded observation via `apply_observed_boundary` (see
+                // `replay_trace`); cross-store reproduction is re-verified by the
+                // SQLite/Postgres backend replays, which re-run the real lease
+                // store. This abstract projection therefore reports identity only
+                // and deliberately fabricates NO fencing, so no path can make the
+                // worker oracle pass without the real store actually fencing.
                 json!({
                     "worker_alias": event.actor_alias,
-                    "session": session_alias,
-                    "initial_owner": stale_owner,
-                    "active_owner": active_owner,
-                    "active_fencing_token": active_token,
-                    "stale_completion_rejected": true,
-                    "lease_owner_changed": true,
-                    "runtime_stale_completion": {
-                        "session_id": boundary_session_alias(event),
-                        "lease_token": format!("model-lease-{stale_token}"),
-                        "fencing_token": stale_token,
-                    },
-                    "runtime_active_lease": {
-                        "session_id": boundary_session_alias(event),
-                        "lease_token": format!("model-lease-{active_token}"),
-                        "fencing_token": active_token,
-                    },
+                    "session": boundary_session_alias(event),
                 })
             }
             BoundaryKind::ProcessWake => {
                 let session = boundary_session_alias(event);
-                let _lease_token = self.next_session_execution_fencing_token(&session);
                 let process_id = format!("sim-process-{}", event.boundary_id.replace(':', "-"));
                 let dedupe_key = event
                     .payload
@@ -675,7 +725,7 @@ impl ModelStore {
                 json!({
                     "session": event.actor_alias,
                     "lease_time_tick": tick,
-                    "monotonic": previous_tick.map_or(true, |previous| previous <= tick),
+                    "monotonic": previous_tick.is_none_or(|previous| previous <= tick),
                 })
             }
         }
@@ -686,15 +736,6 @@ impl ModelStore {
         self.sessions
             .entry(alias.clone())
             .or_insert_with(|| ModelSession::new(alias))
-    }
-
-    fn next_session_execution_fencing_token(&mut self, session_alias: &str) -> u64 {
-        let token = self
-            .session_execution_fencing_tokens
-            .entry(session_alias.to_string())
-            .or_insert(0);
-        *token = token.saturating_add(1);
-        *token
     }
 
     fn project_durable_effect(
@@ -934,6 +975,59 @@ fn boundary_session_alias(event: &BoundaryEvent) -> String {
         .to_string()
 }
 
+/// A suspend-session ingress or its scheduler-delivered resume completion.
+fn is_suspend_boundary(event: &BoundaryEvent) -> bool {
+    (event.kind == BoundaryKind::Ingress && event.payload.get("suspend_kind").is_some())
+        || event
+            .payload
+            .get("suspend_resume")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// Project the abstract observed for a suspend boundary, matching the
+/// generated-world observed so cross-backend replay stays equal without
+/// modelling the suspend session as a real abstract session.
+fn project_suspend_boundary(event: &BoundaryEvent) -> Option<Value> {
+    if event.kind == BoundaryKind::Ingress && event.payload.get("suspend_kind").is_some() {
+        return Some(json!({
+            "session": event.actor_alias,
+            "opened": true,
+            "ingress_count": 1,
+            "runtime_suspend": {
+                "suspend_kind": event.payload.get("suspend_kind").cloned().unwrap_or(Value::Null),
+                "spawned": true,
+            },
+        }));
+    }
+    if event
+        .payload
+        .get("suspend_resume")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let output = event
+            .payload
+            .get("output")
+            .cloned()
+            .unwrap_or_else(|| json!(""));
+        let tool_name = event
+            .payload
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("await_tool");
+        return Some(json!({
+            "session": event.actor_alias,
+            "tool_output": output,
+            "tool_name": tool_name,
+            "tool_call_id": event.boundary_id,
+            "execution_count": 1,
+            "runtime_tool_output": lash_core::ToolCallOutput::success(output.clone()),
+        }));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,19 +1122,53 @@ mod tests {
             "durable.sleep.replay",
             json!({"durable_key": "sleep/session-001", "result": {"done": false}}),
         ));
-        store.apply_boundary(&BoundaryEvent::new(
-            "worker-1",
-            "worker-001",
-            BoundaryKind::Worker,
-            5,
-            "worker.stale-completion-rejected",
-            json!({"session": "session-001"}),
-        ));
+        // Worker fencing is NOT abstractly projected (the abstract arm reports
+        // identity only); the model reads the REAL reclaim/fence facts produced by
+        // the live lease store, threaded in via `apply_observed_boundary`.
+        store.apply_observed_boundary(
+            &BoundaryEvent::new(
+                "worker-1",
+                "worker-001",
+                BoundaryKind::Worker,
+                5,
+                "worker.stale-completion-rejected",
+                json!({"session": "session-001"}),
+            ),
+            &json!({
+                "worker_alias": "worker-001",
+                "session": "session-001",
+                "active_owner": { "incarnation_id": "worker-001:incarnation-002" },
+                "active_fencing_token": 2,
+                "lease_owner_changed": true,
+                "stale_completion_rejected": true,
+            }),
+        );
 
         let summary = store.summary();
         assert_eq!(summary.sessions[0].observer_turn_indices, vec![1]);
         assert_eq!(summary.durable_effects[0].execution_count, 1);
         assert_eq!(summary.durable_effects[0].replay_count, 1);
         assert_eq!(summary.workers[0].stale_completion_rejections, 1);
+        assert_eq!(summary.workers[0].lease_owner_changes, 1);
+        assert_eq!(summary.workers[0].active_fencing_token, 2);
+    }
+
+    #[test]
+    fn abstract_worker_projection_fabricates_no_fencing() {
+        // The abstract worker projection must NOT fabricate fencing: if the real
+        // lease facts are never threaded in, the worker summary shows no fence
+        // change and the worker oracle cannot pass.
+        let mut store = ModelStore::default();
+        let observed = store.project_boundary_observation(&BoundaryEvent::new(
+            "worker-1",
+            "worker-001",
+            BoundaryKind::Worker,
+            0,
+            "worker.stale-completion-rejected",
+            json!({"session": "session-001"}),
+        ));
+        assert!(observed.get("stale_completion_rejected").is_none());
+        assert!(observed.get("lease_owner_changed").is_none());
+        assert!(observed.get("active_fencing_token").is_none());
     }
 }

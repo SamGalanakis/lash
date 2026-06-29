@@ -1,0 +1,25 @@
+{
+  "schema": "lash.sim.discovered-divergence-fixture.v1",
+  "fixture_id": "cross-backend-sqlite-active-turn-divergence",
+  "status": "open_cross_backend_divergence_under_investigation",
+  "trace": "trace.json",
+  "generator_version": "lash-sim.generated-workload.v8",
+  "source": "generated full-random (seed 14123330213291275571, seed_index 0, max-boundaries 384) DST trace at generator lash-sim.generated-workload.v8 on 2026-06-29; surfaced by the broad/full generated lane",
+  "source_trace_sha256": "761dbc973c507b97f4ff843a6558a964e98b5c6a80b95ae3dbcd1bbfd77ad869",
+  "seed": 14123330213291275571,
+  "profile": "full-random",
+  "classification": "open cross-backend divergence; product-vs-harness under investigation; surfaced by the broad/full generated lane; not caught by lib-scale tests",
+  "discovered_by": "lash-sim broad/full generated lane (this run), confirmed after the provider-event liveness fix",
+  "divergence_summary": "After an active-turn queued-input cancel on turn 1 (the cancel succeeds), the lash SQLite store re-executes a subsequent turn on the same session with an extra provider exchange and yields EMPTY assistant output, while the in-memory ModelStore produces the correct output. The serial SQLite replay additionally DEADLOCKS when an active-turn queued-input enqueue blocks on a gated turn the serial replayer cannot advance.",
+  "model_replay": "passes (this trace is model-replayable; the divergence is NOT a sim-harness/model gate issue)",
+  "sqlite_replay": "KNOWN-DIVERGENT. The lane no longer SKIPS or HANGS on it: the generated lane SELF-CHECKS this trace under a bounded deterministic yield budget (KNOWN_DIVERGENCE_SELF_CHECK_YIELDS in crates/lash-sim/src/runner.rs) and asserts the divergence still reproduces with its expected signature `deadlock_within_bounded_budget` (the serial SQLite replay does not complete within the budget because an active-turn queued-input enqueue blocks on a gated turn). The lane FAILS LOUDLY if the replay ever completes cleanly (divergence gone) OR reproduces a different signature (failure mode changed). NOTE: the raw `replay-sqlite` CLI has no such budget and WILL hang on this trace — only the self-checking lane is bounded.",
+  "self_check": "expected_signature=deadlock_within_bounded_budget; covered under `cargo test` by runner::tests::known_divergence_fixture_still_reproduces_under_cargo_test (positive direction) and known_divergence_self_check_flags_a_clean_replay_as_no_longer_divergent (negative direction).",
+  "minimization": "not applied — the divergence is SCALE-dependent (does not reproduce at fast-random/lib scale), and the model-replay minimizer preserves only model behavior, so it does not preserve the SQLite divergence. A divergence-preserving shrink would have to re-run the serial SQLite replay per candidate, which deadlocks. The full broad-lane trace is the smallest verified repro available.",
+  "scale_evidence": "491 events, 4 sessions, each with an active-turn queued-input cancel followed by subsequent provider turns (e.g. session-003 has 7 provider outputs after its cancel).",
+  "replay_backends": [
+    "model"
+  ],
+  "replay_command": "cargo run -p lash-sim --locked -- replay crates/lash-sim/replays/cross-backend-sqlite-active-turn-divergence/trace.json",
+  "sqlite_replay_command_DO_NOT_RUN_DIRECTLY": "cargo run -p lash-sim --locked -- replay-sqlite crates/lash-sim/replays/cross-backend-sqlite-active-turn-divergence/trace.json --out /tmp/lash-sim-divergence  (the raw CLI is UNbounded and WILL hang on this trace; the generated lane self-checks it under a bounded budget instead)",
+  "escalation": "product-vs-harness decision pending; this divergence is documented as a discovered finding and NOT resolved (no product patch). The self-checking quarantine guards it under cargo test and the generated lane."
+}

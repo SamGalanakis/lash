@@ -1261,10 +1261,8 @@ fn iteration_execution_environment_sync_can_refresh_prompt_and_tools() {
             tool_specs: Arc::new(vec![crate::llm::types::LlmToolSpec {
                 name: "new_tool".to_string(),
                 description: "desc".to_string(),
-                input_schema: serde_json::json!({ "type": "object" }),
-                output_schema: serde_json::json!({ "type": "object" }),
-                input_schema_projections: Vec::new(),
-                output_schema_projections: Vec::new(),
+                input_schema: serde_json::json!({ "type": "object" }).into(),
+                output_schema: serde_json::json!({ "type": "object" }).into(),
             }]),
         })),
     });

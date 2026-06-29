@@ -1,9 +1,10 @@
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec,
-    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
+    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice,
 };
 use crate::provider::ProviderHandle;
+use crate::{LashSchema, SchemaContract};
 use lash_trace::{TraceContext, TraceError, TraceEvent, TraceSink};
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ pub struct DirectMessage {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirectJsonSchema {
     pub name: String,
-    pub schema: serde_json::Value,
+    pub schema: SchemaContract,
     pub strict: bool,
 }
 
@@ -117,6 +118,8 @@ impl DirectRequest {
 pub enum DirectLlmError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("invalid response: {0}")]
+    InvalidResponse(String),
     #[error("transport error: {0}")]
     Transport(#[from] LlmTransportError),
 }
@@ -171,6 +174,7 @@ impl DirectLlmClient {
                 .map_err(DirectLlmError::InvalidRequest)?;
         }
 
+        let output_for_validation = request.output.clone();
         let model = request.model.clone();
         let llm_request = build_llm_request(&self.provider, request, model);
         let llm_call_id = if self.trace_sink.is_some() {
@@ -190,6 +194,29 @@ impl DirectLlmClient {
         };
         match self.provider.complete(llm_request).await {
             Ok(response) => {
+                if let Err(error) = validate_direct_output(&output_for_validation, &response) {
+                    if let Some(llm_call_id) = llm_call_id {
+                        crate::trace::emit_trace(
+                            &self.trace_sink,
+                            &self.trace_context,
+                            TraceContext::default().for_llm_call(llm_call_id),
+                            TraceEvent::LlmCallFailed {
+                                error: TraceError {
+                                    message: error.to_string(),
+                                    retryable: false,
+                                    terminal_reason: Some(
+                                        LlmTerminalReason::ProviderError.code().to_string(),
+                                    ),
+                                    code: Some("invalid_structured_output".to_string()),
+                                    raw: None,
+                                },
+                                stream_summary: None,
+                            },
+                            self.clock.as_ref(),
+                        );
+                    }
+                    return Err(error);
+                }
                 if let Some(llm_call_id) = llm_call_id {
                     crate::trace::emit_trace(
                         &self.trace_sink,
@@ -311,6 +338,20 @@ pub(crate) fn build_llm_request(
     }
 }
 
+fn validate_direct_output(
+    output: &DirectOutputSpec,
+    response: &LlmResponse,
+) -> Result<(), DirectLlmError> {
+    let DirectOutputSpec::JsonSchema(schema) = output else {
+        return Ok(());
+    };
+    let parsed: serde_json::Value = serde_json::from_str(response.full_text.trim())
+        .map_err(|err| DirectLlmError::InvalidResponse(format!("expected JSON: {err}")))?;
+    LashSchema::new(schema.schema.canonical().clone())
+        .validate(&parsed)
+        .map_err(DirectLlmError::InvalidResponse)
+}
+
 fn transport_stream_events_for_direct(
     provider: &ProviderHandle,
     requested: Option<LlmEventSender>,
@@ -344,7 +385,8 @@ mod tests {
                     "answer": { "type": "string" }
                 },
                 "required": ["answer"]
-            }),
+            })
+            .into(),
             strict: true,
         };
 
@@ -430,6 +472,50 @@ mod tests {
             Some(LlmOutputSpec::JsonObject)
         ));
         assert_eq!(captured.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_client_validates_json_schema_output_against_canonical_schema() {
+        let provider = TestProvider::builder()
+            .kind("direct-validation-provider")
+            .complete(|_request| async {
+                Ok(LlmResponse {
+                    full_text: r#"{"items":[]}"#.to_string(),
+                    terminal_reason: LlmTerminalReason::Stop,
+                    ..Default::default()
+                })
+            })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+        let request = DirectRequest::json_schema(
+            "direct-model",
+            "return items",
+            DirectJsonSchema {
+                name: "items_result".to_string(),
+                schema: json!({
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "type": "string" }
+                        }
+                    }
+                })
+                .into(),
+                strict: true,
+            },
+        );
+
+        let err = client
+            .complete(request)
+            .await
+            .expect_err("empty items must fail canonical validation");
+
+        assert!(matches!(err, DirectLlmError::InvalidResponse(_)));
+        assert!(err.to_string().contains("items >= 1"));
     }
 
     #[test]

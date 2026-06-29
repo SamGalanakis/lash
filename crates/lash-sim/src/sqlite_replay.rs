@@ -8,11 +8,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::oracles::replay_determinism;
-use crate::provider::{ProviderWireScript, ScriptedLlmHttpTransport};
+use crate::provider::{ProviderWireScript, ScriptedLlmHttpTransport, ScriptedTransportSchedule};
 use crate::provider_mutations::ProviderMutationMatrixCache;
 use crate::replay::{ReplayError, replay_trace};
 use crate::runtime_boundaries::{RuntimeBoundaryHarness, RuntimeEffectReplayStore};
-use crate::runtime_contracts::{RuntimeTurnObservation, require_passed, runtime_turn_contract};
+use crate::runtime_contracts::{
+    RuntimeTurnObservation, require_passed, runtime_agent_frame_invariant_facts,
+    runtime_graph_invariant_facts, runtime_turn_contract, runtime_usage_invariant_facts,
+};
 use crate::runtime_providers::{
     runtime_provider_components, runtime_scripts_for_texts as runtime_provider_scripts_for_texts,
 };
@@ -139,14 +142,19 @@ pub async fn replay_trace_to_sqlite(
     let model_replay = replay_trace(trace_path, trace)?;
     prepare_database_root(db_path)?;
 
-    let mut world = SqliteRuntimeReplayWorld::new(db_path.to_path_buf());
+    let mut world = SqliteRuntimeReplayWorld::new(db_path.to_path_buf(), trace);
     let mut store = ModelStore::default();
     let mut provider_mutation_cache = ProviderMutationMatrixCache::default();
     let mut runtime_replayed_boundary_count = 0;
     let mut replayed_boundary_families = BTreeSet::new();
     for delivered in &trace.events {
         let event = delivered.as_event();
-        let observed = if is_runtime_session_boundary(event.kind) {
+        let observed = if is_suspend_replay_boundary(&event) {
+            // Suspend ingress/resume boundaries are a generated-runtime mechanism;
+            // the abstract projector reproduces their observed without running the
+            // SQLite runtime world.
+            store.project_boundary_observation(&event)
+        } else if is_runtime_session_boundary(event.kind) {
             world.deliver_boundary(&event, &delivered.observed).await?
         } else if is_runtime_backed_boundary(event.kind) {
             world.deliver_runtime_boundary(&event).await?
@@ -253,6 +261,7 @@ pub async fn replay_trace_to_sqlite(
 struct SqliteRuntimeReplayWorld {
     database_root: PathBuf,
     sessions: BTreeMap<String, SqliteRuntimeReplaySession>,
+    provider_completion_events: BTreeMap<String, BoundaryEvent>,
     queued_inputs: BTreeMap<String, String>,
     store_factory: Arc<dyn SessionStoreFactory>,
     runtime_boundaries: RuntimeBoundaryHarness,
@@ -262,18 +271,32 @@ struct SqliteRuntimeReplaySession {
     _core: lash::StandardCore,
     session: lash::LashSession,
     transport: Arc<ScriptedLlmHttpTransport>,
+    provider_schedule: ScriptedTransportSchedule,
+    provider_scripts: Vec<ProviderWireScript>,
     provider_kind: String,
+    active_provider_turns: BTreeMap<String, SqliteActiveProviderTurn>,
+}
+
+struct SqliteActiveProviderTurn {
+    handle: tokio::task::JoinHandle<Result<Value, String>>,
 }
 
 impl SqliteRuntimeReplayWorld {
-    fn new(database_root: PathBuf) -> Self {
+    fn new(database_root: PathBuf, trace: &SimulationTrace) -> Self {
         let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(
             lash_sqlite_store::SqliteSessionStoreFactory::new(database_root.clone()),
         );
         let effect_replay_path = database_root.join("runtime-effects.sqlite");
+        let provider_completion_events = trace
+            .events
+            .iter()
+            .filter(|event| event.kind == BoundaryKind::Provider)
+            .map(|event| (event.boundary_id.clone(), event.as_event()))
+            .collect();
         Self {
             database_root,
             sessions: BTreeMap::new(),
+            provider_completion_events,
             queued_inputs: BTreeMap::new(),
             runtime_boundaries: RuntimeBoundaryHarness::new(
                 Arc::clone(&store_factory),
@@ -291,7 +314,8 @@ impl SqliteRuntimeReplayWorld {
         match event.kind {
             BoundaryKind::Ingress => self.open_runtime_session(event).await,
             BoundaryKind::QueuedIngress => self.queue_turn_input(event).await,
-            BoundaryKind::Provider => self.run_provider_turn(event, original_observed).await,
+            BoundaryKind::Provider => self.finish_provider_turn(event).await,
+            BoundaryKind::ProviderEvent => self.release_provider_event(event).await,
             BoundaryKind::Observer => self.observe_session(event, original_observed),
             BoundaryKind::Cancellation => self.cancel_queued_input(event).await,
             BoundaryKind::Tool
@@ -359,11 +383,13 @@ impl SqliteRuntimeReplayWorld {
             })?;
         let scripts = runtime_provider_scripts_for_texts(provider_kind, &provider_texts)
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?;
+        let provider_schedule = ScriptedTransportSchedule::new();
         let (core, transport, provider_kind) = runtime_core_for_scripts(
             Arc::clone(&self.store_factory),
             self.database_root.as_path(),
             provider_kind,
-            scripts,
+            scripts.clone(),
+            Some(provider_schedule.clone()),
         )
         .await?;
         let session = core
@@ -384,7 +410,10 @@ impl SqliteRuntimeReplayWorld {
                 _core: core,
                 session,
                 transport,
+                provider_schedule,
+                provider_scripts: scripts,
                 provider_kind,
+                active_provider_turns: BTreeMap::new(),
             },
         );
         Ok(json!({
@@ -446,20 +475,35 @@ impl SqliteRuntimeReplayWorld {
                 .get("ingress_mode")
                 .and_then(Value::as_str)
                 .unwrap_or("next_turn"),
+            "active_turn_id": event.payload.get("active_turn_id").cloned().unwrap_or(Value::Null),
         }))
     }
 
-    async fn run_provider_turn(
-        &self,
-        event: &BoundaryEvent,
-        original_observed: &Value,
-    ) -> Result<Value, SqliteReplayError> {
-        let runtime_session = self.sessions.get(&event.actor_alias).ok_or_else(|| {
+    async fn ensure_provider_turn_started(
+        &mut self,
+        actor_alias: &str,
+        turn_boundary_id: &str,
+    ) -> Result<(), SqliteReplayError> {
+        let runtime_session = self.sessions.get_mut(actor_alias).ok_or_else(|| {
             SqliteReplayError::Assertion(format!(
-                "provider boundary `{}` ran before ingress for `{}`",
-                event.boundary_id, event.actor_alias
+                "provider turn `{turn_boundary_id}` ran before ingress for `{actor_alias}`"
             ))
         })?;
+        if runtime_session
+            .active_provider_turns
+            .contains_key(turn_boundary_id)
+        {
+            return Ok(());
+        }
+        let event = self
+            .provider_completion_events
+            .get(turn_boundary_id)
+            .cloned()
+            .ok_or_else(|| {
+                SqliteReplayError::Assertion(format!(
+                    "provider event referenced unknown turn `{turn_boundary_id}`"
+                ))
+            })?;
         let expected_text = event
             .payload
             .get("text")
@@ -470,86 +514,292 @@ impl SqliteRuntimeReplayWorld {
             .get("turn_index")
             .and_then(Value::as_u64)
             .unwrap_or(1) as usize;
-        let output = runtime_session
-            .session
-            .turn(lash::TurnInput::text(format!(
-                "Replay generated provider turn {} through SQLite.",
+        let _script = runtime_session
+            .provider_scripts
+            .get(expected_turn_index.saturating_sub(1))
+            .ok_or_else(|| {
+                SqliteReplayError::Assertion(format!(
+                    "provider boundary `{}` had no runtime provider script for turn {}",
+                    event.boundary_id, expected_turn_index
+                ))
+            })?;
+        if expected_text.is_empty() {
+            return Err(SqliteReplayError::Assertion(format!(
+                "provider boundary `{}` missing expected text",
                 event.boundary_id
-            )))
-            .run()
-            .await
-            .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?;
-        let assistant_message = output.assistant_message().unwrap_or_default().to_string();
-        let read_view = output.result.state.read_view();
-        let graph_node_count = output.result.state.session_graph.nodes.len();
-        let transcript_message_count = read_view.messages().len();
-        let provider_exchange_count = runtime_session
+            )));
+        }
+        let session = runtime_session.session.clone();
+        let transport = Arc::clone(&runtime_session.transport);
+        let provider_kind = runtime_session.provider_kind.clone();
+        let handle = tokio::spawn(async move {
+            run_provider_turn_task(session, transport, provider_kind, event)
+                .await
+                .map_err(|err| err.to_string())
+        });
+        runtime_session.active_provider_turns.insert(
+            turn_boundary_id.to_string(),
+            SqliteActiveProviderTurn { handle },
+        );
+        Ok(())
+    }
+
+    async fn release_provider_event(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, SqliteReplayError> {
+        let turn_boundary_id = event
+            .payload
+            .get("turn_boundary_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                SqliteReplayError::Assertion(format!(
+                    "provider event `{}` missing turn_boundary_id",
+                    event.boundary_id
+                ))
+            })?
+            .to_string();
+        self.ensure_provider_turn_started(&event.actor_alias, &turn_boundary_id)
+            .await?;
+        let event_index = event
+            .payload
+            .get("event_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                SqliteReplayError::Assertion(format!(
+                    "provider event `{}` missing event_index",
+                    event.boundary_id
+                ))
+            })? as usize;
+        let exchange_index = event
+            .payload
+            .get("exchange_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                SqliteReplayError::Assertion(format!(
+                    "provider event `{}` missing exchange_index",
+                    event.boundary_id
+                ))
+            })? as usize;
+        let event_name = event
+            .payload
+            .get("event_name")
+            .and_then(Value::as_str)
+            .unwrap_or("provider_event");
+        let runtime_session = self.sessions.get(&event.actor_alias).ok_or_else(|| {
+            SqliteReplayError::Assertion(format!(
+                "provider event `{}` ran before ingress for `{}`",
+                event.boundary_id, event.actor_alias
+            ))
+        })?;
+        let active_turn_pending = runtime_session
+            .active_provider_turns
+            .contains_key(&turn_boundary_id);
+        // Liveness-couple the release instead of a fixed 5s timeout: poll the
+        // gate against the turn's liveness so the replay-sqlite path can NEVER
+        // deadlock on a release that waits for a block which will never come.
+        // The yield budget deterministically bounds the poll even if the turn
+        // drifts onto a different exchange.
+        let release = {
+            let mut polls = 0u64;
+            loop {
+                if let Some(release) = runtime_session.provider_schedule.release_if_blocked(
+                    exchange_index,
+                    event_index,
+                    event_name,
+                    event.at,
+                ) {
+                    break Some(release);
+                }
+                let turn_finished = runtime_session
+                    .active_provider_turns
+                    .get(&turn_boundary_id)
+                    .is_none_or(|turn| turn.handle.is_finished());
+                if turn_finished
+                    || polls >= crate::runner::MAX_PROVIDER_EVENT_POLL_YIELDS
+                {
+                    break None;
+                }
+                polls += 1;
+                tokio::task::yield_now().await;
+            }
+        };
+        let mut observed = json!({
+            "session": event.actor_alias,
+            "provider_event_release": true,
+            "turn_boundary_id": turn_boundary_id,
+            "exchange_index": exchange_index,
+            "event_index": event_index,
+            "event_name": event_name,
+            "provider_kind": runtime_session.provider_kind,
+        });
+        if let Some(release) = release {
+            observed["active_turn_pending_before_release"] = json!(active_turn_pending);
+            observed["released_while_turn_pending"] =
+                json!(active_turn_pending && release.blocked_before_release);
+            observed["scripted_transport_release"] = json!({
+                "exchange_index": release.exchange_index,
+                "event_index": release.event_index,
+                "event_name": release.event_name,
+                "at": release.at,
+                "blocked_before_release": release.blocked_before_release,
+            });
+        } else {
+            observed["provider_event_release_noop_turn_finished"] = json!(true);
+        }
+        Ok(observed)
+    }
+
+    async fn finish_provider_turn(
+        &mut self,
+        event: &BoundaryEvent,
+    ) -> Result<Value, SqliteReplayError> {
+        self.ensure_provider_turn_started(&event.actor_alias, &event.boundary_id)
+            .await?;
+        let runtime_session = self.sessions.get_mut(&event.actor_alias).ok_or_else(|| {
+            SqliteReplayError::Assertion(format!(
+                "provider boundary `{}` ran before ingress for `{}`",
+                event.boundary_id, event.actor_alias
+            ))
+        })?;
+        let active_turn = runtime_session
+            .active_provider_turns
+            .remove(&event.boundary_id)
+            .ok_or_else(|| {
+                SqliteReplayError::Assertion(format!(
+                    "provider boundary `{}` was not active",
+                    event.boundary_id
+                ))
+            })?;
+        let release_count = runtime_session.provider_schedule.releases().len();
+        let exchange_count = runtime_session
             .transport
             .exchanges()
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?
             .len();
-        let expected_exchange_count = event
-            .payload
-            .get("expected_provider_exchange_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(expected_turn_index as u64) as usize;
-        let runtime_contract = runtime_turn_contract(
-            &RuntimeTurnObservation {
-                session_id: output.result.state.session_id.clone(),
-                turn_index: output.result.state.turn_index,
-                assistant_message: assistant_message.clone(),
-                graph_node_count,
-                transcript_message_count,
-                activity_count: output.activities.len(),
-                provider_exchange_count,
-            },
-            &event.actor_alias,
-            expected_turn_index,
-            expected_text,
-            expected_exchange_count,
-        );
-        if let Err(message) = require_passed(&runtime_contract) {
-            return Err(SqliteReplayError::Assertion(format!(
-                "SQLite runtime invariants failed for `{}`: {message}",
-                event.boundary_id
-            )));
+        // Yield-bounded completion poll instead of a wall-clock timeout: if the
+        // turn drifted onto an unscheduled provider exchange (e.g. the SQLite
+        // store re-executed an extra exchange) it can never finish, so we
+        // terminate deterministically rather than letting the runtime hang.
+        let mut polls = 0u64;
+        while !active_turn.handle.is_finished() {
+            if polls >= crate::runner::MAX_TURN_FINISH_POLL_YIELDS {
+                return Err(SqliteReplayError::Assertion(format!(
+                    "provider boundary `{}` did not finish within {} yields after {release_count} scheduled releases and {exchange_count} provider exchanges (turn parked on an unscheduled provider exchange)",
+                    event.boundary_id,
+                    crate::runner::MAX_TURN_FINISH_POLL_YIELDS
+                )));
+            }
+            polls += 1;
+            tokio::task::yield_now().await;
         }
-        if assistant_message
-            != original_observed
-                .get("provider_output")
-                .and_then(Value::as_str)
-                .unwrap_or(expected_text)
-        {
-            return Err(SqliteReplayError::Divergence(format!(
-                "SQLite runtime provider output changed for `{}`",
-                event.boundary_id
-            )));
-        }
-        Ok(json!({
-            "session": event.actor_alias,
-            "runtime_session_id": event.actor_alias,
-            "turn_index": expected_turn_index,
-            "success": output.is_success(),
-            "provider_output": assistant_message,
-            "provider_script": event.payload.get("script").cloned().unwrap_or(Value::Null),
-            "provider_exchange_count": provider_exchange_count,
-            "graph_node_count": graph_node_count,
-            "transcript_message_count": transcript_message_count,
-            "activity_count_nonzero": !output.activities.is_empty(),
-            "provider_kind": runtime_session.provider_kind,
-            "runtime_invariants": {
-                "session_id": true,
-                "turn_index": true,
-                "graph_non_empty": graph_node_count > 0,
-                "transcript_contains_provider_output": read_view.messages().iter().any(|message| {
-                    message.parts.iter().any(|part| part.content.contains(expected_text))
-                }),
-                "activity_count_nonzero": !output.activities.is_empty(),
-            },
-            "runtime_contract": runtime_contract,
-        }))
+        active_turn
+            .handle
+            .await
+            .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?
+            .map_err(SqliteReplayError::Runtime)
     }
+}
 
+async fn run_provider_turn_task(
+    session: lash::LashSession,
+    transport: Arc<ScriptedLlmHttpTransport>,
+    provider_kind: String,
+    event: BoundaryEvent,
+) -> Result<Value, SqliteReplayError> {
+    let expected_text = event
+        .payload
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let expected_turn_index = event
+        .payload
+        .get("turn_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    let output = session
+        .turn(lash::TurnInput::text(format!(
+            "Replay generated provider turn {} through SQLite.",
+            event.boundary_id
+        )))
+        .turn_id(event.boundary_id.clone())
+        .run()
+        .await
+        .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?;
+    let assistant_message = output.assistant_message().unwrap_or_default().to_string();
+    let read_view = output.result.state.read_view();
+    let graph_node_count = output.result.state.session_graph.nodes.len();
+    let transcript_message_count = read_view.messages().len();
+    let provider_exchange_count = transport
+        .exchanges()
+        .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?
+        .len();
+    let expected_exchange_count = event
+        .payload
+        .get("expected_provider_exchange_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(expected_turn_index as u64) as usize;
+    let graph_invariant = runtime_graph_invariant_facts(&output.result.state.session_graph);
+    let agent_frame_invariant = runtime_agent_frame_invariant_facts(&output.result.state);
+    let usage_invariant = runtime_usage_invariant_facts(&output.result, &output.activities);
+    let runtime_contract = runtime_turn_contract(
+        &RuntimeTurnObservation {
+            session_id: output.result.state.session_id.clone(),
+            turn_index: output.result.state.turn_index,
+            assistant_message: assistant_message.clone(),
+            graph_node_count,
+            transcript_message_count,
+            activity_count: output.activities.len(),
+            provider_exchange_count,
+            graph_invariant: Some(graph_invariant.clone()),
+            agent_frame_invariant: Some(agent_frame_invariant.clone()),
+            usage_invariant: Some(usage_invariant.clone()),
+        },
+        &event.actor_alias,
+        expected_turn_index,
+        expected_text,
+        expected_exchange_count,
+    );
+    if let Err(message) = require_passed(&runtime_contract) {
+        return Err(SqliteReplayError::Assertion(format!(
+            "SQLite runtime invariants failed for `{}`: {message}",
+            event.boundary_id
+        )));
+    }
+    Ok(json!({
+        "session": event.actor_alias,
+        "runtime_session_id": event.actor_alias,
+        "turn_index": expected_turn_index,
+        "success": output.is_success(),
+        "provider_output": assistant_message,
+        "provider_script": event.payload.get("script").cloned().unwrap_or(Value::Null),
+        "provider_exchange_count": provider_exchange_count,
+        "graph_node_count": graph_node_count,
+        "transcript_message_count": transcript_message_count,
+        "activity_count_nonzero": !output.activities.is_empty(),
+        "provider_kind": provider_kind,
+        "runtime_invariants": {
+            "session_id": true,
+            "turn_index": true,
+            "graph_non_empty": graph_node_count > 0,
+            "graph_acyclic": graph_invariant.passed,
+            "single_active_agent_frame": agent_frame_invariant.passed,
+            "usage_monotonic": usage_invariant.passed,
+            "transcript_contains_provider_output": read_view.messages().iter().any(|message| {
+                message.parts.iter().any(|part| part.content.contains(expected_text))
+            }),
+            "activity_count_nonzero": !output.activities.is_empty(),
+        },
+        "runtime_invariant_facts": {
+            "graph": graph_invariant,
+            "agent_frame": agent_frame_invariant,
+            "usage": usage_invariant,
+        },
+        "runtime_contract": runtime_contract,
+    }))
+}
+
+impl SqliteRuntimeReplayWorld {
     fn observe_session(
         &self,
         event: &BoundaryEvent,
@@ -670,6 +920,7 @@ impl SqliteRuntimeReplayWorld {
                 self.database_root.as_path(),
                 &runtime_session.provider_kind,
                 Vec::new(),
+                None,
             )
             .await?;
             let session = core
@@ -699,8 +950,13 @@ async fn runtime_core_for_scripts(
     database_root: &Path,
     provider_kind: &str,
     scripts: Vec<ProviderWireScript>,
+    provider_schedule: Option<ScriptedTransportSchedule>,
 ) -> Result<(lash::StandardCore, Arc<ScriptedLlmHttpTransport>, String), SqliteReplayError> {
-    let transport = Arc::new(ScriptedLlmHttpTransport::from_scripts(scripts));
+    let mut transport = ScriptedLlmHttpTransport::from_scripts(scripts);
+    if let Some(schedule) = provider_schedule {
+        transport = transport.with_event_schedule(schedule);
+    }
+    let transport = Arc::new(transport);
     let (provider_handle, model, provider_kind) =
         runtime_provider_components(provider_kind, &transport)
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?;
@@ -735,12 +991,22 @@ fn prepare_database_root(path: &Path) -> Result<(), SqliteReplayError> {
     Ok(())
 }
 
+fn is_suspend_replay_boundary(event: &crate::scheduler::BoundaryEvent) -> bool {
+    (event.kind == BoundaryKind::Ingress && event.payload.get("suspend_kind").is_some())
+        || event
+            .payload
+            .get("suspend_resume")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn is_runtime_session_boundary(kind: BoundaryKind) -> bool {
     matches!(
         kind,
         BoundaryKind::Ingress
             | BoundaryKind::QueuedIngress
             | BoundaryKind::Provider
+            | BoundaryKind::ProviderEvent
             | BoundaryKind::Observer
             | BoundaryKind::Cancellation
     )
@@ -762,6 +1028,7 @@ fn boundary_family_name(kind: BoundaryKind) -> &'static str {
         BoundaryKind::Ingress => "ingress",
         BoundaryKind::QueuedIngress => "queued_ingress",
         BoundaryKind::Provider => "provider",
+        BoundaryKind::ProviderEvent => "provider_event",
         BoundaryKind::Tool => "tool",
         BoundaryKind::ExecCode => "exec_code",
         BoundaryKind::DurableEffect => "durable_effect",
@@ -778,6 +1045,25 @@ fn boundary_family_name(kind: BoundaryKind) -> &'static str {
 
 fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
     let mut normalized = value.clone();
+    if let Some(object) = normalized.as_object_mut() {
+        // Real lease fencing tokens are not reproducible by the abstract
+        // projector path, so they are excluded from cross-backend equality.
+        object.remove("runtime_lease_probe");
+        object.remove("runtime_suspend");
+        object.remove("scripted_transport_release");
+        object.remove("active_turn_pending_before_release");
+        object.remove("released_while_turn_pending");
+        object.remove("provider_event_release_noop_turn_finished");
+    }
+    if kind == BoundaryKind::Cancellation
+        && let Some(object) = normalized.as_object_mut()
+    {
+        // The cancel outcome depends on whether the live runtime had already
+        // consumed the targeted input; the abstract projector cannot reconstruct
+        // it. Coverage is preserved via `cancellation_count` in the summary.
+        object.remove("cancel_outcome");
+        object.remove("cancelled");
+    }
     if kind == BoundaryKind::QueuedIngress
         && let Some(object) = normalized.as_object_mut()
         && object.get("input_id").and_then(Value::as_str).is_some()
@@ -786,6 +1072,20 @@ fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
             "input_id".to_string(),
             Value::String("<backend-assigned>".to_string()),
         );
+    }
+    if kind == BoundaryKind::Provider
+        && let Some(object) = normalized.as_object_mut()
+    {
+        object.remove("runtime_invariant_facts");
+        object.remove("runtime_final_value_facts");
+        if let Some(runtime_invariants) = object
+            .get_mut("runtime_invariants")
+            .and_then(Value::as_object_mut)
+        {
+            runtime_invariants.remove("graph_acyclic");
+            runtime_invariants.remove("single_active_agent_frame");
+            runtime_invariants.remove("usage_monotonic");
+        }
     }
     normalized
 }

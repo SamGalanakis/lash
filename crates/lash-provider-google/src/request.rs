@@ -303,9 +303,10 @@ impl GoogleOAuthProvider {
                         });
                         if use_legacy_parameters {
                             declaration["parameters"] =
-                                Self::sanitized_legacy_schema(&tool.input_schema);
+                                Self::sanitized_legacy_schema(tool.input_schema.canonical());
                         } else {
-                            declaration["parametersJsonSchema"] = tool.input_schema.clone();
+                            declaration["parametersJsonSchema"] =
+                                tool.input_schema.canonical().clone();
                         }
                         declaration
                     })
@@ -320,7 +321,8 @@ impl GoogleOAuthProvider {
         if let Some(output_spec) = &req.output_spec {
             request["request"]["generationConfig"]["responseMimeType"] = json!("application/json");
             if let LlmOutputSpec::JsonSchema(schema) = output_spec {
-                request["request"]["generationConfig"]["responseSchema"] = schema.schema.clone();
+                request["request"]["generationConfig"]["responseSchema"] =
+                    schema.schema.canonical().clone();
             }
         }
         if let Some(project) = project_id.filter(|p| !p.trim().is_empty()) {

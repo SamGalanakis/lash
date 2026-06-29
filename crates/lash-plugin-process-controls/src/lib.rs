@@ -328,7 +328,7 @@ mod tests {
         let definition = process_list_tool_definition();
 
         assert_eq!(
-            definition.contract.output_schema["type"],
+            definition.contract.output_schema.canonical["type"],
             serde_json::json!("array")
         );
         let rendered = definition.compact_contract().render_signature();

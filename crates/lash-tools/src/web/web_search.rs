@@ -155,6 +155,7 @@ mod tests {
         let properties = definition
             .contract
             .input_schema
+            .canonical
             .get("properties")
             .and_then(serde_json::Value::as_object)
             .expect("object properties");
@@ -170,15 +171,15 @@ mod tests {
                 .all(|example| example.contains("limit"))
         );
         assert_eq!(
-            definition.contract.output_schema["type"],
+            definition.contract.output_schema.canonical["type"],
             serde_json::json!("object")
         );
         assert_eq!(
-            definition.contract.output_schema["required"],
+            definition.contract.output_schema.canonical["required"],
             serde_json::json!(["results"])
         );
         assert!(
-            !definition.contract.output_schema["properties"]
+            !definition.contract.output_schema.canonical["properties"]
                 .as_object()
                 .unwrap()
                 .contains_key("answer")

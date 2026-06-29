@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::provider_mutations::TRANSPORT_PROVIDER_MUTATIONS;
 use crate::runtime_providers::{
     MIGRATED_RUNTIME_PROVIDER_KINDS, runtime_provider_kind_for_session,
     runtime_script_name_for_kind,
@@ -9,8 +10,9 @@ use crate::runtime_providers::{
 use crate::scheduler::{BoundaryEvent, BoundaryKind, next_seed};
 use crate::trace::StableAliases;
 
-pub const GENERATOR_VERSION: &str = "lash-sim.generated-workload.v5";
+pub const GENERATOR_VERSION: &str = "lash-sim.generated-workload.v8";
 pub const WORKLOAD_FAMILY: &str = "deterministic-runtime-state-machine";
+const ACTIVE_TURN_QUEUE_OFFSET: u64 = 15;
 pub const VALID_WORKLOAD_PROFILES: &[&str] = &[
     "fast",
     "fast-random",
@@ -89,7 +91,9 @@ pub fn generate_workload(
         operations: Vec::new(),
     };
     planner.plan_required_contracts();
-    planner.plan_extra_transitions(max_boundaries);
+    // Reserve budget for the suspend-session ingress boundaries so the total
+    // generated boundary count still lands on `max_boundaries`.
+    planner.plan_extra_transitions(max_boundaries.saturating_sub(SUSPEND_KINDS.len()));
     let (sessions, boundaries) = planner.into_workload_boundaries(max_boundaries);
 
     let workload_id = workload_id(seed, profile, &boundaries);
@@ -121,7 +125,7 @@ pub fn default_seed_count(profile: &str) -> Result<usize, WorkloadProfileError> 
 
 pub fn default_max_boundaries(profile: &str) -> Result<usize, WorkloadProfileError> {
     Ok(match WorkloadProfile::parse(profile)? {
-        WorkloadProfile::Fast => 24,
+        WorkloadProfile::Fast => 72,
         WorkloadProfile::Default => 96,
         WorkloadProfile::Full => 384,
     })
@@ -302,6 +306,8 @@ enum PlannedOperation {
     QueuedIngress {
         session: usize,
         queue_index: usize,
+        mode: QueuedIngressMode,
+        active_turn_index: Option<usize>,
     },
     Cancellation {
         session: usize,
@@ -351,6 +357,21 @@ enum PlannedOperation {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueuedIngressMode {
+    ActiveTurn,
+    NextTurn,
+}
+
+impl QueuedIngressMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveTurn => "active_turn",
+            Self::NextTurn => "next_turn",
+        }
+    }
+}
+
 struct StateMachinePlanner {
     seed: u64,
     profile: String,
@@ -375,7 +396,13 @@ impl StateMachinePlanner {
             provider_error_operation,
             false,
         );
-        self.plan_provider_turn_with_observer(provider_error_repair_session);
+        let first_provider_turn = self.plan_provider_turn(provider_error_repair_session);
+        self.plan_queue_cancel_pair(
+            provider_error_repair_session,
+            first_provider_turn,
+            QueuedIngressMode::ActiveTurn,
+        );
+        self.plan_observer_snapshot(provider_error_repair_session, first_provider_turn);
         self.plan_tool(provider_error_repair_session);
         self.plan_exec_code(provider_error_repair_session, 0);
         self.plan_provider_turn_with_observer(provider_error_repair_session);
@@ -392,10 +419,18 @@ impl StateMachinePlanner {
             }
             self.plan_lease_time(session);
         }
+        if self.sessions.len() > 1 {
+            let next_turn_session = 1;
+            let next_turn_ref = self.first_provider_turn_ref(next_turn_session);
+            self.plan_queue_cancel_pair(
+                next_turn_session,
+                next_turn_ref,
+                QueuedIngressMode::NextTurn,
+            );
+        }
 
         let primary = (self.next_usize() % self.sessions.len()).min(self.sessions.len() - 1);
         let secondary = (primary + 1) % self.sessions.len();
-        self.plan_queue_cancel_pair(primary);
         self.plan_observer_reconnect(primary);
         self.plan_trigger(primary);
         let backend_retry_operation = self.plan_backend_failure(primary, true);
@@ -404,6 +439,15 @@ impl StateMachinePlanner {
         self.plan_provider_mutation(primary, "malformed_sse_chunk");
         self.plan_provider_mutation(secondary, "rate_limit_error_envelope");
         self.plan_provider_mutation(primary, "dropped_terminal_event");
+        // The three classes above are required across all four provider parsers
+        // by the coverage and protocol-terminal-state oracles, so they stay
+        // anchored. Beyond them, seed-select one transport/HTTP perturbation
+        // class so every generated run also drives a socket disconnect, a
+        // response-start/chunk timeout, or a retryable 5xx through a live
+        // provider request.
+        let transport_mutation = TRANSPORT_PROVIDER_MUTATIONS
+            [self.next_usize() % TRANSPORT_PROVIDER_MUTATIONS.len()];
+        self.plan_provider_mutation(secondary, transport_mutation);
         self.plan_tool(primary);
         self.plan_exec_code(primary, 0);
         let process_wake = self.plan_process_wake(primary);
@@ -423,7 +467,13 @@ impl StateMachinePlanner {
                     self.plan_provider_turn_with_observer(session);
                 }
                 1 if remaining >= 2 && self.can_plan_queue_pair(session) => {
-                    self.plan_queue_cancel_pair(session);
+                    let active_turn = self.first_provider_turn_ref(session);
+                    let mode = if self.next_usize() & 1 == 0 {
+                        QueuedIngressMode::ActiveTurn
+                    } else {
+                        QueuedIngressMode::NextTurn
+                    };
+                    self.plan_queue_cancel_pair(session, active_turn, mode);
                 }
                 2 => self.plan_trigger(session),
                 3 => {
@@ -439,7 +489,7 @@ impl StateMachinePlanner {
                     let exit_code = if self.profile_kind == WorkloadProfile::Fast {
                         0
                     } else {
-                        (self.next_usize() % 3 == 0) as i64
+                        self.next_usize().is_multiple_of(3) as i64
                     };
                     self.plan_exec_code(session, exit_code);
                 }
@@ -466,26 +516,52 @@ impl StateMachinePlanner {
         self.sessions[session].queued_ingress_count == 0
     }
 
-    fn plan_provider_turn_with_observer(&mut self, session: usize) {
-        let ProviderTurnRef { turn_index } =
+    fn plan_provider_turn(&mut self, session: usize) -> ProviderTurnRef {
+        let turn_ref =
             self.sessions[session].next_provider_turn(self.seed, &self.profile, &mut self.rng);
         self.operations.push(PlannedOperation::ProviderTurn {
             session,
-            turn_index,
+            turn_index: turn_ref.turn_index,
         });
+        turn_ref
+    }
+
+    fn plan_observer_snapshot(&mut self, session: usize, turn_ref: ProviderTurnRef) {
         self.operations.push(PlannedOperation::Observer {
             session,
-            turn_index,
+            turn_index: turn_ref.turn_index,
             reconnect: false,
-            observer_index: turn_index,
+            observer_index: turn_ref.turn_index,
         });
     }
 
-    fn plan_queue_cancel_pair(&mut self, session: usize) {
+    fn plan_provider_turn_with_observer(&mut self, session: usize) -> ProviderTurnRef {
+        let turn_ref = self.plan_provider_turn(session);
+        self.plan_observer_snapshot(session, turn_ref);
+        turn_ref
+    }
+
+    fn first_provider_turn_ref(&self, session: usize) -> ProviderTurnRef {
+        debug_assert!(
+            !self.sessions[session].provider_turns.is_empty(),
+            "queued ingress requires an existing provider turn"
+        );
+        ProviderTurnRef { turn_index: 1 }
+    }
+
+    fn plan_queue_cancel_pair(
+        &mut self,
+        session: usize,
+        active_turn: ProviderTurnRef,
+        mode: QueuedIngressMode,
+    ) {
         let queue_index = self.sessions[session].next_queue();
         self.operations.push(PlannedOperation::QueuedIngress {
             session,
             queue_index,
+            mode,
+            active_turn_index: (mode == QueuedIngressMode::ActiveTurn)
+                .then_some(active_turn.turn_index),
         });
         self.operations.push(PlannedOperation::Cancellation {
             session,
@@ -653,11 +729,91 @@ impl StateMachinePlanner {
             ));
         }
 
+        // Suspend sessions: real generated turns that park mid-flight on a
+        // tool / durable-effect / exec-code await key and can only be resumed by
+        // a scheduler-delivered completion boundary. The resume boundary itself
+        // is scheduled by the world once it observes the turn parked, mirroring
+        // how a finished provider turn schedules its completion.
+        let suspend_session_count = self.sessions.len();
+        for (offset, suspend_kind) in SUSPEND_KINDS.iter().copied().enumerate() {
+            let alias = format!("suspend-{}", suspend_kind.replace('_', "-"));
+            boundaries.push(BoundaryEvent::new(
+                format!("{alias}:ingress"),
+                alias.clone(),
+                BoundaryKind::Ingress,
+                (suspend_session_count + offset) as u64,
+                "session.open.suspend",
+                json!({
+                    "suspend_kind": suspend_kind,
+                    "raw_session_id": alias,
+                }),
+            ));
+        }
+
         let mut timeline = TimelineCursor::new(10, self.seed ^ self.rng);
         let operations = std::mem::take(&mut self.operations);
+        let mut provider_start_at = std::collections::BTreeMap::<(usize, usize), u64>::new();
+        let mut queue_at = std::collections::BTreeMap::<(usize, usize), u64>::new();
         for operation in operations {
-            let at = timeline.next_tick(&mut self.rng);
-            boundaries.push(self.event_for_operation(operation, at));
+            let scheduled_at = timeline.next_tick(&mut self.rng);
+            match operation {
+                PlannedOperation::ProviderTurn {
+                    session,
+                    turn_index,
+                } => {
+                    provider_start_at.insert((session, turn_index), scheduled_at);
+                    boundaries.push(self.event_for_operation(
+                        PlannedOperation::ProviderTurn {
+                            session,
+                            turn_index,
+                        },
+                        scheduled_at,
+                    ));
+                }
+                PlannedOperation::QueuedIngress {
+                    session,
+                    queue_index,
+                    mode,
+                    active_turn_index,
+                } => {
+                    let at = active_turn_index
+                        .and_then(|active_turn_index| {
+                            provider_start_at
+                                .get(&(session, active_turn_index))
+                                .copied()
+                        })
+                        .map(|provider_at| provider_at.saturating_add(ACTIVE_TURN_QUEUE_OFFSET))
+                        .unwrap_or(scheduled_at);
+                    queue_at.insert((session, queue_index), at);
+                    boundaries.push(self.event_for_operation(
+                        PlannedOperation::QueuedIngress {
+                            session,
+                            queue_index,
+                            mode,
+                            active_turn_index,
+                        },
+                        at,
+                    ));
+                }
+                PlannedOperation::Cancellation {
+                    session,
+                    queue_index,
+                } => {
+                    let at = queue_at
+                        .get(&(session, queue_index))
+                        .copied()
+                        .map(|queued_at| queued_at.saturating_add(1))
+                        .unwrap_or(scheduled_at);
+                    boundaries.push(self.event_for_operation(
+                        PlannedOperation::Cancellation {
+                            session,
+                            queue_index,
+                        },
+                        at,
+                    ));
+                }
+                operation => boundaries.push(self.event_for_operation(operation, scheduled_at)),
+            }
         }
 
         let required = boundaries.len();
@@ -723,8 +879,16 @@ impl StateMachinePlanner {
             PlannedOperation::QueuedIngress {
                 session,
                 queue_index,
+                mode,
+                active_turn_index,
             } => {
                 let session = &self.sessions[session];
+                let active_turn_id = active_turn_index
+                    .map(|active_turn_index| {
+                        format!("{}:provider:{active_turn_index:03}", session.alias)
+                    })
+                    .map(Value::String)
+                    .unwrap_or(Value::Null);
                 BoundaryEvent::new(
                     queued_boundary_id(session, queue_index),
                     session.alias.clone(),
@@ -734,9 +898,14 @@ impl StateMachinePlanner {
                     json!({
                         "text": format!("queued follow-up {queue_index} for {}", session.alias),
                         "source_key": format!("{}:queued-follow-up:{queue_index:03}", session.alias),
-                        "ingress_mode": "active_turn",
-                        "active_turn_id": format!("{}:active-turn:{queue_index:03}", session.alias),
-                        "checkpoint_boundary": "after_work",
+                        "ingress_mode": mode.as_str(),
+                        "active_turn_id": active_turn_id,
+                        "active_turn_provider_turn_index": active_turn_index,
+                        "checkpoint_boundary": if mode == QueuedIngressMode::ActiveTurn {
+                            Value::String("after_work".to_string())
+                        } else {
+                            Value::Null
+                        },
                     }),
                 )
             }
@@ -965,12 +1134,23 @@ impl TimelineCursor {
     }
 }
 
+/// Suspend-session kinds emitted per generated workload. Each opens a real turn
+/// that parks on the named await kind and is resumed by a scheduler-delivered
+/// completion boundary. Tool is enabled today; durable-effect and exec-code
+/// follow the same mechanism.
+const SUSPEND_KINDS: &[&str] = &["tool", "durable_effect", "exec_code"];
+
+
 const PROVIDER_MUTATIONS: &[&str] = &[
     "malformed_sse_chunk",
     "rate_limit_error_envelope",
     "dropped_terminal_event",
     "duplicate_tool_call_delta",
     "wrong_provider_schema",
+    "mid_stream_disconnect",
+    "response_start_timeout",
+    "stream_chunk_timeout",
+    "retryable_server_error_sequence",
 ];
 
 fn queued_boundary_id(session: &SessionPlan, queue_index: usize) -> String {
@@ -1014,6 +1194,47 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.sessions.len(), MIGRATED_RUNTIME_PROVIDER_KINDS.len());
         assert_eq!(first.generator_version, GENERATOR_VERSION);
+    }
+
+    #[test]
+    fn fast_profile_default_budget_runs_seeded_extra_transitions() {
+        let max = default_max_boundaries("fast-random").expect("fast max");
+        assert!(max > 24);
+        let first = generate_workload(41, "fast-random", max).expect("first workload");
+        let second = generate_workload(42, "fast-random", max).expect("second workload");
+
+        assert_eq!(first.boundaries.len(), max);
+        assert_eq!(second.boundaries.len(), max);
+        assert_ne!(
+            first.workload_id, second.workload_id,
+            "fast-random seeds should alter the generated transition schedule"
+        );
+        assert!(
+            first
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.kind == BoundaryKind::ProviderMutation)
+                .count()
+                > 2,
+            "fast-random default budget should have room beyond the required mutation pair"
+        );
+    }
+
+    #[test]
+    fn generated_queue_ingress_modes_vary_when_budget_allows() {
+        let workload = generate_workload(42, "default-random", 160).expect("workload");
+        let modes = workload
+            .boundaries
+            .iter()
+            .filter(|boundary| boundary.kind == BoundaryKind::QueuedIngress)
+            .filter_map(|boundary| boundary.payload.get("ingress_mode"))
+            .filter_map(Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(
+            modes.contains("active_turn") && modes.contains("next_turn"),
+            "expected both active_turn and next_turn queued ingress modes, got {modes:?}"
+        );
     }
 
     #[test]

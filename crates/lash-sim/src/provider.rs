@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -245,46 +245,178 @@ pub struct ProviderWireTimelineEntry {
 pub struct ScriptedLlmHttpTransport {
     scripts: Arc<Mutex<VecDeque<ProviderWireScript>>>,
     exchanges: Arc<Mutex<Vec<ScriptedLlmHttpExchange>>>,
-    response_start_gate: Option<ScriptedTransportGate>,
+    event_schedule: Option<ScriptedTransportSchedule>,
+    next_exchange_index: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ScriptedTransportGate {
-    inner: Arc<ScriptedTransportGateInner>,
+pub struct ScriptedTransportSchedule {
+    inner: Arc<ScriptedTransportScheduleInner>,
 }
 
 #[derive(Debug, Default)]
-struct ScriptedTransportGateInner {
+struct ScriptedTransportScheduleInner {
+    gates: Mutex<BTreeMap<ScriptedProviderEventKey, Arc<ScriptedTransportEventGate>>>,
+    releases: Mutex<Vec<ScriptedProviderEventRelease>>,
+    next_release_sequence: AtomicUsize,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ScriptedProviderEventKey {
+    exchange_index: usize,
+    event_index: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScriptedProviderEventRelease {
+    pub exchange_index: usize,
+    pub event_index: usize,
+    pub event_name: String,
+    pub at: u64,
+    pub blocked_before_release: bool,
+    pub release_sequence: usize,
+}
+
+#[derive(Debug, Default)]
+struct ScriptedTransportEventGate {
     opened: AtomicBool,
     blocked: AtomicBool,
     blocked_notify: tokio::sync::Notify,
     opened_notify: tokio::sync::Notify,
 }
 
-impl ScriptedTransportGate {
-    pub fn closed() -> Self {
+impl ScriptedTransportSchedule {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn open(&self) {
-        self.inner.opened.store(true, Ordering::SeqCst);
-        self.inner.opened_notify.notify_waiters();
+    pub async fn wait_until_blocked(&self, exchange_index: usize, event_index: usize) {
+        self.gate(exchange_index, event_index)
+            .wait_until_blocked()
+            .await;
     }
 
-    pub async fn wait_until_blocked(&self) {
-        while !self.inner.blocked.load(Ordering::SeqCst) {
-            self.inner.blocked_notify.notified().await;
+    pub async fn release_when_blocked(
+        &self,
+        exchange_index: usize,
+        event_index: usize,
+        event_name: impl Into<String>,
+        at: u64,
+    ) -> ScriptedProviderEventRelease {
+        let event_name = event_name.into();
+        let gate = self.gate(exchange_index, event_index);
+        gate.wait_until_blocked().await;
+        self.open_gate(&gate, exchange_index, event_index, event_name, at)
+    }
+
+    /// Whether the turn future is currently parked on this gate. Lets the
+    /// boundary harness couple gate release to turn liveness (poll until either
+    /// the gate blocks or the turn finishes) instead of blocking forever.
+    pub fn is_blocked(&self, exchange_index: usize, event_index: usize) -> bool {
+        self.gate(exchange_index, event_index).is_blocked()
+    }
+
+    /// Release the gate only if the turn is already parked on it; otherwise
+    /// return `None` without blocking. The caller polls this against the turn's
+    /// liveness so a release can never deadlock waiting for a block that will
+    /// never come (e.g. a turn that finished or drifted to a different exchange).
+    pub fn release_if_blocked(
+        &self,
+        exchange_index: usize,
+        event_index: usize,
+        event_name: impl Into<String>,
+        at: u64,
+    ) -> Option<ScriptedProviderEventRelease> {
+        let gate = self.gate(exchange_index, event_index);
+        if !gate.is_blocked() {
+            return None;
+        }
+        Some(self.open_gate(&gate, exchange_index, event_index, event_name.into(), at))
+    }
+
+    fn open_gate(
+        &self,
+        gate: &ScriptedTransportEventGate,
+        exchange_index: usize,
+        event_index: usize,
+        event_name: String,
+        at: u64,
+    ) -> ScriptedProviderEventRelease {
+        let release = ScriptedProviderEventRelease {
+            exchange_index,
+            event_index,
+            event_name,
+            at,
+            blocked_before_release: gate.is_blocked(),
+            release_sequence: self
+                .inner
+                .next_release_sequence
+                .fetch_add(1, Ordering::SeqCst),
+        };
+        gate.open();
+        self.inner
+            .releases
+            .lock()
+            .expect("scripted transport release log lock")
+            .push(release.clone());
+        release
+    }
+
+    pub fn releases(&self) -> Vec<ScriptedProviderEventRelease> {
+        self.inner
+            .releases
+            .lock()
+            .expect("scripted transport release log lock")
+            .clone()
+    }
+
+    async fn wait_for_release(&self, exchange_index: usize, event_index: usize) {
+        self.gate(exchange_index, event_index)
+            .wait_for_release()
+            .await;
+    }
+
+    fn gate(&self, exchange_index: usize, event_index: usize) -> Arc<ScriptedTransportEventGate> {
+        let key = ScriptedProviderEventKey {
+            exchange_index,
+            event_index,
+        };
+        let mut gates = self
+            .inner
+            .gates
+            .lock()
+            .expect("scripted transport event gate lock");
+        gates
+            .entry(key)
+            .or_insert_with(|| Arc::new(ScriptedTransportEventGate::default()))
+            .clone()
+    }
+}
+
+impl ScriptedTransportEventGate {
+    fn open(&self) {
+        self.opened.store(true, Ordering::SeqCst);
+        self.opened_notify.notify_waiters();
+    }
+
+    fn is_blocked(&self) -> bool {
+        self.blocked.load(Ordering::SeqCst)
+    }
+
+    async fn wait_until_blocked(&self) {
+        while !self.blocked.load(Ordering::SeqCst) {
+            self.blocked_notify.notified().await;
         }
     }
 
-    async fn wait_before_response_start(&self) {
-        if self.inner.opened.load(Ordering::SeqCst) {
+    async fn wait_for_release(&self) {
+        if self.opened.load(Ordering::SeqCst) {
             return;
         }
-        self.inner.blocked.store(true, Ordering::SeqCst);
-        self.inner.blocked_notify.notify_waiters();
-        while !self.inner.opened.load(Ordering::SeqCst) {
-            self.inner.opened_notify.notified().await;
+        self.blocked.store(true, Ordering::SeqCst);
+        self.blocked_notify.notify_waiters();
+        while !self.opened.load(Ordering::SeqCst) {
+            self.opened_notify.notified().await;
         }
     }
 }
@@ -298,7 +430,8 @@ impl ScriptedLlmHttpTransport {
         Self {
             scripts: Arc::new(Mutex::new(scripts.into_iter().collect())),
             exchanges: Arc::new(Mutex::new(Vec::new())),
-            response_start_gate: None,
+            event_schedule: None,
+            next_exchange_index: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -306,8 +439,8 @@ impl ScriptedLlmHttpTransport {
         Ok(Self::new(ProviderWireScript::from_json_str(input)?))
     }
 
-    pub fn with_response_start_gate(mut self, gate: ScriptedTransportGate) -> Self {
-        self.response_start_gate = Some(gate);
+    pub fn with_event_schedule(mut self, schedule: ScriptedTransportSchedule) -> Self {
+        self.event_schedule = Some(schedule);
         self
     }
 
@@ -375,34 +508,31 @@ impl LlmHttpTransport for ScriptedLlmHttpTransport {
     ) -> Result<LlmHttpResponse, LlmTransportError> {
         let script = self.next_script()?;
         match_request(&script, &request)?;
-        let mut recorded_pending_exchange = false;
-        if let Some(gate) = &self.response_start_gate {
+        if let Some(schedule) = &self.event_schedule {
+            let exchange_index = self.next_exchange_index.fetch_add(1, Ordering::SeqCst);
             self.record_exchange(scripted_exchange(&script, &request, false))?;
-            recorded_pending_exchange = true;
             let timeout_message = request
                 .response_start_timeout_message
                 .as_deref()
                 .unwrap_or("LLM HTTP response start timed out");
-            let wait_result = run_with_timeout(
-                async {
-                    gate.wait_before_response_start().await;
-                    Ok(())
-                },
+            let result = execute_scheduled_script(
+                script.clone(),
+                exchange_index,
+                schedule.clone(),
                 timeout,
                 timeout_message,
             )
             .await;
-            if let Err(err) = wait_result {
-                return Err(err);
+            if result.is_ok() {
+                self.record_or_replace_pending_exchange(scripted_exchange(
+                    &script, &request, true,
+                ))?;
             }
+            return result;
         }
         let result = execute_script(script.clone());
         let exchange = scripted_exchange(&script, &request, true);
-        if recorded_pending_exchange {
-            self.record_or_replace_pending_exchange(exchange)?;
-        } else {
-            self.record_exchange(exchange)?;
-        }
+        self.record_exchange(exchange)?;
         result
     }
 }
@@ -587,6 +717,261 @@ impl LlmByteStream for ScriptedByteStream {
             None => Ok(None),
         }
     }
+}
+
+#[derive(Debug)]
+struct ScheduledScriptedByteStream {
+    script_name: String,
+    exchange_index: usize,
+    schedule: ScriptedTransportSchedule,
+    events: VecDeque<ScheduledByteEvent>,
+}
+
+impl ScheduledScriptedByteStream {
+    fn new(
+        script_name: String,
+        exchange_index: usize,
+        schedule: ScriptedTransportSchedule,
+        events: VecDeque<ScheduledByteEvent>,
+    ) -> Self {
+        Self {
+            script_name,
+            exchange_index,
+            schedule,
+            events,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ScheduledByteEvent {
+    Immediate(Bytes),
+    Scripted(usize, ProviderWireEvent),
+}
+
+#[async_trait]
+impl LlmByteStream for ScheduledScriptedByteStream {
+    async fn next_chunk(&mut self) -> Result<Option<Bytes>, LlmTransportError> {
+        let Some(event) = self.events.pop_front() else {
+            return Ok(None);
+        };
+        let (event_index, event) = match event {
+            ScheduledByteEvent::Immediate(bytes) => return Ok(Some(bytes)),
+            ScheduledByteEvent::Scripted(event_index, event) => (event_index, event),
+        };
+        let event_name = event.event_name();
+        self.schedule
+            .wait_for_release(self.exchange_index, event_index)
+            .await;
+        match event {
+            ProviderWireEvent::Body { data, .. } => Ok(Some(Bytes::from(data))),
+            ProviderWireEvent::Chunk { data, bytes, .. } => {
+                Ok(Some(chunk_bytes(&self.script_name, data, bytes)?))
+            }
+            ProviderWireEvent::Sse { data, .. } => {
+                Ok(Some(Bytes::from(format!("data: {data}\n\n"))))
+            }
+            ProviderWireEvent::End { .. } => Ok(None),
+            ProviderWireEvent::Disconnect {
+                message, retryable, ..
+            } => Err(disconnect_error(message, retryable)),
+            ProviderWireEvent::Timeout { message, .. } => Err(timeout_error(message)),
+            ProviderWireEvent::TransportError {
+                message, retryable, ..
+            } => Err(transport_error(message, retryable)),
+            ProviderWireEvent::ResponseStart { .. } | ProviderWireEvent::HttpError { .. } => {
+                Err(script_validation_error(format!(
+                    "Provider Wire Script `{}` emitted `{event_name}` inside a response body stream",
+                    self.script_name
+                )))
+            }
+        }
+    }
+}
+
+async fn execute_scheduled_script(
+    script: ProviderWireScript,
+    exchange_index: usize,
+    schedule: ScriptedTransportSchedule,
+    timeout: Option<std::time::Duration>,
+    response_start_timeout_message: &str,
+) -> Result<LlmHttpResponse, LlmTransportError> {
+    let mut prefix_body = BytesMut::new();
+    let script_name = script.name.clone();
+    let mut timeline = script
+        .timeline
+        .into_iter()
+        .enumerate()
+        .collect::<VecDeque<_>>();
+    while let Some((event_index, event)) = timeline.pop_front() {
+        match event {
+            ProviderWireEvent::ResponseStart {
+                status, headers, ..
+            } => {
+                wait_for_scheduled_response_event(
+                    &schedule,
+                    exchange_index,
+                    event_index,
+                    timeout,
+                    response_start_timeout_message,
+                )
+                .await?;
+                let body = scheduled_response_body(
+                    script_name,
+                    exchange_index,
+                    schedule,
+                    prefix_body,
+                    timeline,
+                )
+                .await?;
+                return Ok(LlmHttpResponse {
+                    status,
+                    headers: header_vec(headers),
+                    body,
+                });
+            }
+            ProviderWireEvent::Body { data, .. } => {
+                prefix_body.extend_from_slice(data.as_bytes());
+            }
+            ProviderWireEvent::HttpError {
+                status,
+                headers,
+                body,
+                ..
+            } => {
+                wait_for_scheduled_response_event(
+                    &schedule,
+                    exchange_index,
+                    event_index,
+                    timeout,
+                    response_start_timeout_message,
+                )
+                .await?;
+                return Ok(LlmHttpResponse {
+                    status,
+                    headers: header_vec(headers),
+                    body: LlmHttpBody::buffered(body),
+                });
+            }
+            ProviderWireEvent::TransportError {
+                message, retryable, ..
+            } => {
+                wait_for_scheduled_response_event(
+                    &schedule,
+                    exchange_index,
+                    event_index,
+                    timeout,
+                    response_start_timeout_message,
+                )
+                .await?;
+                return Err(transport_error(message, retryable));
+            }
+            ProviderWireEvent::Timeout { message, .. } => {
+                wait_for_scheduled_response_event(
+                    &schedule,
+                    exchange_index,
+                    event_index,
+                    timeout,
+                    response_start_timeout_message,
+                )
+                .await?;
+                return Err(timeout_error(message));
+            }
+            ProviderWireEvent::Chunk { .. }
+            | ProviderWireEvent::Sse { .. }
+            | ProviderWireEvent::End { .. }
+            | ProviderWireEvent::Disconnect { .. } => {
+                return Err(script_validation_error(format!(
+                    "Provider Wire Script `{script_name}` emitted `{}` before response_start",
+                    event.event_name()
+                )));
+            }
+        }
+    }
+
+    Err(script_validation_error(format!(
+        "Provider Wire Script `{script_name}` did not include response_start"
+    )))
+}
+
+async fn wait_for_scheduled_response_event(
+    schedule: &ScriptedTransportSchedule,
+    exchange_index: usize,
+    event_index: usize,
+    timeout: Option<std::time::Duration>,
+    timeout_message: &str,
+) -> Result<(), LlmTransportError> {
+    run_with_timeout(
+        async {
+            schedule.wait_for_release(exchange_index, event_index).await;
+            Ok(())
+        },
+        timeout,
+        timeout_message,
+    )
+    .await
+}
+
+async fn scheduled_response_body(
+    script_name: String,
+    exchange_index: usize,
+    schedule: ScriptedTransportSchedule,
+    mut buffered: BytesMut,
+    remaining: VecDeque<(usize, ProviderWireEvent)>,
+) -> Result<LlmHttpBody, LlmTransportError> {
+    let streamed = remaining.iter().any(|(_, event)| {
+        matches!(
+            event,
+            ProviderWireEvent::Chunk { .. }
+                | ProviderWireEvent::Sse { .. }
+                | ProviderWireEvent::Disconnect { .. }
+                | ProviderWireEvent::Timeout { .. }
+                | ProviderWireEvent::TransportError { .. }
+        )
+    });
+    if streamed {
+        let mut events = remaining
+            .into_iter()
+            .map(|(event_index, event)| ScheduledByteEvent::Scripted(event_index, event))
+            .collect::<VecDeque<_>>();
+        if !buffered.is_empty() {
+            events.push_front(ScheduledByteEvent::Immediate(buffered.split().freeze()));
+        }
+        return Ok(LlmHttpBody::streamed(ScheduledScriptedByteStream::new(
+            script_name,
+            exchange_index,
+            schedule,
+            events,
+        )));
+    }
+
+    for (event_index, event) in remaining {
+        schedule.wait_for_release(exchange_index, event_index).await;
+        match event {
+            ProviderWireEvent::Body { data, .. } => {
+                buffered.extend_from_slice(data.as_bytes());
+            }
+            ProviderWireEvent::End { .. } => break,
+            ProviderWireEvent::Timeout { message, .. } => return Err(timeout_error(message)),
+            ProviderWireEvent::TransportError {
+                message, retryable, ..
+            } => return Err(transport_error(message, retryable)),
+            ProviderWireEvent::Disconnect {
+                message, retryable, ..
+            } => return Err(disconnect_error(message, retryable)),
+            ProviderWireEvent::ResponseStart { .. }
+            | ProviderWireEvent::Chunk { .. }
+            | ProviderWireEvent::Sse { .. }
+            | ProviderWireEvent::HttpError { .. } => {
+                return Err(script_validation_error(format!(
+                    "Provider Wire Script `{script_name}` emitted `{}` in a buffered response body",
+                    event.event_name()
+                )));
+            }
+        }
+    }
+
+    Ok(LlmHttpBody::buffered(buffered.freeze()))
 }
 
 fn match_request(
@@ -910,6 +1295,28 @@ fn chunk_bytes(
     }
 }
 
+fn disconnect_error(message: Option<String>, retryable: Option<bool>) -> LlmTransportError {
+    LlmTransportError::new(format!(
+        "Stream read failed: {}",
+        message.unwrap_or_else(|| "scripted disconnect".to_string())
+    ))
+    .with_kind(ProviderFailureKind::Stream)
+    .retryable(retryable.unwrap_or(true))
+}
+
+fn timeout_error(message: Option<String>) -> LlmTransportError {
+    LlmTransportError::new(message.unwrap_or_else(|| "scripted provider timeout".to_string()))
+        .with_kind(ProviderFailureKind::Timeout)
+        .with_code("timeout")
+        .retryable(true)
+}
+
+fn transport_error(message: String, retryable: Option<bool>) -> LlmTransportError {
+    LlmTransportError::new(message)
+        .with_kind(ProviderFailureKind::Transport)
+        .retryable(retryable.unwrap_or(true))
+}
+
 fn select_path<'a>(root: &'a Value, path: &str) -> Result<Option<&'a Value>, LlmTransportError> {
     let mut current = root;
     for segment in parse_path(path)? {
@@ -1159,18 +1566,18 @@ mod tests {
 
     #[tokio::test]
     async fn provider_wire_script_cancellation_before_response_start_commits_no_output() {
-        let gate = ScriptedTransportGate::closed();
+        let schedule = ScriptedTransportSchedule::new();
         let transport = Arc::new(
             ScriptedLlmHttpTransport::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT)
                 .unwrap()
-                .with_response_start_gate(gate.clone()),
+                .with_event_schedule(schedule.clone()),
         );
         let (events, sender) = event_collector();
         let mut provider = OpenAiCompatibleProvider::new("test-key", "https://provider.test")
             .with_transport(transport);
 
         let task = tokio::spawn(async move { provider.complete(request(Some(sender))).await });
-        gate.wait_until_blocked().await;
+        schedule.wait_until_blocked(0, 0).await;
         task.abort();
 
         let join_err = task.await.expect_err("cancelled provider task");
@@ -1183,11 +1590,11 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_transport_response_start_gate_timeout_uses_production_timeout_envelope() {
-        let gate = ScriptedTransportGate::closed();
+        let schedule = ScriptedTransportSchedule::new();
         let transport = Arc::new(
             ScriptedLlmHttpTransport::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT)
                 .unwrap()
-                .with_response_start_gate(gate),
+                .with_event_schedule(schedule),
         );
         let provider_transport: Arc<dyn lash_llm_transport::LlmHttpTransport> = transport.clone();
         let (events, sender) = event_collector();
@@ -1292,10 +1699,9 @@ mod tests {
                     "properties": {
                         "q": { "type": "string" }
                     }
-                }),
-                output_schema: json!({}),
-                input_schema_projections: Vec::new(),
-                output_schema_projections: Vec::new(),
+                })
+                .into(),
+                output_schema: json!({}).into(),
             }]),
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,

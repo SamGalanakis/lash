@@ -346,8 +346,6 @@ pub fn model_tool_specs_iter<'a>(
                 description: model_tool.description,
                 input_schema: model_tool.input_schema,
                 output_schema: model_tool.output_schema,
-                input_schema_projections: model_tool.input_schema_projections,
-                output_schema_projections: model_tool.output_schema_projections,
             }
         })
         .collect()

@@ -7,12 +7,15 @@ use serde::{Deserialize, Serialize};
 use crate::generator::generate_workload;
 use crate::oracles::{
     backend_failure_observed, cancellation_observed, combine_oracles, cross_session_isolation,
-    durable_effect_exactly_once, exec_code_observed, ingress_sessions_opened, lease_time_monotonic,
+    durable_effect_exactly_once, exec_code_observed, generated_final_value_semantic_channel,
+    generated_suspend_resume, ingress_sessions_opened,
+    lease_time_monotonic,
     observer_convergence, observer_reconnect_observed, operational_coverage, process_wake_observed,
-    provider_mutation_rejected, queued_ingress_observed, runtime_session_graph_contract,
+    provider_mutation_rejected, provider_transport_mutation_classified,
+    provider_turn_interleaving_depth, queued_ingress_observed, runtime_session_graph_contract,
     scenario_contract_mini_oracles, scenario_contract_oracles, scheduler_controlled_delivery,
     scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
-    trigger_delivery_observed, worker_stale_completion_rejected,
+    trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
 };
 use crate::replay::{ReplayError, replay_trace};
 use crate::runner::run_generated_workload_for_fixture;
@@ -354,6 +357,7 @@ fn boundary_kind_name(kind: BoundaryKind) -> &'static str {
         BoundaryKind::Ingress => "ingress",
         BoundaryKind::QueuedIngress => "queued_ingress",
         BoundaryKind::Provider => "provider",
+        BoundaryKind::ProviderEvent => "provider_event",
         BoundaryKind::Tool => "tool",
         BoundaryKind::ExecCode => "exec_code",
         BoundaryKind::DurableEffect => "durable_effect",
@@ -378,10 +382,10 @@ fn refresh_trace_verdicts(trace: &mut SimulationTrace, target: Option<TargetFail
     let final_summary = summary_for_trace(trace);
     let oracles = generated_oracles(&trace.events, &final_summary);
     let mut oracle = combine_oracles(&oracles);
-    if let Some(target) = target {
-        if let Some(target_oracle) = find_target_oracle(&oracles, target) {
-            oracle = target_oracle.clone();
-        }
+    if let Some(target) = target
+        && let Some(target_oracle) = find_target_oracle(&oracles, target)
+    {
+        oracle = target_oracle.clone();
     }
     trace.final_summary = final_summary;
     trace.oracles = oracles;
@@ -578,6 +582,7 @@ fn rewrite_cancellations_for_removed_queued_inputs(
 fn fixture_boundary_kind(kind: &str) -> Result<BoundaryKind, MinimizeError> {
     match kind {
         "provider" => Ok(BoundaryKind::Provider),
+        "provider_event" => Ok(BoundaryKind::ProviderEvent),
         "queued_ingress" => Ok(BoundaryKind::QueuedIngress),
         "provider_mutation" => Ok(BoundaryKind::ProviderMutation),
         "cancellation" => Ok(BoundaryKind::Cancellation),
@@ -602,21 +607,26 @@ fn generated_oracles(
         state_machine_semantic_invariants(events, summary),
         operational_coverage(events, summary),
         ingress_sessions_opened(summary),
-        queued_ingress_observed(summary),
-        cancellation_observed(summary),
-        trigger_delivery_observed(summary),
-        observer_reconnect_observed(summary),
-        backend_failure_observed(summary),
-        provider_mutation_rejected(summary),
-        process_wake_observed(summary),
-        tool_boundary_observed(summary),
-        exec_code_observed(summary),
+        queued_ingress_observed(summary, events),
+        cancellation_observed(summary, events),
+        trigger_delivery_observed(summary, events),
+        observer_reconnect_observed(summary, events),
+        backend_failure_observed(summary, events),
+        provider_mutation_rejected(summary, events),
+        provider_transport_mutation_classified(events),
+        provider_turn_interleaving_depth(events),
+        process_wake_observed(summary, events),
+        tool_boundary_observed(summary, events),
+        exec_code_observed(summary, events),
         cross_session_isolation(summary),
         observer_convergence(summary),
         runtime_session_graph_contract(summary),
         durable_effect_exactly_once(summary),
         worker_stale_completion_rejected(summary),
-        lease_time_monotonic(summary),
+        worker_failover_continues_work(events),
+        lease_time_monotonic(events),
+        generated_suspend_resume(events),
+        generated_final_value_semantic_channel(events),
     ];
     oracles.extend(scenario_contract_mini_oracles(events, summary));
     oracles.extend(scenario_contract_oracles(events, summary));

@@ -1,5 +1,8 @@
+use crate::responses_shared as shared;
 use crate::support::*;
 use std::borrow::Cow;
+
+const PROVIDER: &str = "OpenAI-compatible";
 
 impl OpenAiCompatibleProvider {
     fn model_is_anthropic_claude(model: &str) -> bool {
@@ -142,18 +145,16 @@ impl OpenAiCompatibleProvider {
     fn build_chat_tools(
         req: &LlmRequest,
         strict_tools: bool,
+        capabilities: &ProviderSchemaCapabilities,
     ) -> Result<Vec<Value>, LlmTransportError> {
         req.tools
             .iter()
             .map(|tool| {
-                let parameters = Self::projected_schema(
+                let parameters = shared::projected_schema(
+                    PROVIDER,
                     &tool.input_schema,
-                    &tool.input_schema_projections,
-                    if strict_tools {
-                        OpenAiSchemaProfile::StrictToolParameters
-                    } else {
-                        OpenAiSchemaProfile::ToolParameters
-                    },
+                    capabilities,
+                    SchemaPurpose::ToolInput,
                 )?;
                 Ok(json!({
                     "type": "function",
@@ -289,7 +290,8 @@ impl OpenAiCompatibleProvider {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI")?;
         let compat = self.resolved_compat(CompletionEndpoint::ChatCompletions);
         let mut messages = Self::build_chat_messages(req);
-        let mut tools = Self::build_chat_tools(req, compat.strict_tools)?;
+        let mut tools =
+            Self::build_chat_tools(req, compat.strict_tools, &compat.schema_capabilities)?;
         let policy = resolve_generation_policy(
             &req.generation,
             &self.options,
@@ -327,10 +329,11 @@ impl OpenAiCompatibleProvider {
             body["response_format"] = match output_spec {
                 LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
                 LlmOutputSpec::JsonSchema(schema) => {
-                    let projected = Self::projected_schema(
+                    let projected = shared::projected_schema(
+                        PROVIDER,
                         &schema.schema,
-                        &[],
-                        OpenAiSchemaProfile::StructuredOutput,
+                        &compat.schema_capabilities,
+                        SchemaPurpose::StructuredOutput,
                     )?;
                     json!({
                         "type": "json_schema",

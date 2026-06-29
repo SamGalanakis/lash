@@ -138,8 +138,10 @@ pub(crate) fn trace_llm_request(req: &LlmRequest) -> TraceLlmRequest {
             .map(|tool| TraceToolSpec {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-                output_schema: tool.output_schema.clone(),
+                input_schema: serde_json::to_value(&tool.input_schema)
+                    .unwrap_or(serde_json::Value::Null),
+                output_schema: serde_json::to_value(&tool.output_schema)
+                    .unwrap_or(serde_json::Value::Null),
             })
             .collect(),
         tool_choice: match req.tool_choice {

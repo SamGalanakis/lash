@@ -12,6 +12,7 @@ pub enum BoundaryKind {
     Ingress,
     QueuedIngress,
     Provider,
+    ProviderEvent,
     Tool,
     ExecCode,
     DurableEffect,
@@ -204,6 +205,10 @@ impl RuntimeCompletionQueue {
         self.completed_ids.insert(boundary_id.to_string());
     }
 
+    pub fn defer(&mut self, event: BoundaryEvent) {
+        self.pending.push(event);
+    }
+
     pub fn take_ready(&mut self, ready: impl Fn(&BoundaryEvent) -> bool) -> Vec<BoundaryEvent> {
         let mut selected = Vec::new();
         let mut remaining = Vec::with_capacity(self.pending.len());
@@ -221,11 +226,28 @@ impl RuntimeCompletionQueue {
     pub fn register(
         &mut self,
         scheduler: &mut BoundaryScheduler,
-        mut event: BoundaryEvent,
+        event: BoundaryEvent,
         registered_after: &DeliveredBoundary,
         completion_family: impl Into<String>,
         completion_units: Vec<RuntimeCompletionUnit>,
     ) -> PendingRuntimeBoundary {
+        let (pending, event) = self.register_pending_event(
+            event,
+            registered_after,
+            completion_family,
+            completion_units,
+        );
+        scheduler.schedule(event);
+        pending
+    }
+
+    pub fn register_pending_event(
+        &mut self,
+        mut event: BoundaryEvent,
+        registered_after: &DeliveredBoundary,
+        completion_family: impl Into<String>,
+        completion_units: Vec<RuntimeCompletionUnit>,
+    ) -> (PendingRuntimeBoundary, BoundaryEvent) {
         let original_scheduled_at = event.at;
         let ready_at = original_scheduled_at.max(registered_after.at.saturating_add(1));
         event.at = ready_at;
@@ -251,8 +273,7 @@ impl RuntimeCompletionQueue {
         event.payload = Value::Object(payload_object);
         self.registered_ids.insert(event.boundary_id.clone());
         self.registrations.push(pending.clone());
-        scheduler.schedule(event);
-        pending
+        (pending, event)
     }
 }
 
@@ -411,6 +432,7 @@ impl BoundaryEvent {
             BoundaryKind::Ingress => "ingress",
             BoundaryKind::QueuedIngress => "queued_ingress",
             BoundaryKind::Provider => "provider",
+            BoundaryKind::ProviderEvent => "provider_event",
             BoundaryKind::Tool => "tool",
             BoundaryKind::ExecCode => "exec_code",
             BoundaryKind::DurableEffect => "durable_effect",

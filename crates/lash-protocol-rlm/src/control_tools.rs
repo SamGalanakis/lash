@@ -175,7 +175,7 @@ mod tests {
         let definition = continue_as_tool_definition();
 
         assert_eq!(
-            definition.contract.output_schema["required"],
+            definition.contract.output_schema.canonical["required"],
             json!(["ok", "frame_id", "task", "seed_keys", "seed_count"])
         );
         let rendered = definition.compact_contract().render_signature();

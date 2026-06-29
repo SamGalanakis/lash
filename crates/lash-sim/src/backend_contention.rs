@@ -10,6 +10,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
 
+use crate::oracles::worker_stale_completion_rejected;
+use crate::trace::{AbstractWorldSummary, WorkerAbstractSummary};
+
 const LEASE_TTL_MS: u64 = 60_000;
 
 #[derive(Debug, Serialize)]
@@ -433,6 +436,32 @@ async fn dead_owner_reclaim_preserves_live_successor(
         .release_session_execution_lease(&renewed_live.completion())
         .await
         .map_err(|err| format!("release renewed live successor: {err}"))?;
+    // Assert the contention evidence AGAINST the worker-stale-completion oracle
+    // (the same oracle the generated lane uses), rather than wiring `status:
+    // "passed"` by convention. The oracle only passes when a real incarnation
+    // change advanced the fencing token and the stale completion was rejected, so
+    // a store that failed to fence fails this operation loudly.
+    let worker_summary = AbstractWorldSummary::with_digest(
+        1,
+        1,
+        vec![],
+        vec![],
+        vec![WorkerAbstractSummary {
+            worker_alias: live_owner.owner_id.clone(),
+            session_alias: session_id.to_string(),
+            active_incarnation_id: renewed_live.owner.incarnation_id.clone(),
+            active_fencing_token: renewed_live.fencing_token,
+            lease_owner_changes: usize::from(!stale_owner.same_incarnation(&live_owner)),
+            stale_completion_rejections: 1,
+        }],
+    );
+    let verdict = worker_stale_completion_rejected(&worker_summary);
+    if !verdict.is_passed() {
+        return Err(format!(
+            "dead-owner reclaim evidence failed the worker-stale-completion oracle: {}",
+            verdict.message
+        ));
+    }
     Ok(BackendContentionOperation {
         operation_id: "runtime-persistence.dead-owner-reclaim",
         status: "passed",
@@ -444,6 +473,11 @@ async fn dead_owner_reclaim_preserves_live_successor(
             "renewed_live_lease": lease_summary(&renewed_live),
             "stale_completion_left_live_lease_renewable": true,
             "fencing_token_advanced": live_lease.fencing_token > stale_lease.fencing_token,
+            "asserted_against_oracle": {
+                "oracle_id": verdict.oracle_id,
+                "status": "passed",
+                "reason": verdict.message,
+            },
         }),
     })
 }

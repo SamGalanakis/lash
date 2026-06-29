@@ -21,6 +21,12 @@ const OPENAI_COMPAT_TOOL_CALL: &str = include_str!(
 );
 const OPENAI_COMPAT_RATE_LIMIT: &str =
     include_str!("../provider-scripts/canonical/openai-compatible.chat-rate-limit-429.json");
+const OPENAI_COMPAT_MID_STREAM_DISCONNECT: &str =
+    include_str!("../provider-scripts/canonical/openai-compatible.chat-mid-stream-disconnect.json");
+const OPENAI_COMPAT_RESPONSE_START_TIMEOUT: &str =
+    include_str!("../provider-scripts/canonical/openai-compatible.chat-response-start-timeout.json");
+const OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT: &str =
+    include_str!("../provider-scripts/canonical/openai-compatible.chat-stream-chunk-timeout.json");
 const OPENAI_RESPONSES_TEXT: &str =
     include_str!("../provider-scripts/canonical/openai.responses-text-stream.json");
 const ANTHROPIC_MESSAGES_TEXT: &str =
@@ -61,6 +67,24 @@ impl From<lash_core::LlmTransportError> for ProviderMutationExecutionError {
     fn from(value: lash_core::LlmTransportError) -> Self {
         Self::new(value.to_string())
     }
+}
+
+/// Transport- and HTTP-level mutation classes (distinct from the JSON
+/// parser-error and rate-limit classes). Each perturbs the wire transport while
+/// preserving provider-native framing and is classified on its own named
+/// failure path. Generator-driven selection draws from this set so live runs
+/// exercise socket disconnects, response-start/chunk timeouts, and retryable
+/// 5xx sequences, not only the fixed parser-rejection corpus.
+pub const TRANSPORT_PROVIDER_MUTATIONS: &[&str] = &[
+    "mid_stream_disconnect",
+    "response_start_timeout",
+    "stream_chunk_timeout",
+    "retryable_server_error_sequence",
+];
+
+/// Whether a mutation class is one of the transport/HTTP perturbation classes.
+pub fn is_transport_provider_mutation(mutation: &str) -> bool {
+    TRANSPORT_PROVIDER_MUTATIONS.contains(&mutation)
 }
 
 #[derive(Default)]
@@ -134,6 +158,33 @@ struct MutationScriptSpec {
     script_content: String,
     request_kind: MutationRequestKind,
     expected_status: Option<u16>,
+    /// When set, the real provider failure classifier must report this
+    /// `ProviderFailureKind` (e.g. `Stream`, `Timeout`, `Http`), proving the
+    /// mutation class drives a distinct, named failure path and not just a
+    /// generic parse error.
+    expected_kind: Option<&'static str>,
+    /// When set, the classified failure's `retryable` flag must match, so a
+    /// retryable transport/server fault is never silently treated as terminal.
+    expected_retryable: Option<bool>,
+}
+
+impl MutationScriptSpec {
+    fn parser_error(
+        proof_name: &'static str,
+        provider_kind: &'static str,
+        script_content: String,
+        request_kind: MutationRequestKind,
+    ) -> Self {
+        Self {
+            proof_name,
+            provider_kind,
+            script_content,
+            request_kind,
+            expected_status: None,
+            expected_kind: None,
+            expected_retryable: None,
+        }
+    }
 }
 
 enum MutationRequestKind {
@@ -164,6 +215,8 @@ fn mutation_specs(
                 script_content: OPENAI_COMPAT_RATE_LIMIT.to_string(),
                 request_kind: MutationRequestKind::OpenAiCompatible { stream: false },
                 expected_status: Some(429),
+                expected_kind: None,
+                expected_retryable: None,
             },
             MutationScriptSpec {
                 proof_name: "mutation.rate-limit.openai",
@@ -181,6 +234,8 @@ fn mutation_specs(
                 )?,
                 request_kind: MutationRequestKind::OpenAiResponses,
                 expected_status: Some(429),
+                expected_kind: None,
+                expected_retryable: None,
             },
             MutationScriptSpec {
                 proof_name: "mutation.rate-limit.anthropic",
@@ -198,6 +253,8 @@ fn mutation_specs(
                 )?,
                 request_kind: MutationRequestKind::Anthropic,
                 expected_status: Some(429),
+                expected_kind: None,
+                expected_retryable: None,
             },
             MutationScriptSpec {
                 proof_name: "mutation.rate-limit.google",
@@ -205,8 +262,14 @@ fn mutation_specs(
                 script_content: GOOGLE_GENERATE_RATE_LIMIT.to_string(),
                 request_kind: MutationRequestKind::Google { stream: false },
                 expected_status: Some(429),
+                expected_kind: None,
+                expected_retryable: None,
             },
         ]),
+        "mid_stream_disconnect"
+        | "response_start_timeout"
+        | "stream_chunk_timeout"
+        | "retryable_server_error_sequence" => transport_mutation_specs(mutation),
         other => Err(ProviderMutationExecutionError::new(format!(
             "unknown provider mutation `{other}`"
         ))),
@@ -218,51 +281,139 @@ fn malformed_parser_specs(
     mutation: &'static str,
 ) -> Result<Vec<MutationScriptSpec>, ProviderMutationExecutionError> {
     Ok(vec![
-        MutationScriptSpec {
-            proof_name: "mutation.parser-error.openai-compatible",
-            provider_kind: "openai-compatible",
-            script_content: malformed_sse_script(
+        MutationScriptSpec::parser_error(
+            "mutation.parser-error.openai-compatible",
+            "openai-compatible",
+            malformed_sse_script(
                 OPENAI_COMPAT_TOOL_CALL,
                 &format!("openai-compatible.chat-{script_stem}"),
                 mutation,
             )?,
-            request_kind: MutationRequestKind::OpenAiCompatible { stream: true },
-            expected_status: None,
-        },
-        MutationScriptSpec {
-            proof_name: "mutation.parser-error.openai",
-            provider_kind: "openai",
-            script_content: malformed_sse_script(
+            MutationRequestKind::OpenAiCompatible { stream: true },
+        ),
+        MutationScriptSpec::parser_error(
+            "mutation.parser-error.openai",
+            "openai",
+            malformed_sse_script(
                 OPENAI_RESPONSES_TEXT,
                 &format!("openai.responses-{script_stem}"),
                 mutation,
             )?,
-            request_kind: MutationRequestKind::OpenAiResponses,
-            expected_status: None,
-        },
-        MutationScriptSpec {
-            proof_name: "mutation.parser-error.anthropic",
-            provider_kind: "anthropic",
-            script_content: malformed_sse_script(
+            MutationRequestKind::OpenAiResponses,
+        ),
+        MutationScriptSpec::parser_error(
+            "mutation.parser-error.anthropic",
+            "anthropic",
+            malformed_sse_script(
                 ANTHROPIC_MESSAGES_TEXT,
                 &format!("anthropic.messages-{script_stem}"),
                 mutation,
             )?,
-            request_kind: MutationRequestKind::Anthropic,
-            expected_status: None,
-        },
-        MutationScriptSpec {
-            proof_name: "mutation.parser-error.google",
-            provider_kind: "google_oauth",
-            script_content: malformed_sse_script(
+            MutationRequestKind::Anthropic,
+        ),
+        MutationScriptSpec::parser_error(
+            "mutation.parser-error.google",
+            "google_oauth",
+            malformed_sse_script(
                 GOOGLE_STREAM_GENERATE_TEXT,
                 &format!("google.stream-generate-content-{script_stem}"),
                 mutation,
             )?,
-            request_kind: MutationRequestKind::Google { stream: true },
-            expected_status: None,
-        },
+            MutationRequestKind::Google { stream: true },
+        ),
     ])
+}
+
+/// Transport- and HTTP-level mutation classes that run a real, schema-valid
+/// provider wire script through the production provider and assert the failure
+/// is classified on a distinct named path. Unlike the parser-error classes,
+/// these never corrupt the JSON payload — they perturb the *transport* (a
+/// mid-stream socket close, a response-start or chunk read timeout, or a
+/// retryable 5xx) while preserving provider-native wire framing.
+fn transport_mutation_specs(
+    mutation: &str,
+) -> Result<Vec<MutationScriptSpec>, ProviderMutationExecutionError> {
+    let spec = match mutation {
+        "mid_stream_disconnect" => MutationScriptSpec {
+            proof_name: "mutation.transport.mid-stream-disconnect.openai-compatible",
+            provider_kind: "openai-compatible",
+            script_content: OPENAI_COMPAT_MID_STREAM_DISCONNECT.to_string(),
+            request_kind: MutationRequestKind::OpenAiCompatible { stream: true },
+            expected_status: None,
+            expected_kind: Some("Stream"),
+            expected_retryable: Some(true),
+        },
+        "response_start_timeout" => MutationScriptSpec {
+            proof_name: "mutation.transport.response-start-timeout.openai-compatible",
+            provider_kind: "openai-compatible",
+            script_content: OPENAI_COMPAT_RESPONSE_START_TIMEOUT.to_string(),
+            request_kind: MutationRequestKind::OpenAiCompatible { stream: true },
+            expected_status: None,
+            expected_kind: Some("Timeout"),
+            expected_retryable: Some(true),
+        },
+        "stream_chunk_timeout" => MutationScriptSpec {
+            proof_name: "mutation.transport.stream-chunk-timeout.openai-compatible",
+            provider_kind: "openai-compatible",
+            script_content: OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT.to_string(),
+            request_kind: MutationRequestKind::OpenAiCompatible { stream: true },
+            expected_status: None,
+            expected_kind: Some("Timeout"),
+            expected_retryable: Some(true),
+        },
+        "retryable_server_error_sequence" => MutationScriptSpec {
+            proof_name: "mutation.transport.retryable-503.openai-compatible",
+            provider_kind: "openai-compatible",
+            script_content: retryable_server_error_script(
+                OPENAI_COMPAT_TOOL_CALL,
+                "openai-compatible.chat-retryable-503",
+            )?,
+            request_kind: MutationRequestKind::OpenAiCompatible { stream: true },
+            expected_status: Some(503),
+            expected_kind: None,
+            expected_retryable: Some(true),
+        },
+        other => {
+            return Err(ProviderMutationExecutionError::new(format!(
+                "unknown transport mutation `{other}`"
+            )));
+        }
+    };
+    Ok(vec![spec])
+}
+
+fn retryable_server_error_script(
+    script: &str,
+    name: &str,
+) -> Result<String, ProviderMutationExecutionError> {
+    let mut value: Value = serde_json::from_str(script)?;
+    value["name"] = Value::String(name.to_string());
+    value["timeline"] = json!([
+        {
+            "at": 10,
+            "event": "http_error",
+            "status": 503,
+            "headers": [
+                { "name": "content-type", "value": "application/json" },
+                { "name": "retry-after", "value": "1" },
+                { "name": "x-request-id", "value": format!("req-{name}") }
+            ],
+            "body": json!({
+                "error": {
+                    "message": "The server is overloaded, please retry",
+                    "type": "server_error",
+                    "code": "service_unavailable"
+                }
+            })
+            .to_string()
+        }
+    ]);
+    value["expected_provider"] = json!({
+        "mutation": "retryable_server_error_sequence",
+        "status": 503,
+        "retryable": true,
+    });
+    Ok(serde_json::to_string(&value)?)
 }
 
 fn malformed_sse_script(
@@ -284,9 +435,26 @@ fn malformed_sse_script(
             "script had no SSE event to mutate",
         ));
     };
-    event["data"] = Value::String("{ malformed provider event".to_string());
+    let (behavior, data) = match mutation {
+        "malformed_sse_chunk" => ("invalid_json_sse_chunk", "{ malformed provider event"),
+        "dropped_terminal_event" => (
+            "truncated_terminal_event_payload",
+            r#"{"terminal_event":"dropped""#,
+        ),
+        "duplicate_tool_call_delta" => (
+            "truncated_duplicate_tool_call_delta",
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"lookup","arguments":""#,
+        ),
+        "wrong_provider_schema" => (
+            "wrong_provider_schema_payload",
+            r#"{"provider":"wrong","payload":["#,
+        ),
+        _ => ("unknown_parser_mutation", "{ malformed provider event"),
+    };
+    event["data"] = Value::String(data.to_string());
     value["expected_provider"] = json!({
         "mutation": mutation,
+        "behavior": behavior,
         "expected": "provider parser error",
     });
     Ok(serde_json::to_string(&value)?)
@@ -324,6 +492,13 @@ async fn run_mutation_script(
 ) -> Result<Value, ProviderMutationExecutionError> {
     let parsed = ProviderWireScript::from_json_str(&spec.script_content)?;
     let script_name = parsed.name.clone();
+    let mutation_behavior = parsed
+        .expected_provider
+        .as_ref()
+        .and_then(|expected| expected.get("behavior"))
+        .and_then(Value::as_str)
+        .unwrap_or("unspecified")
+        .to_string();
     let transport = Arc::new(ScriptedLlmHttpTransport::new(parsed));
     let result = match spec.request_kind {
         MutationRequestKind::OpenAiCompatible { stream } => {
@@ -349,14 +524,11 @@ async fn run_mutation_script(
             provider.complete(google_request(stream)).await
         }
     };
-    let err = result.map_or_else(
-        |err| Ok(err),
-        |_| {
-            Err(ProviderMutationExecutionError::new(format!(
-                "mutated provider script `{script_name}` unexpectedly succeeded"
-            )))
-        },
-    )?;
+    let err = result.map_or_else(Ok, |_| {
+        Err(ProviderMutationExecutionError::new(format!(
+            "mutated provider script `{script_name}` unexpectedly succeeded"
+        )))
+    })?;
     if let Some(expected_status) = spec.expected_status
         && err.status != Some(expected_status)
     {
@@ -366,11 +538,28 @@ async fn run_mutation_script(
         )));
     }
     let classified = DefaultProviderFailureClassifier.classify(err.clone());
+    if let Some(expected_kind) = spec.expected_kind {
+        let observed_kind = format!("{:?}", classified.kind);
+        if observed_kind != expected_kind {
+            return Err(ProviderMutationExecutionError::new(format!(
+                "mutated provider script `{script_name}` classified as `{observed_kind}`, expected `{expected_kind}`"
+            )));
+        }
+    }
+    if let Some(expected_retryable) = spec.expected_retryable
+        && classified.retryable != expected_retryable
+    {
+        return Err(ProviderMutationExecutionError::new(format!(
+            "mutated provider script `{script_name}` classified retryable={}, expected {expected_retryable}",
+            classified.retryable
+        )));
+    }
     let exchanges = transport.exchanges()?;
     Ok(json!({
         "proof_name": spec.proof_name,
         "provider_kind": spec.provider_kind,
         "script_name": script_name,
+        "mutation_behavior": mutation_behavior,
         "exchange_count": exchanges.len(),
         "endpoint": exchanges.first().map(|exchange| exchange.request.path.clone()),
         "response_events": exchanges.first().map(|exchange| exchange.response.event_names.clone()).unwrap_or_default(),
@@ -404,10 +593,9 @@ fn openai_compatible_request(stream: bool) -> LlmRequest {
                 "properties": {
                     "q": { "type": "string" }
                 }
-            }),
-            output_schema: json!({}),
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
+            })
+            .into(),
+            output_schema: json!({}).into(),
         }]),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
@@ -519,5 +707,56 @@ mod tests {
                 .iter()
                 .all(|proof| proof["exchange_count"].as_u64() == Some(1))
         );
+    }
+
+    #[tokio::test]
+    async fn transport_mutations_classify_on_distinct_named_paths() {
+        let expectations = [
+            ("mid_stream_disconnect", "Stream", true, None),
+            ("response_start_timeout", "Timeout", true, None),
+            ("stream_chunk_timeout", "Timeout", true, None),
+            ("retryable_server_error_sequence", "Unknown", true, Some(503)),
+        ];
+        for (mutation, raw_kind, classified_retryable, status) in expectations {
+            let matrix = execute_provider_mutation_matrix(mutation)
+                .await
+                .unwrap_or_else(|err| panic!("mutation {mutation} failed: {err}"));
+            let proof = &matrix["matrix"]["proofs"][0];
+            assert_eq!(proof["kind"], raw_kind, "raw kind for {mutation}");
+            assert_eq!(
+                proof["classification"]["retryable"], classified_retryable,
+                "classified retryable for {mutation}"
+            );
+            if let Some(status) = status {
+                assert_eq!(proof["status"], status, "status for {mutation}");
+            } else {
+                assert_eq!(proof["status"], Value::Null, "status for {mutation}");
+            }
+        }
+    }
+
+    #[test]
+    fn parser_mutation_labels_generate_distinct_wire_behaviors() {
+        let mut behaviors = std::collections::BTreeSet::new();
+        for mutation in [
+            "malformed_sse_chunk",
+            "dropped_terminal_event",
+            "duplicate_tool_call_delta",
+            "wrong_provider_schema",
+        ] {
+            let specs = mutation_specs(mutation).expect("mutation specs");
+            let first =
+                ProviderWireScript::from_json_str(&specs[0].script_content).expect("script parses");
+            let behavior = first
+                .expected_provider
+                .as_ref()
+                .and_then(|expected| expected.get("behavior"))
+                .and_then(Value::as_str)
+                .expect("behavior");
+            assert!(
+                behaviors.insert(behavior.to_string()),
+                "mutation behavior `{behavior}` was reused"
+            );
+        }
     }
 }

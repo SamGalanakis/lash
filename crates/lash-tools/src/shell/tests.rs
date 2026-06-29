@@ -915,6 +915,7 @@ mod tests {
         let properties = definition
             .contract
             .input_schema
+            .canonical
             .get("properties")
             .and_then(serde_json::Value::as_object)
             .expect("properties");
@@ -956,6 +957,7 @@ mod tests {
         let properties = definition
             .contract
             .input_schema
+            .canonical
             .get("properties")
             .and_then(serde_json::Value::as_object)
             .expect("properties");

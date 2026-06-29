@@ -126,7 +126,8 @@ pub(crate) fn llm_rerank_request(
                     }
                 }
             }
-        }),
+        })
+        .into(),
     };
     let prompt = llm_rerank_prompt(args, candidates, limit);
     DirectRequest {
@@ -286,7 +287,7 @@ mod tests {
         };
         assert_eq!(schema.name, "tool_search_rerank");
         assert_eq!(
-            schema.schema["properties"]["tool_names"]["items"]["enum"],
+            schema.schema.canonical["properties"]["tool_names"]["items"]["enum"],
             json!(["read_file", "search_web"])
         );
     }
