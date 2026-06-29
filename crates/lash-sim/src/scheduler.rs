@@ -306,6 +306,16 @@ impl BoundaryScheduler {
         self.pending.is_empty()
     }
 
+    /// The scheduled time of the boundary `deliver_next` would select next (the
+    /// minimum `at` across all pending boundaries). `None` when empty. Used by the
+    /// serialized cross-backend driver as a delivery barrier: it must not deliver
+    /// any boundary at or past a live turn's completion time until that
+    /// completion has actually been scheduled, so the delivery order cannot drift
+    /// with the backend store's async timing.
+    pub fn min_pending_at(&self) -> Option<u64> {
+        self.pending.iter().map(|event| event.at).min()
+    }
+
     pub fn deliver_next(&mut self, observed: Value) -> Option<DeliveredBoundary> {
         let decision = self.next_decision()?;
         Some(self.deliver_index(decision, observed))
