@@ -50,7 +50,7 @@ use crate::oracles::{
     scenario_contract_mini_oracles, scenario_contract_oracles,
     scenario_suite_coverage_manifest_oracle_id, scheduler_controlled_delivery,
     scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
-    trigger_delivery_observed, worker_stale_completion_rejected,
+    trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
 };
 use crate::provider::{
     ProviderWireEvent, ProviderWireHeader, ProviderWireScript, ScriptedLlmHttpExchange,
@@ -88,6 +88,13 @@ use crate::trace::{
 /// generated turn ever reaches them.
 pub(crate) const MAX_PROVIDER_EVENT_POLL_YIELDS: u64 = 200_000;
 pub(crate) const MAX_TURN_FINISH_POLL_YIELDS: u64 = 2_000_000;
+/// Deterministic yield budget for the self-checking quarantine: the known
+/// SQLite divergence is RUN (not skipped) under this bounded budget. If the
+/// replay does not complete within it, the expected active-turn-enqueue deadlock
+/// signature still reproduces (green-except-known). If it completes cleanly, the
+/// divergence is gone and the lane fails loudly. Large enough that the small
+/// amount of pre-deadlock SQLite I/O cannot exhaust it before the deadlock parks.
+pub(crate) const KNOWN_DIVERGENCE_SELF_CHECK_YIELDS: u64 = 3_000_000;
 
 pub const FIXED_SCRIPT_PROFILE: &str = "tiny-fixed-provider-scripts";
 pub const FIXED_SCRIPT_EVENTS: &str = "events.jsonl";
@@ -2975,10 +2982,13 @@ pub async fn run_fixed_script_profile(
 
 /// A generated seed whose SQLite cross-backend replay is a KNOWN, documented
 /// divergence (a product bug surfaced by the harness's own broad lane, escalated
-/// for a product decision — never silently patched). The lane runs these seeds
-/// and *expects* the SQLite replay to diverge: if it diverges the lane stays
-/// green-except-known; if it ever stops diverging the lane fails loudly so the
-/// quarantine is removed once the product fix lands.
+/// for a product decision — never silently patched). The lane RUNS these seeds
+/// under a bounded deterministic budget (it does NOT silently skip them) and
+/// *expects* the SQLite replay to still diverge — either by failing with a
+/// divergence error or by reproducing the active-turn-enqueue deadlock signature
+/// (not completing within the budget). If the replay instead completes cleanly,
+/// the divergence is gone and the lane FAILS LOUDLY so the stale quarantine is
+/// removed once the product fix lands. The budget guarantees it never hangs.
 struct KnownSqliteDivergence {
     seed: u64,
     profile: &'static str,
@@ -3005,6 +3015,72 @@ fn known_sqlite_divergence(
     KNOWN_SQLITE_DIVERGENCES
         .iter()
         .find(|divergence| divergence.seed == seed && divergence.profile == profile)
+}
+
+/// Result of running a known SQLite divergence under the bounded self-check.
+struct KnownDivergenceSelfCheck {
+    /// `true` if the divergence still reproduces (a divergence error or the
+    /// bounded deadlock signature); `false` only if the replay completed cleanly
+    /// (the divergence is gone and the quarantine is stale).
+    still_divergent: bool,
+    signature: &'static str,
+    detail: String,
+    budget_yields: u64,
+}
+
+/// Run the quarantined SQLite replay under a bounded deterministic yield budget,
+/// asserting the divergence STILL reproduces. This replaces the old silent SKIP:
+/// the replay is actually executed, so a product fix can never go undetected.
+/// Bounded by `KNOWN_DIVERGENCE_SELF_CHECK_YIELDS` so the known active-turn
+/// enqueue deadlock can never hang the lane — once the budget is exhausted the
+/// (parked) replay future is dropped.
+async fn self_check_known_sqlite_divergence(
+    trace_path: &Path,
+    trace: &SimulationTrace,
+    db_path: &Path,
+) -> KnownDivergenceSelfCheck {
+    let budget = KNOWN_DIVERGENCE_SELF_CHECK_YIELDS;
+    let replay_fut = replay_trace_to_sqlite(trace_path, trace, db_path, None);
+    tokio::pin!(replay_fut);
+    let mut polls = 0u64;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut replay_fut => {
+                return match result {
+                    Ok(_) => KnownDivergenceSelfCheck {
+                        still_divergent: false,
+                        signature: "completed_clean_divergence_gone",
+                        detail: format!(
+                            "the SQLite replay completed cleanly within {polls} deterministic yields; the known divergence no longer reproduces"
+                        ),
+                        budget_yields: polls,
+                    },
+                    Err(err) => KnownDivergenceSelfCheck {
+                        still_divergent: true,
+                        signature: "divergence_error",
+                        detail: format!(
+                            "the SQLite replay still diverged with an error after {polls} yields (no longer a hang, but still divergent): {err}"
+                        ),
+                        budget_yields: polls,
+                    },
+                };
+            }
+            () = tokio::task::yield_now() => {
+                polls += 1;
+                if polls >= budget {
+                    return KnownDivergenceSelfCheck {
+                        still_divergent: true,
+                        signature: "deadlock_within_bounded_budget",
+                        detail: format!(
+                            "the SQLite replay did not complete within {budget} deterministic yields; the expected active-turn-enqueue deadlock signature still reproduces"
+                        ),
+                        budget_yields: polls,
+                    };
+                }
+            }
+        }
+    }
 }
 
 pub async fn run_generated_sim_profile(
@@ -3081,11 +3157,20 @@ pub async fn run_generated_sim_profile(
         // A quarantined seed reproduces an escalated lash-store product bug whose
         // SQLite replay does not just diverge but DEADLOCKS the serial replay
         // (an active-turn queued-input enqueue blocks on a gated turn the serial
-        // replay cannot advance). Running it would hang the lane, so we SKIP the
-        // SQLite replay and record an explicit, documented known-divergence —
-        // the lane is green-except-known rather than hanging. Generation, the
-        // oracle suite, and the abstract model replay all still run for the seed.
+        // replay cannot advance). Rather than silently SKIP it, the lane RUNS the
+        // replay under a bounded deterministic self-check that asserts the
+        // divergence still reproduces (a divergence error or the deadlock
+        // signature), and FAILS LOUDLY if it ever completes cleanly — so a silent
+        // product fix can never go undetected. The budget guarantees no hang.
         if let Some(divergence) = known_sqlite_divergence(seed, profile) {
+            let self_check =
+                self_check_known_sqlite_divergence(&trace_path, &trace, &sqlite_database_path).await;
+            if !self_check.still_divergent {
+                return Err(FixedScriptRunnerError::Assertion(format!(
+                    "known SQLite divergence for seed {seed} ({}) NO LONGER reproduces: {}. The quarantine is stale: re-examine the cross-backend divergence and remove this entry from KNOWN_SQLITE_DIVERGENCES.",
+                    divergence.profile, self_check.detail
+                )));
+            }
             let known = serde_json::json!({
                 "schema": "lash.sim.known-sqlite-divergence.v1",
                 "seed": seed,
@@ -3093,7 +3178,13 @@ pub async fn run_generated_sim_profile(
                 "classification": divergence.classification,
                 "fixture": divergence.fixture,
                 "rationale": divergence.rationale,
-                "sqlite_replay": "skipped_known_divergence",
+                "sqlite_replay": "self_checked_still_divergent",
+                "self_check": {
+                    "still_divergent": self_check.still_divergent,
+                    "signature": self_check.signature,
+                    "detail": self_check.detail,
+                    "budget_yields": self_check.budget_yields,
+                },
             });
             std::fs::write(&sqlite_replay_report_path, serde_json::to_vec_pretty(&known)?)?;
             quarantined_divergences.push(known);
@@ -3389,6 +3480,7 @@ async fn run_generated_workload(
         runtime_usage_monotonic(&events),
         durable_effect_exactly_once(&final_summary),
         worker_stale_completion_rejected(&final_summary),
+        worker_failover_continues_work(&events),
         lease_time_monotonic(&events),
         generated_suspend_resume(&events),
         generated_final_value_semantic_channel(&events),
@@ -7199,6 +7291,30 @@ mod tests {
         assert!(proof.assistant_prose_delta_count > 0);
         assert!(!proof.facts.transcript_inference_required);
         assert!(proof.semantic_channel_invariant.is_passed());
+    }
+
+    #[tokio::test]
+    async fn known_divergence_self_check_flags_a_clean_replay_as_no_longer_divergent() {
+        // The self-check must DETECT a clean replay (no longer divergent), which is
+        // exactly the condition under which the quarantine lane fails loudly. A
+        // normal fast-random trace (seed 7) replays cleanly through the real SQLite
+        // store, so the self-check must report `still_divergent == false`.
+        let workload = generate_workload(7, "fast-random", 24).expect("workload");
+        let trace = run_generated_workload_for_fixture(workload, "bundle")
+            .await
+            .expect("trace");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("sqlite-store");
+
+        let check =
+            self_check_known_sqlite_divergence(Path::new("trace.json"), &trace, &db_path).await;
+        assert!(
+            !check.still_divergent,
+            "a clean SQLite replay must be flagged as no-longer-divergent so the quarantine lane fails loudly; got signature={} detail={}",
+            check.signature,
+            check.detail
+        );
+        assert_eq!(check.signature, "completed_clean_divergence_gone");
     }
 
     #[tokio::test]

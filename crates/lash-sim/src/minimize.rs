@@ -15,7 +15,7 @@ use crate::oracles::{
     provider_turn_interleaving_depth, queued_ingress_observed, runtime_session_graph_contract,
     scenario_contract_mini_oracles, scenario_contract_oracles, scheduler_controlled_delivery,
     scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
-    trigger_delivery_observed, worker_stale_completion_rejected,
+    trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
 };
 use crate::replay::{ReplayError, replay_trace};
 use crate::runner::run_generated_workload_for_fixture;
@@ -623,6 +623,7 @@ fn generated_oracles(
         runtime_session_graph_contract(summary),
         durable_effect_exactly_once(summary),
         worker_stale_completion_rejected(summary),
+        worker_failover_continues_work(events),
         lease_time_monotonic(events),
         generated_suspend_resume(events),
         generated_final_value_semantic_channel(events),

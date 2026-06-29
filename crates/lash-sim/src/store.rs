@@ -71,7 +71,6 @@ pub struct ModelStore {
     workers: BTreeMap<String, ModelWorker>,
     #[allow(clippy::struct_field_names)]
     durable_projection_entries: BTreeMap<String, ModelDurableProjectionEntry>,
-    session_execution_fencing_tokens: BTreeMap<String, u64>,
     backend_attempts_by_operation: BTreeMap<String, usize>,
     tool_completions: BTreeMap<String, usize>,
     exec_executions: BTreeMap<String, usize>,
@@ -320,8 +319,6 @@ impl ModelStore {
                 })
             }
             BoundaryKind::Provider => {
-                let _turn_lease_token =
-                    self.next_session_execution_fencing_token(&event.actor_alias);
                 let turn_index = self
                     .sessions
                     .get(&event.actor_alias)
@@ -526,40 +523,25 @@ impl ModelStore {
                 self.project_durable_effect(event, durable_key, result)
             }
             BoundaryKind::Worker => {
-                let session_alias = boundary_session_alias(event);
-                let stale_owner = json!({
-                    "owner_id": event.actor_alias,
-                    "incarnation_id": format!("{}:incarnation-001", event.actor_alias),
-                });
-                let active_owner = json!({
-                    "owner_id": event.actor_alias,
-                    "incarnation_id": format!("{}:incarnation-002", event.actor_alias),
-                });
-                let stale_token = self.next_session_execution_fencing_token(&session_alias);
-                let active_token = self.next_session_execution_fencing_token(&session_alias);
+                // Worker lease fencing (incarnation change, monotonic fencing
+                // token, stale-completion rejection, and second-owner work
+                // continuation) is produced by the REAL session-execution lease
+                // store in `runtime_boundaries::run_worker_stale_completion`, and
+                // is NOT abstractly derivable from the boundary stream. The model
+                // carries the REAL reclaim/fence facts, threaded from the
+                // recorded observation via `apply_observed_boundary` (see
+                // `replay_trace`); cross-store reproduction is re-verified by the
+                // SQLite/Postgres backend replays, which re-run the real lease
+                // store. This abstract projection therefore reports identity only
+                // and deliberately fabricates NO fencing, so no path can make the
+                // worker oracle pass without the real store actually fencing.
                 json!({
                     "worker_alias": event.actor_alias,
-                    "session": session_alias,
-                    "initial_owner": stale_owner,
-                    "active_owner": active_owner,
-                    "active_fencing_token": active_token,
-                    "stale_completion_rejected": true,
-                    "lease_owner_changed": true,
-                    "runtime_stale_completion": {
-                        "session_id": boundary_session_alias(event),
-                        "lease_token": format!("model-lease-{stale_token}"),
-                        "fencing_token": stale_token,
-                    },
-                    "runtime_active_lease": {
-                        "session_id": boundary_session_alias(event),
-                        "lease_token": format!("model-lease-{active_token}"),
-                        "fencing_token": active_token,
-                    },
+                    "session": boundary_session_alias(event),
                 })
             }
             BoundaryKind::ProcessWake => {
                 let session = boundary_session_alias(event);
-                let _lease_token = self.next_session_execution_fencing_token(&session);
                 let process_id = format!("sim-process-{}", event.boundary_id.replace(':', "-"));
                 let dedupe_key = event
                     .payload
@@ -754,15 +736,6 @@ impl ModelStore {
         self.sessions
             .entry(alias.clone())
             .or_insert_with(|| ModelSession::new(alias))
-    }
-
-    fn next_session_execution_fencing_token(&mut self, session_alias: &str) -> u64 {
-        let token = self
-            .session_execution_fencing_tokens
-            .entry(session_alias.to_string())
-            .or_insert(0);
-        *token = token.saturating_add(1);
-        *token
     }
 
     fn project_durable_effect(
@@ -1149,19 +1122,53 @@ mod tests {
             "durable.sleep.replay",
             json!({"durable_key": "sleep/session-001", "result": {"done": false}}),
         ));
-        store.apply_boundary(&BoundaryEvent::new(
-            "worker-1",
-            "worker-001",
-            BoundaryKind::Worker,
-            5,
-            "worker.stale-completion-rejected",
-            json!({"session": "session-001"}),
-        ));
+        // Worker fencing is NOT abstractly projected (the abstract arm reports
+        // identity only); the model reads the REAL reclaim/fence facts produced by
+        // the live lease store, threaded in via `apply_observed_boundary`.
+        store.apply_observed_boundary(
+            &BoundaryEvent::new(
+                "worker-1",
+                "worker-001",
+                BoundaryKind::Worker,
+                5,
+                "worker.stale-completion-rejected",
+                json!({"session": "session-001"}),
+            ),
+            &json!({
+                "worker_alias": "worker-001",
+                "session": "session-001",
+                "active_owner": { "incarnation_id": "worker-001:incarnation-002" },
+                "active_fencing_token": 2,
+                "lease_owner_changed": true,
+                "stale_completion_rejected": true,
+            }),
+        );
 
         let summary = store.summary();
         assert_eq!(summary.sessions[0].observer_turn_indices, vec![1]);
         assert_eq!(summary.durable_effects[0].execution_count, 1);
         assert_eq!(summary.durable_effects[0].replay_count, 1);
         assert_eq!(summary.workers[0].stale_completion_rejections, 1);
+        assert_eq!(summary.workers[0].lease_owner_changes, 1);
+        assert_eq!(summary.workers[0].active_fencing_token, 2);
+    }
+
+    #[test]
+    fn abstract_worker_projection_fabricates_no_fencing() {
+        // The abstract worker projection must NOT fabricate fencing: if the real
+        // lease facts are never threaded in, the worker summary shows no fence
+        // change and the worker oracle cannot pass.
+        let mut store = ModelStore::default();
+        let observed = store.project_boundary_observation(&BoundaryEvent::new(
+            "worker-1",
+            "worker-001",
+            BoundaryKind::Worker,
+            0,
+            "worker.stale-completion-rejected",
+            json!({"session": "session-001"}),
+        ));
+        assert!(observed.get("stale_completion_rejected").is_none());
+        assert!(observed.get("lease_owner_changed").is_none());
+        assert!(observed.get("active_fencing_token").is_none());
     }
 }

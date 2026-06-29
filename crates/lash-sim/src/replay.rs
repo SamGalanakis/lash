@@ -71,7 +71,18 @@ pub fn replay_trace(
     let mut sequence = Vec::new();
 
     for expected in &trace.events {
-        let observed = store.apply_boundary(&expected.as_event());
+        let event = expected.as_event();
+        // Worker lease fencing is produced by the REAL session-execution lease
+        // store at generation time (and re-verified by the SQLite/Postgres backend
+        // replays). The abstract ModelStore cannot re-derive it, so the model
+        // carries the REAL recorded reclaim/fence facts rather than fabricating
+        // them: thread the recorded observation in directly instead of projecting.
+        let observed = if event.kind == BoundaryKind::Worker {
+            store.apply_observed_boundary(&event, &expected.observed);
+            expected.observed.clone()
+        } else {
+            store.apply_boundary(&event)
+        };
         let delivered = scheduler
             .deliver_boundary(&expected.boundary_id, observed)
             .ok_or_else(|| ReplayError::MissingBoundary(expected.boundary_id.clone()))?;

@@ -26,8 +26,10 @@ Current executable evidence in the implementation:
 - Generated traces include scheduler/completion evidence, a named
   `sim.oracle.operational-coverage.v1` oracle for the operational case set,
   and scenario contract oracles for Runtime, Standard, RLM, and Agent coverage
-  without importing scenario test modules. This is strong deterministic
-  conformance/replay evidence; by itself it is not yet true DST.
+  without importing scenario test modules. Combined with the interleaved live
+  turns, suspend/resume, live failure-turn, invariant floor, and real worker
+  failover described under "Implemented DST substance", this is now true DST and
+  not only operation-level conformance/replay.
 - Runtime, Standard, RLM, and Agent scenario contract metadata is now exported
   from production/test-independent modules and serialized into `lash-sim`
   summaries alongside the generated oracle verdicts.
@@ -53,29 +55,64 @@ Current executable evidence in the implementation:
   `target/confidence/<lane>/sim/`, including env-gated Postgres conformance
   evidence when the lane is enabled.
 
-Missing DST substance before the harness can be called done:
+Implemented DST substance (each item below is landed and gated by
+`cargo test -p lash-sim`):
 
-- The scheduler must actually interleave work: start at least two sessions'
-  turns concurrently, then have `BoundaryScheduler` resolve scripted-transport
-  provider chunks and final completions in seeded order. Current stable
-  evidence must be treated as operation-level conformance/replay unless the
-  in-progress provider-event scheduler path is landed and verified.
-- Tool and durable-effect coverage must pass through a real turn: a scripted
-  turn calls a tool or awaits a durable effect, the scheduler delivers the
-  completion, and the test proves suspend-to-resume behavior. Isolated runtime
-  boundary execution is not enough.
-- The invariant floor for true DST is graph acyclicity, exactly one active
-  Agent Frame, monotonic usage accounting, and Final Value as a semantic
-  outcome distinct from transcript/prose. Scenario-contract oracles must prove
-  each contract with distinct evidence/semantics or by running the named
-  scenario itself.
-- The docs and confidence summaries must not claim the harness finds bugs that
-  example tests miss until one real discovered regression has been minimized
-  and promoted to a replay fixture under `crates/lash-sim/replays/`.
-- Generator gaps remain done-line blockers: the fast profile must be genuinely
-  random, provider mutations must have distinct executable behaviors,
-  queued-ingress mode must vary, and worker failover must be generated as real
-  failover rather than only stale-completion evidence.
+- The scheduler actually interleaves work: provider turns are spawned as live
+  futures whose scripted-transport SSE chunks are released by scheduler-delivered
+  `ProviderEvent` boundaries in seeded order, and the generated lane asserts a
+  peak of at least two concurrent live turns
+  (`sim.oracle.provider-turn-interleaving-depth`).
+- Tool, durable-effect, and exec-code coverage pass through real turns that
+  SUSPEND and RESUME: a generated suspend session runs a real
+  `session.turn().run()` over the real `ScriptedLlmHttpTransport`, parks on a
+  tool/durable/exec await key, and is resumed only by a scheduler-delivered
+  completion boundary (`sim.oracle.generated-suspend-resume`). Both the
+  tool-call exchange that suspends the turn and the post-resume exchange exercise
+  real provider wire parsing.
+- A non-retryable provider FAILURE is driven through a LIVE turn: a malformed
+  mid-stream SSE chunk is delivered to a parked turn via the scripted-transport
+  gating, and `sim.oracle.live-provider-failure-terminalizes` asserts the turn
+  terminalizes with a terminal failure and commits no provider output (no leaked
+  partial assistant prose, no Final Value).
+- The invariant floor is enforced: graph acyclicity, exactly one active Agent
+  Frame, monotonic usage accounting, and Final Value as a semantic outcome
+  distinct from transcript/prose, each as a named failing-capable oracle and
+  re-verified from recorded facts on replay. The Runtime suite proves each
+  contract with distinct per-contract evidence; the Standard/RLM/Agent protocol
+  suites — not distinctly exercised per-contract by the generic generated
+  workload — are honestly collapsed to one failing-capable suite-level coverage
+  manifest each (plus the real per-behavior mini-oracles), so the oracle count
+  no longer overstates per-contract assurance.
+- One real discovered regression is minimized and promoted: the
+  `queued-active-turn-cancel-race` fixture under `crates/lash-sim/replays/` is a
+  deterministic regression guard, and the broad/full lane additionally surfaced
+  an open cross-backend SQLite divergence promoted as
+  `cross-backend-sqlite-active-turn-divergence` (see Known limitations).
+- Generator substance is real: the fast profile is genuinely seed-random,
+  provider mutations have distinct executable behaviors, queued-ingress mode
+  varies, and worker failover is generated as REAL failover — a second worker
+  incarnation reclaims the crashed owner's session-execution lease at a strictly
+  higher fencing token and CONTINUES the queued work the dead owner could not,
+  rejecting its stale completion (`sim.oracle.worker-failover-continues-work`).
+  The abstract model no longer fabricates worker fencing: it carries the real
+  reclaim/fence facts produced by the live lease store, re-verified by the
+  SQLite/Postgres backend replays.
+
+Known limitations (documented, not silently skipped):
+
+- The open cross-backend SQLite divergence remains the canonical UN-minimized
+  repro. It is scale-dependent (it does not reproduce at lib/fast-random scale),
+  so the model-replay minimizer — which preserves only abstract-model behavior —
+  does not preserve it, and a divergence-preserving shrink would have to re-run
+  the serial SQLite replay per candidate, which DEADLOCKS at the unbounded
+  active-turn enqueue (`sqlite_replay::queue_turn_input`). Bounding that enqueue
+  deterministically would require a clock the sim forbids or the product fix that
+  is intentionally out of scope. The quarantine is therefore SELF-CHECKING: the
+  lane runs the known divergence under a bounded deterministic yield budget and
+  asserts it still reproduces (a divergence error or the deadlock signature),
+  failing loudly if it ever completes cleanly so a silent product fix cannot go
+  undetected.
 
 ## Related Documents
 
@@ -101,9 +138,12 @@ deterministic simulated world. In the done state, the harness should find
 schedule, failure, provider-streaming, lease, replay, and backend-ordering bugs
 that example-based tests miss, while every failure is reproducible from a seed,
 generator version, and event trace and can later be minimized into a Simulation
-Replay Script. Until a real discovered regression is promoted to a replay
-fixture, that bug-finding claim remains a design goal rather than current
-evidence.
+Replay Script. The bug-finding claim is now backed by current evidence: the
+broad/full lane surfaced a real cross-backend SQLite divergence that the
+example/lib-scale tests do not catch, promoted as the
+`cross-backend-sqlite-active-turn-divergence` fixture and guarded by a
+self-checking quarantine. (It remains the canonical un-minimized repro for the
+reason given under "Known limitations".)
 
 The highest-value property is not "more random tests". It is one deterministic
 world that can compose the contracts Lash already owns:

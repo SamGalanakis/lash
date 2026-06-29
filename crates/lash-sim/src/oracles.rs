@@ -952,6 +952,50 @@ pub fn worker_stale_completion_rejected(summary: &AbstractWorldSummary) -> Oracl
     )
 }
 
+pub const WORKER_FAILOVER_CONTINUATION_ORACLE: &str =
+    "sim.oracle.worker-failover-continues-work.v1";
+
+/// Real worker FAILOVER CONTINUATION: a second worker incarnation reclaimed the
+/// crashed first owner's session-execution lease at a strictly higher fencing
+/// token and COMMITTED (continued) the queued work the dead owner could not,
+/// while the dead owner's stale work completion was rejected. These facts are
+/// produced by the real lease/queued-work store in
+/// `runtime_boundaries::run_worker_stale_completion` (start_worker_owned_work +
+/// resume_crashed_worker_work), so this oracle can only pass when a real
+/// successor actually continued real work — not merely when stale-completion
+/// evidence was observed.
+pub fn worker_failover_continues_work(events: &[DeliveredBoundary]) -> OracleVerdict {
+    if events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Worker)
+        .any(worker_owned_work_continued_by_successor)
+    {
+        return OracleVerdict::passed(
+            WORKER_FAILOVER_CONTINUATION_ORACLE,
+            "a second worker incarnation reclaimed the dead owner's lease at a strictly higher fence and committed (continued) the queued work the crashed first owner could not, rejecting its stale completion",
+        );
+    }
+    OracleVerdict::failed(
+        WORKER_FAILOVER_CONTINUATION_ORACLE,
+        "no worker boundary proved second-owner failover CONTINUATION of the first owner's in-flight work (claimed -> reclaimed at higher fence -> continued -> stale rejected)",
+    )
+}
+
+fn worker_owned_work_continued_by_successor(event: &DeliveredBoundary) -> bool {
+    let Some(work) = event
+        .observed
+        .get("runtime_worker_store")
+        .and_then(|store| store.get("worker_owned_work"))
+    else {
+        return false;
+    };
+    let flag = |key: &str| work.get(key).and_then(Value::as_bool).unwrap_or(false);
+    flag("first_owner_claimed_work")
+        && flag("second_owner_resumed_work")
+        && flag("second_owner_outranks_first")
+        && flag("stale_work_completion_rejected")
+}
+
 /// Assert that the real session-execution-lease fencing tokens recorded by the
 /// lease-time boundaries strictly increase per session. Unlike the old
 /// generator-fed tick (which was monotonic by construction and could never
@@ -3287,6 +3331,87 @@ mod tests {
             ..clean
         };
         assert!(!live_provider_failure_terminalizes(&not_live).is_passed());
+    }
+
+    #[test]
+    fn worker_stale_completion_oracle_requires_real_fencing() {
+        // Negative: the real store did NOT fence (no incarnation change, no stale
+        // rejection, fence not advanced) -> the oracle must FAIL. With the
+        // fabrication deleted, this is the ONLY way the summary can look.
+        let not_fenced = AbstractWorldSummary::with_digest(
+            1,
+            1,
+            vec![],
+            vec![],
+            vec![WorkerAbstractSummary {
+                worker_alias: "worker-001".to_string(),
+                session_alias: "session-001".to_string(),
+                active_incarnation_id: String::new(),
+                active_fencing_token: 1,
+                lease_owner_changes: 0,
+                stale_completion_rejections: 0,
+            }],
+        );
+        assert!(!worker_stale_completion_rejected(&not_fenced).is_passed());
+
+        // Positive: the real store fenced (incarnation change, stale rejection,
+        // monotonic fence advance) -> the oracle passes.
+        let fenced = AbstractWorldSummary::with_digest(
+            1,
+            1,
+            vec![],
+            vec![],
+            vec![WorkerAbstractSummary {
+                worker_alias: "worker-001".to_string(),
+                session_alias: "session-001".to_string(),
+                active_incarnation_id: "worker-001:incarnation-002".to_string(),
+                active_fencing_token: 2,
+                lease_owner_changes: 1,
+                stale_completion_rejections: 1,
+            }],
+        );
+        assert!(worker_stale_completion_rejected(&fenced).is_passed());
+    }
+
+    #[test]
+    fn worker_failover_continuation_oracle_requires_successor_commit() {
+        let worker_event = |work: serde_json::Value| {
+            delivered_with_payload(
+                0,
+                "worker-001:worker:001",
+                "worker-001",
+                BoundaryKind::Worker,
+                json!({ "session": "session-001" }),
+                json!({ "runtime_worker_store": { "worker_owned_work": work } }),
+            )
+        };
+        let full = json!({
+            "first_owner_claimed_work": true,
+            "second_owner_resumed_work": true,
+            "second_owner_outranks_first": true,
+            "stale_work_completion_rejected": true,
+        });
+
+        // Positive: a successor reclaimed and continued the work.
+        assert!(worker_failover_continues_work(&[worker_event(full.clone())]).is_passed());
+
+        // Negative: no worker boundary at all.
+        assert!(!worker_failover_continues_work(&[]).is_passed());
+
+        // Negative: the successor did not resume the dead owner's work.
+        let mut not_resumed = full.clone();
+        not_resumed["second_owner_resumed_work"] = json!(false);
+        assert!(!worker_failover_continues_work(&[worker_event(not_resumed)]).is_passed());
+
+        // Negative: the dead owner's stale completion was NOT rejected.
+        let mut stale_not_rejected = full.clone();
+        stale_not_rejected["stale_work_completion_rejected"] = json!(false);
+        assert!(!worker_failover_continues_work(&[worker_event(stale_not_rejected)]).is_passed());
+
+        // Negative: the successor did not outrank the first owner's fence.
+        let mut not_outranked = full;
+        not_outranked["second_owner_outranks_first"] = json!(false);
+        assert!(!worker_failover_continues_work(&[worker_event(not_outranked)]).is_passed());
     }
 
     #[test]
