@@ -186,6 +186,50 @@ async fn run() -> Result<(), String> {
             println!("{}", report.report_path.display());
             Ok(())
         }
+        "stack-probe" => {
+            let Some(kind) = args.next() else {
+                return Err(format!("missing stack-probe kind\n\n{}", usage()));
+            };
+            match kind.as_str() {
+                "agent-contract" => {
+                    let mut contract = None;
+                    let mut stack_bytes = None;
+                    while let Some(arg) = args.next() {
+                        match arg.as_str() {
+                            "--contract" => {
+                                contract = Some(args.next().ok_or_else(|| {
+                                    format!("missing --contract value\n\n{}", usage())
+                                })?);
+                            }
+                            "--stack-bytes" => {
+                                let raw = args.next().ok_or_else(|| {
+                                    format!("missing --stack-bytes value\n\n{}", usage())
+                                })?;
+                                stack_bytes = Some(parse_usize("--stack-bytes", &raw)?);
+                            }
+                            "-h" | "--help" => return Err(usage()),
+                            other => {
+                                return Err(format!("unknown argument `{other}`\n\n{}", usage()));
+                            }
+                        }
+                    }
+                    let Some(contract) = contract else {
+                        return Err(format!("missing --contract\n\n{}", usage()));
+                    };
+                    let Some(stack_bytes) = stack_bytes else {
+                        return Err(format!("missing --stack-bytes\n\n{}", usage()));
+                    };
+                    lash_sim::runner::run_agent_contract_product_stack_probe(
+                        &contract,
+                        stack_bytes,
+                    )
+                    .map_err(|err| err.to_string())?;
+                    println!("{contract} passed product stack probe at {stack_bytes} bytes");
+                    Ok(())
+                }
+                other => Err(format!("unknown stack-probe kind `{other}`\n\n{}", usage())),
+            }
+        }
         "minimize" => {
             let trace = args
                 .next()
@@ -232,6 +276,7 @@ fn usage() -> String {
   lash-sim replay-sqlite <trace> --out <artifact-root>
   lash-sim replay-postgres <trace> --out <artifact-root>
   lash-sim backend-contention --out <artifact-root>
+  lash-sim stack-probe agent-contract --contract <semantic-oracle> --stack-bytes <bytes>
   lash-sim minimize <trace> --out <artifact-root>"
         .to_string()
 }

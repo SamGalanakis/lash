@@ -615,9 +615,7 @@ impl SqliteRuntimeReplayWorld {
                     .active_provider_turns
                     .get(&turn_boundary_id)
                     .is_none_or(|turn| turn.handle.is_finished());
-                if turn_finished
-                    || polls >= crate::runner::MAX_PROVIDER_EVENT_POLL_YIELDS
-                {
+                if turn_finished || polls >= crate::runner::MAX_PROVIDER_EVENT_POLL_YIELDS {
                     break None;
                 }
                 polls += 1;

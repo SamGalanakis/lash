@@ -661,14 +661,21 @@ impl ModelStore {
                 .with_source(json!({"sim": true}));
                 let occurrence_id = lash_core::deterministic_occurrence_id(&request)
                     .unwrap_or_else(|_| format!("trigger:{}", event.boundary_id));
-                json!({
+                let mut observed = json!({
                     "session": session,
                     "trigger_delivered": true,
                     "source_key": source_key,
                     "occurrence_id": occurrence_id,
                     "reservation_count": 1,
                     "started_process": event.payload.get("started_process").cloned().unwrap_or(Value::Bool(true)),
-                })
+                });
+                if let Some(execution) = event.payload.get("contract_execution") {
+                    observed
+                        .as_object_mut()
+                        .expect("trigger observed object")
+                        .insert("contract_execution".to_string(), execution.clone());
+                }
+                observed
             }
             BoundaryKind::BackendFailure => {
                 let operation = event

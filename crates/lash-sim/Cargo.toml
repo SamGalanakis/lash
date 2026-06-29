@@ -18,13 +18,17 @@ bytes = { workspace = true }
 lash = { workspace = true, features = ["rlm"] }
 lash-core = { workspace = true, features = ["testing"] }
 lash-llm-transport = { workspace = true }
+lash-lashlang-runtime = { workspace = true }
 lash-provider-anthropic = { workspace = true }
 lash-provider-google = { workspace = true }
 lash-provider-openai = { workspace = true }
 lash-protocol-rlm = { workspace = true }
 lash-protocol-standard = { workspace = true }
 lash-postgres-store = { workspace = true }
+lash-rlm-types = { workspace = true }
 lash-sqlite-store = { workspace = true }
+lash-subagents = { workspace = true }
+lash-tools = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

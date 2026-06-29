@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lash_core::runtime::{
-    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkPayload, RuntimeReplay,
-    RuntimeScope, RuntimeSubject,
+    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkPayload,
+    RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
 use lash_core::{
     DeliveryPolicy, ExecResponse, ExecutionScope, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
@@ -605,7 +605,13 @@ impl RuntimeBoundaryHarness {
             }
         };
         let work = self
-            .start_worker_owned_work(store.as_ref(), &session, &stale_owner, &stale_lease, event.at)
+            .start_worker_owned_work(
+                store.as_ref(),
+                &session,
+                &stale_owner,
+                &stale_lease,
+                event.at,
+            )
             .await?;
 
         // Worker one crashes mid-flight: worker two fences it out by reclaiming
@@ -795,7 +801,8 @@ impl RuntimeBoundaryHarness {
         );
         if !stale_work_completion_rejected {
             return Err(RuntimeBoundaryError::new(
-                "crashed worker's stale work completion was not rejected after failover".to_string(),
+                "crashed worker's stale work completion was not rejected after failover"
+                    .to_string(),
             ));
         }
         Ok(WorkerFailover {
@@ -1014,7 +1021,9 @@ mod tests {
 
         // The real store could NOT fence: no rejection, no work continuation.
         assert_eq!(
-            observed.get("stale_completion_rejected").and_then(Value::as_bool),
+            observed
+                .get("stale_completion_rejected")
+                .and_then(Value::as_bool),
             Some(false),
             "a busy store must not report a fenced stale completion: {observed}"
         );
@@ -1038,7 +1047,8 @@ mod tests {
             payload: json!({ "session": session }),
             observed,
         };
-        let verdict = crate::oracles::worker_failover_continues_work(std::slice::from_ref(&delivered));
+        let verdict =
+            crate::oracles::worker_failover_continues_work(std::slice::from_ref(&delivered));
         assert!(
             !verdict.is_passed(),
             "the failover-continuation oracle must catch a store that failed to fence: {}",

@@ -1,0 +1,16 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "rlm-empty-options-default-mode-broken",
+  "seed": 47,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "contract_execution_field": {
+      "contract": "rlm.empty_options_natural_default",
+      "pointer": "/result/termination/kind",
+      "replacement": "finish_required"
+    }
+  },
+  "expected_oracle_id": "sim.oracle.scenario.rlm-contract.v1:rlm_protocol_scenario_empty_turn_options_use_natural_default",
+  "expected_reason_contains": "fixed-source replay validation"
+}

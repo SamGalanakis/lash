@@ -221,8 +221,9 @@ pub fn reverify_runtime_invariant_facts(
                         event.boundary_id
                     ))
                 })?;
-            let recomputed =
-                usage.negative_fields.is_empty() && usage.non_negative && usage.usage_events_monotonic;
+            let recomputed = usage.negative_fields.is_empty()
+                && usage.non_negative
+                && usage.usage_events_monotonic;
             require_reverified(
                 event,
                 "usage",

@@ -344,6 +344,12 @@ run_sim_provider_scripts() {
     rlm-lashlang-cell-missing-exec-outcome \
     agent-parallel-join-missing-wake-session \
     standard-provider-error-missing-parser-matrix \
+    standard-max-turn-stop-missing \
+    rlm-typed-finish-terminal-event-missing \
+    rlm-empty-options-default-mode-broken \
+    agent-tuple-json-array-shape-broken \
+    agent-started-process-subagent-child-graph-missing \
+    agent-failed-child-task-fail-evidence-missing \
     provider-mutation-runtime-completion-missing \
     worker-failover-stale-rejection-missing \
     backend-retry-runtime-completion-missing
@@ -365,6 +371,12 @@ run_sim_provider_scripts() {
     "crates/lash-sim/failure-fixtures/rlm-lashlang-cell-missing-exec-outcome.json",
     "crates/lash-sim/failure-fixtures/agent-parallel-join-missing-wake-session.json",
     "crates/lash-sim/failure-fixtures/standard-provider-error-missing-parser-matrix.json",
+    "crates/lash-sim/failure-fixtures/standard-max-turn-stop-missing.json",
+    "crates/lash-sim/failure-fixtures/rlm-typed-finish-terminal-event-missing.json",
+    "crates/lash-sim/failure-fixtures/rlm-empty-options-default-mode-broken.json",
+    "crates/lash-sim/failure-fixtures/agent-tuple-json-array-shape-broken.json",
+    "crates/lash-sim/failure-fixtures/agent-started-process-subagent-child-graph-missing.json",
+    "crates/lash-sim/failure-fixtures/agent-failed-child-task-fail-evidence-missing.json",
     "crates/lash-sim/failure-fixtures/provider-mutation-runtime-completion-missing.json",
     "crates/lash-sim/failure-fixtures/worker-failover-stale-rejection-missing.json",
     "crates/lash-sim/failure-fixtures/backend-retry-runtime-completion-missing.json"
@@ -380,6 +392,12 @@ run_sim_provider_scripts() {
     "rlm_lashlang_cell_missing_exec_outcome": "failing-fixtures/rlm-lashlang-cell-missing-exec-outcome/minimized-regression/package.json",
     "agent_parallel_join_missing_wake_session": "failing-fixtures/agent-parallel-join-missing-wake-session/minimized-regression/package.json",
     "standard_provider_error_missing_parser_matrix": "failing-fixtures/standard-provider-error-missing-parser-matrix/minimized-regression/package.json",
+    "standard_max_turn_stop_missing": "failing-fixtures/standard-max-turn-stop-missing/minimized-regression/package.json",
+    "rlm_typed_finish_terminal_event_missing": "failing-fixtures/rlm-typed-finish-terminal-event-missing/minimized-regression/package.json",
+    "rlm_empty_options_default_mode_broken": "failing-fixtures/rlm-empty-options-default-mode-broken/minimized-regression/package.json",
+    "agent_tuple_json_array_shape_broken": "failing-fixtures/agent-tuple-json-array-shape-broken/minimized-regression/package.json",
+    "agent_started_process_subagent_child_graph_missing": "failing-fixtures/agent-started-process-subagent-child-graph-missing/minimized-regression/package.json",
+    "agent_failed_child_task_fail_evidence_missing": "failing-fixtures/agent-failed-child-task-fail-evidence-missing/minimized-regression/package.json",
     "provider_mutation_runtime_completion_missing": "failing-fixtures/provider-mutation-runtime-completion-missing/minimized-regression/package.json",
     "worker_failover_stale_rejection_missing": "failing-fixtures/worker-failover-stale-rejection-missing/minimized-regression/package.json",
     "backend_retry_runtime_completion_missing": "failing-fixtures/backend-retry-runtime-completion-missing/minimized-regression/package.json"
@@ -836,6 +854,71 @@ EOF
   "port": "${port}"
 }
 EOF
+}
+
+write_restate_postgres_workers_e2e_lane_status() {
+  if [ "$lane" = "full" ]; then
+    return
+  fi
+  mkdir -p "${out_dir}/sim"
+  cat >"${out_dir}/sim/restate-postgres-workers-e2e.json" <<EOF
+{
+  "schema": "lash.confidence.restate-postgres-workers-e2e.v1",
+  "status": "not_run",
+  "lane": "${lane}",
+  "reason": "distributed Restate/Postgres/MinIO worker e2e is full-lane-only",
+  "script": "scripts/restate-postgres-workers-e2e.sh",
+  "full_lane_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full"
+}
+EOF
+}
+
+run_restate_postgres_workers_e2e() {
+  if [ "$lane" != "full" ]; then
+    return
+  fi
+  step "Restate/Postgres/MinIO workers e2e"
+  local artifact log_dir minio_port exit_code
+  artifact="${out_dir}/sim/restate-postgres-workers-e2e.json"
+  log_dir="${out_dir}/sim/restate-postgres-workers-e2e"
+  minio_port="${LASH_CONFIDENCE_RESTATE_WORKERS_MINIO_PORT:-$((51000 + ($$ % 10000)))}"
+  mkdir -p "$log_dir"
+  set +e
+  LASH_E2E_MINIO_PORT="$minio_port" \
+    bash scripts/restate-postgres-workers-e2e.sh \
+    >"${log_dir}/stdout.log" 2>"${log_dir}/stderr.log"
+  exit_code=$?
+  set -e
+  if [ "$exit_code" -eq 0 ]; then
+    cat >"$artifact" <<EOF
+{
+  "schema": "lash.confidence.restate-postgres-workers-e2e.v1",
+  "status": "passed",
+  "lane": "full",
+  "script": "scripts/restate-postgres-workers-e2e.sh",
+  "minio_port": "${minio_port}",
+  "stdout": "sim/restate-postgres-workers-e2e/stdout.log",
+  "stderr": "sim/restate-postgres-workers-e2e/stderr.log",
+  "evidence": "two Restate workers behind proxy with Postgres state, MinIO attachments, host-built worker binaries, and runner-owned end-to-end assertions"
+}
+EOF
+    return
+  fi
+  cat >"$artifact" <<EOF
+{
+  "schema": "lash.confidence.restate-postgres-workers-e2e.v1",
+  "status": "failed",
+  "lane": "full",
+  "script": "scripts/restate-postgres-workers-e2e.sh",
+  "exit_code": ${exit_code},
+  "minio_port": "${minio_port}",
+  "stdout": "sim/restate-postgres-workers-e2e/stdout.log",
+  "stderr": "sim/restate-postgres-workers-e2e/stderr.log",
+  "exact_retry_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full"
+}
+EOF
+  write_confidence_summary "failed"
+  exit "$exit_code"
 }
 
 run_broad_postgres_evidence() {
@@ -1486,6 +1569,7 @@ write_confidence_summary() {
   "postgres_current_trace_replay_report": "$([ -f "${out_dir}/sim/postgres-replay/postgres-replay.json" ] && echo "sim/postgres-replay/postgres-replay.json" || echo "not_run")",
   "backend_contention": "$([ -f "${out_dir}/sim/backend-contention/backend-contention.json" ] && echo "sim/backend-contention/backend-contention.json" || echo "not_run")",
   "cross_backend_replay_matrix": "$([ -f "${out_dir}/sim/cross-backend-replay/summary.json" ] && echo "sim/cross-backend-replay/summary.json" || echo "not_run")",
+  "restate_postgres_workers_e2e": "$([ -f "${out_dir}/sim/restate-postgres-workers-e2e.json" ] && echo "sim/restate-postgres-workers-e2e.json" || echo "not_written")",
   "provider_transport_exclusions": "$([ -f "${out_dir}/sim/provider-transport-exclusions.json" ] && echo "sim/provider-transport-exclusions.json" || echo "not_written")",
   "postgres_native_effect_history_replay": "native_postgres_runtime_effect_controller",
   "postgres_effect_history_status": "$([ -f "${out_dir}/sim/postgres-effect-history-status.json" ] && echo "sim/postgres-effect-history-status.json" || echo "not_written")",
@@ -1506,6 +1590,7 @@ write_provider_transport_exclusion_evidence
 write_sim_lane_declarations
 write_full_lane_prerequisites
 write_postgres_effect_history_status
+write_restate_postgres_workers_e2e_lane_status
 run_perf_identity_checks
 
 if [ "$lane" = "default" ] || [ "$lane" = "broad" ] || [ "$lane" = "full" ]; then
@@ -1540,6 +1625,7 @@ fi
 
 if [ "$lane" = "full" ]; then
   run_postgres_conformance
+  run_restate_postgres_workers_e2e
   run_mutation_full
   write_mutation_evidence_summary
   if [ "$mutation_failures" -ne 0 ]; then

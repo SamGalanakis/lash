@@ -1,8 +1,8 @@
 # Distributed-backend e2e harness: Restate + Postgres + MinIO with two
 # workers behind a round-robin proxy.
 #
-# The e2e binaries are built on the host by `just restate-postgres-workers-e2e`
-# and bind-mounted in; LASH_E2E_BIN_DIR (exported by the recipe) points at the
+# The e2e binaries are built on the host by scripts/restate-postgres-workers-e2e.sh
+# and bind-mounted in; LASH_E2E_BIN_DIR (exported by the script) points at the
 # host's target/debug. The runtime image matches the GitHub ubuntu-latest
 # runner's glibc, so host-built binaries run unmodified — which also means the
 # harness needs a Linux x86_64 host with glibc <= the image's (any current

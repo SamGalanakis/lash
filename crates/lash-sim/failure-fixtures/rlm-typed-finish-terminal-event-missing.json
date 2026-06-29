@@ -1,0 +1,16 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "rlm-typed-finish-terminal-event-missing",
+  "seed": 47,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "contract_execution_field": {
+      "contract": "rlm.typed_finish_emits_outcome_and_done",
+      "pointer": "/result/turn_outcomes/0/value/ok",
+      "replacement": false
+    }
+  },
+  "expected_oracle_id": "sim.oracle.scenario.rlm-contract.v1:rlm_protocol_scenario_typed_finish_emits_turn_outcome_and_done",
+  "expected_reason_contains": "fixed-source replay validation"
+}

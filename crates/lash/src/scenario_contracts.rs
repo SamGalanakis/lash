@@ -1,13 +1,5 @@
 use lash_core::runtime::ScenarioContractSpec;
 
-const AGENT_REQUIRED_EVIDENCE: &[&str] = &[
-    "multi_session",
-    "observer_reconnect",
-    "tool_result",
-    "process_wake",
-    "durable_effect",
-];
-
 pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
     ScenarioContractSpec {
         suite: "agent",
@@ -15,7 +7,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "foreground labeled tool call",
         owned_invariant: "Facade root turn, app tool execution, label graph, final value, and remote DTO round trip.",
         semantic_oracle: "agent.foreground_tool_call_round_trip",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["tool_result", "provider_turn"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -24,7 +16,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "started process labeled tool call",
         owned_invariant: "Started Lashlang process calling an app tool with process graph completion.",
         semantic_oracle: "agent.started_process_tool_call_graph",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["process_wake", "tool_result", "provider_turn"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -33,7 +25,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "durable input suspension",
         owned_invariant: "Live durable input suspension, external resolution, process event, and final value.",
         semantic_oracle: "agent.durable_input_suspension_resolution",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["durable_effect", "process_wake", "observer_reconnect"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -42,7 +34,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "shell nonzero and pipeline results are data",
         owned_invariant: "Shell failures and pipelines remain data at the facade boundary.",
         semantic_oracle: "agent.shell_results_are_data",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code", "tool_result"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -51,7 +43,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "shell output survives print projection in variable",
         owned_invariant: "Large shell output survives print projection and remains addressable.",
         semantic_oracle: "agent.shell_output_print_projection_survives",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code", "provider_turn"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -60,7 +52,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "started process labeled subagent spawn",
         owned_invariant: "Started process spawns a subagent and records child session execution graphs.",
         semantic_oracle: "agent.started_process_subagent_spawn",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["process_wake", "multi_session"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -69,7 +61,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "nested process start await",
         owned_invariant: "Nested process start/await produces deterministic process ids and graph lineage.",
         semantic_oracle: "agent.nested_process_start_await",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["process_wake", "multi_session"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -78,7 +70,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "session turn process child",
         owned_invariant: "Host session-turn process API creates and awaits a child session turn.",
         semantic_oracle: "agent.session_turn_process_child",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["process_wake", "provider_turn", "multi_session"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -87,7 +79,11 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "failed child preserves failure graph",
         owned_invariant: "Child failure path preserves failure graph and avoids provider-exhaustion false failures.",
         semantic_oracle: "agent.failed_child_preserves_failure_graph",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &[
+            "worker_stale_completion",
+            "backend_failure",
+            "multi_session",
+        ],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -96,7 +92,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "parallel process spawn and join",
         owned_invariant: "Parallel process starts join deterministically with unique process ids.",
         semantic_oracle: "agent.parallel_spawn_and_join",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["process_wake", "worker_stale_completion", "multi_session"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
     ScenarioContractSpec {
@@ -105,7 +101,7 @@ pub const AGENT_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "tuple values finish as json arrays",
         owned_invariant: "Facade final values preserve tuple-to-JSON array projection.",
         semantic_oracle: "agent.tuple_values_finish_as_json_arrays",
-        required_sim_evidence: AGENT_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["final_value"],
         oracle_id: "sim.oracle.scenario.agent-contract.v1",
     },
 ];

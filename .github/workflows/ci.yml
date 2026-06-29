@@ -362,11 +362,8 @@ jobs:
         with:
           tool: protoc
 
-      - name: Install just
-        uses: extractions/setup-just@v2
-
       - name: Run distributed backend E2E
-        run: just restate-postgres-workers-e2e
+        run: bash scripts/restate-postgres-workers-e2e.sh
 
   prepare-release:
     name: Prepare release

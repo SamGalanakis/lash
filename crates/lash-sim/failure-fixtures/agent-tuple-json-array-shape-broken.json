@@ -1,0 +1,18 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "agent-tuple-json-array-shape-broken",
+  "seed": 47,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "contract_execution_field": {
+      "contract": "agent.tuple_values_finish_as_json_arrays",
+      "pointer": "/result/final_value/tuple",
+      "replacement": {
+        "left": "right"
+      }
+    }
+  },
+  "expected_oracle_id": "sim.oracle.scenario.agent-contract.v1:agent_scenario_tuple_values_finish_as_json_arrays",
+  "expected_reason_contains": "fixed-source replay validation"
+}

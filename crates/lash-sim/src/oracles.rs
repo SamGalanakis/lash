@@ -4,12 +4,12 @@ use lash::scenario_contracts::AGENT_SCENARIO_CONTRACTS;
 use lash_core::runtime::{RUNTIME_SCENARIO_CONTRACTS, ScenarioContractSpec};
 use lash_protocol_rlm::scenario_contracts::RLM_PROTOCOL_SCENARIO_CONTRACTS;
 use lash_protocol_standard::scenario_contracts::STANDARD_PROTOCOL_SCENARIO_CONTRACTS;
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use crate::provider_mutations::is_transport_provider_mutation;
 use crate::runtime_contracts::{
     RuntimeAgentFrameInvariantFacts, RuntimeGraphInvariantFacts, RuntimeUsageInvariantFacts,
 };
-use crate::provider_mutations::is_transport_provider_mutation;
 use crate::runtime_providers::MIGRATED_RUNTIME_PROVIDER_KINDS;
 use crate::scheduler::{BoundaryKind, DeliveredBoundary};
 use crate::trace::{AbstractWorldSummary, OracleVerdict};
@@ -148,7 +148,10 @@ pub fn generated_suspend_resume(events: &[DeliveredBoundary]) -> OracleVerdict {
                 format!(
                     "suspend `{}` ({}) did not park-then-resume: suspended_before={suspended_before} scheduler_delivered={scheduler_delivered} resolve_accepted={resolve_accepted} resumed_after={resumed_after} completed_before={before} completed_after={after}",
                     event.boundary_id,
-                    suspend.get("suspend_kind").and_then(Value::as_str).unwrap_or("?")
+                    suspend
+                        .get("suspend_kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
                 ),
             );
         }
@@ -193,7 +196,10 @@ pub fn generated_final_value_semantic_channel(events: &[DeliveredBoundary]) -> O
                 ),
             );
         };
-        let outcome_kind = facts.get("outcome_kind").and_then(Value::as_str).unwrap_or("");
+        let outcome_kind = facts
+            .get("outcome_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let has_semantic_value = facts
             .get("semantic_value")
             .map(|value| !value.is_null())
@@ -228,7 +234,6 @@ pub fn generated_final_value_semantic_channel(events: &[DeliveredBoundary]) -> O
         ),
     )
 }
-
 
 pub fn cross_session_isolation(summary: &AbstractWorldSummary) -> OracleVerdict {
     if summary.session_count < 2 {
@@ -1388,140 +1393,28 @@ pub fn state_machine_semantic_invariants(
     }
 }
 
-/// Scenario-contract oracle vector. The RUNTIME suite is genuinely exercised
-/// per-contract by the generated runtime state machine, so each runtime contract
-/// emits its OWN distinct, failing-capable verdict. The STANDARD/RLM/AGENT
-/// protocol suites are NOT distinctly exercised per-contract by the generated
-/// workload (extending it to per-contract evidence is out of scope this pass), so
-/// rather than stamp ~36 shared-bucket verdicts and overstate the oracle count,
-/// each of those suites collapses to ONE explicit, failing-capable SUITE-LEVEL
-/// coverage-manifest verdict (see `scenario_suite_coverage_manifest`). The real
-/// per-behavior failing oracles for those suites are the mini-oracles
-/// (`scenario_contract_mini_oracles`); the per-contract protocol semantics are
-/// validated upstream by each protocol crate's own unit tests.
+/// Scenario-contract oracle vector. Every contract emits its own named,
+/// failing-capable verdict; suite-level coverage manifests are deliberately not
+/// used as backing oracles because they let generated packages look
+/// per-contract while sharing the same semantic proof.
 pub fn scenario_contract_oracles(
     events: &[DeliveredBoundary],
     summary: &AbstractWorldSummary,
 ) -> Vec<OracleVerdict> {
-    let mut verdicts = RUNTIME_SCENARIO_CONTRACTS
-        .iter()
+    all_scenario_contracts()
         .map(|contract| scenario_contract_oracle(contract, events, summary))
-        .collect::<Vec<_>>();
-    verdicts.push(scenario_suite_coverage_manifest(
+        .collect()
+}
+
+fn all_scenario_contracts() -> impl Iterator<Item = &'static ScenarioContractSpec> {
+    [
+        RUNTIME_SCENARIO_CONTRACTS,
         STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
-        events,
-        summary,
-    ));
-    verdicts.push(scenario_suite_coverage_manifest(
         RLM_PROTOCOL_SCENARIO_CONTRACTS,
-        events,
-        summary,
-    ));
-    verdicts.push(scenario_suite_coverage_manifest(
         AGENT_SCENARIO_CONTRACTS,
-        events,
-        summary,
-    ));
-    verdicts
-}
-
-/// The suite-level coverage-manifest oracle id for a protocol suite (e.g.
-/// `sim.oracle.scenario.standard-contract.v1:coverage-manifest`). Stable so the
-/// generated slice/package machinery can attach this verdict to every contract
-/// in the suite as its coverage backing.
-pub fn scenario_suite_coverage_manifest_oracle_id(contract: &ScenarioContractSpec) -> String {
-    format!("{}:coverage-manifest", contract.oracle_id)
-}
-
-/// One failing-capable, suite-level coverage manifest for a protocol suite. This
-/// is explicitly a COVERAGE MANIFEST, not a per-contract oracle: it enumerates
-/// the protocol contracts the generated lane covers at the suite level and
-/// asserts the suite-level evidence the generated workload genuinely produces. If
-/// that evidence regresses the manifest fails loudly; the per-contract semantics
-/// remain validated upstream by the protocol crate and by the suite mini-oracles.
-fn scenario_suite_coverage_manifest(
-    contracts: &'static [ScenarioContractSpec],
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> OracleVerdict {
-    let first = contracts
-        .first()
-        .expect("protocol suite must declare at least one contract");
-    let suite = first.suite;
-    let oracle_id = scenario_suite_coverage_manifest_oracle_id(first);
-    let covered = contracts
-        .iter()
-        .map(|contract| contract.test_name)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let evidence = suite_coverage_evidence(suite, events, summary);
-    if evidence.passed {
-        OracleVerdict::passed(
-            oracle_id,
-            format!(
-                "{suite} suite coverage manifest: the generated lane covers {} protocol contracts [{covered}] at the suite level; suite evidence held ({}). Per-contract semantics are validated upstream by the {suite} protocol crate's own tests and by the {suite} mini-oracles; not re-derived per-contract here.",
-                contracts.len(),
-                evidence.reason
-            ),
-        )
-    } else {
-        OracleVerdict::failed(
-            oracle_id,
-            format!(
-                "{suite} suite coverage manifest FAILED: suite-level evidence missing ({}) while covering contracts [{covered}]",
-                evidence.reason
-            ),
-        )
-    }
-}
-
-/// Suite-level evidence the generated workload must produce for a protocol suite,
-/// expressed as the conjunction of the distinct runtime DTO/projection facts the
-/// suite's contracts depend on (no `|`-grouped per-contract stamping, no global
-/// `any-session>0` presence bucket). Failing-capable: a regressed fact fails the
-/// suite coverage manifest.
-fn suite_coverage_evidence(
-    suite: &str,
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> ScenarioSemanticVerdict {
-    match suite {
-        "standard" => assert_semantic(
-            provider_mutation_parser_matrix_observed(events)
-                && tool_provider_reentry_observed(events, summary)
-                && tool_runtime_output_observed(events)
-                && tool_effects_execute_once(events)
-                && duplicate_free_stream_finalization(events, summary)
-                && provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "provider parser matrix, tool-loop re-entry + single tool effect, duplicate-free streamed finalization, and turn-indexed exchanges with observer convergence",
-        ),
-        "rlm" => assert_semantic(
-            exec_runtime_outcome_observed(events)
-                && exec_effects_execute_once(events)
-                && exec_outcome_has_no_tool_call_replay(events)
-                && trigger_delivery_runtime_observed(events)
-                && provider_mutation_parser_matrix_observed(events)
-                && provider_mutation_classes_observed(events)
-                && provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed(),
-            "exec-code RuntimeEffectOutcome (single execution, no replayed tool calls), trigger delivery, provider mutation parser matrix + classes, and turn-indexed exchanges with observer convergence",
-        ),
-        "agent" => assert_semantic(
-            process_wake_runtime_dto_observed(events)
-                && durable_runtime_effect_observed(events)
-                && exec_runtime_outcome_observed(events)
-                && tool_runtime_output_observed(events)
-                && observer_reconnect_has_matching_turn(events, summary)
-                && provider_exchange_counts_are_turn_indexed(summary)
-                && observer_convergence(summary).is_passed()
-                && summary.session_count >= 2,
-            "process wake DTO, durable effect, exec + tool facade outputs, observer reconnect convergence, turn-indexed exchanges, and a multi-session graph",
-        ),
-        other => ScenarioSemanticVerdict::failed(format!(
-            "unknown protocol suite `{other}` has no suite coverage evidence"
-        )),
-    }
+    ]
+    .into_iter()
+    .flat_map(|contracts| contracts.iter())
 }
 
 pub fn scenario_contract_mini_oracles(
@@ -2027,6 +1920,32 @@ fn scenario_evidence_satisfied(
                 .sum::<usize>();
             summary.session_count > 0 && provider_turns >= summary.session_count * 2
         }
+        "provider_event" => events.iter().any(|event| {
+            event.kind == BoundaryKind::ProviderEvent
+                && event
+                    .observed
+                    .get("provider_event_release")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && event
+                    .observed
+                    .get("turn_boundary_id")
+                    .and_then(Value::as_str)
+                    .is_some()
+        }),
+        "provider_mutation" => events.iter().any(|event| {
+            event.kind == BoundaryKind::ProviderMutation
+                && event
+                    .payload
+                    .pointer("/runtime_completion/completion_family")
+                    .and_then(Value::as_str)
+                    == Some("provider_script_mutation")
+                && event
+                    .observed
+                    .pointer("/provider_parser_matrix/matrix/real_provider_parser_execution")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }),
         "tool_result" => {
             summary
                 .sessions
@@ -2034,6 +1953,50 @@ fn scenario_evidence_satisfied(
                 .any(|session| !session.tool_outputs.is_empty())
                 && tool_runtime_output_observed(events)
         }
+        "max_turn_stop" => events.iter().any(|event| {
+            event.kind == BoundaryKind::Trigger
+                && event
+                    .observed
+                    .pointer("/contract_execution/contract")
+                    .and_then(Value::as_str)
+                    == Some("standard.max_turns_after_tool_result")
+                && event
+                    .observed
+                    .pointer("/contract_execution/source/kind")
+                    .and_then(Value::as_str)
+                    == Some("fixed_dst_api_execution")
+                && event
+                    .observed
+                    .pointer("/contract_execution/result/turn_outcomes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|outcome| {
+                        outcome.get("kind").and_then(Value::as_str) == Some("stopped")
+                            && outcome.get("stop_reason").and_then(Value::as_str)
+                                == Some("max_turns")
+                    })
+        }),
+        "final_value" => events.iter().any(|event| {
+            event.kind == BoundaryKind::Trigger
+                && event
+                    .observed
+                    .pointer("/contract_execution/source/kind")
+                    .and_then(Value::as_str)
+                    == Some("fixed_dst_api_execution")
+                && event
+                    .observed
+                    .pointer("/contract_execution/result/runtime_final_value_facts/outcome_kind")
+                    .and_then(Value::as_str)
+                    == Some("final_value")
+                && event
+                    .observed
+                    .pointer(
+                        "/contract_execution/result/runtime_final_value_facts/semantic_channel_observed",
+                    )
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }),
         "observer_convergence" => {
             summary.session_count > 0
                 && summary.sessions.iter().all(|session| {
@@ -2053,6 +2016,24 @@ fn scenario_evidence_satisfied(
             .sessions
             .iter()
             .any(|session| session.trigger_count > 0),
+        "backend_failure" => events.iter().any(|event| {
+            event.kind == BoundaryKind::BackendFailure
+                && event
+                    .observed
+                    .get("backend_failure")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && event
+                    .payload
+                    .pointer("/runtime_completion/completion_family")
+                    .and_then(Value::as_str)
+                    == Some("backend_retry_or_failure")
+                && event
+                    .observed
+                    .pointer("/production_store_error/type")
+                    .and_then(Value::as_str)
+                    .is_some()
+        }),
         "durable_effect" => {
             summary
                 .durable_effects
@@ -2090,9 +2071,258 @@ impl ScenarioSemanticVerdict {
     }
 }
 
-/// Per-contract semantic adapter. Only the RUNTIME suite emits per-contract
-/// oracles (the STANDARD/RLM/AGENT suites collapse to suite coverage manifests in
-/// `scenario_contract_oracles`), so only runtime contracts reach this dispatcher.
+#[derive(Clone, Debug)]
+pub struct ScenarioContractGeneratedFact {
+    pub fact: &'static str,
+    pub assertion: &'static str,
+    pub boundary_ids: Vec<String>,
+    pub observed: Value,
+}
+
+pub fn scenario_contract_generated_facts(
+    contract: &ScenarioContractSpec,
+    events: &[DeliveredBoundary],
+) -> Result<Vec<ScenarioContractGeneratedFact>, String> {
+    scenario_contract_generated_facts_for_semantic(contract.semantic_oracle, events)
+}
+
+pub fn scenario_contract_generated_facts_for_semantic(
+    semantic_oracle: &str,
+    events: &[DeliveredBoundary],
+) -> Result<Vec<ScenarioContractGeneratedFact>, String> {
+    let facts = match semantic_oracle {
+        "standard.initial_request_projection" => Ok(vec![
+            standard_protocol_execution_fact(events, "standard.initial_request_projection")?,
+            initial_provider_projection_fact(events)?,
+        ]),
+        "standard.empty_provider_response_error" => Ok(vec![
+            standard_protocol_execution_fact(events, "standard.empty_provider_response_error")?,
+            provider_mutation_semantic_fact(
+                events,
+                "dropped_terminal_event",
+                "standard_empty_response_terminal_error",
+                "empty/unterminated provider output is classified as a terminal provider error by every migrated parser",
+            )?,
+        ]),
+        "standard.provider_error_without_checkpoint" => Ok(vec![
+            standard_protocol_execution_fact(events, "standard.provider_error_without_checkpoint")?,
+            provider_mutation_semantic_fact(
+                events,
+                "rate_limit_error_envelope",
+                "standard_provider_error_no_checkpoint",
+                "provider error envelope is classified through migrated parsers without depending on a later checkpoint",
+            )?,
+        ]),
+        "standard.native_tool_loop_reenters_model" => Ok(vec![
+            standard_protocol_execution_fact(events, "standard.native_tool_loop_reenters_model")?,
+            tool_reentry_fact(events, "standard_native_tool_reenters_model", false)?,
+        ]),
+        "standard.parallel_tool_results_checkpoint_once" => Ok(vec![
+            standard_protocol_execution_fact(
+                events,
+                "standard.parallel_tool_results_checkpoint_once",
+            )?,
+            parallel_tool_results_checkpoint_once_fact(events)?,
+        ]),
+        "standard.tool_failure_feedback_reenters_model" => Ok(vec![
+            standard_protocol_execution_fact(
+                events,
+                "standard.tool_failure_feedback_reenters_model",
+            )?,
+            tool_reentry_fact(events, "standard_tool_feedback_reenters_model", false)?,
+            provider_mutation_semantic_fact(
+                events,
+                "malformed_sse_chunk",
+                "standard_tool_failure_feedback_parser_path",
+                "tool-failure feedback package also carries generated provider failure parser evidence",
+            )?,
+        ]),
+        "standard.streamed_text_finalizes_once" => Ok(vec![
+            standard_protocol_execution_fact(events, "standard.streamed_text_finalizes_once")?,
+            streamed_text_finalizes_once_fact(events)?,
+        ]),
+        "standard.max_turns_after_tool_result" => {
+            Ok(vec![standard_max_turns_after_tool_result_fact(events)?])
+        }
+        "rlm.natural_prose_finalizes" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.natural_prose_finalizes",
+        )?]),
+        "rlm.typed_prose_requires_finish" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.typed_prose_requires_finish",
+        )?]),
+        "rlm.finish_required_max_turn_stop" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.finish_required_max_turn_stop",
+        )?]),
+        "rlm.exec_error_max_turn_stop" => Ok(vec![
+            rlm_protocol_execution_fact(events, "rlm.exec_error_max_turn_stop")?,
+            exec_semantic_fact(
+                events,
+                "rlm_exec_error_max_turn_stop",
+                ExecFactRequirement::RuntimeOutcome,
+            )?,
+        ]),
+        "rlm.finish_required_diagnostic_counts" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.finish_required_diagnostic_counts",
+        )?]),
+        "rlm.natural_diagnostic_counts" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.natural_diagnostic_counts",
+        )?]),
+        "rlm.cell_diagnostic_counts" => Ok(vec![
+            rlm_protocol_execution_fact(events, "rlm.cell_diagnostic_counts")?,
+            exec_semantic_fact(
+                events,
+                "rlm_cell_diagnostic_exec_counts",
+                ExecFactRequirement::RuntimeOutcome,
+            )?,
+        ]),
+        "rlm.retired_marker_plain_lashlang_text" => Ok(vec![
+            rlm_protocol_execution_fact(events, "rlm.retired_marker_plain_lashlang_text")?,
+            exec_semantic_fact(
+                events,
+                "rlm_retired_marker_plain_lashlang_text",
+                ExecFactRequirement::NoToolCallReplay,
+            )?,
+        ]),
+        "rlm.lashlang_cell_exec_continues" => Ok(vec![
+            rlm_protocol_execution_fact(events, "rlm.lashlang_cell_exec_continues")?,
+            exec_semantic_fact(
+                events,
+                "rlm_lashlang_cell_exec_continues",
+                ExecFactRequirement::ReentersProvider,
+            )?,
+        ]),
+        "rlm.empty_options_natural_default" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.empty_options_natural_default",
+        )?]),
+        "rlm.exec_result_no_tool_call_replay" => Ok(vec![
+            rlm_protocol_execution_fact(events, "rlm.exec_result_no_tool_call_replay")?,
+            exec_semantic_fact(
+                events,
+                "rlm_exec_result_no_tool_call_replay",
+                ExecFactRequirement::NoToolCallReplay,
+            )?,
+        ]),
+        "rlm.exec_tool_control_frame_switch_terminal" => Ok(vec![
+            rlm_protocol_execution_fact(events, "rlm.exec_tool_control_frame_switch_terminal")?,
+            exec_semantic_fact(
+                events,
+                "rlm_exec_tool_control_frame_switch_terminal",
+                ExecFactRequirement::RuntimeOutcome,
+            )?,
+            trigger_then_provider_fact(events, "rlm_exec_tool_control_frame_switch_trigger")?,
+        ]),
+        "rlm.exec_tool_control_fail_terminal" => Ok(vec![
+            rlm_protocol_execution_fact(events, "rlm.exec_tool_control_fail_terminal")?,
+            exec_semantic_fact(
+                events,
+                "rlm_exec_tool_control_fail_terminal",
+                ExecFactRequirement::RuntimeOutcome,
+            )?,
+            backend_retry_terminalization_fact(events, "rlm_exec_tool_control_fail_backend")?,
+        ]),
+        "rlm.typed_finish_emits_outcome_and_done" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.typed_finish_emits_outcome_and_done",
+        )?]),
+        "rlm.natural_allows_finish_value" => Ok(vec![rlm_protocol_execution_fact(
+            events,
+            "rlm.natural_allows_finish_value",
+        )?]),
+        "rlm.typed_schema_mismatch_repair_loop" => Ok(vec![
+            provider_mutation_semantic_fact(
+                events,
+                "malformed_sse_chunk",
+                "rlm_typed_schema_mismatch_feedback",
+                "typed schema mismatch repair uses generated malformed provider payload feedback",
+            )?,
+            rlm_protocol_execution_fact(events, "rlm.typed_schema_mismatch_repair_loop")?,
+        ]),
+        "rlm.typed_schema_any_of_mismatch" => Ok(vec![
+            provider_mutation_semantic_fact(
+                events,
+                "rate_limit_error_envelope",
+                "rlm_typed_schema_anyof_feedback",
+                "typed anyOf mismatch package carries generated parser-classified feedback",
+            )?,
+            rlm_protocol_execution_fact(events, "rlm.typed_schema_any_of_mismatch")?,
+        ]),
+        "agent.foreground_tool_call_round_trip" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.foreground_tool_call_round_trip")?,
+            tool_reentry_fact(events, "agent_foreground_tool_call_round_trip", false)?,
+        ]),
+        "agent.started_process_tool_call_graph" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.started_process_tool_call_graph")?,
+            process_wake_fact(events, "agent_started_process_graph")?,
+            tool_reentry_fact(events, "agent_started_process_tool_call", false)?,
+        ]),
+        "agent.durable_input_suspension_resolution" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.durable_input_suspension_resolution")?,
+            durable_replay_fact(events, "agent_durable_input_first_and_replay")?,
+            process_wake_fact(events, "agent_durable_input_process_wake")?,
+            observer_reconnect_fact(events, "agent_durable_input_observer_reconnect")?,
+        ]),
+        "agent.shell_results_are_data" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.shell_results_are_data")?,
+            exec_semantic_fact(
+                events,
+                "agent_shell_exec_result_data",
+                ExecFactRequirement::RuntimeOutcome,
+            )?,
+            tool_reentry_fact(events, "agent_shell_tool_result_data", false)?,
+        ]),
+        "agent.shell_output_print_projection_survives" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.shell_output_print_projection_survives")?,
+            exec_semantic_fact(
+                events,
+                "agent_shell_output_exec_projection",
+                ExecFactRequirement::RuntimeOutcome,
+            )?,
+            agent_shell_output_projection_fact(events)?,
+        ]),
+        "agent.started_process_subagent_spawn" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.started_process_subagent_spawn")?,
+            process_wake_fact(events, "agent_started_process_subagent_spawn")?,
+        ]),
+        "agent.nested_process_start_await" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.nested_process_start_await")?,
+            process_wake_fact(events, "agent_nested_process_start_await")?,
+        ]),
+        "agent.session_turn_process_child" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.session_turn_process_child")?,
+            process_wake_fact(events, "agent_session_turn_process_child_wake")?,
+            agent_session_turn_child_provider_fact(events)?,
+        ]),
+        "agent.failed_child_preserves_failure_graph" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.failed_child_preserves_failure_graph")?,
+            worker_stale_fact(events, "agent_failed_child_worker_graph")?,
+            backend_retry_terminalization_fact(events, "agent_failed_child_backend_graph")?,
+        ]),
+        "agent.parallel_spawn_and_join" => Ok(vec![
+            agent_contract_execution_fact(events, "agent.parallel_spawn_and_join")?,
+            process_wake_fact(events, "agent_parallel_spawn_process_wakes")?,
+            worker_stale_fact(events, "agent_parallel_spawn_join_worker_order")?,
+        ]),
+        "agent.tuple_values_finish_as_json_arrays" => {
+            Ok(vec![agent_tuple_values_finish_as_json_arrays_fact(events)?])
+        }
+        other => Err(format!(
+            "{} scenario contract `{other}` has no per-contract semantic adapter; add distinct evidence instead of a generic fallback",
+            other.split('.').next().unwrap_or("unknown")
+        )),
+    }?;
+    reject_named_contract_proxy_facts(semantic_oracle, &facts)?;
+    Ok(facts)
+}
+
+/// Per-contract semantic adapter. Each suite gets explicit generated-boundary
+/// semantics keyed by `semantic_oracle`; unmapped contracts fail loudly instead
+/// of inheriting a suite-level fallback.
 fn scenario_contract_semantics(
     contract: &ScenarioContractSpec,
     events: &[DeliveredBoundary],
@@ -2100,8 +2330,11 @@ fn scenario_contract_semantics(
 ) -> ScenarioSemanticVerdict {
     match contract.suite {
         "runtime" => runtime_contract_semantics(contract.semantic_oracle, events, summary),
+        "standard" => standard_contract_semantics(contract.semantic_oracle, events, summary),
+        "rlm" => rlm_contract_semantics(contract.semantic_oracle, events, summary),
+        "agent" => agent_contract_semantics(contract.semantic_oracle, events, summary),
         other => ScenarioSemanticVerdict::failed(format!(
-            "suite `{other}` does not emit per-contract oracles; it is covered by a suite coverage manifest"
+            "suite `{other}` has no per-contract semantic adapter dispatcher"
         )),
     }
 }
@@ -2131,10 +2364,9 @@ fn runtime_contract_semantics(
         // A new incarnation reclaims the dead lease and the fence strictly advances.
         "runtime.dead_lease_reclaim_rejects_stale" => assert_semantic(
             worker_runtime_lease_dto_observed(events)
-                && summary
-                    .workers
-                    .iter()
-                    .any(|worker| worker.lease_owner_changes > 0 && worker.active_fencing_token > 1),
+                && summary.workers.iter().any(|worker| {
+                    worker.lease_owner_changes > 0 && worker.active_fencing_token > 1
+                }),
             "a second incarnation reclaimed the dead lease at a strictly higher fence",
         ),
         "runtime.checkpoint_redrive_cancel" => assert_semantic(
@@ -2172,6 +2404,2811 @@ fn runtime_contract_semantics(
         ),
         other => unmapped_scenario_semantic("runtime", other),
     }
+}
+
+fn standard_contract_semantics(
+    semantic_oracle: &str,
+    events: &[DeliveredBoundary],
+    _summary: &AbstractWorldSummary,
+) -> ScenarioSemanticVerdict {
+    match scenario_contract_generated_facts_for_semantic(semantic_oracle, events) {
+        Ok(facts) => ScenarioSemanticVerdict::passed(format!(
+            "generated contract facts held: {}",
+            fact_names(&facts)
+        )),
+        Err(reason) => ScenarioSemanticVerdict::failed(reason),
+    }
+}
+
+fn rlm_contract_semantics(
+    semantic_oracle: &str,
+    events: &[DeliveredBoundary],
+    _summary: &AbstractWorldSummary,
+) -> ScenarioSemanticVerdict {
+    match scenario_contract_generated_facts_for_semantic(semantic_oracle, events) {
+        Ok(facts) => ScenarioSemanticVerdict::passed(format!(
+            "generated contract facts held: {}",
+            fact_names(&facts)
+        )),
+        Err(reason) => ScenarioSemanticVerdict::failed(reason),
+    }
+}
+
+fn agent_contract_semantics(
+    semantic_oracle: &str,
+    events: &[DeliveredBoundary],
+    _summary: &AbstractWorldSummary,
+) -> ScenarioSemanticVerdict {
+    match scenario_contract_generated_facts_for_semantic(semantic_oracle, events) {
+        Ok(facts) => ScenarioSemanticVerdict::passed(format!(
+            "generated contract facts held: {}",
+            fact_names(&facts)
+        )),
+        Err(reason) => ScenarioSemanticVerdict::failed(reason),
+    }
+}
+
+fn fact_names(facts: &[ScenarioContractGeneratedFact]) -> String {
+    facts
+        .iter()
+        .map(|fact| fact.fact)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[derive(Clone, Copy)]
+enum ExecFactRequirement {
+    RuntimeOutcome,
+    NoToolCallReplay,
+    ReentersProvider,
+}
+
+fn generated_fact(
+    fact: &'static str,
+    assertion: &'static str,
+    events: Vec<&DeliveredBoundary>,
+    observed: Value,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    if events.is_empty() {
+        return Err(format!(
+            "generated semantic fact `{fact}` had no backing boundary events"
+        ));
+    }
+    Ok(ScenarioContractGeneratedFact {
+        fact,
+        assertion,
+        boundary_ids: events
+            .iter()
+            .map(|event| event.boundary_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        observed,
+    })
+}
+
+fn successful_provider_events(events: &[DeliveredBoundary]) -> Vec<&DeliveredBoundary> {
+    events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::Provider
+                && event.observed.get("success").and_then(Value::as_bool) == Some(true)
+                && event
+                    .observed
+                    .pointer("/runtime_contract/status")
+                    .and_then(Value::as_str)
+                    == Some("passed")
+                && event
+                    .payload
+                    .get("expected_provider_exchange_count")
+                    .and_then(Value::as_u64)
+                    == event
+                        .observed
+                        .get("provider_exchange_count")
+                        .and_then(Value::as_u64)
+        })
+        .collect()
+}
+
+fn initial_provider_projection_fact(
+    events: &[DeliveredBoundary],
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some(provider) = successful_provider_events(events)
+        .into_iter()
+        .find(|event| {
+            event
+                .payload
+                .get("expected_provider_exchange_count")
+                .and_then(Value::as_u64)
+                == Some(1)
+                && event.payload.get("text").and_then(Value::as_str).is_some()
+        })
+    else {
+        return Err(
+            "standard initial request projection did not find a successful exchange-1 provider boundary"
+                .to_string(),
+        );
+    };
+    let expected_text = provider
+        .payload
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let output = provider
+        .observed
+        .get("provider_output")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if expected_text.is_empty() || expected_text != output {
+        return Err(format!(
+            "standard initial request projection expected provider output `{expected_text}`, got `{output}`"
+        ));
+    }
+    generated_fact(
+        "standard_initial_request_projection",
+        "first generated provider boundary preserves projected request text and exchange index 1",
+        vec![provider],
+        json!({
+            "provider_boundary": provider.boundary_id,
+            "actor": provider.actor_alias,
+            "expected_provider_exchange_count": 1,
+            "provider_output": output,
+            "projected_text": expected_text,
+        }),
+    )
+}
+
+fn provider_mutation_semantic_fact(
+    events: &[DeliveredBoundary],
+    mutation: &'static str,
+    fact: &'static str,
+    assertion: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some(event) = events.iter().find(|event| {
+        event.kind == BoundaryKind::ProviderMutation
+            && event
+                .observed
+                .get("mutation")
+                .or_else(|| event.payload.get("mutation"))
+                .and_then(Value::as_str)
+                == Some(mutation)
+            && event
+                .payload
+                .pointer("/runtime_completion/completion_family")
+                .and_then(Value::as_str)
+                == Some("provider_script_mutation")
+            && event
+                .observed
+                .pointer("/provider_parser_matrix/matrix/real_provider_parser_execution")
+                .and_then(Value::as_bool)
+                == Some(true)
+    }) else {
+        return Err(format!(
+            "provider mutation semantic fact `{fact}` did not find `{mutation}` parser evidence"
+        ));
+    };
+    let providers = provider_mutation_providers(event);
+    if !MIGRATED_RUNTIME_PROVIDER_KINDS
+        .iter()
+        .all(|provider| providers.contains(provider))
+    {
+        return Err(format!(
+            "provider mutation `{mutation}` did not cover every migrated provider parser: {:?}",
+            providers
+        ));
+    }
+    if mutation == "rate_limit_error_envelope"
+        && !provider_rate_limit_terminalized_by_all_migrated_parsers(std::slice::from_ref(event))
+    {
+        return Err(
+            "rate-limit provider mutation lacked 429 retryable terminal classification proofs"
+                .to_string(),
+        );
+    }
+    if mutation == "dropped_terminal_event"
+        && !provider_dropped_terminal_event_classified(std::slice::from_ref(event))
+    {
+        return Err(
+            "dropped-terminal provider mutation lacked non-retryable parser classification proofs"
+                .to_string(),
+        );
+    }
+    generated_fact(
+        fact,
+        assertion,
+        vec![event],
+        json!({
+            "provider_mutation_boundary": event.boundary_id,
+            "mutation": mutation,
+            "provider_kinds": providers,
+            "runtime_completion_family": "provider_script_mutation",
+            "real_provider_parser_execution": true,
+        }),
+    )
+}
+
+fn provider_mutation_providers(event: &DeliveredBoundary) -> BTreeSet<&str> {
+    event
+        .observed
+        .pointer("/provider_parser_matrix/matrix/provider_kinds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+fn tool_reentry_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+    require_provider_event_release: bool,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some((tool, provider)) = tool_then_same_actor_provider(events) else {
+        return Err(format!(
+            "tool semantic fact `{fact}` did not find a scheduler-owned tool result followed by a successful provider re-entry for the same actor"
+        ));
+    };
+    let provider_release = provider_event_for_turn(events, &provider.boundary_id);
+    if require_provider_event_release && provider_release.is_none() {
+        return Err(format!(
+            "tool semantic fact `{fact}` did not find scheduler-owned provider-event release evidence for re-entry `{}`",
+            provider.boundary_id
+        ));
+    }
+    let mut fact_events = vec![tool, provider];
+    if let Some(release) = provider_release {
+        fact_events.push(release);
+    }
+    generated_fact(
+        fact,
+        if require_provider_event_release {
+            "tool result executes once, checkpoints through scheduler-owned provider-event release, and re-enters the same actor"
+        } else {
+            "tool result executes once and re-enters the same actor through a later successful provider boundary"
+        },
+        fact_events,
+        json!({
+            "tool_boundary": tool.boundary_id,
+            "tool_name": tool.observed.get("tool_name").cloned().unwrap_or(Value::Null),
+            "tool_call_id": tool.observed.get("tool_call_id").cloned().unwrap_or(Value::Null),
+            "tool_sequence": tool.sequence,
+            "reentry_provider_boundary": provider.boundary_id,
+            "reentry_provider_sequence": provider.sequence,
+            "actor": tool.actor_alias,
+            "execution_count": 1,
+            "provider_event_release": provider_release.map(|event| event.boundary_id.as_str()),
+        }),
+    )
+}
+
+fn tool_then_same_actor_provider<'a>(
+    events: &'a [DeliveredBoundary],
+) -> Option<(&'a DeliveredBoundary, &'a DeliveredBoundary)> {
+    events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::Tool
+                && event.observed.get("runtime_tool_output").is_some()
+                && event
+                    .observed
+                    .get("execution_count")
+                    .and_then(Value::as_u64)
+                    == Some(1)
+                && event
+                    .payload
+                    .pointer("/runtime_completion/completion_family")
+                    .and_then(Value::as_str)
+                    == Some("tool_return")
+        })
+        .find_map(|tool| {
+            successful_provider_events(events)
+                .into_iter()
+                .filter(|provider| {
+                    provider.actor_alias == tool.actor_alias && provider.sequence > tool.sequence
+                })
+                .min_by_key(|provider| provider.sequence)
+                .map(|provider| (tool, provider))
+        })
+}
+
+fn provider_event_for_turn<'a>(
+    events: &'a [DeliveredBoundary],
+    turn_boundary_id: &str,
+) -> Option<&'a DeliveredBoundary> {
+    provider_events_for_turn(events, turn_boundary_id)
+        .into_iter()
+        .next()
+}
+
+fn provider_events_for_turn<'a>(
+    events: &'a [DeliveredBoundary],
+    turn_boundary_id: &str,
+) -> Vec<&'a DeliveredBoundary> {
+    events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::ProviderEvent
+                && event
+                    .payload
+                    .get("turn_boundary_id")
+                    .and_then(Value::as_str)
+                    == Some(turn_boundary_id)
+                && event
+                    .observed
+                    .get("provider_event_release")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+        .collect()
+}
+
+fn contract_execution_event<'a>(
+    events: &'a [DeliveredBoundary],
+    contract: &str,
+) -> Result<&'a DeliveredBoundary, String> {
+    events
+        .iter()
+        .find(|event| {
+            event.kind == BoundaryKind::Trigger
+                && event
+                    .observed
+                    .pointer("/contract_execution/contract")
+                    .and_then(Value::as_str)
+                    == Some(contract)
+        })
+        .ok_or_else(|| {
+            format!("contract execution `{contract}` was not present in generated events")
+        })
+}
+
+fn contract_execution_payload_matches_observed<'a>(
+    event: &'a DeliveredBoundary,
+    contract: &str,
+    expected_source_scenario: &str,
+) -> Result<&'a Value, String> {
+    let observed = event.observed.get("contract_execution").ok_or_else(|| {
+        format!(
+            "contract execution boundary `{}` did not record observed execution payload",
+            event.boundary_id
+        )
+    })?;
+    if event.payload.get("contract_execution") != Some(observed) {
+        return Err(format!(
+            "contract execution boundary `{}` observed execution diverged from scheduler payload",
+            event.boundary_id
+        ));
+    }
+    if observed.get("contract").and_then(Value::as_str) != Some(contract) {
+        return Err(format!(
+            "contract execution boundary `{}` recorded wrong contract identity",
+            event.boundary_id
+        ));
+    }
+    if observed.pointer("/source/kind").and_then(Value::as_str) != Some("fixed_dst_api_execution")
+        || observed
+            .pointer("/source/path")
+            .and_then(Value::as_str)
+            .is_none()
+        || observed.pointer("/source/scenario").and_then(Value::as_str)
+            != Some(expected_source_scenario)
+        || !is_sha256_hex_value(observed.pointer("/source/source_hash"))
+        || !is_sha256_hex_value(observed.pointer("/source/result_sha256"))
+    {
+        return Err(format!(
+            "contract execution boundary `{}` lacks fixed execution source path/scenario/hash evidence",
+            event.boundary_id
+        ));
+    }
+    if event.observed.get("semantic_proof").is_some()
+        || event.payload.get("semantic_proof").is_some()
+    {
+        return Err(format!(
+            "contract execution boundary `{}` used semantic-proof-only trigger evidence",
+            event.boundary_id
+        ));
+    }
+    contract_execution_replay_matches(observed, contract).map_err(|reason| {
+        format!(
+            "contract execution boundary `{}` failed fixed-source replay validation: {reason}",
+            event.boundary_id
+        )
+    })?;
+    Ok(observed)
+}
+
+fn contract_execution_replay_matches(observed: &Value, contract: &str) -> Result<(), String> {
+    let replayed = crate::runner::replay_contract_execution(contract)
+        .map_err(|err| format!("could not re-execute `{contract}`: {err}"))?;
+    if replayed.get("source") != observed.get("source") {
+        return Err(format!(
+            "`{contract}` source identity/hash diverged from re-execution"
+        ));
+    }
+    if replayed.get("result") != observed.get("result") {
+        return Err(format!(
+            "`{contract}` result payload diverged from re-execution"
+        ));
+    }
+    Ok(())
+}
+
+fn is_sha256_hex_value(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_str).is_some_and(|value| {
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn event_by_boundary_id<'a>(
+    events: &'a [DeliveredBoundary],
+    boundary_id: &str,
+) -> Option<&'a DeliveredBoundary> {
+    events.iter().find(|event| event.boundary_id == boundary_id)
+}
+
+fn json_array_equals(value: Option<&Value>, expected: &[&str]) -> bool {
+    let Some(values) = value.and_then(Value::as_array) else {
+        return false;
+    };
+    values.len() == expected.len()
+        && values
+            .iter()
+            .zip(expected)
+            .all(|(value, expected)| value.as_str() == Some(*expected))
+}
+
+fn standard_protocol_execution_fact(
+    events: &[DeliveredBoundary],
+    contract: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let (scenario, fact, assertion) = standard_protocol_contract_metadata(contract)?;
+    let proof_event = contract_execution_event(events, contract)?;
+    let execution = contract_execution_payload_matches_observed(proof_event, contract, scenario)?;
+    let result = execution
+        .get("result")
+        .ok_or_else(|| format!("{contract} execution missing result"))?;
+    require_standard_str(
+        result,
+        "/execution_api",
+        "lash_core::sansio::TurnMachine",
+        contract,
+    )?;
+    require_standard_str(
+        result,
+        "/driver",
+        "lash_protocol_standard::StandardDriver",
+        contract,
+    )?;
+    require_standard_bool(
+        result,
+        "/initial_request_contains_user_message",
+        true,
+        contract,
+    )?;
+    let contract_observed = match contract {
+        "standard.initial_request_projection" => {
+            require_standard_bool(result, "/done", false, contract)?;
+            require_standard_u64(result, "/llm_call_count", 1, contract)?;
+            json!({
+                "initial_request_contains_user_message": true,
+                "llm_call_count": 1,
+                "done": false,
+            })
+        }
+        "standard.empty_provider_response_error" => {
+            require_standard_bool(result, "/done", true, contract)?;
+            require_standard_u64(result, "/llm_call_count", 1, contract)?;
+            require_standard_error_contains(
+                result,
+                "Model returned no assistant text or tool calls.",
+                contract,
+            )?;
+            require_standard_stopped_outcome(result, "ProviderError", contract)?;
+            json!({
+                "done": true,
+                "stop_reason": "provider_error",
+                "error": "empty_response",
+                "llm_call_count": 1,
+            })
+        }
+        "standard.provider_error_without_checkpoint" => {
+            require_standard_bool(result, "/done", true, contract)?;
+            require_standard_u64(result, "/llm_call_count", 1, contract)?;
+            require_standard_checkpoint_count(result, 0, contract)?;
+            require_standard_error_contains(
+                result,
+                "LLM error: upstream provider unavailable",
+                contract,
+            )?;
+            require_standard_stopped_outcome(result, "ProviderError", contract)?;
+            json!({
+                "done": true,
+                "stop_reason": "provider_error",
+                "checkpoint_count": 0,
+                "llm_call_count": 1,
+            })
+        }
+        "standard.native_tool_loop_reenters_model" => {
+            require_standard_bool(result, "/done", false, contract)?;
+            require_standard_u64(result, "/llm_call_count", 2, contract)?;
+            require_standard_checkpoint(result, "after_work", contract)?;
+            require_standard_tool_call(result, "tc1", "read_file", contract)?;
+            json!({
+                "done": false,
+                "llm_call_count": 2,
+                "checkpoint": "after_work",
+                "tool_call": "read_file/tc1",
+            })
+        }
+        "standard.parallel_tool_results_checkpoint_once" => {
+            require_standard_bool(result, "/done", false, contract)?;
+            require_standard_u64(result, "/llm_call_count", 2, contract)?;
+            require_standard_checkpoint_count(result, 1, contract)?;
+            require_standard_checkpoint(result, "after_work", contract)?;
+            require_standard_tool_call(result, "tc1", "read_file", contract)?;
+            require_standard_tool_call(result, "tc2", "read_file", contract)?;
+            json!({
+                "done": false,
+                "llm_call_count": 2,
+                "checkpoint_count": 1,
+                "tool_calls": ["tc1", "tc2"],
+            })
+        }
+        "standard.tool_failure_feedback_reenters_model" => {
+            require_standard_bool(result, "/done", false, contract)?;
+            require_standard_u64(result, "/llm_call_count", 2, contract)?;
+            require_standard_checkpoint(result, "after_work", contract)?;
+            require_standard_tool_call(result, "tc1", "search", contract)?;
+            require_standard_tool_result(
+                result,
+                "tc1",
+                "failure",
+                Some("search_failed"),
+                contract,
+            )?;
+            json!({
+                "done": false,
+                "llm_call_count": 2,
+                "checkpoint": "after_work",
+                "tool_result": "failure/search_failed",
+            })
+        }
+        "standard.streamed_text_finalizes_once" => {
+            require_standard_bool(result, "/done", true, contract)?;
+            require_standard_u64(result, "/llm_call_count", 1, contract)?;
+            require_standard_u64(result, "/text_delta_count", 0, contract)?;
+            require_standard_checkpoint(result, "before_completion", contract)?;
+            require_standard_finished_outcome_contains(result, "AssistantMessage", contract)?;
+            require_standard_finished_outcome_contains(result, "streamed done", contract)?;
+            json!({
+                "done": true,
+                "llm_call_count": 1,
+                "text_delta_count": 0,
+                "checkpoint": "before_completion",
+                "turn_outcome": "assistant_message",
+            })
+        }
+        other => {
+            return Err(format!(
+                "Standard protocol contract execution fact has no checker for `{other}`"
+            ));
+        }
+    };
+    generated_fact(
+        fact,
+        assertion,
+        vec![proof_event],
+        json!({
+            "contract_execution_boundary": proof_event.boundary_id,
+            "contract": contract,
+            "observed": contract_observed,
+            "source": execution.get("source").cloned().unwrap_or(Value::Null),
+        }),
+    )
+}
+
+fn standard_protocol_contract_metadata(
+    contract: &str,
+) -> Result<(&'static str, &'static str, &'static str), String> {
+    match contract {
+        "standard.initial_request_projection" => Ok((
+            "standard_protocol_scenario_projects_initial_request",
+            "standard_initial_request_projection_execution",
+            "StandardDriver projects the user input into the first TurnMachine LLM request",
+        )),
+        "standard.empty_provider_response_error" => Ok((
+            "standard_protocol_scenario_empty_model_response_stops_provider_error",
+            "standard_empty_provider_response_error_execution",
+            "StandardDriver turns an empty model response into a provider-error stop with no generic success proxy",
+        )),
+        "standard.provider_error_without_checkpoint" => Ok((
+            "standard_protocol_scenario_provider_error_stops_without_checkpoint",
+            "standard_provider_error_without_checkpoint_execution",
+            "StandardDriver provider error stops immediately without committing a checkpoint",
+        )),
+        "standard.native_tool_loop_reenters_model" => Ok((
+            "standard_protocol_scenario_native_tool_loop_reenters_model_after_checkpoint",
+            "standard_native_tool_loop_reenters_model_execution",
+            "StandardDriver native tool results checkpoint after work and re-enter the model loop",
+        )),
+        "standard.parallel_tool_results_checkpoint_once" => Ok((
+            "standard_protocol_scenario_parallel_tool_results_checkpoint_once",
+            "standard_parallel_tool_results_checkpoint_once_execution",
+            "StandardDriver parallel tool results commit exactly one AfterWork checkpoint before model re-entry",
+        )),
+        "standard.tool_failure_feedback_reenters_model" => Ok((
+            "standard_protocol_scenario_tool_failure_feedback_reenters_model_after_checkpoint",
+            "standard_tool_failure_feedback_reenters_model_execution",
+            "StandardDriver converts tool failure into model feedback, checkpoints, and re-enters",
+        )),
+        "standard.streamed_text_finalizes_once" => Ok((
+            "standard_protocol_scenario_streamed_text_finishes_without_duplicate_delta",
+            "standard_streamed_text_finalizes_once_execution",
+            "StandardDriver streamed assistant text finalizes once without duplicate text deltas",
+        )),
+        other => Err(format!(
+            "no Standard protocol metadata registered for `{other}`"
+        )),
+    }
+}
+
+fn require_standard_bool(
+    result: &Value,
+    pointer: &str,
+    expected: bool,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_bool) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}={expected}"))
+    }
+}
+
+fn require_standard_u64(
+    result: &Value,
+    pointer: &str,
+    expected: u64,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_u64) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}={expected}"))
+    }
+}
+
+fn require_standard_str(
+    result: &Value,
+    pointer: &str,
+    expected: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_str) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}=`{expected}`"))
+    }
+}
+
+fn require_standard_checkpoint(
+    result: &Value,
+    checkpoint: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("checkpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| value.as_str() == Some(checkpoint))
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} missing checkpoint `{checkpoint}`"))
+    }
+}
+
+fn require_standard_checkpoint_count(
+    result: &Value,
+    expected: usize,
+    contract: &str,
+) -> Result<(), String> {
+    let actual = result
+        .get("checkpoints")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} expected {expected} checkpoint(s), found {actual}"
+        ))
+    }
+}
+
+fn require_standard_error_contains(
+    result: &Value,
+    needle: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|error| error.contains(needle))
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} missing error containing `{needle}`"))
+    }
+}
+
+fn require_standard_stopped_outcome(
+    result: &Value,
+    stop_reason_needle: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("turn_outcomes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|outcome| {
+            outcome.get("kind").and_then(Value::as_str) == Some("stopped")
+                && outcome
+                    .get("stop_reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| reason.contains(stop_reason_needle))
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing stopped outcome containing `{stop_reason_needle}`"
+        ))
+    }
+}
+
+fn require_standard_finished_outcome_contains(
+    result: &Value,
+    needle: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("turn_outcomes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|outcome| {
+            outcome.get("kind").and_then(Value::as_str) == Some("finished")
+                && outcome
+                    .get("finish")
+                    .and_then(Value::as_str)
+                    .is_some_and(|finish| finish.contains(needle))
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing finished outcome containing `{needle}`"
+        ))
+    }
+}
+
+fn require_standard_tool_call(
+    result: &Value,
+    call_id: &str,
+    tool_name: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|call| {
+            call.get("call_id").and_then(Value::as_str) == Some(call_id)
+                && call.get("tool_name").and_then(Value::as_str) == Some(tool_name)
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing tool call `{tool_name}/{call_id}`"
+        ))
+    }
+}
+
+fn require_standard_tool_result(
+    result: &Value,
+    call_id: &str,
+    status: &str,
+    error_code: Option<&str>,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("tool_results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|tool_result| {
+            tool_result.get("call_id").and_then(Value::as_str) == Some(call_id)
+                && tool_result.get("status").and_then(Value::as_str) == Some(status)
+                && error_code.is_none_or(|code| {
+                    tool_result.get("error_code").and_then(Value::as_str) == Some(code)
+                })
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing tool result `{call_id}` status `{status}`"
+        ))
+    }
+}
+
+fn agent_contract_execution_fact(
+    events: &[DeliveredBoundary],
+    contract: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let (scenario, fact, assertion) = agent_contract_metadata(contract)?;
+    let proof_event = contract_execution_event(events, contract)?;
+    let execution = contract_execution_payload_matches_observed(proof_event, contract, scenario)?;
+    let result = execution
+        .get("result")
+        .ok_or_else(|| format!("{contract} execution missing result"))?;
+    require_agent_bool(result, "/done", true, contract)?;
+    require_agent_str(result, "/execution_api", "lash::RlmCore facade", contract)?;
+    let observed = match contract {
+        "agent.foreground_tool_call_round_trip" => {
+            require_agent_final_value(result, &json!({ "ok": true }), contract)?;
+            require_agent_u64(result, "/tool_completed_count", 1, contract)?;
+            require_agent_tool_output(result, "app_lookup", &json!({ "ok": true }), contract)?;
+            json!({
+                "final_value": { "ok": true },
+                "tool_completed_count": 1,
+                "tool_name": "app_lookup",
+            })
+        }
+        "agent.started_process_tool_call_graph" => {
+            require_agent_final_value(result, &json!({ "ok": true }), contract)?;
+            require_agent_completed_process_entry(result, "lookup", contract)?;
+            require_agent_completed_labeled_resource(
+                result,
+                "Lookup app state in process",
+                contract,
+            )?;
+            json!({
+                "final_value": { "ok": true },
+                "completed_process": "lookup",
+                "labeled_resource": "Lookup app state in process",
+            })
+        }
+        "agent.durable_input_suspension_resolution" => {
+            require_agent_final_value(result, &json!("approved"), contract)?;
+            require_agent_bool(
+                result,
+                "/durable_input/suspended_before_resolution",
+                true,
+                contract,
+            )?;
+            require_agent_bool(result, "/durable_input/resolve_accepted", true, contract)?;
+            require_agent_u64(
+                result,
+                "/durable_input/completed_event_count_before_resolution",
+                0,
+                contract,
+            )?;
+            require_agent_u64(result, "/durable_input/durable_step_count", 2, contract)?;
+            require_agent_str(
+                result,
+                "/durable_input/await_custom_key",
+                "mock-input-request:request-1",
+                contract,
+            )?;
+            require_agent_completed_process_entry(result, "request_answer", contract)?;
+            require_agent_process_event(
+                result,
+                "process.yield",
+                "/payload/type",
+                "work.input_request.opened",
+                contract,
+            )?;
+            require_agent_no_process_event(result, "process.waiting", contract)?;
+            json!({
+                "final_value": "approved",
+                "await_custom_key": "mock-input-request:request-1",
+                "suspended_before_resolution": true,
+                "completed_process": "request_answer",
+                "process_event": "work.input_request.opened",
+            })
+        }
+        "agent.shell_results_are_data" => {
+            let expected = json!({
+                "pipe_exit": 0,
+                "pipe_output": "line\nline\nline\n",
+                "missing_exit": 1,
+                "missing_status": "completed"
+            });
+            require_agent_final_value(result, &expected, contract)?;
+            json!({
+                "final_value": expected,
+                "nonzero_shell_exit_is_data": true,
+                "pipeline_output": "line\nline\nline\n",
+            })
+        }
+        "agent.shell_output_print_projection_survives" => {
+            let expected = json!({
+                "chars": 60000,
+                "tail": "x\nx\n",
+                "has_full_output_path": true
+            });
+            require_agent_final_value(result, &expected, contract)?;
+            json!({
+                "final_value": expected,
+                "shell_output_chars": 60000,
+                "projection_tail": "x\nx\n",
+            })
+        }
+        "agent.started_process_subagent_spawn" => {
+            require_agent_final_value(result, &json!({ "len": 2 }), contract)?;
+            require_agent_completed_process_entry(result, "spawn_child", contract)?;
+            require_agent_completed_labeled_resource(
+                result,
+                "Spawn subagent with web search",
+                contract,
+            )?;
+            require_agent_min_u64(
+                result,
+                "/graph_facts/child_session_exec_completed_count",
+                1,
+                contract,
+            )?;
+            json!({
+                "final_value": { "len": 2 },
+                "completed_process": "spawn_child",
+                "labeled_resource": "Spawn subagent with web search",
+                "child_session_exec_completed_count": result.pointer("/graph_facts/child_session_exec_completed_count").cloned().unwrap_or(Value::Null),
+            })
+        }
+        "agent.session_turn_process_child" => {
+            require_agent_final_value(result, &json!({ "child": "done" }), contract)?;
+            json!({
+                "final_value": { "child": "done" },
+                "process_child_awaited": true,
+            })
+        }
+        "agent.nested_process_start_await" => {
+            require_agent_final_value(result, &json!({ "parent": "done" }), contract)?;
+            require_agent_completed_process_entry(result, "parent", contract)?;
+            require_agent_completed_process_entry(result, "child", contract)?;
+            require_agent_completed_labeled_node(result, "Start nested child process", contract)?;
+            require_agent_min_u64(result, "/process_facts/process_count", 2, contract)?;
+            require_agent_min_u64(
+                result,
+                "/process_facts/completed_lashlang_process_count",
+                2,
+                contract,
+            )?;
+            json!({
+                "final_value": { "parent": "done" },
+                "completed_processes": ["child", "parent"],
+                "labeled_node": "Start nested child process",
+            })
+        }
+        "agent.failed_child_preserves_failure_graph" => {
+            require_agent_no_final_value(result, contract)?;
+            require_agent_bool(result, "/process_facts/all_terminal", true, contract)?;
+            require_agent_failed_labeled_resource(result, "Spawn failing subagent", contract)?;
+            require_agent_min_u64(
+                result,
+                "/graph_facts/child_session_exec_completed_count",
+                1,
+                contract,
+            )?;
+            require_agent_bool(result, "/failure/turn_success", false, contract)?;
+            require_agent_bool(result, "/failure/final_value_present", false, contract)?;
+            require_agent_u64(result, "/failure/final_value_event_count", 0, contract)?;
+            require_agent_min_u64(result, "/failure/failed_code_block_count", 1, contract)?;
+            require_agent_bool(
+                result,
+                "/failure/provider_exhaustion_observed",
+                false,
+                contract,
+            )?;
+            require_agent_bool(
+                result,
+                "/failure/child_task_fail_reason_observed",
+                true,
+                contract,
+            )?;
+            json!({
+                "final_value_present": false,
+                "failed_labeled_resource": "Spawn failing subagent",
+                "child_task_fail_reason": "child boom",
+                "child_session_exec_completed_count": result.pointer("/graph_facts/child_session_exec_completed_count").cloned().unwrap_or(Value::Null),
+                "all_processes_terminal": true,
+            })
+        }
+        "agent.parallel_spawn_and_join" => {
+            let expected = json!({ "joined": ["left", "right"] });
+            require_agent_final_value(result, &expected, contract)?;
+            json!({
+                "final_value": expected,
+                "joined": ["left", "right"],
+            })
+        }
+        other => {
+            return Err(format!(
+                "Agent contract execution fact has no checker for `{other}`"
+            ));
+        }
+    };
+    generated_fact(
+        fact,
+        assertion,
+        vec![proof_event],
+        json!({
+            "contract_execution_boundary": proof_event.boundary_id,
+            "contract": contract,
+            "observed": observed,
+            "source": execution.get("source").cloned().unwrap_or(Value::Null),
+        }),
+    )
+}
+
+fn agent_contract_metadata(
+    contract: &str,
+) -> Result<(&'static str, &'static str, &'static str), String> {
+    match contract {
+        "agent.foreground_tool_call_round_trip" => Ok((
+            "agent_scenario_foreground_labeled_tool_call",
+            "agent_foreground_tool_call_round_trip_execution",
+            "Agent facade executes app_lookup and returns its concrete tool value as the final value",
+        )),
+        "agent.started_process_tool_call_graph" => Ok((
+            "agent_scenario_started_process_labeled_tool_call",
+            "agent_started_process_tool_call_graph_execution",
+            "Agent facade starts a Lashlang process that executes app_lookup and records a completed labeled process graph",
+        )),
+        "agent.durable_input_suspension_resolution" => Ok((
+            "agent_scenario_process_durable_input_request_tool",
+            "agent_durable_input_suspension_resolution_execution",
+            "Agent facade suspends a durable input process before external resolution and resumes to a concrete final value",
+        )),
+        "agent.shell_results_are_data" => Ok((
+            "agent_scenario_shell_nonzero_and_pipeline_results_are_data",
+            "agent_shell_results_are_data_execution",
+            "Agent facade preserves shell pipeline output and nonzero shell status as final-value data",
+        )),
+        "agent.shell_output_print_projection_survives" => Ok((
+            "agent_scenario_shell_output_survives_print_projection_in_variable",
+            "agent_shell_output_print_projection_execution",
+            "Agent facade keeps large shell output addressable after print projection and finishes retained metadata",
+        )),
+        "agent.started_process_subagent_spawn" => Ok((
+            "agent_scenario_started_process_labeled_subagent_spawn",
+            "agent_started_process_subagent_spawn_execution",
+            "Agent facade starts a Lashlang process that spawns a default subagent, preserves the labeled child-session graph, and returns the typed child value",
+        )),
+        "agent.session_turn_process_child" => Ok((
+            "agent_scenario_session_turn_process_child",
+            "agent_session_turn_process_child_execution",
+            "Agent facade starts and awaits a child process to produce a concrete final value",
+        )),
+        "agent.nested_process_start_await" => Ok((
+            "agent_scenario_nested_process_start_await",
+            "agent_nested_process_start_await_execution",
+            "Agent facade starts a parent Lashlang process that starts and awaits a child process with connected graph evidence",
+        )),
+        "agent.failed_child_preserves_failure_graph" => Ok((
+            "agent_scenario_failed_child_preserves_failure_graph",
+            "agent_failed_child_preserves_failure_graph_execution",
+            "Agent facade preserves a failed subagent task graph, terminal process state, and task.fail reason without provider exhaustion or false final value",
+        )),
+        "agent.parallel_spawn_and_join" => Ok((
+            "agent_scenario_parallel_spawn_and_join",
+            "agent_parallel_spawn_and_join_execution",
+            "Agent facade starts two child processes and joins their concrete final values in order",
+        )),
+        other => Err(format!(
+            "no Agent contract metadata registered for `{other}`"
+        )),
+    }
+}
+
+fn require_agent_bool(
+    result: &Value,
+    pointer: &str,
+    expected: bool,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_bool) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}={expected}"))
+    }
+}
+
+fn require_agent_u64(
+    result: &Value,
+    pointer: &str,
+    expected: u64,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_u64) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}={expected}"))
+    }
+}
+
+fn require_agent_min_u64(
+    result: &Value,
+    pointer: &str,
+    minimum: u64,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .is_some_and(|value| value >= minimum)
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}>={minimum}"))
+    }
+}
+
+fn require_agent_str(
+    result: &Value,
+    pointer: &str,
+    expected: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_str) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}=`{expected}`"))
+    }
+}
+
+fn require_agent_final_value(
+    result: &Value,
+    expected: &Value,
+    contract: &str,
+) -> Result<(), String> {
+    if result.get("final_value") == Some(expected)
+        && result.pointer("/runtime_final_value_facts/semantic_value") == Some(expected)
+        && result
+            .pointer("/runtime_final_value_facts/outcome_kind")
+            .and_then(Value::as_str)
+            == Some("final_value")
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing concrete facade final value `{expected}`"
+        ))
+    }
+}
+
+fn require_agent_no_final_value(result: &Value, contract: &str) -> Result<(), String> {
+    if result.get("final_value") == Some(&Value::Null)
+        && result
+            .pointer("/failure/final_value_present")
+            .and_then(Value::as_bool)
+            == Some(false)
+        && result
+            .pointer("/failure/final_value_event_count")
+            .and_then(Value::as_u64)
+            == Some(0)
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} unexpectedly recorded a final value"))
+    }
+}
+
+fn require_agent_tool_output(
+    result: &Value,
+    name: &str,
+    expected: &Value,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("tool_completed_outputs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|entry| {
+            entry.get("name").and_then(Value::as_str) == Some(name)
+                && entry.get("value") == Some(expected)
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing tool output `{name}` `{expected}`"
+        ))
+    }
+}
+
+fn require_agent_completed_process_entry(
+    result: &Value,
+    entry_name: &str,
+    contract: &str,
+) -> Result<(), String> {
+    require_agent_array_str_contains(
+        result,
+        "/process_facts/completed_entries",
+        entry_name,
+        contract,
+    )
+}
+
+fn require_agent_completed_labeled_resource(
+    result: &Value,
+    title: &str,
+    contract: &str,
+) -> Result<(), String> {
+    require_agent_array_str_contains(
+        result,
+        "/graph_facts/completed_labeled_resources",
+        title,
+        contract,
+    )
+}
+
+fn require_agent_completed_labeled_node(
+    result: &Value,
+    title: &str,
+    contract: &str,
+) -> Result<(), String> {
+    require_agent_array_str_contains(
+        result,
+        "/graph_facts/completed_labeled_nodes",
+        title,
+        contract,
+    )
+}
+
+fn require_agent_failed_labeled_resource(
+    result: &Value,
+    title: &str,
+    contract: &str,
+) -> Result<(), String> {
+    require_agent_array_str_contains(
+        result,
+        "/graph_facts/failed_labeled_resources",
+        title,
+        contract,
+    )
+}
+
+fn require_agent_array_str_contains(
+    result: &Value,
+    pointer: &str,
+    expected: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| value.as_str() == Some(expected))
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} missing `{expected}` in {pointer}"))
+    }
+}
+
+fn require_agent_process_event(
+    result: &Value,
+    event_type: &str,
+    payload_pointer: &str,
+    expected_payload: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("process_events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|event| {
+            event.get("event_type").and_then(Value::as_str) == Some(event_type)
+                && event.pointer(payload_pointer).and_then(Value::as_str) == Some(expected_payload)
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing process event `{event_type}` with {payload_pointer}=`{expected_payload}`"
+        ))
+    }
+}
+
+fn require_agent_no_process_event(
+    result: &Value,
+    event_type: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("process_events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .all(|event| event.get("event_type").and_then(Value::as_str) != Some(event_type))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} unexpectedly recorded process event `{event_type}`"
+        ))
+    }
+}
+
+fn rlm_protocol_execution_fact(
+    events: &[DeliveredBoundary],
+    contract: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let (scenario, fact, assertion) = rlm_protocol_contract_metadata(contract)?;
+    let proof_event = contract_execution_event(events, contract)?;
+    let execution = contract_execution_payload_matches_observed(proof_event, contract, scenario)?;
+    let result = execution
+        .get("result")
+        .ok_or_else(|| format!("{contract} execution missing result"))?;
+    let contract_observed = match contract {
+        "rlm.natural_prose_finalizes" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_u64(result, "/llm_call_count", 1, contract)?;
+            require_rlm_bool(result, "/initial_request_tools_empty", true, contract)?;
+            require_rlm_bool(result, "/final_message_event", false, contract)?;
+            require_rlm_bool(result, "/assistant_conversation_progress", false, contract)?;
+            require_rlm_checkpoint(result, "before_completion", contract)?;
+            require_rlm_turn_outcome_contains(result, "finished", "AssistantMessage", contract)?;
+            require_rlm_diagnostic(result, "finish_prose", "natural", contract)?;
+            json!({
+                "mode": "natural",
+                "decision": "finish_prose",
+                "done": true,
+                "turn_outcome": "assistant_message",
+                "llm_call_count": 1,
+                "assistant_conversation_progress": false,
+            })
+        }
+        "rlm.typed_prose_requires_finish" => {
+            require_rlm_bool(result, "/done", false, contract)?;
+            require_rlm_u64(result, "/llm_call_count", 2, contract)?;
+            require_rlm_checkpoint(result, "after_work", contract)?;
+            require_rlm_system_contains(result, "explicit final value", contract)?;
+            require_rlm_system_contains(result, "finish <value>", contract)?;
+            require_rlm_system_omits(result, "required output schema", contract)?;
+            require_rlm_diagnostic(result, "request_finish", "finish_required", contract)?;
+            json!({
+                "mode": "finish_required",
+                "decision": "request_finish",
+                "done": false,
+                "repair_prompt_contains": ["explicit final value", "finish <value>"],
+                "llm_call_count": 2,
+            })
+        }
+        "rlm.finish_required_max_turn_stop" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_u64(result, "/llm_call_count", 1, contract)?;
+            require_rlm_stopped_max_turns(result, contract)?;
+            require_rlm_system_omits(result, "explicit final value", contract)?;
+            require_rlm_system_omits(result, "finish <value>", contract)?;
+            json!({
+                "mode": "finish_required",
+                "done": true,
+                "stop_reason": "max_turns",
+                "llm_call_count": 1,
+                "retry_prompt_after_max_turn": false,
+            })
+        }
+        "rlm.exec_error_max_turn_stop" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_u64(result, "/llm_call_count", 1, contract)?;
+            require_rlm_exec_code(result, "missing_name", contract)?;
+            require_rlm_stopped_max_turns(result, contract)?;
+            require_rlm_trajectory_error(
+                result,
+                Some("unknown variable `missing_name`"),
+                contract,
+            )?;
+            json!({
+                "mode": "finish_required",
+                "done": true,
+                "stop_reason": "max_turns",
+                "exec_code": "missing_name",
+                "trajectory_error": "unknown variable `missing_name`",
+            })
+        }
+        "rlm.typed_finish_emits_outcome_and_done" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_u64(result, "/llm_call_count", 1, contract)?;
+            require_rlm_exec_code(result, "finish { ok: true }", contract)?;
+            require_rlm_checkpoint(result, "before_completion", contract)?;
+            require_rlm_final_value(result, &json!({ "ok": true }), contract)?;
+            require_rlm_bool(result, "/final_message_event", false, contract)?;
+            require_rlm_trajectory_error(result, None, contract)?;
+            json!({
+                "mode": "finish_required_schema",
+                "done": true,
+                "final_value": { "ok": true },
+                "exec_code": "finish { ok: true }",
+                "final_message_event": false,
+                "checkpoint": "before_completion",
+            })
+        }
+        "rlm.finish_required_diagnostic_counts" => {
+            let diagnostic =
+                require_rlm_diagnostic(result, "request_finish", "finish_required", contract)?;
+            require_rlm_count(diagnostic, "full_text_chars", 12, contract)?;
+            require_rlm_count(diagnostic, "prose_chars", 12, contract)?;
+            require_rlm_count(diagnostic, "code_chars", 0, contract)?;
+            require_rlm_count(diagnostic, "reasoning_chars", 0, contract)?;
+            require_rlm_count(diagnostic, "lashlang_cell_count", 0, contract)?;
+            require_rlm_checkpoint(result, "after_work", contract)?;
+            json!({
+                "decision": "request_finish",
+                "termination": "finish_required",
+                "counts": diagnostic.get("counts").cloned().unwrap_or(Value::Null),
+            })
+        }
+        "rlm.natural_diagnostic_counts" => {
+            let diagnostic = require_rlm_diagnostic(result, "finish_prose", "natural", contract)?;
+            require_rlm_count(diagnostic, "full_text_chars", 12, contract)?;
+            require_rlm_count(diagnostic, "prose_chars", 12, contract)?;
+            require_rlm_count(diagnostic, "code_chars", 0, contract)?;
+            require_rlm_count(diagnostic, "reasoning_chars", 0, contract)?;
+            require_rlm_count(diagnostic, "lashlang_cell_count", 0, contract)?;
+            require_rlm_checkpoint(result, "before_completion", contract)?;
+            json!({
+                "decision": "finish_prose",
+                "termination": "natural",
+                "counts": diagnostic.get("counts").cloned().unwrap_or(Value::Null),
+            })
+        }
+        "rlm.cell_diagnostic_counts" => {
+            let diagnostic =
+                require_rlm_diagnostic(result, "execute_lashlang", "natural", contract)?;
+            require_rlm_count(diagnostic, "lashlang_cell_count", 1, contract)?;
+            require_rlm_count(diagnostic, "code_chars", 10, contract)?;
+            require_rlm_exec_code(result, "print \"hi\"", contract)?;
+            require_rlm_trajectory_error(result, None, contract)?;
+            json!({
+                "decision": "execute_lashlang",
+                "counts": diagnostic.get("counts").cloned().unwrap_or(Value::Null),
+                "exec_code": "print \"hi\"",
+                "trajectory_last": rlm_trajectory_last(result).cloned().unwrap_or(Value::Null),
+            })
+        }
+        "rlm.retired_marker_plain_lashlang_text" => {
+            let code = "text = \"%%lashlang is just source here\"\nprint text";
+            let diagnostic =
+                require_rlm_diagnostic(result, "execute_lashlang", "natural", contract)?;
+            require_rlm_count(diagnostic, "lashlang_cell_count", 1, contract)?;
+            require_rlm_exec_code(result, code, contract)?;
+            require_rlm_no_tool_call_event(result, contract)?;
+            json!({
+                "decision": "execute_lashlang",
+                "exec_code": code,
+                "retired_marker_interpreted_as_source_text": true,
+                "tool_call_event": false,
+            })
+        }
+        "rlm.lashlang_cell_exec_continues" => {
+            require_rlm_bool(result, "/done", false, contract)?;
+            require_rlm_u64(result, "/llm_call_count", 2, contract)?;
+            require_rlm_exec_code(result, "print \"hi\"", contract)?;
+            require_rlm_checkpoint(result, "after_work", contract)?;
+            require_rlm_trajectory_error(result, None, contract)?;
+            require_rlm_trajectory_output_contains(result, "hi\n", contract)?;
+            json!({
+                "done": false,
+                "llm_call_count": 2,
+                "exec_code": "print \"hi\"",
+                "checkpoint": "after_work",
+                "trajectory_output": "hi\n",
+            })
+        }
+        "rlm.empty_options_natural_default" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_final_value(result, &json!("done"), contract)?;
+            require_rlm_exec_code(result, "finish \"done\"", contract)?;
+            require_rlm_checkpoint(result, "before_completion", contract)?;
+            if result.pointer("/termination/kind").and_then(Value::as_str)
+                != Some("empty_protocol_turn_options")
+            {
+                return Err(format!(
+                    "{contract} did not execute with empty protocol turn options"
+                ));
+            }
+            json!({
+                "mode": "empty_options_default",
+                "natural_default": true,
+                "final_value": "done",
+                "exec_code": "finish \"done\"",
+            })
+        }
+        "rlm.exec_result_no_tool_call_replay" => {
+            require_rlm_exec_code(
+                result,
+                "x = await tools.read_file({ path: \"foo\" })?",
+                contract,
+            )?;
+            require_rlm_checkpoint(result, "after_work", contract)?;
+            require_rlm_no_tool_call_event(result, contract)?;
+            require_rlm_trajectory_omits(result, "rlm-call-1", contract)?;
+            require_rlm_trajectory_error(result, None, contract)?;
+            json!({
+                "exec_code": "x = await tools.read_file({ path: \"foo\" })?",
+                "checkpoint": "after_work",
+                "tool_call_event": false,
+                "trajectory_omits_tool_call_id": "rlm-call-1",
+            })
+        }
+        "rlm.exec_tool_control_frame_switch_terminal" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_exec_code(result, "x = await tools.custom_frame_switch({})?", contract)?;
+            require_rlm_checkpoint(result, "before_completion", contract)?;
+            require_rlm_no_tool_call_event(result, contract)?;
+            require_rlm_agent_frame_switch(result, "next-frame", "continue", contract)?;
+            require_rlm_trajectory_error(result, None, contract)?;
+            json!({
+                "done": true,
+                "exec_code": "x = await tools.custom_frame_switch({})?",
+                "checkpoint": "before_completion",
+                "agent_frame_switch": { "frame_id": "next-frame", "task": "continue" },
+                "tool_call_event": false,
+            })
+        }
+        "rlm.exec_tool_control_fail_terminal" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_exec_code(result, "x = await tools.custom_fail({})?", contract)?;
+            require_rlm_checkpoint(result, "before_completion", contract)?;
+            require_rlm_no_tool_call_event(result, contract)?;
+            require_rlm_tool_error(result, "custom_fail", "no valid result", contract)?;
+            require_rlm_trajectory_error(result, None, contract)?;
+            json!({
+                "done": true,
+                "exec_code": "x = await tools.custom_fail({})?",
+                "checkpoint": "before_completion",
+                "tool_error": { "tool_name": "custom_fail", "message": "no valid result" },
+                "tool_call_event": false,
+            })
+        }
+        "rlm.natural_allows_finish_value" => {
+            require_rlm_bool(result, "/done", true, contract)?;
+            require_rlm_final_value(result, &json!({ "ok": true }), contract)?;
+            require_rlm_exec_code(result, "finish { ok: true }", contract)?;
+            require_rlm_checkpoint(result, "before_completion", contract)?;
+            json!({
+                "mode": "natural",
+                "final_value": { "ok": true },
+                "exec_code": "finish { ok: true }",
+            })
+        }
+        "rlm.typed_schema_mismatch_repair_loop" => {
+            require_rlm_u64(result, "/llm_call_count", 2, contract)?;
+            require_rlm_checkpoint(result, "after_work", contract)?;
+            require_rlm_exec_code(result, "finish { missing: true }", contract)?;
+            require_rlm_system_contains(
+                result,
+                "didn't match the required output schema",
+                contract,
+            )?;
+            require_rlm_trajectory_error(result, Some("\"ok\" is a required property"), contract)?;
+            json!({
+                "mode": "finish_required_schema",
+                "schema_feedback": "required property",
+                "repair_loop_next_llm_call": true,
+                "llm_call_count": 2,
+            })
+        }
+        "rlm.typed_schema_any_of_mismatch" => {
+            require_rlm_checkpoint(result, "after_work", contract)?;
+            require_rlm_exec_code(result, "finish true", contract)?;
+            require_rlm_system_contains(
+                result,
+                "didn't match the required output schema",
+                contract,
+            )?;
+            require_rlm_trajectory_error(
+                result,
+                Some("true is not valid under any of the schemas listed in the 'anyOf' keyword"),
+                contract,
+            )?;
+            json!({
+                "mode": "finish_required_schema",
+                "schema_feedback": "anyOf",
+                "exec_code": "finish true",
+            })
+        }
+        other => {
+            return Err(format!(
+                "RLM protocol contract execution fact has no checker for `{other}`"
+            ));
+        }
+    };
+    generated_fact(
+        fact,
+        assertion,
+        vec![proof_event],
+        json!({
+            "contract_execution_boundary": proof_event.boundary_id,
+            "contract": contract,
+            "observed": contract_observed,
+            "source": execution.get("source").cloned().unwrap_or(Value::Null),
+        }),
+    )
+}
+
+fn rlm_protocol_contract_metadata(
+    contract: &str,
+) -> Result<(&'static str, &'static str, &'static str), String> {
+    match contract {
+        "rlm.natural_prose_finalizes" => Ok((
+            "rlm_protocol_scenario_prose_only_response_finishes_by_default",
+            "rlm_natural_prose_finalizes",
+            "natural RLM prose-only response finishes as an assistant-message outcome with clean natural diagnostics",
+        )),
+        "rlm.typed_prose_requires_finish" => Ok((
+            "rlm_protocol_scenario_typed_prose_only_response_requests_finish",
+            "rlm_typed_prose_requires_finish",
+            "finish-required prose-only response stays unfinished and emits explicit finish repair feedback",
+        )),
+        "rlm.finish_required_max_turn_stop" => Ok((
+            "rlm_protocol_scenario_finish_required_prose_at_max_turns_stops_without_retry_prompt",
+            "rlm_finish_required_max_turn_stop",
+            "finish-required prose at max turns stops with TurnStop::MaxTurns and no extra retry prompt",
+        )),
+        "rlm.exec_error_max_turn_stop" => Ok((
+            "rlm_protocol_scenario_finish_required_exec_error_at_max_turns_stops_without_retry",
+            "rlm_exec_error_max_turn_stop",
+            "finish-required exec error at max turns records the concrete exec failure and stops with TurnStop::MaxTurns",
+        )),
+        "rlm.typed_finish_emits_outcome_and_done" => Ok((
+            "rlm_protocol_scenario_typed_finish_emits_turn_outcome_and_done",
+            "rlm_typed_finish_emits_outcome_and_done",
+            "typed RLM finish executes LashLang, emits a concrete final-value TurnOutcome, and marks the turn done without a final message event",
+        )),
+        "rlm.finish_required_diagnostic_counts" => Ok((
+            "rlm_protocol_scenario_finish_required_prose_only_diagnostic_has_clean_counts",
+            "rlm_finish_required_diagnostic_counts",
+            "finish-required prose diagnostic records exact prose/code/reasoning/lashlang counts",
+        )),
+        "rlm.natural_diagnostic_counts" => Ok((
+            "rlm_protocol_scenario_natural_prose_only_diagnostic_has_clean_counts",
+            "rlm_natural_diagnostic_counts",
+            "natural prose diagnostic records exact prose/code/reasoning/lashlang counts",
+        )),
+        "rlm.cell_diagnostic_counts" => Ok((
+            "rlm_protocol_scenario_cell_reasoning_prose_code_diagnostic_has_clean_counts",
+            "rlm_cell_diagnostic_counts",
+            "mixed reasoning/prose/lashlang diagnostic records one cell and the concrete executed code",
+        )),
+        "rlm.retired_marker_plain_lashlang_text" => Ok((
+            "rlm_protocol_scenario_retired_percent_marker_inside_source_is_plain_lashlang_text",
+            "rlm_retired_marker_plain_lashlang_text",
+            "retired percent LashLang marker inside a source block remains plain source text and executes as one cell",
+        )),
+        "rlm.lashlang_cell_exec_continues" => Ok((
+            "rlm_protocol_scenario_lashlang_cell_runs_exec_and_continues",
+            "rlm_lashlang_cell_exec_continues",
+            "LashLang cell execution records concrete output, checkpoints after work, and re-enters the model loop",
+        )),
+        "rlm.empty_options_natural_default" => Ok((
+            "rlm_protocol_scenario_empty_turn_options_use_natural_default",
+            "rlm_empty_options_natural_default",
+            "empty RLM turn options default to natural mode and accept explicit finish value",
+        )),
+        "rlm.exec_result_no_tool_call_replay" => Ok((
+            "rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool_events",
+            "rlm_exec_result_no_tool_call_replay",
+            "exec results with internal tool-call records do not replay tool-call ids as RLM session events",
+        )),
+        "rlm.exec_tool_control_frame_switch_terminal" => Ok((
+            "rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal",
+            "rlm_exec_tool_control_frame_switch_terminal",
+            "exec result tool control frame switch terminalizes as a concrete AgentFrameSwitch outcome",
+        )),
+        "rlm.exec_tool_control_fail_terminal" => Ok((
+            "rlm_protocol_scenario_exec_any_tool_control_fail_is_terminal_error",
+            "rlm_exec_tool_control_fail_terminal",
+            "exec result tool control failure terminalizes as a concrete ToolError outcome",
+        )),
+        "rlm.natural_allows_finish_value" => Ok((
+            "rlm_protocol_scenario_natural_allows_finish_value",
+            "rlm_natural_allows_finish_value",
+            "natural RLM mode accepts explicit finish value as a final-value outcome",
+        )),
+        "rlm.typed_schema_mismatch_repair_loop" => Ok((
+            "rlm_protocol_scenario_typed_schema_mismatch_loops_with_feedback",
+            "rlm_typed_schema_mismatch_repair_loop",
+            "typed schema mismatch emits concrete required-property feedback and re-enters the LLM loop",
+        )),
+        "rlm.typed_schema_any_of_mismatch" => Ok((
+            "rlm_protocol_scenario_typed_schema_mismatch_checks_any_of",
+            "rlm_typed_schema_anyof_mismatch",
+            "typed schema mismatch checks anyOf and records the concrete validation error",
+        )),
+        other => Err(format!("no RLM protocol metadata registered for `{other}`")),
+    }
+}
+
+fn require_rlm_bool(
+    result: &Value,
+    pointer: &str,
+    expected: bool,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_bool) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}={expected}"))
+    }
+}
+
+fn require_rlm_u64(
+    result: &Value,
+    pointer: &str,
+    expected: u64,
+    contract: &str,
+) -> Result<(), String> {
+    if result.pointer(pointer).and_then(Value::as_u64) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{contract} expected {pointer}={expected}"))
+    }
+}
+
+fn require_rlm_checkpoint(result: &Value, checkpoint: &str, contract: &str) -> Result<(), String> {
+    if result
+        .get("checkpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| value.as_str() == Some(checkpoint))
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} missing checkpoint `{checkpoint}`"))
+    }
+}
+
+fn require_rlm_turn_outcome_contains(
+    result: &Value,
+    kind: &str,
+    needle: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("turn_outcomes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|outcome| {
+            outcome.get("kind").and_then(Value::as_str) == Some(kind)
+                && outcome
+                    .get("finish")
+                    .or_else(|| outcome.get("stop_reason"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.contains(needle))
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing turn outcome `{kind}` containing `{needle}`"
+        ))
+    }
+}
+
+fn require_rlm_stopped_max_turns(result: &Value, contract: &str) -> Result<(), String> {
+    if result
+        .get("turn_outcomes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|outcome| {
+            outcome.get("kind").and_then(Value::as_str) == Some("stopped")
+                && outcome.get("stop_reason").and_then(Value::as_str) == Some("max_turns")
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} missing TurnStop::MaxTurns outcome"))
+    }
+}
+
+fn require_rlm_diagnostic<'a>(
+    result: &'a Value,
+    decision: &str,
+    termination: &str,
+    contract: &str,
+) -> Result<&'a Value, String> {
+    let Some(diagnostic) = result
+        .get("llm_extraction_diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|diagnostic| {
+            diagnostic.get("decision").and_then(Value::as_str) == Some(decision)
+                && diagnostic.get("termination").and_then(Value::as_str) == Some(termination)
+        })
+    else {
+        return Err(format!(
+            "{contract} missing llm_extraction diagnostic decision={decision} termination={termination}"
+        ));
+    };
+    Ok(diagnostic)
+}
+
+fn require_rlm_count(
+    diagnostic: &Value,
+    count_name: &str,
+    expected: u64,
+    contract: &str,
+) -> Result<(), String> {
+    if diagnostic
+        .pointer(&format!("/counts/{count_name}"))
+        .and_then(Value::as_u64)
+        == Some(expected)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} diagnostic count `{count_name}` changed"
+        ))
+    }
+}
+
+fn require_rlm_system_contains(result: &Value, needle: &str, contract: &str) -> Result<(), String> {
+    if rlm_system_messages(result)
+        .iter()
+        .any(|message| message.contains(needle))
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} missing system feedback `{needle}`"))
+    }
+}
+
+fn require_rlm_system_omits(result: &Value, needle: &str, contract: &str) -> Result<(), String> {
+    if rlm_system_messages(result)
+        .iter()
+        .all(|message| !message.contains(needle))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} unexpectedly emitted system feedback `{needle}`"
+        ))
+    }
+}
+
+fn rlm_system_messages(result: &Value) -> Vec<&str> {
+    result
+        .get("system_messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+fn require_rlm_exec_code(result: &Value, expected: &str, contract: &str) -> Result<(), String> {
+    if result
+        .get("exec_codes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| value.as_str() == Some(expected))
+    {
+        Ok(())
+    } else {
+        Err(format!("{contract} missing exec code `{expected}`"))
+    }
+}
+
+fn require_rlm_final_value(result: &Value, expected: &Value, contract: &str) -> Result<(), String> {
+    if result
+        .get("turn_outcomes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|outcome| {
+            outcome.get("kind").and_then(Value::as_str) == Some("final_value")
+                && outcome.get("value") == Some(expected)
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing final-value outcome `{expected}`"
+        ))
+    }
+}
+
+fn require_rlm_trajectory_error(
+    result: &Value,
+    expected: Option<&str>,
+    contract: &str,
+) -> Result<(), String> {
+    let Some(last) = rlm_trajectory_last(result) else {
+        return Err(format!("{contract} missing RLM trajectory entry"));
+    };
+    match expected {
+        Some(needle)
+            if last
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains(needle)) =>
+        {
+            Ok(())
+        }
+        Some(needle) => Err(format!(
+            "{contract} trajectory error did not contain `{needle}`"
+        )),
+        None if last.get("error").is_none() => Ok(()),
+        None => Err(format!("{contract} trajectory unexpectedly had an error")),
+    }
+}
+
+fn require_rlm_trajectory_output_contains(
+    result: &Value,
+    expected: &str,
+    contract: &str,
+) -> Result<(), String> {
+    let Some(last) = rlm_trajectory_last(result) else {
+        return Err(format!("{contract} missing RLM trajectory entry"));
+    };
+    if last
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| value.as_str() == Some(expected))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} trajectory output did not contain `{expected}`"
+        ))
+    }
+}
+
+fn require_rlm_trajectory_omits(
+    result: &Value,
+    forbidden: &str,
+    contract: &str,
+) -> Result<(), String> {
+    let trajectory = result.get("trajectory").cloned().unwrap_or(Value::Null);
+    if !trajectory.to_string().contains(forbidden) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} trajectory unexpectedly retained `{forbidden}`"
+        ))
+    }
+}
+
+fn rlm_trajectory_last(result: &Value) -> Option<&Value> {
+    result
+        .get("trajectory")
+        .and_then(Value::as_array)
+        .and_then(|values| values.last())
+}
+
+fn require_rlm_no_tool_call_event(result: &Value, contract: &str) -> Result<(), String> {
+    if result.get("tool_call_event").and_then(Value::as_bool) == Some(false) {
+        Ok(())
+    } else {
+        Err(format!("{contract} unexpectedly emitted a tool-call event"))
+    }
+}
+
+fn require_rlm_agent_frame_switch(
+    result: &Value,
+    frame_id: &str,
+    task: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("turn_outcomes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|outcome| {
+            outcome.get("kind").and_then(Value::as_str) == Some("agent_frame_switch")
+                && outcome.get("frame_id").and_then(Value::as_str) == Some(frame_id)
+                && outcome.get("task").and_then(Value::as_str) == Some(task)
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing AgentFrameSwitch outcome `{frame_id}` / `{task}`"
+        ))
+    }
+}
+
+fn require_rlm_tool_error(
+    result: &Value,
+    tool_name: &str,
+    message: &str,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("turn_outcomes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|outcome| {
+            outcome.get("kind").and_then(Value::as_str) == Some("stopped")
+                && outcome
+                    .get("stop_reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| {
+                        reason.contains("ToolError")
+                            && reason.contains(tool_name)
+                            && reason.contains(message)
+                    })
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} missing ToolError outcome `{tool_name}` containing `{message}`"
+        ))
+    }
+}
+
+fn reject_named_contract_proxy_facts(
+    semantic_oracle: &str,
+    facts: &[ScenarioContractGeneratedFact],
+) -> Result<(), String> {
+    if !matches!(
+        semantic_oracle,
+        "standard.max_turns_after_tool_result"
+            | "rlm.typed_finish_emits_outcome_and_done"
+            | "agent.tuple_values_finish_as_json_arrays"
+    ) {
+        return Ok(());
+    }
+    for fact in facts {
+        if let Some(proxy_kind) = proxy_fact_kind(fact) {
+            return Err(format!(
+                "contract `{semantic_oracle}` attempted to use {proxy_kind} proxy fact `{}` instead of contract-owned evidence",
+                fact.fact
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn proxy_fact_kind(fact: &ScenarioContractGeneratedFact) -> Option<&'static str> {
+    if fact.observed.get("semantic_proof_boundary").is_some()
+        || fact.observed.get("semantic_proof").is_some()
+    {
+        return Some("semantic-proof-only trigger");
+    }
+    if fact.fact == "generated_transition_evidence_present"
+        || fact
+            .assertion
+            .contains("scenario contract selected generated trace events")
+        || (fact.observed.get("selected_event_count").is_some()
+            && fact.observed.get("boundary_kinds").is_some())
+    {
+        return Some("generic transition fallback");
+    }
+    if fact
+        .assertion
+        .contains("generated provider boundary completed successfully")
+        || fact.observed.get("provider_boundary").is_some()
+    {
+        return Some("ProviderTerminalRequirement::AnySuccessful");
+    }
+    if fact
+        .assertion
+        .contains("one generated actor completed sequential")
+        || fact.observed.get("provider_turns").is_some()
+    {
+        return Some("ProviderTerminalRequirement::SequentialTurns");
+    }
+    None
+}
+
+fn streamed_text_finalizes_once_fact(
+    events: &[DeliveredBoundary],
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some((provider, release)) =
+        successful_provider_events(events)
+            .into_iter()
+            .find_map(|provider| {
+                provider_event_for_turn(events, &provider.boundary_id)
+                    .map(|release| (provider, release))
+            })
+    else {
+        return Err(
+            "streamed-text finalization did not find a successful provider boundary with scheduler-owned provider-event release".to_string(),
+        );
+    };
+    let expected = provider
+        .payload
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let output = provider
+        .observed
+        .get("provider_output")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let occurrences = if expected.is_empty() {
+        0
+    } else {
+        output.matches(expected).count()
+    };
+    if occurrences != 1 {
+        return Err(format!(
+            "streamed-text finalization expected exactly one `{expected}` projection, found {occurrences}"
+        ));
+    }
+    generated_fact(
+        "standard_streamed_text_finalizes_once",
+        "scheduler-owned streamed provider release produces exactly one final assistant projection",
+        vec![provider, release],
+        json!({
+            "provider_boundary": provider.boundary_id,
+            "provider_event_boundary": release.boundary_id,
+            "projected_text": expected,
+            "occurrences": occurrences,
+        }),
+    )
+}
+
+fn parallel_tool_results_checkpoint_once_fact(
+    events: &[DeliveredBoundary],
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some((tool, provider)) = tool_then_same_actor_provider(events) else {
+        return Err(
+            "parallel tool checkpoint proof did not find tool result followed by same-actor provider continuation".to_string(),
+        );
+    };
+    let releases = provider_events_for_turn(events, &provider.boundary_id);
+    if releases.is_empty() {
+        return Err(format!(
+            "parallel tool checkpoint proof did not find scheduler-owned provider-event release evidence for `{}`",
+            provider.boundary_id
+        ));
+    }
+    let mut fact_events = vec![tool, provider];
+    fact_events.extend(releases.iter().copied());
+    generated_fact(
+        "standard_parallel_tool_checkpoint_once",
+        "parallel tool results execute once, checkpoint through scheduler-owned provider-event release, and re-enter the same actor",
+        fact_events,
+        json!({
+            "tool_boundary": tool.boundary_id,
+            "tool_sequence": tool.sequence,
+            "continuation_provider_boundary": provider.boundary_id,
+            "continuation_provider_sequence": provider.sequence,
+            "provider_event_release_count": releases.len(),
+            "actor": tool.actor_alias,
+            "execution_count": 1,
+        }),
+    )
+}
+
+fn standard_max_turns_after_tool_result_fact(
+    events: &[DeliveredBoundary],
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let proof_event = contract_execution_event(events, "standard.max_turns_after_tool_result")?;
+    let execution = contract_execution_payload_matches_observed(
+        proof_event,
+        "standard.max_turns_after_tool_result",
+        "standard_protocol_scenario_max_turns_terminates_after_tool_result",
+    )?;
+    let result = execution
+        .get("result")
+        .ok_or_else(|| "standard max-turn execution missing result".to_string())?;
+    let anchor = execution
+        .get("generated_anchor")
+        .ok_or_else(|| "standard max-turn execution missing generated anchor".to_string())?;
+    let tool_id = anchor
+        .get("tool_boundary")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "standard max-turn execution missing tool boundary id".to_string())?;
+    let provider_id = anchor
+        .get("continuation_provider_boundary")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "standard max-turn execution missing continuation provider boundary id".to_string()
+        })?;
+    let tool = event_by_boundary_id(events, tool_id)
+        .filter(|event| event.kind == BoundaryKind::Tool)
+        .ok_or_else(|| {
+            format!("standard max-turn execution referenced missing tool `{tool_id}`")
+        })?;
+    let provider = event_by_boundary_id(events, provider_id)
+        .filter(|event| event.kind == BoundaryKind::Provider)
+        .ok_or_else(|| {
+            format!("standard max-turn execution referenced missing provider `{provider_id}`")
+        })?;
+    if tool.actor_alias != provider.actor_alias || provider.sequence <= tool.sequence {
+        return Err(format!(
+            "standard max-turn execution did not preserve tool -> same-actor provider continuation: tool={} provider={}",
+            tool.boundary_id, provider.boundary_id
+        ));
+    }
+    let stopped_at_max_turns = result.get("done").and_then(Value::as_bool) == Some(true)
+        && result.get("max_turns").and_then(Value::as_u64) == Some(1)
+        && result
+            .get("turn_outcomes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|outcome| {
+                outcome.get("kind").and_then(Value::as_str) == Some("stopped")
+                    && outcome.get("stop_reason").and_then(Value::as_str) == Some("max_turns")
+            })
+        && result
+            .get("execution_api")
+            .and_then(Value::as_str)
+            .is_some_and(|api| api.contains("TurnMachine"))
+        && result.get("driver").and_then(Value::as_str)
+            == Some("lash_protocol_standard::StandardDriver");
+    if !stopped_at_max_turns {
+        return Err(
+            "standard max-turn execution did not record done=true and TurnStop::MaxTurns after a real tool result".to_string(),
+        );
+    }
+    generated_fact(
+        "standard_max_turns_after_tool_result",
+        "tool result executes once, same-actor provider continuation is observed, and explicit max-turn stopped/done evidence terminates the contract",
+        vec![tool, provider, proof_event],
+        json!({
+            "tool_boundary": tool.boundary_id,
+            "continuation_provider_boundary": provider.boundary_id,
+            "contract_execution_boundary": proof_event.boundary_id,
+            "actor": tool.actor_alias,
+            "tool_sequence": tool.sequence,
+            "continuation_provider_sequence": provider.sequence,
+            "done": true,
+            "turn_outcomes": result.get("turn_outcomes").cloned().unwrap_or(Value::Null),
+            "max_turns": result.get("max_turns").cloned().unwrap_or(Value::Null),
+            "source": execution.get("source").cloned().unwrap_or(Value::Null),
+        }),
+    )
+}
+
+fn agent_tuple_values_finish_as_json_arrays_fact(
+    events: &[DeliveredBoundary],
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let proof_event = contract_execution_event(events, "agent.tuple_values_finish_as_json_arrays")?;
+    let execution = contract_execution_payload_matches_observed(
+        proof_event,
+        "agent.tuple_values_finish_as_json_arrays",
+        "agent_scenario_tuple_values_finish_as_json_arrays",
+    )?;
+    let result = execution
+        .get("result")
+        .ok_or_else(|| "agent tuple JSON-array execution missing result".to_string())?;
+    let expected = json!({
+        "first": "left",
+        "tail": ["right"],
+        "seen": ["left", "right"],
+        "tuple": ["left", "right"],
+        "nested": { "pair": ["left", "right"] }
+    });
+    let final_value = result.get("final_value").ok_or_else(|| {
+        "agent tuple JSON-array execution missing final value evidence".to_string()
+    })?;
+    let tuple_arrays_ok = result.get("done").and_then(Value::as_bool) == Some(true)
+        && final_value == &expected
+        && json_array_equals(final_value.pointer("/tuple"), &["left", "right"])
+        && json_array_equals(final_value.pointer("/tail"), &["right"])
+        && json_array_equals(final_value.pointer("/seen"), &["left", "right"])
+        && json_array_equals(final_value.pointer("/nested/pair"), &["left", "right"])
+        && result
+            .pointer("/runtime_final_value_facts/outcome_kind")
+            .and_then(Value::as_str)
+            == Some("final_value")
+        && result.pointer("/runtime_final_value_facts/semantic_value") == Some(&expected)
+        && result
+            .pointer("/runtime_final_value_facts/semantic_channel_observed")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && result.get("execution_api").and_then(Value::as_str) == Some("lash::RlmCore facade");
+    if !tuple_arrays_ok {
+        return Err(
+            "agent tuple JSON-array execution did not preserve tuple/tail/seen/nested tuple values as JSON arrays in the final value".to_string(),
+        );
+    }
+    generated_fact(
+        "agent_tuple_values_finish_json_arrays",
+        "facade final value preserves tuple projections as JSON arrays for tuple, tail, seen, and nested pair fields",
+        vec![proof_event],
+        json!({
+            "contract_execution_boundary": proof_event.boundary_id,
+            "final_value": final_value.clone(),
+            "tuple": final_value.pointer("/tuple").cloned().unwrap_or(Value::Null),
+            "tail": final_value.pointer("/tail").cloned().unwrap_or(Value::Null),
+            "seen": final_value.pointer("/seen").cloned().unwrap_or(Value::Null),
+            "nested_pair": final_value.pointer("/nested/pair").cloned().unwrap_or(Value::Null),
+            "runtime_final_value_facts": result.get("runtime_final_value_facts").cloned().unwrap_or(Value::Null),
+            "source": execution.get("source").cloned().unwrap_or(Value::Null),
+        }),
+    )
+}
+
+fn trigger_then_provider_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some((trigger, provider)) = events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::Trigger
+                && event
+                    .observed
+                    .get("trigger_delivered")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && event
+                    .observed
+                    .get("started_process")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && event
+                    .observed
+                    .get("occurrence_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("trigger:"))
+        })
+        .find_map(|trigger| {
+            successful_provider_events(events)
+                .into_iter()
+                .filter(|provider| {
+                    provider.actor_alias == trigger.actor_alias
+                        && provider.sequence > trigger.sequence
+                })
+                .min_by_key(|provider| provider.sequence)
+                .map(|provider| (trigger, provider))
+        })
+    else {
+        return Err(format!(
+            "trigger/provider semantic fact `{fact}` did not find a generated trigger followed by same-actor provider completion"
+        ));
+    };
+    generated_fact(
+        fact,
+        "trigger delivery records occurrence/reservation data and later same-actor provider completion",
+        vec![trigger, provider],
+        json!({
+            "trigger_boundary": trigger.boundary_id,
+            "provider_boundary": provider.boundary_id,
+            "actor": trigger.actor_alias,
+            "occurrence_id": trigger.observed.get("occurrence_id").cloned().unwrap_or(Value::Null),
+            "reservation_count": trigger.observed.get("reservation_count").cloned().unwrap_or(Value::Null),
+        }),
+    )
+}
+
+fn exec_semantic_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+    requirement: ExecFactRequirement,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some(exec) = events.iter().find(|event| {
+        event.kind == BoundaryKind::ExecCode
+            && event
+                .payload
+                .pointer("/runtime_completion/completion_family")
+                .and_then(Value::as_str)
+                == Some("exec_result")
+            && event.observed.get("runtime_effect_outcome").is_some()
+            && event
+                .observed
+                .get("execution_count")
+                .and_then(Value::as_u64)
+                == Some(1)
+    }) else {
+        return Err(format!(
+            "exec semantic fact `{fact}` did not find a scheduler-owned exec result with runtime effect outcome"
+        ));
+    };
+    if matches!(
+        requirement,
+        ExecFactRequirement::NoToolCallReplay | ExecFactRequirement::ReentersProvider
+    ) && !exec_outcome_has_no_tool_call_replay(std::slice::from_ref(exec))
+    {
+        return Err(format!(
+            "exec semantic fact `{fact}` found replayed tool-call ids in exec runtime outcome"
+        ));
+    }
+    let provider = if matches!(requirement, ExecFactRequirement::ReentersProvider) {
+        let Some(provider) = successful_provider_events(events)
+            .into_iter()
+            .filter(|provider| {
+                provider.actor_alias == exec.actor_alias && provider.sequence > exec.sequence
+            })
+            .min_by_key(|provider| provider.sequence)
+        else {
+            return Err(format!(
+                "exec semantic fact `{fact}` did not find a later same-actor provider continuation"
+            ));
+        };
+        Some(provider)
+    } else {
+        None
+    };
+    let mut fact_events = vec![exec];
+    if let Some(provider) = provider {
+        fact_events.push(provider);
+    }
+    generated_fact(
+        fact,
+        "exec-code boundary completed once through runtime effect outcome and preserved protocol-owned result channel",
+        fact_events,
+        json!({
+            "exec_boundary": exec.boundary_id,
+            "actor": exec.actor_alias,
+            "runtime_effect_outcome_type": exec.observed.pointer("/runtime_effect_outcome/type").cloned().unwrap_or(Value::Null),
+            "execution_count": 1,
+            "tool_call_replay_absent": exec_outcome_has_no_tool_call_replay(std::slice::from_ref(exec)),
+            "continuation_provider_boundary": provider.map(|provider| provider.boundary_id.as_str()),
+        }),
+    )
+}
+
+fn backend_retry_terminalization_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let mut by_operation: BTreeMap<String, Vec<&DeliveredBoundary>> = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::BackendFailure)
+    {
+        let operation = event
+            .observed
+            .get("operation")
+            .or_else(|| event.payload.get("operation"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        by_operation.entry(operation).or_default().push(event);
+    }
+    let Some(mut operation_events) = by_operation.into_values().find(|events| {
+        let retryable = events.iter().any(|event| {
+            event.observed.get("retryable").and_then(Value::as_bool) == Some(true)
+                && event
+                    .observed
+                    .pointer("/production_store_error/retryable_class")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        });
+        let terminal = events.iter().any(|event| {
+            event.observed.get("retryable").and_then(Value::as_bool) == Some(false)
+                && event
+                    .observed
+                    .get("store_error_class")
+                    .and_then(Value::as_str)
+                    == Some("terminal_backend_error")
+        });
+        retryable && terminal
+    }) else {
+        return Err(format!(
+            "backend semantic fact `{fact}` did not find retryable-to-terminal backend failure sequence"
+        ));
+    };
+    operation_events.sort_by_key(|event| event.sequence);
+    let observed_events = operation_events
+        .iter()
+        .map(|event| {
+            json!({
+                "boundary_id": event.boundary_id,
+                "attempt": event.observed.get("attempt").cloned().unwrap_or(Value::Null),
+                "retryable": event.observed.get("retryable").cloned().unwrap_or(Value::Null),
+                "store_error_class": event.observed.get("store_error_class").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+    generated_fact(
+        fact,
+        "backend failure evidence advances from retryable production StoreError to terminal StoreError",
+        operation_events,
+        json!({
+            "backend_failures": observed_events,
+        }),
+    )
+}
+
+fn durable_replay_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let mut by_key: BTreeMap<String, Vec<&DeliveredBoundary>> = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::DurableEffect)
+    {
+        if let Some(key) = event.observed.get("durable_key").and_then(Value::as_str) {
+            by_key.entry(key.to_string()).or_default().push(event);
+        }
+    }
+    let Some((key, mut durable_events)) = by_key.into_iter().find(|(_key, events)| {
+        let first = events.iter().any(|event| {
+            event.observed.get("replayed").and_then(Value::as_bool) == Some(false)
+                && event
+                    .observed
+                    .pointer("/runtime_effect/local_executor_called")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        });
+        let replay = events.iter().any(|event| {
+            event.observed.get("replayed").and_then(Value::as_bool) == Some(true)
+                && event
+                    .observed
+                    .pointer("/runtime_effect/local_executor_called")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+                && event
+                    .observed
+                    .get("execution_count")
+                    .and_then(Value::as_u64)
+                    == Some(1)
+        });
+        first && replay
+    }) else {
+        return Err(format!(
+            "durable semantic fact `{fact}` did not find first-execution plus replay evidence for one durable key"
+        ));
+    };
+    durable_events.sort_by_key(|event| event.sequence);
+    generated_fact(
+        fact,
+        "durable effect executes locally once and replay returns stored history without local execution",
+        durable_events,
+        json!({
+            "durable_key": key,
+            "first_execution": true,
+            "replay": true,
+        }),
+    )
+}
+
+fn process_wake_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let mut by_dedupe: BTreeMap<String, Vec<&DeliveredBoundary>> = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::ProcessWake)
+    {
+        if let Some(key) = event
+            .observed
+            .get("dedupe_key")
+            .or_else(|| event.payload.get("dedupe_key"))
+            .and_then(Value::as_str)
+        {
+            by_dedupe.entry(key.to_string()).or_default().push(event);
+        }
+    }
+    let Some((dedupe_key, mut wake_events)) = by_dedupe.into_iter().find(|(_key, events)| {
+        events.iter().any(|event| {
+            event
+                .observed
+                .pointer("/runtime_process_wake/event_invocation/subject/process_id")
+                .and_then(Value::as_str)
+                .is_some()
+                && event
+                    .observed
+                    .get("session")
+                    .and_then(Value::as_str)
+                    .is_some()
+        }) && events
+            .iter()
+            .filter_map(|event| event.observed.get("claimed_once").and_then(Value::as_bool))
+            .collect::<Vec<_>>()
+            .contains(&false)
+    }) else {
+        return Err(format!(
+            "process wake semantic fact `{fact}` did not find duplicate wake DTO evidence with a rejected duplicate"
+        ));
+    };
+    wake_events.sort_by_key(|event| event.sequence);
+    let sessions = wake_events
+        .iter()
+        .filter_map(|event| event.observed.get("session").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let claimed_once_values = wake_events
+        .iter()
+        .filter_map(|event| event.observed.get("claimed_once").and_then(Value::as_bool))
+        .collect::<Vec<_>>();
+    generated_fact(
+        fact,
+        "process wake carries runtime DTO process id, session, dedupe key, and duplicate rejection evidence",
+        wake_events,
+        json!({
+            "dedupe_key": dedupe_key,
+            "sessions": sessions,
+            "claimed_once_values": claimed_once_values,
+        }),
+    )
+}
+
+fn agent_shell_output_projection_fact(
+    events: &[DeliveredBoundary],
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some((exec, provider)) = events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::ExecCode
+                && event
+                    .payload
+                    .pointer("/runtime_completion/completion_family")
+                    .and_then(Value::as_str)
+                    == Some("exec_result")
+                && event
+                    .observed
+                    .pointer("/runtime_effect_outcome/result/Ok/tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+                && event
+                    .observed
+                    .get("execution_count")
+                    .and_then(Value::as_u64)
+                    == Some(1)
+        })
+        .find_map(|exec| {
+            successful_provider_events(events)
+                .into_iter()
+                .filter(|provider| {
+                    provider.actor_alias == exec.actor_alias && provider.sequence > exec.sequence
+                })
+                .min_by_key(|provider| provider.sequence)
+                .map(|provider| (exec, provider))
+        })
+    else {
+        return Err(
+            "agent shell output projection did not find an exec data result followed by same-actor provider projection"
+                .to_string(),
+        );
+    };
+    generated_fact(
+        "agent_shell_output_projection_survives",
+        "shell exec output is scheduler-owned data and a later same-actor provider turn projects it without replaying tool calls",
+        vec![exec, provider],
+        json!({
+            "exec_boundary": exec.boundary_id,
+            "projection_provider_boundary": provider.boundary_id,
+            "actor": exec.actor_alias,
+            "exec_sequence": exec.sequence,
+            "provider_sequence": provider.sequence,
+            "exec_result_channel": "runtime_effect_outcome.result.Ok",
+            "tool_calls_replayed": false,
+        }),
+    )
+}
+
+fn agent_session_turn_child_provider_fact(
+    events: &[DeliveredBoundary],
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some((wake, provider)) = events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::ProcessWake
+                && event
+                    .observed
+                    .pointer("/runtime_process_wake/event_invocation/subject/process_id")
+                    .and_then(Value::as_str)
+                    .is_some()
+                && event
+                    .observed
+                    .get("session")
+                    .and_then(Value::as_str)
+                    .is_some()
+                && event
+                    .observed
+                    .pointer("/runtime_queued_work/claimed")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+        .find_map(|wake| {
+            let provider = successful_provider_events(events)
+                .into_iter()
+                .min_by_key(|provider| provider.sequence)?;
+            Some((wake, provider))
+        })
+    else {
+        return Err(
+            "agent session-turn child did not find a claimed process wake and scheduler-owned provider completion in the same generated trace"
+                .to_string(),
+        );
+    };
+    generated_fact(
+        "agent_session_turn_process_child_provider",
+        "session-turn process child wake is claimed through runtime queued work while the same generated trace carries scheduler-owned provider completion evidence",
+        vec![wake, provider],
+        json!({
+            "process_wake_boundary": wake.boundary_id,
+            "child_provider_boundary": provider.boundary_id,
+            "child_session": wake.observed.get("session").cloned().unwrap_or(Value::Null),
+            "process_id": wake.observed.pointer("/runtime_process_wake/event_invocation/subject/process_id").cloned().unwrap_or(Value::Null),
+            "runtime_queued_work_claimed": true,
+            "wake_sequence": wake.sequence,
+            "provider_sequence": provider.sequence,
+        }),
+    )
+}
+
+fn worker_stale_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some(worker) = events.iter().find(|event| {
+        event.kind == BoundaryKind::Worker
+            && event.observed.get("runtime_active_lease").is_some()
+            && event.observed.get("runtime_stale_completion").is_some()
+            && event
+                .observed
+                .get("stale_completion_rejected")
+                .and_then(Value::as_bool)
+                == Some(true)
+    }) else {
+        return Err(format!(
+            "worker semantic fact `{fact}` did not find stale completion rejection evidence"
+        ));
+    };
+    generated_fact(
+        fact,
+        "worker evidence rejects stale completion while preserving active lease data",
+        vec![worker],
+        json!({
+            "worker_boundary": worker.boundary_id,
+            "session": worker.observed.get("session").cloned().unwrap_or(Value::Null),
+            "stale_completion_rejected": true,
+        }),
+    )
+}
+
+fn observer_reconnect_fact(
+    events: &[DeliveredBoundary],
+    fact: &'static str,
+) -> Result<ScenarioContractGeneratedFact, String> {
+    let Some(observer) = events.iter().find(|event| {
+        event.kind == BoundaryKind::Observer
+            && event.observed.get("reconnected").and_then(Value::as_bool) == Some(true)
+            && event
+                .observed
+                .get("turn_index")
+                .and_then(Value::as_u64)
+                .is_some()
+    }) else {
+        return Err(format!(
+            "observer semantic fact `{fact}` did not find reconnected observer turn-index evidence"
+        ));
+    };
+    generated_fact(
+        fact,
+        "observer reconnect boundary records the converged turn index",
+        vec![observer],
+        json!({
+            "observer_boundary": observer.boundary_id,
+            "turn_index": observer.observed.get("turn_index").cloned().unwrap_or(Value::Null),
+        }),
+    )
 }
 
 /// An unmapped scenario-contract semantic oracle. Each contract must own a
@@ -2634,31 +5671,6 @@ fn tool_runtime_output_observed(events: &[DeliveredBoundary]) -> bool {
     })
 }
 
-fn tool_effects_execute_once(events: &[DeliveredBoundary]) -> bool {
-    events.iter().any(|event| {
-        event.kind == BoundaryKind::Tool
-            && event
-                .observed
-                .get("execution_count")
-                .and_then(Value::as_u64)
-                == Some(1)
-            && event.observed.get("runtime_tool_record").is_some()
-    })
-}
-
-fn tool_provider_reentry_observed(
-    events: &[DeliveredBoundary],
-    summary: &AbstractWorldSummary,
-) -> bool {
-    tool_runtime_output_observed(events)
-        && runtime_session_graph_contract(summary).is_passed()
-        && summary.sessions.iter().any(|session| {
-            !session.tool_outputs.is_empty()
-                && session.provider_outputs.len() >= 2
-                && session.provider_exchange_counts.len() >= 2
-        })
-}
-
 fn exec_runtime_outcome_observed(events: &[DeliveredBoundary]) -> bool {
     events.iter().any(|event| {
         event.kind == BoundaryKind::ExecCode
@@ -2668,18 +5680,6 @@ fn exec_runtime_outcome_observed(events: &[DeliveredBoundary]) -> bool {
                 .get("execution_count")
                 .and_then(Value::as_u64)
                 == Some(1)
-    })
-}
-
-fn exec_effects_execute_once(events: &[DeliveredBoundary]) -> bool {
-    events.iter().any(|event| {
-        event.kind == BoundaryKind::ExecCode
-            && event
-                .observed
-                .get("execution_count")
-                .and_then(Value::as_u64)
-                == Some(1)
-            && event.observed.get("runtime_effect_outcome").is_some()
     })
 }
 
@@ -2999,7 +5999,10 @@ pub fn live_provider_failure_terminalizes(facts: &LiveProviderFailureFacts) -> O
     let no_committed_output = !facts.committed_assistant_message_nonempty
         && facts.committed_final_values == 0
         && !facts.committed_prose_in_transcript;
-    if facts.turn_was_live_parked && offered_prose && facts.terminalized_failure && no_committed_output
+    if facts.turn_was_live_parked
+        && offered_prose
+        && facts.terminalized_failure
+        && no_committed_output
     {
         OracleVerdict::passed(
             LIVE_PROVIDER_FAILURE_ORACLE,
@@ -3101,42 +6104,34 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn unmapped_runtime_semantic_fails_loudly_and_protocol_suites_route_to_coverage_manifests() {
+    fn unmapped_scenario_semantics_fail_loudly_for_every_suite() {
         let summary = AbstractWorldSummary::with_digest(0, 0, vec![], vec![], vec![]);
 
-        // A brand-new RUNTIME contract with no per-contract adapter fails loudly
-        // (the runtime suite is genuinely per-contract; there is no decorative
-        // shared fallback).
-        let runtime = runtime_contract_semantics("runtime.brand_new_contract", &[], &summary);
-        assert!(
-            !runtime.passed,
-            "an unmapped runtime contract must fail loudly, not pass via a fallback"
-        );
-        assert!(
-            runtime.reason.contains("no per-contract semantic adapter"),
-            "runtime failure reason should explain the missing adapter, got: {}",
-            runtime.reason
-        );
-
-        // The STANDARD/RLM/AGENT suites do NOT emit per-contract oracles: the
-        // per-contract dispatcher routes them to the coverage-manifest path
-        // instead of stamping a shared-bucket fallback verdict.
-        for contracts in [
-            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
-            RLM_PROTOCOL_SCENARIO_CONTRACTS,
-            AGENT_SCENARIO_CONTRACTS,
+        for (suite, verdict) in [
+            (
+                "runtime",
+                runtime_contract_semantics("runtime.brand_new_contract", &[], &summary),
+            ),
+            (
+                "standard",
+                standard_contract_semantics("standard.brand_new_contract", &[], &summary),
+            ),
+            (
+                "rlm",
+                rlm_contract_semantics("rlm.brand_new_contract", &[], &summary),
+            ),
+            (
+                "agent",
+                agent_contract_semantics("agent.brand_new_contract", &[], &summary),
+            ),
         ] {
-            let contract = contracts.first().expect("suite has a contract");
-            let verdict = scenario_contract_semantics(contract, &[], &summary);
             assert!(
                 !verdict.passed,
-                "protocol suite `{}` must not produce a passing per-contract verdict",
-                contract.suite
+                "an unmapped {suite} contract must fail loudly, not pass via a fallback"
             );
             assert!(
-                verdict.reason.contains("suite coverage manifest"),
-                "protocol suite `{}` should route to the coverage manifest, got: {}",
-                contract.suite,
+                verdict.reason.contains("no per-contract semantic adapter"),
+                "{suite} failure reason should explain the missing adapter, got: {}",
                 verdict.reason
             );
         }
@@ -3144,110 +6139,44 @@ mod tests {
 
     #[test]
     fn scenario_contract_oracles_emit_one_named_verdict_per_contract() {
-        let summary = AbstractWorldSummary::with_digest(
-            2,
-            24,
-            vec![
-                SessionAbstractSummary {
-                    alias: "session-001".to_string(),
-                    opened: true,
-                    ingress_count: 1,
-                    provider_outputs: vec![
-                        "answer for session-001 turn 1".to_string(),
-                        "answer for session-001 turn 2".to_string(),
-                    ],
-                    provider_exchange_counts: vec![1, 2],
-                    graph_node_counts: vec![2, 4],
-                    transcript_message_counts: vec![2, 4],
-                    tool_outputs: vec!["tool result for session-001".to_string()],
-                    exec_code_outputs: vec!["exec result for session-001".to_string()],
-                    observer_turn_indices: vec![2],
-                    observer_reconnects: 1,
-                    queued_ingress_count: 1,
-                    cancellation_count: 1,
-                    trigger_count: 1,
-                    backend_failure_count: 2,
-                    provider_mutation_count: 2,
-                    process_wake_count: 2,
-                    durable_effect_keys: vec!["durable/session-001".to_string()],
-                    lease_time_ticks: vec![1, 2],
-                },
-                SessionAbstractSummary {
-                    alias: "session-002".to_string(),
-                    opened: true,
-                    ingress_count: 1,
-                    provider_outputs: vec![
-                        "answer for session-002 turn 1".to_string(),
-                        "answer for session-002 turn 2".to_string(),
-                    ],
-                    provider_exchange_counts: vec![1, 2],
-                    graph_node_counts: vec![2, 4],
-                    transcript_message_counts: vec![2, 4],
-                    tool_outputs: Vec::new(),
-                    exec_code_outputs: Vec::new(),
-                    observer_turn_indices: vec![2],
-                    observer_reconnects: 0,
-                    queued_ingress_count: 0,
-                    cancellation_count: 0,
-                    trigger_count: 0,
-                    backend_failure_count: 0,
-                    provider_mutation_count: 0,
-                    process_wake_count: 0,
-                    durable_effect_keys: Vec::new(),
-                    lease_time_ticks: vec![1, 2],
-                },
-            ],
-            vec![DurableEffectAbstractSummary {
-                durable_key: "durable/session-001".to_string(),
-                execution_count: 1,
-                replay_count: 1,
-                result_digest: "digest".to_string(),
-            }],
-            vec![WorkerAbstractSummary {
-                worker_alias: "worker-001".to_string(),
-                session_alias: "session-001".to_string(),
-                active_incarnation_id: "worker-001:incarnation-002".to_string(),
-                active_fencing_token: 2,
-                lease_owner_changes: 1,
-                stale_completion_rejections: 1,
-            }],
-        );
-
+        let summary = semantic_summary();
         let events = semantic_events();
         let verdicts = scenario_contract_oracles(&events, &summary);
 
-        // RUNTIME is genuinely per-contract; STANDARD/RLM/AGENT collapse to one
-        // failing-capable suite coverage manifest each (no shared-bucket
-        // per-contract stamping that would overstate the oracle count).
-        let expected_count = RUNTIME_SCENARIO_CONTRACTS.len() + 3;
+        let expected_count = RUNTIME_SCENARIO_CONTRACTS.len()
+            + STANDARD_PROTOCOL_SCENARIO_CONTRACTS.len()
+            + RLM_PROTOCOL_SCENARIO_CONTRACTS.len()
+            + AGENT_SCENARIO_CONTRACTS.len();
         assert_eq!(verdicts.len(), expected_count);
-        assert!(verdicts.iter().all(OracleVerdict::is_passed));
+        assert!(
+            verdicts.iter().all(OracleVerdict::is_passed),
+            "all generated semantic fixture scenario contracts should pass: {:?}",
+            verdicts
+                .iter()
+                .filter(|verdict| !verdict.is_passed())
+                .collect::<Vec<_>>()
+        );
 
         let ids = verdicts
             .iter()
             .map(|verdict| verdict.oracle_id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(ids.len(), verdicts.len());
+        assert!(
+            ids.iter().all(|id| !id.ends_with(":coverage-manifest")),
+            "scenario contracts must not be backed by suite coverage manifests"
+        );
 
-        // Exactly the runtime contracts get distinct per-contract oracle ids.
-        let runtime_per_contract = verdicts
-            .iter()
-            .filter(|verdict| {
-                verdict.oracle_id.starts_with(SCENARIO_RUNTIME_CONTRACT_ORACLE)
-                    && verdict.oracle_id.contains("runtime_scenario_")
-            })
-            .count();
-        assert_eq!(runtime_per_contract, RUNTIME_SCENARIO_CONTRACTS.len());
-
-        // Each protocol suite emits exactly ONE coverage manifest, and that
-        // manifest enumerates every contract it covers (so the coverage is
-        // explicit and auditable rather than hidden behind a shared bucket).
         for (base, contracts) in [
+            (SCENARIO_RUNTIME_CONTRACT_ORACLE, RUNTIME_SCENARIO_CONTRACTS),
             (
                 SCENARIO_STANDARD_CONTRACT_ORACLE,
                 STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
             ),
-            (SCENARIO_RLM_CONTRACT_ORACLE, RLM_PROTOCOL_SCENARIO_CONTRACTS),
+            (
+                SCENARIO_RLM_CONTRACT_ORACLE,
+                RLM_PROTOCOL_SCENARIO_CONTRACTS,
+            ),
             (SCENARIO_AGENT_CONTRACT_ORACLE, AGENT_SCENARIO_CONTRACTS),
         ] {
             let suite_verdicts = verdicts
@@ -3256,16 +6185,691 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 suite_verdicts.len(),
-                1,
-                "suite `{base}` must emit exactly one coverage manifest, not per-contract oracles"
+                contracts.len(),
+                "suite `{base}` must emit one oracle per contract"
             );
-            let manifest = suite_verdicts[0];
-            assert_eq!(manifest.oracle_id, format!("{base}:coverage-manifest"));
             for contract in contracts {
                 assert!(
-                    manifest.message.contains(contract.test_name),
-                    "coverage manifest for `{base}` must enumerate covered contract `{}`",
+                    suite_verdicts.iter().any(|verdict| {
+                        verdict.oracle_id == scenario_contract_oracle_id(contract)
+                            && verdict.message.contains(contract.semantic_oracle)
+                    }),
+                    "suite `{base}` must emit a per-contract verdict for `{}`",
                     contract.test_name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scenario_contract_generated_facts_fail_on_contract_specific_mutations() {
+        let events = semantic_events();
+
+        for contract in [
+            "standard.initial_request_projection",
+            "standard.empty_provider_response_error",
+            "standard.provider_error_without_checkpoint",
+            "standard.native_tool_loop_reenters_model",
+            "standard.parallel_tool_results_checkpoint_once",
+            "standard.tool_failure_feedback_reenters_model",
+            "standard.streamed_text_finalizes_once",
+        ] {
+            if let Err(err) = scenario_contract_generated_facts_for_semantic(contract, &events) {
+                panic!(
+                    "positive fixture should prove Standard replay-backed fact {contract}: {err}"
+                );
+            }
+        }
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "standard.parallel_tool_results_checkpoint_once",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove Standard parallel tool checkpoint facts"
+        );
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "standard.max_turns_after_tool_result",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove Standard max-turn stop after tool result facts"
+        );
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "rlm.typed_finish_emits_outcome_and_done",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove RLM typed finish outcome/done facts"
+        );
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "agent.tuple_values_finish_as_json_arrays",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove Agent tuple JSON-array final value facts"
+        );
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "rlm.empty_options_natural_default",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove RLM empty-options natural default facts"
+        );
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "rlm.typed_schema_mismatch_repair_loop",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove RLM schema-mismatch repair facts"
+        );
+        for contract in [
+            "rlm.exec_error_max_turn_stop",
+            "rlm.retired_marker_plain_lashlang_text",
+            "rlm.lashlang_cell_exec_continues",
+            "rlm.exec_result_no_tool_call_replay",
+            "rlm.exec_tool_control_frame_switch_terminal",
+            "rlm.exec_tool_control_fail_terminal",
+        ] {
+            if let Err(err) = scenario_contract_generated_facts_for_semantic(contract, &events) {
+                panic!("positive fixture should prove RLM replay-backed fact {contract}: {err}");
+            }
+        }
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "rlm.lashlang_cell_exec_continues",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove RLM LashLang exec continuation facts"
+        );
+        for contract in [
+            "agent.foreground_tool_call_round_trip",
+            "agent.started_process_tool_call_graph",
+            "agent.durable_input_suspension_resolution",
+            "agent.shell_results_are_data",
+            "agent.shell_output_print_projection_survives",
+            "agent.started_process_subagent_spawn",
+            "agent.nested_process_start_await",
+            "agent.session_turn_process_child",
+            "agent.failed_child_preserves_failure_graph",
+            "agent.parallel_spawn_and_join",
+        ] {
+            if let Err(err) = scenario_contract_generated_facts_for_semantic(contract, &events) {
+                panic!("positive fixture should prove Agent replay-backed fact {contract}: {err}");
+            }
+        }
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "agent.shell_output_print_projection_survives",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove Agent shell output projection facts"
+        );
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "agent.durable_input_suspension_resolution",
+                &events,
+            )
+            .is_ok(),
+            "positive fixture should prove Agent durable input resolution facts"
+        );
+        assert!(
+            scenario_contract_generated_facts_for_semantic(
+                "agent.parallel_spawn_and_join",
+                &events
+            )
+            .is_ok(),
+            "positive fixture should prove Agent parallel spawn/join facts"
+        );
+
+        let mut no_reentry_release = events.clone();
+        no_reentry_release.retain(|event| {
+            !(event.kind == BoundaryKind::ProviderEvent
+                && event
+                    .payload
+                    .get("turn_boundary_id")
+                    .and_then(Value::as_str)
+                    == Some("session-001:provider:003"))
+        });
+        let err = scenario_contract_generated_facts_for_semantic(
+            "standard.parallel_tool_results_checkpoint_once",
+            &no_reentry_release,
+        )
+        .expect_err("Standard parallel tool checkpoint must require provider-event release");
+        assert!(
+            err.contains("provider-event release evidence"),
+            "unexpected Standard parallel failure: {err}"
+        );
+
+        let mut wrong_max_turn_stop = events.clone();
+        mutate_contract_execution(
+            &mut wrong_max_turn_stop,
+            "standard.max_turns_after_tool_result",
+            |execution| {
+                execution
+                    .pointer_mut("/result/turn_outcomes/0/stop_reason")
+                    .expect("max-turn stop reason")
+                    .clone_from(&json!("runtime_error"));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "standard.max_turns_after_tool_result",
+            &wrong_max_turn_stop,
+        )
+        .expect_err("Standard max-turn fact must require explicit max-turn stop");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Standard max-turn failure: {err}"
+        );
+
+        let mut provider_error_checkpointed = events.clone();
+        mutate_contract_execution(
+            &mut provider_error_checkpointed,
+            "standard.provider_error_without_checkpoint",
+            |execution| {
+                execution
+                    .pointer_mut("/result/checkpoints")
+                    .expect("provider error checkpoints")
+                    .clone_from(&json!(["after_work"]));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "standard.provider_error_without_checkpoint",
+            &provider_error_checkpointed,
+        )
+        .expect_err("Standard provider error fact must require no checkpoint");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Standard provider-error replay failure: {err}"
+        );
+
+        let mut streamed_duplicate_delta = events.clone();
+        mutate_contract_execution(
+            &mut streamed_duplicate_delta,
+            "standard.streamed_text_finalizes_once",
+            |execution| {
+                execution
+                    .pointer_mut("/result/text_delta_count")
+                    .expect("streamed text delta count")
+                    .clone_from(&json!(1));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "standard.streamed_text_finalizes_once",
+            &streamed_duplicate_delta,
+        )
+        .expect_err("Standard streamed text fact must reject duplicate text deltas");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Standard streamed-text replay failure: {err}"
+        );
+
+        let mut missing_typed_done_event = events.clone();
+        mutate_contract_execution(
+            &mut missing_typed_done_event,
+            "rlm.typed_finish_emits_outcome_and_done",
+            |execution| {
+                execution
+                    .pointer_mut("/result/turn_outcomes/0/value/ok")
+                    .expect("typed final value")
+                    .clone_from(&json!(false));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.typed_finish_emits_outcome_and_done",
+            &missing_typed_done_event,
+        )
+        .expect_err("RLM typed finish fact must require concrete protocol final value");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected RLM typed-finish failure: {err}"
+        );
+
+        let mut tuple_not_array = events.clone();
+        mutate_contract_execution(
+            &mut tuple_not_array,
+            "agent.tuple_values_finish_as_json_arrays",
+            |execution| {
+                execution
+                    .pointer_mut("/result/final_value/tuple")
+                    .expect("tuple field")
+                    .clone_from(&json!({"left": "right"}));
+                execution
+                    .pointer_mut("/result/runtime_final_value_facts/semantic_value/tuple")
+                    .expect("tuple semantic field")
+                    .clone_from(&json!({"left": "right"}));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.tuple_values_finish_as_json_arrays",
+            &tuple_not_array,
+        )
+        .expect_err("Agent tuple fact must require JSON-array final value fields");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent tuple failure: {err}"
+        );
+
+        let mut empty_options_not_natural = events.clone();
+        mutate_contract_execution(
+            &mut empty_options_not_natural,
+            "rlm.empty_options_natural_default",
+            |execution| {
+                execution
+                    .pointer_mut("/result/termination/kind")
+                    .expect("termination kind")
+                    .clone_from(&json!("finish_required"));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.empty_options_natural_default",
+            &empty_options_not_natural,
+        )
+        .expect_err("RLM empty options fact must require the natural default execution mode");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected RLM empty-options failure: {err}"
+        );
+
+        let mut exec_error_not_max_turn = events.clone();
+        mutate_contract_execution(
+            &mut exec_error_not_max_turn,
+            "rlm.exec_error_max_turn_stop",
+            |execution| {
+                execution
+                    .pointer_mut("/result/turn_outcomes/0/stop_reason")
+                    .expect("exec-error max-turn stop reason")
+                    .clone_from(&json!("RuntimeError"));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.exec_error_max_turn_stop",
+            &exec_error_not_max_turn,
+        )
+        .expect_err("RLM exec-error max-turn fact must require MaxTurns");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected RLM exec-error max-turn replay failure: {err}"
+        );
+
+        let mut retired_marker_code_changed = events.clone();
+        mutate_contract_execution(
+            &mut retired_marker_code_changed,
+            "rlm.retired_marker_plain_lashlang_text",
+            |execution| {
+                execution
+                    .pointer_mut("/result/exec_codes/0")
+                    .expect("retired marker exec code")
+                    .clone_from(&json!("print \"wrong\""));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.retired_marker_plain_lashlang_text",
+            &retired_marker_code_changed,
+        )
+        .expect_err("RLM retired marker fact must require exact source text");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected RLM retired-marker replay failure: {err}"
+        );
+
+        let mut exec_replayed_tool_event = events.clone();
+        mutate_contract_execution(
+            &mut exec_replayed_tool_event,
+            "rlm.exec_result_no_tool_call_replay",
+            |execution| {
+                execution
+                    .pointer_mut("/result/tool_call_event")
+                    .expect("tool call event flag")
+                    .clone_from(&json!(true));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.exec_result_no_tool_call_replay",
+            &exec_replayed_tool_event,
+        )
+        .expect_err("RLM exec result fact must reject replayed tool-call events");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected RLM no-tool-call-replay failure: {err}"
+        );
+
+        let mut frame_switch_wrong_frame = events.clone();
+        mutate_contract_execution(
+            &mut frame_switch_wrong_frame,
+            "rlm.exec_tool_control_frame_switch_terminal",
+            |execution| {
+                execution
+                    .pointer_mut("/result/turn_outcomes/0/frame_id")
+                    .expect("frame switch id")
+                    .clone_from(&json!("wrong-frame"));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.exec_tool_control_frame_switch_terminal",
+            &frame_switch_wrong_frame,
+        )
+        .expect_err("RLM frame-switch fact must require exact frame id");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected RLM frame-switch replay failure: {err}"
+        );
+
+        let mut tool_control_fail_not_terminal = events.clone();
+        mutate_contract_execution(
+            &mut tool_control_fail_not_terminal,
+            "rlm.exec_tool_control_fail_terminal",
+            |execution| {
+                execution
+                    .pointer_mut("/result/done")
+                    .expect("tool control fail done")
+                    .clone_from(&json!(false));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.exec_tool_control_fail_terminal",
+            &tool_control_fail_not_terminal,
+        )
+        .expect_err("RLM tool-control fail fact must require terminal done state");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected RLM tool-control-fail replay failure: {err}"
+        );
+
+        let mut shell_projection_lost = events.clone();
+        shell_projection_lost.retain(|event| event.boundary_id != "session-001:provider:003");
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.shell_output_print_projection_survives",
+            &shell_projection_lost,
+        )
+        .expect_err(
+            "Agent shell projection fact must require later same-actor provider projection",
+        );
+        assert!(
+            err.contains("same-actor provider projection"),
+            "unexpected Agent shell projection failure: {err}"
+        );
+
+        let mut foreground_tool_missing = events.clone();
+        mutate_contract_execution(
+            &mut foreground_tool_missing,
+            "agent.foreground_tool_call_round_trip",
+            |execution| {
+                execution
+                    .pointer_mut("/result/tool_completed_count")
+                    .expect("foreground tool completion count")
+                    .clone_from(&json!(0));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.foreground_tool_call_round_trip",
+            &foreground_tool_missing,
+        )
+        .expect_err("Agent foreground tool fact must require concrete tool completion");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent foreground tool replay failure: {err}"
+        );
+
+        let mut started_process_graph_lost = events.clone();
+        mutate_contract_execution(
+            &mut started_process_graph_lost,
+            "agent.started_process_tool_call_graph",
+            |execution| {
+                execution
+                    .pointer_mut("/result/graph_facts/completed_labeled_resources/0")
+                    .expect("started process labeled resource")
+                    .clone_from(&json!("wrong label"));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.started_process_tool_call_graph",
+            &started_process_graph_lost,
+        )
+        .expect_err("Agent started process fact must require labeled process graph evidence");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent started-process replay failure: {err}"
+        );
+
+        let mut durable_not_suspended = events.clone();
+        mutate_contract_execution(
+            &mut durable_not_suspended,
+            "agent.durable_input_suspension_resolution",
+            |execution| {
+                execution
+                    .pointer_mut("/result/durable_input/suspended_before_resolution")
+                    .expect("durable input suspended flag")
+                    .clone_from(&json!(false));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.durable_input_suspension_resolution",
+            &durable_not_suspended,
+        )
+        .expect_err("Agent durable input fact must require suspension before resolution");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent durable-input replay failure: {err}"
+        );
+
+        let mut subagent_child_graph_missing = events.clone();
+        mutate_contract_execution(
+            &mut subagent_child_graph_missing,
+            "agent.started_process_subagent_spawn",
+            |execution| {
+                execution
+                    .pointer_mut("/result/graph_facts/child_session_exec_completed_count")
+                    .expect("subagent child exec graph count")
+                    .clone_from(&json!(0));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.started_process_subagent_spawn",
+            &subagent_child_graph_missing,
+        )
+        .expect_err("Agent subagent spawn fact must require child-session exec graph evidence");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent subagent-spawn replay failure: {err}"
+        );
+
+        let mut shell_results_stringly = events.clone();
+        mutate_contract_execution(
+            &mut shell_results_stringly,
+            "agent.shell_results_are_data",
+            |execution| {
+                execution
+                    .pointer_mut("/result/final_value/missing_exit")
+                    .expect("shell missing exit")
+                    .clone_from(&json!("1"));
+                execution
+                    .pointer_mut("/result/runtime_final_value_facts/semantic_value/missing_exit")
+                    .expect("shell missing exit semantic")
+                    .clone_from(&json!("1"));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.shell_results_are_data",
+            &shell_results_stringly,
+        )
+        .expect_err("Agent shell result fact must preserve numeric shell data");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent shell-results replay failure: {err}"
+        );
+
+        let mut nested_process_count_lost = events.clone();
+        mutate_contract_execution(
+            &mut nested_process_count_lost,
+            "agent.nested_process_start_await",
+            |execution| {
+                execution
+                    .pointer_mut("/result/process_facts/process_count")
+                    .expect("nested process count")
+                    .clone_from(&json!(1));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.nested_process_start_await",
+            &nested_process_count_lost,
+        )
+        .expect_err("Agent nested process fact must require parent and child process evidence");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent nested-process replay failure: {err}"
+        );
+
+        let mut failed_child_not_task_fail = events.clone();
+        mutate_contract_execution(
+            &mut failed_child_not_task_fail,
+            "agent.failed_child_preserves_failure_graph",
+            |execution| {
+                execution
+                    .pointer_mut("/result/failure/child_task_fail_reason_observed")
+                    .expect("child task.fail reason")
+                    .clone_from(&json!(false));
+            },
+        );
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.failed_child_preserves_failure_graph",
+            &failed_child_not_task_fail,
+        )
+        .expect_err("Agent failed-child fact must require task.fail failure evidence");
+        assert!(
+            err.contains("fixed-source replay validation"),
+            "unexpected Agent failed-child replay failure: {err}"
+        );
+
+        let mut no_schema_feedback = events.clone();
+        no_schema_feedback.retain(|event| {
+            event
+                .observed
+                .get("mutation")
+                .or_else(|| event.payload.get("mutation"))
+                .and_then(Value::as_str)
+                != Some("malformed_sse_chunk")
+        });
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.typed_schema_mismatch_repair_loop",
+            &no_schema_feedback,
+        )
+        .expect_err("RLM schema mismatch repair must require malformed provider feedback");
+        assert!(
+            err.contains("malformed_sse_chunk"),
+            "unexpected RLM schema-mismatch failure: {err}"
+        );
+
+        let mut no_lashlang_continuation = events.clone();
+        no_lashlang_continuation.retain(|event| event.boundary_id != "session-001:provider:003");
+        let err = scenario_contract_generated_facts_for_semantic(
+            "rlm.lashlang_cell_exec_continues",
+            &no_lashlang_continuation,
+        )
+        .expect_err("RLM LashLang cell execution must require later model continuation");
+        assert!(
+            err.contains("later same-actor provider continuation"),
+            "unexpected RLM LashLang continuation failure: {err}"
+        );
+
+        let mut no_observer_reconnect = events.clone();
+        no_observer_reconnect.retain(|event| event.kind != BoundaryKind::Observer);
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.durable_input_suspension_resolution",
+            &no_observer_reconnect,
+        )
+        .expect_err("Agent durable input resolution must require observer reconnect evidence");
+        assert!(
+            err.contains("reconnected observer"),
+            "unexpected Agent durable-input failure: {err}"
+        );
+
+        let mut no_join_worker = events;
+        no_join_worker.retain(|event| event.kind != BoundaryKind::Worker);
+        let err = scenario_contract_generated_facts_for_semantic(
+            "agent.parallel_spawn_and_join",
+            &no_join_worker,
+        )
+        .expect_err("Agent parallel spawn/join must require worker stale-completion evidence");
+        assert!(
+            err.contains("stale completion rejection"),
+            "unexpected Agent parallel-join failure: {err}"
+        );
+    }
+
+    #[test]
+    fn critic_named_contracts_reject_generic_proxy_fact_backings() {
+        let proxy_cases = [
+            (
+                "ProviderTerminalRequirement::AnySuccessful",
+                ScenarioContractGeneratedFact {
+                    fact: "generic_provider_proxy",
+                    assertion: "generated provider boundary completed successfully with matching exchange count and runtime contract evidence",
+                    boundary_ids: vec!["session-001:provider:001".to_string()],
+                    observed: json!({
+                        "provider_boundary": "session-001:provider:001",
+                    }),
+                },
+            ),
+            (
+                "ProviderTerminalRequirement::SequentialTurns",
+                ScenarioContractGeneratedFact {
+                    fact: "sequential_provider_proxy",
+                    assertion: "one generated actor completed sequential turn-indexed provider boundaries",
+                    boundary_ids: vec![
+                        "session-001:provider:001".to_string(),
+                        "session-001:provider:002".to_string(),
+                    ],
+                    observed: json!({
+                        "provider_turns": [
+                            {"boundary_id": "session-001:provider:001"},
+                            {"boundary_id": "session-001:provider:002"}
+                        ],
+                    }),
+                },
+            ),
+            (
+                "generic transition fallback",
+                ScenarioContractGeneratedFact {
+                    fact: "generated_transition_evidence_present",
+                    assertion: "scenario contract selected generated trace events for its required state transition",
+                    boundary_ids: vec!["session-001:trigger:001".to_string()],
+                    observed: json!({
+                        "selected_event_count": 1,
+                        "boundary_kinds": ["Trigger"],
+                    }),
+                },
+            ),
+            (
+                "semantic-proof-only trigger",
+                ScenarioContractGeneratedFact {
+                    fact: "semantic_proof_proxy",
+                    assertion: "trigger payload claimed a semantic proof without fixed execution source identity",
+                    boundary_ids: vec!["session-001:semantic-proof:001".to_string()],
+                    observed: json!({
+                        "semantic_proof_boundary": "session-001:semantic-proof:001",
+                    }),
+                },
+            ),
+        ];
+        for semantic_oracle in [
+            "standard.max_turns_after_tool_result",
+            "rlm.typed_finish_emits_outcome_and_done",
+            "agent.tuple_values_finish_as_json_arrays",
+        ] {
+            for (proxy_kind, proxy) in &proxy_cases {
+                let err = reject_named_contract_proxy_facts(semantic_oracle, &[proxy.clone()])
+                    .expect_err("critic-named contracts must reject generic proxy facts");
+                assert!(
+                    err.contains(proxy_kind),
+                    "unexpected proxy rejection for {semantic_oracle}/{proxy_kind}: {err}"
                 );
             }
         }
@@ -3376,52 +6980,65 @@ mod tests {
     }
 
     #[test]
-    fn live_provider_failure_oracle_passes_on_clean_terminalization_and_fails_on_committed_output() {
+    fn live_provider_failure_oracle_passes_on_clean_terminalization_and_fails_on_committed_output()
+    {
         let clean = clean_live_failure_facts();
         assert!(live_provider_failure_terminalizes(&clean).is_passed());
 
         // Negative: the turn finished successfully instead of terminalizing.
-        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
-            terminalized_failure: false,
-            ..clean.clone()
-        })
-        .is_passed());
+        assert!(
+            !live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+                terminalized_failure: false,
+                ..clean.clone()
+            })
+            .is_passed()
+        );
 
         // Negative: the committed turn result leaked a non-empty assistant message.
-        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
-            committed_assistant_message_nonempty: true,
-            ..clean.clone()
-        })
-        .is_passed());
+        assert!(
+            !live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+                committed_assistant_message_nonempty: true,
+                ..clean.clone()
+            })
+            .is_passed()
+        );
 
         // Negative: the turn committed a Final Value despite failing.
-        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
-            committed_final_values: 1,
-            ..clean.clone()
-        })
-        .is_passed());
+        assert!(
+            !live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+                committed_final_values: 1,
+                ..clean.clone()
+            })
+            .is_passed()
+        );
 
         // Negative: the partial prose leaked into the committed transcript.
-        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
-            committed_prose_in_transcript: true,
-            ..clean.clone()
-        })
-        .is_passed());
+        assert!(
+            !live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+                committed_prose_in_transcript: true,
+                ..clean.clone()
+            })
+            .is_passed()
+        );
 
         // Negative (anti-vacuity): no valid prose was offered before the fault, so
         // "no committed output" would be vacuous -> the oracle must NOT pass.
-        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
-            offered_prose_deltas: 0,
-            ..clean.clone()
-        })
-        .is_passed());
+        assert!(
+            !live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+                offered_prose_deltas: 0,
+                ..clean.clone()
+            })
+            .is_passed()
+        );
 
         // Negative: the turn was never observed live/parked.
-        assert!(!live_provider_failure_terminalizes(&LiveProviderFailureFacts {
-            turn_was_live_parked: false,
-            ..clean
-        })
-        .is_passed());
+        assert!(
+            !live_provider_failure_terminalizes(&LiveProviderFailureFacts {
+                turn_was_live_parked: false,
+                ..clean
+            })
+            .is_passed()
+        );
     }
 
     #[test]
@@ -3436,23 +7053,28 @@ mod tests {
 
         // Positive: >= 2 kinds and >= 2 positions, all clean.
         assert!(
-            live_provider_failure_coverage(&[
-                combo("openai-compatible", 1),
-                combo("anthropic", 2),
-            ])
+            live_provider_failure_coverage(
+                &[combo("openai-compatible", 1), combo("anthropic", 2),]
+            )
             .is_passed()
         );
 
         // Negative: only one provider kind.
         assert!(
-            !live_provider_failure_coverage(&[combo("openai-compatible", 1), combo("openai-compatible", 2)])
-                .is_passed()
+            !live_provider_failure_coverage(&[
+                combo("openai-compatible", 1),
+                combo("openai-compatible", 2)
+            ])
+            .is_passed()
         );
 
         // Negative: only one fault position.
         assert!(
-            !live_provider_failure_coverage(&[combo("openai-compatible", 1), combo("anthropic", 1)])
-                .is_passed()
+            !live_provider_failure_coverage(&[
+                combo("openai-compatible", 1),
+                combo("anthropic", 1)
+            ])
+            .is_passed()
         );
 
         // Negative: a single combo that itself leaked output fails the aggregate.
@@ -3547,33 +7169,6 @@ mod tests {
         let mut not_outranked = full;
         not_outranked["second_owner_outranks_first"] = json!(false);
         assert!(!worker_failover_continues_work(&[worker_event(not_outranked)]).is_passed());
-    }
-
-    #[test]
-    fn suite_coverage_manifest_is_failing_capable() {
-        // Missing suite-level evidence => the coverage manifest fails loudly
-        // (it is a real, failing-capable oracle, not a decorative label).
-        let empty = AbstractWorldSummary::with_digest(0, 0, vec![], vec![], vec![]);
-        for contracts in [
-            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
-            RLM_PROTOCOL_SCENARIO_CONTRACTS,
-            AGENT_SCENARIO_CONTRACTS,
-        ] {
-            let verdict = scenario_suite_coverage_manifest(contracts, &[], &empty);
-            assert!(!verdict.is_passed());
-            assert!(verdict.message.contains("FAILED: suite-level evidence missing"));
-        }
-
-        // On a workload that produces the suite evidence it passes.
-        let summary = semantic_summary();
-        let events = semantic_events();
-        for contracts in [
-            STANDARD_PROTOCOL_SCENARIO_CONTRACTS,
-            RLM_PROTOCOL_SCENARIO_CONTRACTS,
-            AGENT_SCENARIO_CONTRACTS,
-        ] {
-            assert!(scenario_suite_coverage_manifest(contracts, &events, &summary).is_passed());
-        }
     }
 
     #[test]
@@ -4077,10 +7672,39 @@ mod tests {
         );
     }
 
+    fn mutate_contract_execution(
+        events: &mut [DeliveredBoundary],
+        contract: &str,
+        mut mutate: impl FnMut(&mut Value),
+    ) {
+        let event = events
+            .iter_mut()
+            .find(|event| {
+                event
+                    .observed
+                    .pointer("/contract_execution/contract")
+                    .and_then(Value::as_str)
+                    == Some(contract)
+            })
+            .expect("contract execution event");
+        mutate(
+            event
+                .observed
+                .get_mut("contract_execution")
+                .expect("observed contract execution"),
+        );
+        mutate(
+            event
+                .payload
+                .get_mut("contract_execution")
+                .expect("payload contract execution"),
+        );
+    }
+
     fn semantic_summary() -> AbstractWorldSummary {
         AbstractWorldSummary::with_digest(
             2,
-            24,
+            29,
             vec![
                 SessionAbstractSummary {
                     alias: "session-001".to_string(),
@@ -4089,17 +7713,18 @@ mod tests {
                     provider_outputs: vec![
                         "answer for session-001 turn 1".to_string(),
                         "answer for session-001 turn 2".to_string(),
+                        "answer for session-001 turn 3".to_string(),
                     ],
-                    provider_exchange_counts: vec![1, 2],
-                    graph_node_counts: vec![2, 4],
-                    transcript_message_counts: vec![2, 4],
+                    provider_exchange_counts: vec![1, 2, 3],
+                    graph_node_counts: vec![2, 4, 6],
+                    transcript_message_counts: vec![2, 4, 6],
                     tool_outputs: vec!["tool result for session-001".to_string()],
                     exec_code_outputs: vec!["exec result for session-001".to_string()],
-                    observer_turn_indices: vec![2],
+                    observer_turn_indices: vec![3],
                     observer_reconnects: 1,
                     queued_ingress_count: 1,
                     cancellation_count: 1,
-                    trigger_count: 1,
+                    trigger_count: 4,
                     backend_failure_count: 2,
                     provider_mutation_count: 3,
                     process_wake_count: 2,
@@ -4149,7 +7774,7 @@ mod tests {
     }
 
     fn semantic_events() -> Vec<DeliveredBoundary> {
-        [
+        let base = [
             delivered_with_payload(
                 0,
                 "session-001:provider:001",
@@ -4308,6 +7933,7 @@ mod tests {
                         "claimed": true,
                         "source_key": "process/wake/session-001/001"
                     },
+                    "session": "session-001",
                     "wake_id": "wake:duplicate"
                 }),
             ),
@@ -4331,6 +7957,7 @@ mod tests {
                         "claimed": false,
                         "source_key": "process/wake/session-001/001"
                     },
+                    "session": "session-001",
                     "wake_id": "wake:duplicate"
                 }),
             ),
@@ -4544,8 +8171,189 @@ mod tests {
                     }
                 }),
             ),
+            delivered_with_payload(
+                20,
+                "session-001:provider:003:provider-event:001:sse",
+                "session-001",
+                BoundaryKind::ProviderEvent,
+                json!({
+                    "turn_boundary_id": "session-001:provider:003",
+                    "event_index": 1,
+                    "event_name": "sse",
+                }),
+                json!({
+                    "provider_event_release": true,
+                    "released_while_turn_pending": true,
+                    "turn_boundary_id": "session-001:provider:003",
+                }),
+            ),
+            delivered_with_payload(
+                21,
+                "session-001:provider:003",
+                "session-001",
+                BoundaryKind::Provider,
+                json!({
+                    "text": "answer for session-001 turn 3",
+                    "runtime_completion": runtime_completion("provider_turn_completion", 21),
+                    "expected_provider_exchange_count": 3,
+                }),
+                json!({
+                    "provider_kind": "openai-compatible",
+                    "provider_output": "answer for session-001 turn 3",
+                    "success": true,
+                    "provider_exchange_count": 3,
+                    "runtime_contract": {"status": "passed"},
+                }),
+            ),
+            delivered_with_payload(
+                22,
+                "session-001:contract-execution:standard-max-turn-after-tool-result",
+                "session-001",
+                BoundaryKind::Trigger,
+                json!({
+                    "session": "session-001",
+                    "source_key": "contract-execution/session-001/standard-max-turn-after-tool-result",
+                    "started_process": false,
+                    "contract_execution": standard_max_turn_execution_fixture()
+                }),
+                json!({
+                    "session": "session-001",
+                    "trigger_delivered": true,
+                    "source_key": "contract-execution/session-001/standard-max-turn-after-tool-result",
+                    "occurrence_id": "trigger:contract-execution-standard-max-turn-after-tool-result",
+                    "reservation_count": 1,
+                    "started_process": false,
+                    "contract_execution": standard_max_turn_execution_fixture()
+                }),
+            ),
+            delivered_with_payload(
+                24,
+                "session-001:contract-execution:agent-tuple-json-array-final-value",
+                "session-001",
+                BoundaryKind::Trigger,
+                json!({
+                    "session": "session-001",
+                    "source_key": "contract-execution/session-001/agent-tuple-json-array-final-value",
+                    "started_process": false,
+                    "contract_execution": tuple_json_array_execution_fixture(),
+                }),
+                json!({
+                    "session": "session-001",
+                    "trigger_delivered": true,
+                    "source_key": "contract-execution/session-001/agent-tuple-json-array-final-value",
+                    "occurrence_id": "trigger:contract-execution-agent-tuple-json-array-final-value",
+                    "reservation_count": 1,
+                    "started_process": false,
+                    "contract_execution": tuple_json_array_execution_fixture(),
+                }),
+            ),
+        ];
+        let mut events: Vec<DeliveredBoundary> = base.into();
+        events.extend(contract_execution_fixture_events(25));
+        events
+    }
+
+    fn standard_max_turn_execution_fixture() -> serde_json::Value {
+        let mut execution =
+            replay_contract_execution_fixture("standard.max_turns_after_tool_result");
+        execution
+            .as_object_mut()
+            .expect("contract execution object")
+            .insert(
+                "generated_anchor".to_string(),
+                json!({
+                    "tool_boundary": "session-001:tool:001",
+                    "continuation_provider_boundary": "session-001:provider:003",
+                    "actor": "session-001",
+                    "tool_sequence": 12,
+                    "continuation_provider_sequence": 21,
+                    "same_actor_continuation": true
+                }),
+            );
+        execution
+    }
+
+    fn tuple_json_array_execution_fixture() -> serde_json::Value {
+        replay_contract_execution_fixture("agent.tuple_values_finish_as_json_arrays")
+    }
+
+    fn replay_contract_execution_fixture(contract: &str) -> serde_json::Value {
+        crate::runner::replay_contract_execution(contract).unwrap_or_else(|err| {
+            panic!("fixed contract execution fixture `{contract}` failed: {err}")
+        })
+    }
+
+    fn contract_execution_fixture_events(start_sequence: usize) -> Vec<DeliveredBoundary> {
+        [
+            "standard.initial_request_projection",
+            "standard.empty_provider_response_error",
+            "standard.provider_error_without_checkpoint",
+            "standard.native_tool_loop_reenters_model",
+            "standard.parallel_tool_results_checkpoint_once",
+            "standard.tool_failure_feedback_reenters_model",
+            "standard.streamed_text_finalizes_once",
+            "rlm.natural_prose_finalizes",
+            "rlm.typed_prose_requires_finish",
+            "rlm.finish_required_max_turn_stop",
+            "rlm.exec_error_max_turn_stop",
+            "rlm.typed_finish_emits_outcome_and_done",
+            "rlm.finish_required_diagnostic_counts",
+            "rlm.natural_diagnostic_counts",
+            "rlm.cell_diagnostic_counts",
+            "rlm.retired_marker_plain_lashlang_text",
+            "rlm.lashlang_cell_exec_continues",
+            "rlm.empty_options_natural_default",
+            "rlm.exec_result_no_tool_call_replay",
+            "rlm.exec_tool_control_frame_switch_terminal",
+            "rlm.exec_tool_control_fail_terminal",
+            "rlm.natural_allows_finish_value",
+            "rlm.typed_schema_mismatch_repair_loop",
+            "rlm.typed_schema_any_of_mismatch",
+            "agent.foreground_tool_call_round_trip",
+            "agent.started_process_tool_call_graph",
+            "agent.durable_input_suspension_resolution",
+            "agent.shell_results_are_data",
+            "agent.shell_output_print_projection_survives",
+            "agent.started_process_subagent_spawn",
+            "agent.nested_process_start_await",
+            "agent.session_turn_process_child",
+            "agent.failed_child_preserves_failure_graph",
+            "agent.parallel_spawn_and_join",
         ]
-        .into()
+        .into_iter()
+        .enumerate()
+        .map(|(offset, contract)| {
+            contract_execution_fixture_event(start_sequence + offset, contract)
+        })
+        .collect()
+    }
+
+    fn contract_execution_fixture_event(sequence: usize, contract: &str) -> DeliveredBoundary {
+        let proof_id = contract.replace('.', "-").replace('_', "-");
+        let boundary_id = format!("session-001:contract-execution:{proof_id}");
+        let source_key = format!("contract-execution/session-001/{proof_id}");
+        let execution = replay_contract_execution_fixture(contract);
+        delivered_with_payload(
+            sequence,
+            &boundary_id,
+            "session-001",
+            BoundaryKind::Trigger,
+            json!({
+                "session": "session-001",
+                "source_key": source_key,
+                "started_process": false,
+                "contract_execution": execution.clone(),
+            }),
+            json!({
+                "session": "session-001",
+                "trigger_delivered": true,
+                "source_key": source_key,
+                "occurrence_id": format!("trigger:contract-execution-{proof_id}"),
+                "reservation_count": 1,
+                "started_process": false,
+                "contract_execution": execution,
+            }),
+        )
     }
 
     fn delivered_with_payload(
@@ -4616,7 +8424,11 @@ mod tests {
         )
     }
 
-    fn provider_completion(sequence: usize, actor: &str, turn_boundary_id: &str) -> DeliveredBoundary {
+    fn provider_completion(
+        sequence: usize,
+        actor: &str,
+        turn_boundary_id: &str,
+    ) -> DeliveredBoundary {
         delivered_with_payload(
             sequence,
             turn_boundary_id,
@@ -4716,5 +8528,4 @@ mod tests {
         assert!(!verdict.is_passed());
         assert!(verdict.message.contains("class is absent"));
     }
-
 }
